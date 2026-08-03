@@ -1,0 +1,41 @@
+name: Bug report
+description: Report a reproducible AIDraw defect
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include API keys, MCP bearer tokens, private prompts, or sensitive file paths.
+  - type: input
+    id: version
+    attributes:
+      label: AIDraw version
+      placeholder: 0.1.0-alpha.1
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Document mode
+      options: [Illustration, Pixel Sprite, Pixel Tilemap, Pixel Project, MCP or file handling, Generation]
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction
+      description: Include the smallest safe sequence, expected result, and actual result.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: Attach sanitized screenshots, import/export report, or crash details.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed credentials, tokens, personal files, and paid-provider data.
+          required: true

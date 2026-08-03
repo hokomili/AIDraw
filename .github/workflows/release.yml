@@ -1,0 +1,37 @@
+name: Windows release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --cache .npm-cache
+      - run: npm run verify
+      - run: npm audit --omit=dev --audit-level=high
+      - run: npm run package
+      - run: npm run test:e2e:only
+      - run: npm run make
+      - run: npm run checksums
+      - run: npm run licenses
+      - name: Stage release files
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release | Out-Null
+          Get-ChildItem out/make -Recurse -File | Copy-Item -Destination release
+          Copy-Item out/SHA256SUMS.txt,out/THIRD_PARTY_LICENSES.json,out/THIRD_PARTY_LICENSES.md -Destination release
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: release/*
