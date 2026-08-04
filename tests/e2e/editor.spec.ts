@@ -1,11 +1,13 @@
 import { expect, test } from '@playwright/test';
 import { chromium, type Browser, type Page } from 'playwright';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { readPixel } from '@aidraw/core';
+import { createCanvas } from '@napi-rs/canvas';
+import { readPixel, type PixelDocument } from '@aidraw/core';
 
 let applicationProcess: ChildProcess | undefined;
 let browser: Browser | undefined;
@@ -229,8 +231,44 @@ test('keeps a live object outliner synchronized with agent edits and human organ
 });
 
 test('creates and edits an indexed pixel sprite', async () => {
-  const page = await launch(); await expect(page.getByText('Illustration', { exact: true }).last()).toBeVisible(); await page.getByTitle('New document').click(); const dialog = page.getByRole('dialog', { name: 'New document' }); await expect(dialog).toBeVisible(); await dialog.getByRole('radio', { name: /Pixel Sprite/ }).click(); await dialog.getByRole('button', { name: 'Create Pixel Sprite' }).click(); await expect(page.getByText('Pixel Art', { exact: true })).toBeVisible();
+  const page = await launch(); await expect(page.getByText('Illustration', { exact: true }).last()).toBeVisible(); await page.getByTitle('New document').click(); const dialog = page.getByRole('dialog', { name: 'New document' }); await expect(dialog).toBeVisible(); await dialog.getByRole('radio', { name: /Pixel Sprite/ }).click(); await dialog.getByRole('button', { name: 'Create Pixel Sprite' }).click(); await expect(page.locator('.status-mode').filter({ hasText: /^Pixel Art$/ })).toBeVisible();
   const canvas = page.getByRole('application', { name: /Pixel-art canvas/ }); await expect(canvas).toBeVisible(); await page.getByTitle('Pixel-perfect pencil').click(); const bounds = await canvas.boundingBox(); if (!bounds) throw new Error('Pixel canvas has no bounds'); await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2); await page.mouse.down(); await page.mouse.move(bounds.x + bounds.width / 2 + 18, bounds.y + bounds.height / 2 + 18, { steps: 6 }); await page.mouse.up(); await expect(page.getByLabel('Unsaved changes').last()).toBeVisible();
+});
+
+test('runs packaged agent image quantization in the supervised raster utility', async () => {
+  const page = await launch();
+  const setup = await page.evaluate(async () => {
+    await window.aidraw.newDocument({ kind: 'sprite', name: 'Utility quantize', width: 2, height: 2 });
+    const document = (await window.aidraw.bootstrap()).activeDocument;
+    if (!document || document.kind !== 'pixel') throw new Error('Pixel document unavailable.');
+    const sprite = document.pixelAssets[document.activeAssetId];
+    if (sprite.type !== 'sprite') throw new Error('Sprite unavailable.');
+    const cel = Object.values(sprite.cels)[0];
+    return { documentId: document.id, spriteId: sprite.id, celId: cel.id, celRevision: cel.revision, credentials: await window.aidraw.getMcpCredentials() };
+  });
+  if (!setup.credentials.url) throw new Error('MCP endpoint unavailable.');
+  const initialize = await fetch(setup.credentials.url, { method: 'POST', headers: { authorization: `Bearer ${setup.credentials.token}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2026-07-28', capabilities: {}, clientInfo: { name: 'utility-e2e', version: '1.0' } } }) });
+  const sessionId = initialize.headers.get('mcp-session-id');
+  if (!sessionId) throw new Error('MCP session unavailable.');
+  const headers = { authorization: `Bearer ${setup.credentials.token}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json', 'mcp-session-id': sessionId };
+  await fetch(setup.credentials.url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) });
+  await callMcpTool(setup.credentials.url, headers, 2, 'session_manage', { action: 'join', name: 'Utility test agent', documentId: setup.documentId });
+
+  const source = createCanvas(2, 2);
+  const context = source.getContext('2d');
+  context.fillStyle = '#31a6a0';
+  context.fillRect(0, 0, 2, 2);
+  const bytes = source.toBuffer('image/png');
+  const assetId = 'utility-source-image';
+  const asset = { id: assetId, name: 'Utility source', mimeType: 'image/png', byteLength: bytes.byteLength, sha256: createHash('sha256').update(bytes).digest('hex'), source: 'embedded', data: bytes.toString('base64') };
+  expect(await callMcpTool(setup.credentials.url, headers, 3, 'canvas_apply', { documentId: setup.documentId, clientOperationId: 'utility-asset', label: 'Embed utility source', operations: [{ kind: 'asset.add', asset }], playback: { mode: 'instant', speed: 1 } })).toMatchObject({ status: 'committed' });
+  expect(await callMcpTool(setup.credentials.url, headers, 4, 'canvas_apply', { documentId: setup.documentId, clientOperationId: 'utility-quantize', label: 'Quantize in utility process', operations: [{ kind: 'pixel.image.quantize', assetId, spriteId: setup.spriteId, celId: setup.celId, x: 0, y: 0, width: 2, height: 2, expectedRevision: setup.celRevision }], playback: { mode: 'instant', speed: 1 } })).toMatchObject({ status: 'committed' });
+  const observed = await callMcpTool(setup.credentials.url, headers, 5, 'canvas_observe', { documentId: setup.documentId });
+  const document = observed.document as PixelDocument;
+  const sprite = document.pixelAssets[setup.spriteId];
+  if (sprite.type !== 'sprite') throw new Error('Observed sprite unavailable.');
+  const cel = sprite.cels[setup.celId];
+  expect([readPixel(cel, 0, 0), readPixel(cel, 1, 0), readPixel(cel, 0, 1), readPixel(cel, 1, 1)]).toEqual([8, 8, 8, 8]);
 });
 
 test('visibly replays a committed pixel drawing trace', async () => {

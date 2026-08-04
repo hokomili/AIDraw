@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import {
   CanvasTransactionSchema,
   HUMAN_ACTOR,
+  NewDocumentOptionsSchema,
   TransactionConflictError,
   applyTransaction,
   createDocument,
@@ -17,7 +18,12 @@ import {
 import type {
   AgentPresence,
   ApplyTransactionResponse,
+  DocumentCheckpointRecord,
+  DocumentCheckpointSummary,
+  EditorAdvisoryInput,
+  EditorAdvisoryState,
   HumanLockRequest,
+  HumanOccupancy,
   McpConnectionInfo,
   NewDocumentOptions,
   WorkspaceEvent,
@@ -29,6 +35,8 @@ import { readNativeDocument, writeNativeDocument } from './persistence';
 import { renderDocument } from './render-document';
 import { TransactionTraceStore } from './trace-store';
 import { prepareTransactionForCommit } from './transaction-policy';
+import { rebaseRestoredEntityRevisions } from '../common/document-branch';
+import { checkpointMergeCandidates, checkpointMergeOperations } from '../common/checkpoint-merge';
 
 interface HistoryState {
   undo: CanvasTransaction[];
@@ -47,10 +55,13 @@ export class DocumentService extends EventEmitter {
   private readonly histories = new Map<Id, Map<Id, HistoryState>>();
   private readonly operationIds = new Map<Id, Map<string, number>>();
   private readonly changes = new Map<Id, Array<{ revision: number; transaction: CanvasTransaction }>>();
+  private readonly comparisons = new Map<Id, { transactionId: Id; before: AIDrawDocument; afterRevision: number }>();
+  private readonly checkpoints = new Map<Id, Map<Id, DocumentCheckpointRecord>>();
   private readonly locks = new Map<Id, HumanLock>();
   private readonly jobs = new Map<Id, AsyncJob>();
   private readonly jobTimers = new Map<Id, NodeJS.Timeout>();
   private readonly presence = new Map<Id, AgentPresence>();
+  private editorAdvisory: EditorAdvisoryState = { advisory: true, attached: false, updatedAt: nowIso() };
   private activeDocumentId?: Id;
   private mcpInfo: Pick<McpConnectionInfo, 'running' | 'url' | 'port' | 'tokenHint'> = { running: false };
 
@@ -69,7 +80,7 @@ export class DocumentService extends EventEmitter {
   async recover(): Promise<number> {
     const documents = await this.journal.recover();
     for (const document of documents) {
-      this.documents.set(document.id, document); this.histories.set(document.id, new Map()); this.operationIds.set(document.id, new Map()); this.changes.set(document.id, []); this.activeDocumentId = document.id;
+      this.documents.set(document.id, document); this.histories.set(document.id, new Map()); this.operationIds.set(document.id, new Map()); this.changes.set(document.id, []); this.checkpoints.set(document.id, new Map()); this.activeDocumentId = document.id;
     }
     if (documents.length) this.publish();
     return documents.length;
@@ -77,6 +88,10 @@ export class DocumentService extends EventEmitter {
 
   async compactRecovery(): Promise<void> {
     await Promise.all(this.getDocuments().map((document) => this.journal.compact(document)));
+  }
+
+  async flushRecovery(): Promise<void> {
+    await this.journal.flush();
   }
 
   setMcpInfo(info: Pick<McpConnectionInfo, 'running' | 'url' | 'port' | 'tokenHint'>): void {
@@ -99,6 +114,41 @@ export class DocumentService extends EventEmitter {
 
   getActiveDocumentId(): Id | undefined {
     return this.activeDocumentId;
+  }
+
+  getLastComparison(documentId: Id, transactionId: Id): { transactionId: Id; before: AIDrawDocument; after: AIDrawDocument } | undefined {
+    const comparison = this.comparisons.get(documentId);
+    const after = this.documents.get(documentId);
+    if (!comparison || comparison.transactionId !== transactionId || !after || after.revision !== comparison.afterRevision) return undefined;
+    return { transactionId, before: structuredClone(comparison.before), after: structuredClone(after) };
+  }
+
+  setEditorAttached(attached: boolean): void {
+    this.editorAdvisory = attached
+      ? { ...this.editorAdvisory, advisory: true, attached: true, updatedAt: nowIso() }
+      : { advisory: true, attached: false, updatedAt: nowIso() };
+  }
+
+  updateEditorAdvisory(input: EditorAdvisoryInput): void {
+    if (!this.editorAdvisory.attached) return;
+    const documentId = typeof input.documentId === 'string' && this.documents.has(input.documentId) ? input.documentId : undefined;
+    const tool = typeof input.tool === 'string' && /^[a-z0-9-]{1,40}$/i.test(input.tool) ? input.tool : undefined;
+    const selectedEntityIds = Array.isArray(input.selectedEntityIds)
+      ? [...new Set(input.selectedEntityIds.filter((id): id is string => typeof id === 'string' && id.length > 0 && id.length <= 200))].slice(0, 256)
+      : undefined;
+    const zoom = Number.isFinite(input.zoom) ? Math.max(0.01, Math.min(128, Number(input.zoom))) : undefined;
+    const viewport = input.viewport && [input.viewport.x, input.viewport.y, input.viewport.width, input.viewport.height].every(Number.isFinite)
+      ? { x: Math.max(-16_777_216, Math.min(16_777_216, input.viewport.x)), y: Math.max(-16_777_216, Math.min(16_777_216, input.viewport.y)), width: Math.max(0, Math.min(16_777_216, input.viewport.width)), height: Math.max(0, Math.min(16_777_216, input.viewport.height)) }
+      : undefined;
+    const cleanId = (value: unknown) => typeof value === 'string' && value.length > 0 && value.length <= 200 ? value : undefined;
+    const animation = input.animation && typeof input.animation === 'object'
+      ? { activeAssetId: cleanId(input.animation.activeAssetId), activeFrameId: cleanId(input.animation.activeFrameId), activeTagId: cleanId(input.animation.activeTagId), illustrationTimeMs: Number.isFinite(input.animation.illustrationTimeMs) ? Math.max(0, Math.min(600_000, Number(input.animation.illustrationTimeMs))) : undefined, playing: input.animation.playing === true, onionSkin: input.animation.onionSkin === true, direction: input.animation.direction === 'reverse' || input.animation.direction === 'ping-pong' ? input.animation.direction : 'forward' as const }
+      : undefined;
+    this.editorAdvisory = { advisory: true, attached: true, updatedAt: nowIso(), documentId, tool, selectedEntityIds, zoom, viewport, animation };
+  }
+
+  getEditorAdvisory(): EditorAdvisoryState {
+    return structuredClone(this.editorAdvisory);
   }
 
   snapshot(actorId = HUMAN_ACTOR.id): WorkspaceSnapshot {
@@ -126,34 +176,38 @@ export class DocumentService extends EventEmitter {
         const state = active ? this.histories.get(active.id)?.get(actor.id) : undefined;
         return { actor: structuredClone(actor), canUndo: Boolean(state?.undo.length), canRedo: Boolean(state?.redo.length) };
       }),
+      checkpoints: active ? this.listCheckpoints(active.id) : [],
     };
   }
 
   create(options: NewDocumentOptions): WorkspaceSnapshot {
-    const document = createDocument(options.kind);
-    if (options.name?.trim()) document.name = options.name.trim();
+    const parsed = NewDocumentOptionsSchema.parse(options);
+    const document = createDocument(parsed.kind);
+    if (parsed.name?.trim()) document.name = parsed.name.trim();
     if (document.kind === 'illustration') {
-      if (options.width) document.artboard.width = Math.max(1, Math.round(options.width));
-      if (options.height) document.artboard.height = Math.max(1, Math.round(options.height));
-      if (options.background !== undefined) document.artboard.background = options.background;
+      if (parsed.width) document.artboard.width = parsed.width;
+      if (parsed.height) document.artboard.height = parsed.height;
+      if (parsed.background !== undefined) document.artboard.background = parsed.background;
     } else {
       const asset = document.pixelAssets[document.activeAssetId];
       if (asset?.type === 'sprite') {
-        if (options.width) asset.width = Math.max(1, Math.round(options.width));
-        if (options.height) asset.height = Math.max(1, Math.round(options.height));
+        if (parsed.width) asset.width = parsed.width;
+        if (parsed.height) asset.height = parsed.height;
       } else if (asset?.type === 'tilemap') {
-        if (options.width) asset.width = Math.max(1, Math.round(options.width));
-        if (options.height) asset.height = Math.max(1, Math.round(options.height));
-        if (options.orientation) asset.orientation = options.orientation;
-        if (options.infinite !== undefined) asset.infinite = options.infinite;
-        if (options.tileWidth) asset.tileWidth = Math.max(1, Math.min(1024, Math.round(options.tileWidth)));
-        if (options.tileHeight) asset.tileHeight = Math.max(1, Math.min(1024, Math.round(options.tileHeight)));
+        if (parsed.width) asset.width = parsed.width;
+        if (parsed.height) asset.height = parsed.height;
+        if (parsed.orientation) asset.orientation = parsed.orientation;
+        if (parsed.infinite !== undefined) asset.infinite = parsed.infinite;
+        if (parsed.tileWidth) asset.tileWidth = parsed.tileWidth;
+        if (parsed.tileHeight) asset.tileHeight = parsed.tileHeight;
       }
     }
     this.documents.set(document.id, document);
     this.histories.set(document.id, new Map());
     this.operationIds.set(document.id, new Map());
     this.changes.set(document.id, []);
+    this.checkpoints.set(document.id, new Map());
+    this.comparisons.delete(document.id);
     this.activeDocumentId = document.id;
     void this.journal.compact(document);
     this.publish();
@@ -165,6 +219,8 @@ export class DocumentService extends EventEmitter {
     this.histories.set(document.id, new Map());
     this.operationIds.set(document.id, new Map());
     this.changes.set(document.id, []);
+    this.checkpoints.set(document.id, new Map());
+    this.comparisons.delete(document.id);
     this.activeDocumentId = document.id;
     void this.journal.compact(document);
     this.publish();
@@ -205,12 +261,13 @@ export class DocumentService extends EventEmitter {
 
     if (!options.actorMayBypassLocks && transaction.actor.kind !== 'human') {
       const collision = this.findLockCollision(transaction);
-      if (collision) return { status: 'locked', message: collision };
+      if (collision) return { status: 'locked', message: collision, conflict: { retryable: true } };
     }
 
     try {
       transaction = await prepareTransactionForCommit(current, transaction, nowIso(), { trustedProvenance: options.trustedProvenance });
       const result = applyTransaction(current, transaction, { status: options.activityStatus });
+      this.comparisons.set(current.id, { transactionId: transaction.id, before: structuredClone(current), afterRevision: result.document.revision });
       this.documents.set(current.id, result.document);
       dedupe.set(transaction.clientOperationId, result.document.revision);
       if (dedupe.size > 10_000) dedupe.delete(dedupe.keys().next().value as string);
@@ -255,6 +312,7 @@ export class DocumentService extends EventEmitter {
     transaction.actor = actor;
     try {
       const result = applyTransaction(current, transaction);
+      this.comparisons.set(documentId, { transactionId: transaction.id, before: structuredClone(current), afterRevision: result.document.revision });
       this.documents.set(documentId, result.document);
       history.redo.push(result.inverse);
       await this.journal.append(documentId, transaction);
@@ -277,6 +335,7 @@ export class DocumentService extends EventEmitter {
     transaction.actor = actor;
     try {
       const result = applyTransaction(current, transaction);
+      this.comparisons.set(documentId, { transactionId: transaction.id, before: structuredClone(current), afterRevision: result.document.revision });
       this.documents.set(documentId, result.document);
       history.undo.push(result.inverse);
       await this.journal.append(documentId, transaction);
@@ -299,6 +358,115 @@ export class DocumentService extends EventEmitter {
     return actor ? this.redo(documentId, actor) : { status: 'conflict', message: 'That agent has no attributed history in this document.' };
   }
 
+  listCheckpoints(documentId: Id): DocumentCheckpointSummary[] {
+    return this.listCheckpointRecords(documentId)
+      .map((checkpoint) => this.checkpointSummary(checkpoint))
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  }
+
+  getCheckpoint(documentId: Id, checkpointId: Id): DocumentCheckpointRecord | undefined {
+    const checkpoint = this.checkpoints.get(documentId)?.get(checkpointId);
+    return checkpoint ? structuredClone(checkpoint) : undefined;
+  }
+
+  listCheckpointMergeCandidates(documentId: Id, checkpointId: Id) {
+    const checkpoint = this.checkpoints.get(documentId)?.get(checkpointId);
+    if (!checkpoint) throw new Error('Checkpoint not found.');
+    return checkpointMergeCandidates(checkpoint.document);
+  }
+
+  async mergeCheckpoint(documentId: Id, checkpointId: Id, sourceIds: Id[], actor: Actor = HUMAN_ACTOR): Promise<ApplyTransactionResponse> {
+    const current = this.documents.get(documentId); const checkpoint = this.checkpoints.get(documentId)?.get(checkpointId);
+    if (!current || !checkpoint) return { status: 'conflict', message: 'Checkpoint not found.' };
+    let operations: CanvasOperation[];
+    try { operations = checkpointMergeOperations(current, checkpoint.document, sourceIds); }
+    catch (error) { return { status: 'conflict', message: error instanceof Error ? error.message : String(error) }; }
+    return this.apply({ id: createId('tx'), clientOperationId: createId('checkpoint-merge'), documentId, actor: structuredClone(actor), label: `Merge checkpoint selection · ${checkpoint.name}`, createdAt: nowIso(), operations, playback: { mode: 'instant', speed: 1 } });
+  }
+
+  createCheckpoint(documentId: Id, name: string, actor: Actor = HUMAN_ACTOR, kind: DocumentCheckpointSummary['kind'] = 'manual'): DocumentCheckpointSummary {
+    const document = this.documents.get(documentId);
+    if (!document) throw new Error('Document is not open.');
+    const cleanName = name.trim();
+    if (!cleanName || cleanName.length > 80) throw new Error('Checkpoint names must contain 1–80 characters.');
+    const entries = this.checkpoints.get(documentId) ?? new Map<Id, DocumentCheckpointRecord>();
+    if (entries.size >= 32) throw new Error('This document already has the maximum of 32 checkpoints.');
+    const checkpoint: DocumentCheckpointRecord = {
+      id: createId('checkpoint'),
+      documentId,
+      name: cleanName,
+      createdAt: nowIso(),
+      createdBy: structuredClone(actor),
+      sourceRevision: document.revision,
+      kind,
+      document: structuredClone(document),
+    };
+    entries.set(checkpoint.id, checkpoint);
+    this.checkpoints.set(documentId, entries);
+    document.dirty = true;
+    document.updatedAt = checkpoint.createdAt;
+    this.publish();
+    return this.checkpointSummary(checkpoint);
+  }
+
+  deleteCheckpoint(documentId: Id, checkpointId: Id, actor: Actor = HUMAN_ACTOR): { deleted: boolean; message?: string } {
+    const document = this.documents.get(documentId);
+    const entries = this.checkpoints.get(documentId);
+    const checkpoint = entries?.get(checkpointId);
+    if (!document || !entries || !checkpoint) return { deleted: false, message: 'Checkpoint not found.' };
+    if (actor.kind !== 'human' && checkpoint.createdBy.id !== actor.id) return { deleted: false, message: 'Agents may only delete checkpoints they created.' };
+    entries.delete(checkpointId);
+    document.dirty = true;
+    document.updatedAt = nowIso();
+    this.publish();
+    return { deleted: true };
+  }
+
+  async restoreCheckpoint(documentId: Id, checkpointId: Id, actor: Actor = HUMAN_ACTOR): Promise<ApplyTransactionResponse> {
+    const current = this.documents.get(documentId);
+    const checkpoint = this.checkpoints.get(documentId)?.get(checkpointId);
+    if (!current || !checkpoint) return { status: 'conflict', message: 'Checkpoint not found.' };
+    if (actor.kind !== 'human' && [...this.locks.values()].some((lock) => lock.documentId === documentId)) {
+      return { status: 'locked', message: 'A human is actively editing this document.', conflict: { retryable: true } };
+    }
+    const entries = this.checkpoints.get(documentId)!;
+    if (entries.size >= 32) {
+      const oldestAutomatic = [...entries.values()].filter((entry) => entry.kind === 'automatic').sort((left, right) => left.createdAt.localeCompare(right.createdAt))[0];
+      if (!oldestAutomatic) return { status: 'busy', message: 'Delete a checkpoint before restoring so AIDraw can preserve the current branch automatically.' };
+      entries.delete(oldestAutomatic.id);
+    }
+    const timestamp = nowIso();
+    const automatic: DocumentCheckpointRecord = {
+      id: createId('checkpoint'), documentId, name: `Before restore · ${checkpoint.name}`, createdAt: timestamp,
+      createdBy: structuredClone(actor), sourceRevision: current.revision, kind: 'automatic', document: structuredClone(current),
+    };
+    entries.set(automatic.id, automatic);
+    const transactionId = createId('checkpoint-restore');
+    const restored = structuredClone(checkpoint.document);
+    restored.id = current.id;
+    restored.revision = current.revision + 1;
+    restored.filePath = current.filePath;
+    restored.dirty = true;
+    restored.updatedAt = timestamp;
+    rebaseRestoredEntityRevisions(current, restored, timestamp);
+    restored.activity = [
+      ...current.activity,
+      {
+        id: createId('activity'), transactionId, actor: structuredClone(actor), label: `Restore checkpoint · ${checkpoint.name}`,
+        timestamp, status: 'committed', operationCount: 0,
+        details: `Accepted checkpoint ${checkpoint.id} from revision ${checkpoint.sourceRevision}; the prior branch is preserved as ${automatic.id}.`,
+      },
+    ];
+    this.comparisons.set(documentId, { transactionId, before: structuredClone(current), afterRevision: restored.revision });
+    this.documents.set(documentId, restored);
+    this.histories.set(documentId, new Map());
+    this.operationIds.set(documentId, new Map());
+    this.changes.set(documentId, []);
+    await this.journal.compact(restored);
+    this.publish();
+    return { status: 'committed', revision: restored.revision, transactionId };
+  }
+
   async open(filePaths: string[]): Promise<{ opened: string[]; warnings: string[] }> {
     const opened: string[] = [];
     const warnings: string[] = [];
@@ -314,6 +482,8 @@ export class DocumentService extends EventEmitter {
         this.histories.set(loaded.document.id, new Map());
         this.operationIds.set(loaded.document.id, new Map());
         this.changes.set(loaded.document.id, []);
+        this.checkpoints.set(loaded.document.id, new Map(loaded.checkpoints.map((checkpoint) => [checkpoint.id, checkpoint])));
+        this.comparisons.delete(loaded.document.id);
         await this.traceStore?.import(loaded.document.id, loaded.trace);
         this.activeDocumentId = loaded.document.id;
         opened.push(filePath);
@@ -330,7 +500,7 @@ export class DocumentService extends EventEmitter {
     const document = this.documents.get(documentId);
     if (!document) throw new Error('Document is not open.');
     const trace = await this.listTrace(documentId);
-    const destination = await writeNativeDocument(filePath, document, this.appVersion, (await renderDocument(document)).toBuffer('image/png'), trace);
+    const destination = await writeNativeDocument(filePath, document, this.appVersion, (await renderDocument(document)).toBuffer('image/png'), trace, this.listCheckpointRecords(documentId));
     document.filePath = destination;
     document.dirty = false;
     document.updatedAt = nowIso();
@@ -347,6 +517,8 @@ export class DocumentService extends EventEmitter {
     this.histories.delete(documentId);
     this.operationIds.delete(documentId);
     this.changes.delete(documentId);
+    this.comparisons.delete(documentId);
+    this.checkpoints.delete(documentId);
     for (const [lockId, lock] of this.locks) if (lock.documentId === documentId) this.locks.delete(lockId);
     if (this.activeDocumentId === documentId) {
       this.activeDocumentId = [...this.documents.keys()].at(-1);
@@ -366,6 +538,24 @@ export class DocumentService extends EventEmitter {
 
   releaseLock(lockId: Id): void {
     this.locks.delete(lockId);
+  }
+
+  getHumanOccupancy(documentId: Id): HumanOccupancy {
+    const locks = [...this.locks.values()]
+      .filter((lock) => lock.documentId === documentId)
+      .map((lock) => ({
+        objectIds: lock.objectIds ? [...lock.objectIds] : undefined,
+        region: lock.region ? structuredClone(lock.region) : undefined,
+        acquiredAt: new Date(lock.acquiredAt).toISOString(),
+      }));
+    return {
+      documentId,
+      active: locks.length > 0,
+      locks,
+      retryGuidance: locks.length > 0
+        ? 'Retry after the human releases the listed object/region lock; unrelated entities and non-overlapping regions may proceed now.'
+        : 'No human pointer lock is active.',
+    };
   }
 
   updatePresence(presence: AgentPresence): void {
@@ -410,6 +600,12 @@ export class DocumentService extends EventEmitter {
   getJob(jobId: Id): AsyncJob | undefined {
     const job = this.jobs.get(jobId);
     return job ? structuredClone(job) : undefined;
+  }
+
+  listJobs(actorId?: Id): AsyncJob[] {
+    return [...this.jobs.values()]
+      .filter((job) => !actorId || job.actor.id === actorId)
+      .map((job) => structuredClone(job));
   }
 
   resolveJob(jobId: Id, decision: 'allow-once' | 'allow-session' | 'allow-always' | 'deny'): AsyncJob | undefined {
@@ -458,6 +654,22 @@ export class DocumentService extends EventEmitter {
     return history;
   }
 
+  private listCheckpointRecords(documentId: Id): DocumentCheckpointRecord[] {
+    return [...(this.checkpoints.get(documentId)?.values() ?? [])].map((checkpoint) => structuredClone(checkpoint));
+  }
+
+  private checkpointSummary(checkpoint: DocumentCheckpointRecord): DocumentCheckpointSummary {
+    return structuredClone({
+      id: checkpoint.id,
+      documentId: checkpoint.documentId,
+      name: checkpoint.name,
+      createdAt: checkpoint.createdAt,
+      createdBy: checkpoint.createdBy,
+      sourceRevision: checkpoint.sourceRevision,
+      kind: checkpoint.kind,
+    });
+  }
+
   private findDocumentAgent(documentId: Id, actorId: Id): Actor | undefined {
     if (actorId === HUMAN_ACTOR.id) return undefined;
     const document = this.documents.get(documentId);
@@ -491,7 +703,11 @@ export class DocumentService extends EventEmitter {
       ? operation.objectId
       : operation.kind === 'illustration.object.replace' || operation.kind === 'illustration.object.add'
         ? operation.object.id
-        : undefined;
+        : operation.kind === 'pixel.asset.replace' || operation.kind === 'pixel.asset.add'
+          ? operation.asset.id
+          : operation.kind === 'pixel.asset.delete'
+            ? operation.assetId
+            : undefined;
     if (objectId && lock.objectIds?.includes(objectId)) return true;
     if (!lock.region) return false;
     const changes = operation.kind === 'pixel.cel.set'
@@ -499,10 +715,16 @@ export class DocumentService extends EventEmitter {
       : operation.kind === 'pixel.tilemap.set' && operation.mapId === lock.region.assetId
         ? operation.changes
         : [];
-    return changes.some((change) =>
+    if (changes.some((change) =>
       change.x >= lock.region!.x && change.y >= lock.region!.y &&
       change.x < lock.region!.x + lock.region!.width && change.y < lock.region!.y + lock.region!.height,
-    );
+    )) return true;
+    const runs = operation.kind === 'pixel.cel.region'
+      ? operation.spriteId === lock.region.assetId ? operation.runs : []
+      : operation.kind === 'pixel.tilemap.region' && operation.mapId === lock.region.assetId
+        ? operation.runs
+        : [];
+    return runs.some((run) => run.y >= lock.region!.y && run.y < lock.region!.y + lock.region!.height && run.x < lock.region!.x + lock.region!.width && run.x + run.length > lock.region!.x);
   }
 
   private publish(): void {

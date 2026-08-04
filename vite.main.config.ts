@@ -12,7 +12,11 @@ export default defineConfig({
   build: {
     sourcemap: true,
     rollupOptions: {
-      external: ['electron', '@napi-rs/canvas'],
+      // Paper's Node entry contains optional jsdom/canvas integration. Keeping
+      // Paper external preserves its guarded `require('jsdom')` fallback;
+      // bundling it would hoist an optional private jsdom import and make the
+      // packaged application fail before Electron can create a window.
+      external: ['electron', '@napi-rs/canvas', 'paper'],
     },
   },
 });

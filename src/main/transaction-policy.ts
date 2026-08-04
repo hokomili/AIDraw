@@ -12,8 +12,8 @@ import type {
 } from '@aidraw/core';
 
 const MAX_INLINE_ASSET_BYTES = 1_500_000;
-const MAX_INLINE_IMAGE_DIMENSION = 8_192;
-const MAX_INLINE_IMAGE_PIXELS = 16_777_216;
+export const MAX_INLINE_IMAGE_DIMENSION = 8_192;
+export const MAX_INLINE_IMAGE_PIXELS = 16_777_216;
 
 interface ImageHeader {
   mimeType: DocumentAsset['mimeType'];
@@ -83,7 +83,7 @@ function webpHeader(bytes: Buffer): ImageHeader | undefined {
   return undefined;
 }
 
-function inspectImageHeader(bytes: Buffer): ImageHeader {
+export function inspectImageHeader(bytes: Buffer): ImageHeader {
   const header = pngHeader(bytes) ?? gifHeader(bytes) ?? jpegHeader(bytes) ?? webpHeader(bytes);
   if (!header) throw new Error('Inline assets must be a supported PNG, APNG, JPEG, WebP, or GIF image with a valid header.');
   return header;
@@ -148,6 +148,10 @@ function normalizeEntityOperation(document: AIDrawDocument, operation: CanvasOpe
       return { ...operation, object: normalizeEntity(operation.object, actor, timestamp) };
     case 'illustration.object.replace':
       return { ...operation, object: normalizeEntity(operation.object, actor, timestamp, document.kind === 'illustration' ? document.objects[operation.object.id] : undefined) };
+    case 'illustration.paint.stroke':
+      return { ...operation, stroke: { ...structuredClone(operation.stroke), actorId: actor.id } };
+    case 'illustration.animation.keyframe.upsert':
+      return { ...operation, keyframe: normalizeEntity(operation.keyframe, actor, timestamp, document.kind === 'illustration' ? document.animation.keyframes[operation.keyframe.id] : undefined) };
     case 'pixel.frame.add':
       return {
         ...operation,

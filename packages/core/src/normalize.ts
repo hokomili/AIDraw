@@ -12,6 +12,7 @@ import type {
   PixelTileset,
   TilemapLayer,
 } from './model';
+import { createDefaultBitmapFont } from './bitmap-font';
 
 const BLEND_MODES = new Set<BlendMode>([
   'normal', 'multiply', 'screen', 'overlay', 'darken', 'lighten', 'color-dodge', 'color-burn',
@@ -165,6 +166,8 @@ function normalizeTileset(value: Record<string, unknown>, current: PixelTileset 
     firstGid: positiveInteger(value.firstGid, current?.firstGid ?? 1),
     tileWidth: positiveInteger(value.tileWidth, current?.tileWidth ?? 16),
     tileHeight: positiveInteger(value.tileHeight, current?.tileHeight ?? 16),
+    margin: Math.max(0, Math.round(finite(value.margin, current?.margin ?? 0))),
+    spacing: Math.max(0, Math.round(finite(value.spacing, current?.spacing ?? 0))),
     columns: positiveInteger(value.columns, current?.columns ?? 1),
     rows: positiveInteger(value.rows, current?.rows ?? 1),
     spriteAssetId: text(value.spriteAssetId, current?.spriteAssetId ?? ''),
@@ -226,6 +229,10 @@ export function normalizePixelAsset(value: unknown, current?: PixelAsset, timest
 
 export function normalizePixelDocument(document: PixelDocument): PixelDocument {
   const normalized = structuredClone(document);
+  normalized.stamps = Array.isArray(normalized.stamps) ? normalized.stamps : [];
+  normalized.tileStamps = Array.isArray(normalized.tileStamps) ? normalized.tileStamps : [];
+  normalized.bitmapFonts = Array.isArray(normalized.bitmapFonts) && normalized.bitmapFonts.length ? normalized.bitmapFonts : [createDefaultBitmapFont()];
+  normalized.paletteCycles = Array.isArray(normalized.paletteCycles) ? normalized.paletteCycles : [];
   const assets: PixelDocument['pixelAssets'] = {};
   for (const [key, value] of Object.entries(record(normalized.pixelAssets))) {
     const asset = normalizePixelAsset(value, undefined, normalized.updatedAt, 'system');

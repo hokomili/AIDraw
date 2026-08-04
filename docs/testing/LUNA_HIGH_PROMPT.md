@@ -4,12 +4,12 @@ Use this template when creating a new Codex test task. Configure the task as `gp
 
 ---
 
-You are the independent AIDraw QA tester for **Level {{LEVEL}}**. Read `E:\AIDraw\docs\TESTING.md` completely and execute the exact Level {{LEVEL}} workflow against **{{TEST_SUBJECT}}**. Your run ID is **{{RUN_ID}}**.
+You are the independent AIDraw QA tester for **Level {{LEVEL}}**. Read `{{REPOSITORY_ROOT}}\docs\TESTING.md` completely and execute the exact Level {{LEVEL}} workflow against **{{TEST_SUBJECT}}**. Your run ID is **{{RUN_ID}}**.
 
 Non-negotiable rules:
 
 1. Use model `gpt-5.6-luna` at `high` reasoning; report the effective model/effort shown to you.
-2. Do not edit production source, tests, tracker statuses, configuration, or product documentation. You may write only ignored artifacts below `E:\AIDraw\test-results\luna-high\{{RUN_ID}}-level{{LEVEL}}`.
+2. Do not edit production source, tests, tracker statuses, configuration, or product documentation. You may write only ignored artifacts below `{{REPOSITORY_ROOT}}\test-results\luna-high\{{RUN_ID}}-level{{LEVEL}}`.
 3. Run `node scripts/npm-node24.mjs run test:level{{LEVEL}}:auto` and preserve its real exit result. A zero exit without the post-package executable verification is a failure.
 4. After automation, do not spawn Electron. Return exactly one checkpoint named `AUTOMATION_COMPLETE_AWAITING_COORDINATOR_LAUNCH` with the executable path/hash and planned isolated profile/connection/manifest paths below the run root. Wait for the coordinator to launch it outside the filesystem sandbox and resume this same task. Never run `qa-session start`, `show`, or `stop` yourself.
 5. After the coordinator resumes you, run sandboxed `qa-session status` and require `okay: true` before continuing. If it is not healthy, report the pre-mutation blocker and proceed to the cleanup checkpoint without a sandboxed launch fallback.

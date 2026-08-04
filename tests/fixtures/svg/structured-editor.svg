@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="160" height="120" viewBox="10 20 160 120">
+  <style>
+    .outline { stroke: #3a2418; stroke-width: 2; stroke-linejoin: round; }
+    #label { fill: #20150f; font-family: sans-serif; font-size: 14px; font-weight: 700; }
+  </style>
+  <defs>
+    <linearGradient id="gold" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#6f3d08"/>
+      <stop offset="45%" stop-color="#fff0a0" stop-opacity="0.8"/>
+      <stop offset="100%" stop-color="#9b5f10"/>
+    </linearGradient>
+    <clipPath id="window-clip"><rect x="78" y="18" width="42" height="22" rx="3"/></clipPath>
+    <filter id="soften"><feGaussianBlur stdDeviation="1.5"/></filter>
+    <g id="badge"><circle cx="5" cy="5" r="5" fill="#df4d6d"/></g>
+  </defs>
+  <g id="locomotive" transform="translate(20 30) rotate(5)" opacity="0.9">
+    <rect id="gold-body" class="outline" x="4" y="8" width="116" height="42" rx="7" fill="url(#gold)"/>
+    <use id="badge-use" href="#badge" x="14" y="18"/>
+    <text id="label" x="32" y="35">Gold <tspan fill="#b02040" font-style="italic">Express</tspan></text>
+    <image id="lamp" x="108" y="12" width="4" height="4" preserveAspectRatio="none" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAE/wH+Q5ZkAAAAAElFTkSuQmCC"/>
+  </g>
+  <path id="window-glow" d="M 70 10 L 130 10 L 130 46 L 70 46 Z" fill="#80d8ff" clip-path="url(#window-clip)" filter="url(#soften)"/>
+  <foreignObject x="0" y="0" width="1" height="1"><div>unsupported HTML</div></foreignObject>
+</svg>

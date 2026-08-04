@@ -3,6 +3,7 @@ import type {
   AIDrawDocument,
   EntityBase,
   IllustrationDocument,
+  IllustrationLayer,
   PixelDocument,
   PixelSprite,
   PixelTilemap,
@@ -10,8 +11,10 @@ import type {
 import type { CanvasOperation, CanvasTransaction } from './operations';
 import { TransactionConflictError } from './operations';
 import { createId, nowIso } from './ids';
-import { writePixels, writeTiles } from './pixel';
+import { remapPixelCelIndices, writePixelRuns, writePixels, writeTileRuns, writeTiles } from './pixel';
 import { findDocumentAssetReferences } from './references';
+import { resolvePixelCel } from './animation';
+import { countPaletteIndexUsage } from './palette';
 
 export interface ApplyTransactionOptions {
   recordActivity?: boolean;
@@ -40,6 +43,29 @@ function touch(entity: EntityBase, timestamp: string): void {
   entity.updatedAt = timestamp;
 }
 
+function paintCachePrefixMatches(current: Extract<IllustrationLayer, { type: 'paint' }>, incoming: Extract<IllustrationLayer, { type: 'paint' }>): boolean {
+  const count = current.tileCache?.strokeCount;
+  return count !== undefined
+    && Number.isInteger(count)
+    && count >= 0
+    && count <= current.strokes.length
+    && count <= incoming.strokes.length
+    && JSON.stringify(current.strokes.slice(0, count)) === JSON.stringify(incoming.strokes.slice(0, count));
+}
+
+function sanitizePaintCache(incoming: IllustrationLayer, current?: IllustrationLayer): IllustrationLayer {
+  const next = structuredClone(incoming);
+  if (next.type !== 'paint') return next;
+  if (current?.type === 'paint' && current.tileCache && paintCachePrefixMatches(current, next)) {
+    next.tileAssetIds = structuredClone(current.tileAssetIds);
+    next.tileCache = structuredClone(current.tileCache);
+  } else {
+    next.tileAssetIds = {};
+    delete next.tileCache;
+  }
+  return next;
+}
+
 function requireIllustration(document: AIDrawDocument, operationIndex: number): IllustrationDocument {
   if (document.kind === 'illustration') return document;
   throw new TransactionConflictError({
@@ -56,6 +82,17 @@ function requirePixel(document: AIDrawDocument, operationIndex: number): PixelDo
     message: 'Pixel operation used on an illustration document',
     retryable: false,
   });
+}
+
+function assertSpriteCoordinates(sprite: PixelSprite, cells: Array<{ x: number; y: number; length?: number }>): void {
+  const invalid = cells.find((cell) => cell.x < 0 || cell.y < 0 || cell.y >= sprite.height || cell.x + (cell.length ?? 1) > sprite.width);
+  if (invalid) throw new Error(`Pixel write at ${invalid.x},${invalid.y} is outside sprite ${sprite.width}×${sprite.height}`);
+}
+
+function assertTileCoordinates(map: PixelTilemap, cells: Array<{ x: number; y: number; length?: number }>): void {
+  if (map.infinite) return;
+  const invalid = cells.find((cell) => cell.x < 0 || cell.y < 0 || cell.y >= map.height || cell.x + (cell.length ?? 1) > map.width);
+  if (invalid) throw new Error(`Tile write at ${invalid.x},${invalid.y} is outside finite map ${map.width}×${map.height}`);
 }
 
 function findObjectParentGroup(document: IllustrationDocument, objectId: string) {
@@ -100,6 +137,27 @@ function applyOperation(
       const previous = document.name;
       document.name = operation.name.trim() || previous;
       return { kind: 'document.rename', name: previous };
+    }
+    case 'illustration.artboard.replace': {
+      const illustration = requireIllustration(document, operationIndex);
+      if (operation.expectedRevision !== undefined && illustration.revision !== operation.expectedRevision) throw new TransactionConflictError({ operationIndex, entityId: illustration.id, expectedRevision: operation.expectedRevision, actualRevision: illustration.revision, message: 'Illustration revision changed before the artboard update', retryable: true });
+      const previous = structuredClone(illustration.artboard);
+      illustration.artboard = structuredClone(operation.artboard);
+      return { kind: 'illustration.artboard.replace', artboard: previous };
+    }
+    case 'illustration.artboard.translate': {
+      const illustration = requireIllustration(document, operationIndex);
+      if (operation.expectedRevision !== undefined && illustration.revision !== operation.expectedRevision) throw new TransactionConflictError({ operationIndex, entityId: illustration.id, expectedRevision: operation.expectedRevision, actualRevision: illustration.revision, message: 'Illustration revision changed before the translated artboard update', retryable: true });
+      const previous = structuredClone(illustration.artboard); const childIds = new Set(Object.values(illustration.objects).flatMap((object) => object.type === 'group' ? object.childIds : []));
+      illustration.artboard = structuredClone(operation.artboard);
+      for (const object of Object.values(illustration.objects)) if (!childIds.has(object.id)) { object.transform.x += operation.offsetX; object.transform.y += operation.offsetY; touch(object, timestamp); }
+      for (const layer of Object.values(illustration.layers)) if (layer.type === 'paint') {
+        for (const stroke of layer.strokes) for (const point of stroke.points) { point.x += operation.offsetX; point.y += operation.offsetY; }
+        layer.tileAssetIds = {}; delete layer.tileCache; touch(layer, timestamp);
+      }
+      for (const guide of illustration.guides) guide.position += guide.orientation === 'vertical' ? operation.offsetX : operation.offsetY;
+      for (const keyframe of Object.values(illustration.animation.keyframes)) if (!childIds.has(keyframe.objectId)) { keyframe.transform.x += operation.offsetX; keyframe.transform.y += operation.offsetY; touch(keyframe, timestamp); }
+      return { kind: 'illustration.artboard.translate', artboard: previous, offsetX: -operation.offsetX, offsetY: -operation.offsetY };
     }
     case 'asset.add': {
       if (document.assets[operation.asset.id]) {
@@ -167,7 +225,7 @@ function applyOperation(
           retryable: false,
         });
       }
-      illustration.layers[operation.layer.id] = structuredClone(operation.layer);
+      illustration.layers[operation.layer.id] = sanitizePaintCache(operation.layer);
       const parent = operation.layer.parentId ? illustration.layers[operation.layer.parentId] : undefined;
       if (operation.layer.parentId && (!parent || parent.type !== 'group')) throw new Error('Layer parent must be a group layer');
       const siblings = parent?.type === 'group' ? parent.childIds : illustration.layerIds;
@@ -184,8 +242,13 @@ function applyOperation(
       const current = illustration.layers[operation.layer.id];
       if (!current) throw new Error(`Layer ${operation.layer.id} does not exist`);
       assertRevision(current, operation.expectedRevision, operationIndex);
+      if (current.type !== operation.layer.type) throw new Error('A layer replacement cannot change the layer type');
+      if (operation.layer.maskLayerId) {
+        const mask = illustration.layers[operation.layer.maskLayerId];
+        if (!mask || mask.type !== 'vector' || mask.id === operation.layer.id) throw new Error('A clipping mask must reference another vector layer');
+      }
       const previous = structuredClone(current);
-      illustration.layers[operation.layer.id] = structuredClone(operation.layer);
+      illustration.layers[operation.layer.id] = sanitizePaintCache(operation.layer, current);
       touch(illustration.layers[operation.layer.id], timestamp);
       return {
         kind: 'illustration.layer.replace',
@@ -210,6 +273,8 @@ function applyOperation(
       const layer = illustration.layers[operation.layerId];
       if (!layer) throw new Error(`Layer ${operation.layerId} does not exist`);
       assertRevision(layer, operation.expectedRevision, operationIndex);
+      const dependent = Object.values(illustration.layers).find((entry) => entry.maskLayerId === layer.id);
+      if (dependent) throw new TransactionConflictError({ operationIndex, entityId: layer.id, message: `Clear the clipping mask from ${dependent.name} before deleting ${layer.name}`, retryable: true });
       const index = illustration.layerIds.indexOf(layer.id);
       if (layer.type === 'vector' && layer.objectIds.length > 0) {
         throw new TransactionConflictError({
@@ -230,6 +295,10 @@ function applyOperation(
       if (illustration.objects[operation.object.id]) throw new Error(`Object ${operation.object.id} already exists`);
       const layer = illustration.layers[operation.object.layerId];
       if (!layer || layer.type !== 'vector') throw new Error('Objects must be added to a vector layer');
+      if (operation.object.maskObjectId) {
+        const mask = illustration.objects[operation.object.maskObjectId];
+        if (!mask || mask.id === operation.object.id || mask.layerId !== operation.object.layerId || !['shape', 'path', 'vector-stroke'].includes(mask.type)) throw new Error('An object mask must reference another path-capable object in the same vector layer');
+      }
       illustration.objects[operation.object.id] = structuredClone(operation.object);
       const index = Math.max(0, Math.min(operation.index ?? layer.objectIds.length, layer.objectIds.length));
       layer.objectIds.splice(index, 0, operation.object.id);
@@ -253,8 +322,14 @@ function applyOperation(
       const current = illustration.objects[operation.object.id];
       if (!current) throw new Error(`Object ${operation.object.id} does not exist`);
       assertRevision(current, operation.expectedRevision, operationIndex);
+      if (operation.object.maskObjectId) {
+        const mask = illustration.objects[operation.object.maskObjectId];
+        if (!mask || mask.id === operation.object.id || mask.layerId !== operation.object.layerId || !['shape', 'path', 'vector-stroke'].includes(mask.type)) throw new Error('An object mask must reference another path-capable object in the same vector layer');
+      }
       const previous = structuredClone(current);
       if (current.layerId !== operation.object.layerId) {
+        const dependent = Object.values(illustration.objects).find((entry) => entry.maskObjectId === current.id);
+        if (dependent) throw new TransactionConflictError({ operationIndex, entityId: current.id, message: `Clear the object mask from ${dependent.name} before moving ${current.name} to another layer`, retryable: true });
         const oldLayer = illustration.layers[current.layerId];
         const newLayer = illustration.layers[operation.object.layerId];
         if (!oldLayer || oldLayer.type !== 'vector' || !newLayer || newLayer.type !== 'vector') {
@@ -282,6 +357,8 @@ function applyOperation(
       const previousLayer = illustration.layers[object.layerId];
       const targetLayer = illustration.layers[operation.layerId];
       if (!previousLayer || previousLayer.type !== 'vector' || !targetLayer || targetLayer.type !== 'vector') throw new Error('Object moves require vector layers');
+      const dependent = Object.values(illustration.objects).find((entry) => entry.maskObjectId === object.id);
+      if (dependent && previousLayer.id !== targetLayer.id) throw new TransactionConflictError({ operationIndex, entityId: object.id, message: `Clear the object mask from ${dependent.name} before moving ${object.name} to another layer`, retryable: true });
       if (object.type === 'group' && object.childIds.length > 0 && previousLayer.id !== targetLayer.id) throw new Error('Move a non-empty object group within its current vector layer');
       const targetParent = operation.parentGroupId ? illustration.objects[operation.parentGroupId] : undefined;
       if (operation.parentGroupId && (!targetParent || targetParent.type !== 'group' || targetParent.layerId !== targetLayer.id)) throw new Error('Object parent must be a group in the target vector layer');
@@ -320,6 +397,8 @@ function applyOperation(
       const object = illustration.objects[operation.objectId];
       if (!object) throw new Error(`Object ${operation.objectId} does not exist`);
       assertRevision(object, operation.expectedRevision, operationIndex);
+      const dependent = Object.values(illustration.objects).find((entry) => entry.maskObjectId === object.id);
+      if (dependent) throw new TransactionConflictError({ operationIndex, entityId: object.id, message: `Clear the object mask from ${dependent.name} before deleting ${object.name}`, retryable: true });
       const layer = illustration.layers[object.layerId];
       if (!layer || layer.type !== 'vector') throw new Error('Object layer does not exist');
       const index = layer.objectIds.indexOf(object.id);
@@ -346,14 +425,119 @@ function applyOperation(
         expectedRevision: layer.revision,
       };
     }
+    case 'illustration.brush-presets.replace': {
+      const illustration = requireIllustration(document, operationIndex);
+      const previous = structuredClone(illustration.brushPresets ?? []);
+      illustration.brushPresets = structuredClone(operation.presets);
+      return { kind: 'illustration.brush-presets.replace', presets: previous };
+    }
+    case 'illustration.guides.replace': {
+      const illustration = requireIllustration(document, operationIndex);
+      if (operation.expectedRevision !== undefined && illustration.revision !== operation.expectedRevision) throw new TransactionConflictError({ operationIndex, entityId: illustration.id, expectedRevision: operation.expectedRevision, actualRevision: illustration.revision, message: 'Illustration revision changed before the guide update', retryable: true });
+      const previous = structuredClone(illustration.guides ?? []); illustration.guides = structuredClone(operation.guides); return { kind: 'illustration.guides.replace', guides: previous };
+    }
+    case 'illustration.snap-settings.replace': {
+      const illustration = requireIllustration(document, operationIndex);
+      if (operation.expectedRevision !== undefined && illustration.revision !== operation.expectedRevision) throw new TransactionConflictError({ operationIndex, entityId: illustration.id, expectedRevision: operation.expectedRevision, actualRevision: illustration.revision, message: 'Illustration revision changed before the snapping update', retryable: true });
+      const previous = structuredClone(illustration.snapSettings); illustration.snapSettings = structuredClone(operation.settings); return { kind: 'illustration.snap-settings.replace', settings: previous };
+    }
+    case 'illustration.animation.settings.replace': {
+      const illustration = requireIllustration(document, operationIndex);
+      if (operation.expectedRevision !== undefined && illustration.revision !== operation.expectedRevision) throw new TransactionConflictError({ operationIndex, entityId: illustration.id, expectedRevision: operation.expectedRevision, actualRevision: illustration.revision, message: 'Illustration revision changed before the animation settings update', retryable: true });
+      if (Object.values(illustration.animation.keyframes).some((keyframe) => keyframe.timeMs > operation.settings.durationMs)) throw new Error('Shortening the animation would place a keyframe beyond its duration');
+      const previous = { durationMs: illustration.animation.durationMs, framesPerSecond: illustration.animation.framesPerSecond, playback: illustration.animation.playback };
+      illustration.animation = { ...illustration.animation, ...structuredClone(operation.settings) };
+      return { kind: 'illustration.animation.settings.replace', settings: previous };
+    }
+    case 'illustration.animation.keyframe.upsert': {
+      const illustration = requireIllustration(document, operationIndex);
+      const incoming = structuredClone(operation.keyframe);
+      if (!illustration.objects[incoming.objectId]) throw new Error(`Animation keyframe object ${incoming.objectId} does not exist`);
+      if (incoming.timeMs > illustration.animation.durationMs) throw new Error('Animation keyframe time exceeds the animation duration');
+      const duplicate = Object.values(illustration.animation.keyframes).find((entry) => entry.id !== incoming.id && entry.objectId === incoming.objectId && entry.timeMs === incoming.timeMs);
+      if (duplicate) throw new Error(`Object ${incoming.objectId} already has a keyframe at ${incoming.timeMs} ms`);
+      const current = illustration.animation.keyframes[incoming.id];
+      if (current) {
+        assertRevision(current, operation.expectedRevision, operationIndex);
+        const previous = structuredClone(current);
+        illustration.animation.keyframes[incoming.id] = incoming;
+        touch(illustration.animation.keyframes[incoming.id], timestamp);
+        return { kind: 'illustration.animation.keyframe.upsert', keyframe: previous, expectedRevision: illustration.animation.keyframes[incoming.id].revision };
+      }
+      if (illustration.animation.keyframeIds.length >= 10_000) throw new Error('Illustration animations are limited to 10,000 keyframes');
+      illustration.animation.keyframes[incoming.id] = incoming;
+      const index = Math.max(0, Math.min(operation.index ?? illustration.animation.keyframeIds.length, illustration.animation.keyframeIds.length));
+      illustration.animation.keyframeIds.splice(index, 0, incoming.id);
+      return { kind: 'illustration.animation.keyframe.delete', keyframeId: incoming.id, expectedRevision: incoming.revision };
+    }
+    case 'illustration.animation.keyframe.delete': {
+      const illustration = requireIllustration(document, operationIndex);
+      const keyframe = illustration.animation.keyframes[operation.keyframeId];
+      if (!keyframe) throw new Error(`Animation keyframe ${operation.keyframeId} does not exist`);
+      assertRevision(keyframe, operation.expectedRevision, operationIndex);
+      const index = illustration.animation.keyframeIds.indexOf(keyframe.id);
+      delete illustration.animation.keyframes[keyframe.id];
+      illustration.animation.keyframeIds = illustration.animation.keyframeIds.filter((id) => id !== keyframe.id);
+      return { kind: 'illustration.animation.keyframe.upsert', keyframe: structuredClone(keyframe), index: Math.max(0, index) };
+    }
     case 'pixel.palette.replace': {
       const pixel = requirePixel(document, operationIndex);
       const previous = structuredClone(pixel.palette);
       if (operation.palette.length === 0 || operation.palette.length > 256) {
         throw new Error('Pixel palettes must contain between 1 and 256 entries');
       }
+      if (operation.palette[0].color.length !== 9 || !operation.palette[0].color.toLowerCase().endsWith('00')) throw new Error('Palette index 0 must remain transparent');
+      if (new Set(operation.palette.map((entry) => entry.id)).size !== operation.palette.length) throw new Error('Palette entry IDs must be unique');
+      const previousIds = previous.map((entry) => entry.id); const nextIds = operation.palette.map((entry) => entry.id); const sharedLength = Math.min(previousIds.length, nextIds.length);
+      if (previousIds.slice(0, sharedLength).some((id, index) => nextIds[index] !== id)) throw new Error('Palette additions and removals must occur at the end; use palette reorder first');
+      if (operation.palette.length < previous.length) for (let index = operation.palette.length; index < previous.length; index += 1) {
+        if (countPaletteIndexUsage(pixel, index, 1)) throw new Error(`Palette index ${index} is still used by pixel artwork or a reusable stamp`);
+        for (const asset of Object.values(pixel.pixelAssets)) if (asset.type === 'sprite') for (const override of Object.values(asset.paletteOverrides)) if (JSON.stringify(override[index]) !== JSON.stringify(previous[index])) throw new Error(`Palette index ${index} has a frame-specific override; clear or normalize it before deleting the color`);
+      }
+      if (pixel.paletteCycles.some((cycle) => cycle.toIndex >= operation.palette.length)) throw new Error('The new palette would invalidate a named cycle range');
       pixel.palette = structuredClone(operation.palette);
+      for (const asset of Object.values(pixel.pixelAssets)) if (asset.type === 'sprite') for (const [frameId, override] of Object.entries(asset.paletteOverrides)) asset.paletteOverrides[frameId] = operation.palette.map((entry, index) => structuredClone(override[index] ?? entry));
       return { kind: 'pixel.palette.replace', palette: previous };
+    }
+    case 'pixel.palette.reorder': {
+      const pixel = requirePixel(document, operationIndex);
+      if (operation.expectedRevision !== undefined && pixel.revision !== operation.expectedRevision) throw new TransactionConflictError({ operationIndex, entityId: pixel.id, expectedRevision: operation.expectedRevision, actualRevision: pixel.revision, message: 'Pixel document revision changed before the palette reorder', retryable: true });
+      const previousIds = pixel.palette.map((entry) => entry.id); const currentIds = new Set(previousIds);
+      if (operation.entryIds.length !== previousIds.length || operation.entryIds.some((id) => !currentIds.has(id))) throw new Error('Palette reorder must contain every current palette entry exactly once');
+      if (operation.entryIds[0] !== previousIds[0]) throw new Error('Transparent palette index 0 cannot be moved');
+      const oldIndex = new Map(previousIds.map((id, index) => [id, index])); const newIndex = new Map(operation.entryIds.map((id, index) => [id, index])); const indexMap = previousIds.map((id) => newIndex.get(id)!);
+      pixel.palette = operation.entryIds.map((id) => structuredClone(pixel.palette[oldIndex.get(id)!]));
+      pixel.stamps = pixel.stamps.map((stamp) => ({ ...stamp, cells: stamp.cells.map((cell) => ({ ...cell, index: indexMap[cell.index] ?? cell.index })) }));
+      for (const asset of Object.values(pixel.pixelAssets)) if (asset.type === 'sprite') {
+        for (const cel of Object.values(asset.cels)) remapPixelCelIndices(cel, indexMap);
+        for (const [frameId, override] of Object.entries(asset.paletteOverrides)) asset.paletteOverrides[frameId] = operation.entryIds.map((id) => structuredClone(override[oldIndex.get(id)!]));
+      }
+      return { kind: 'pixel.palette.reorder', entryIds: previousIds };
+    }
+    case 'pixel.stamps.replace': {
+      const pixel = requirePixel(document, operationIndex);
+      const previous = structuredClone(pixel.stamps);
+      pixel.stamps = structuredClone(operation.stamps);
+      return { kind: 'pixel.stamps.replace', stamps: previous };
+    }
+    case 'pixel.tile-stamps.replace': {
+      const pixel = requirePixel(document, operationIndex);
+      const previous = structuredClone(pixel.tileStamps);
+      pixel.tileStamps = structuredClone(operation.stamps);
+      return { kind: 'pixel.tile-stamps.replace', stamps: previous };
+    }
+    case 'pixel.bitmap-fonts.replace': {
+      const pixel = requirePixel(document, operationIndex);
+      const previous = structuredClone(pixel.bitmapFonts);
+      pixel.bitmapFonts = structuredClone(operation.fonts);
+      return { kind: 'pixel.bitmap-fonts.replace', fonts: previous };
+    }
+    case 'pixel.palette-cycles.replace': {
+      const pixel = requirePixel(document, operationIndex);
+      const previous = structuredClone(pixel.paletteCycles);
+      for (const cycle of operation.cycles) if (cycle.toIndex >= pixel.palette.length) throw new Error(`Palette cycle ${cycle.name} exceeds the current palette`);
+      pixel.paletteCycles = structuredClone(operation.cycles);
+      return { kind: 'pixel.palette-cycles.replace', cycles: previous };
     }
     case 'pixel.conversion.replace': {
       const pixel = requirePixel(document, operationIndex);
@@ -363,6 +547,7 @@ function applyOperation(
     }
     case 'pixel.links.replace': {
       const pixel = requirePixel(document, operationIndex); const previous = structuredClone(pixel.linkedAssets);
+      if (operation.expectedRevision !== undefined && pixel.revision !== operation.expectedRevision) throw new TransactionConflictError({ operationIndex, entityId: pixel.id, expectedRevision: operation.expectedRevision, actualRevision: pixel.revision, message: 'Pixel document changed before the project-link update', retryable: true });
       pixel.linkedAssets = structuredClone(operation.linkedAssets); return { kind: 'pixel.links.replace', linkedAssets: previous };
     }
     case 'pixel.active-asset.set': {
@@ -386,6 +571,7 @@ function applyOperation(
         if (!sprite.layers[cel.layerId]) throw new Error(`Cel layer ${cel.layerId} does not exist`);
         sprite.cels[cel.id] = structuredClone(cel);
       }
+      for (const cel of operation.cels) if (cel.linkedToCelId && !resolvePixelCel(sprite, cel.id)) throw new Error(`Cel ${cel.id} has a cyclic or missing link`);
       touch(sprite, timestamp);
       return { kind: 'pixel.frame.delete', spriteId: sprite.id, frameId: operation.frame.id, expectedRevision: sprite.revision };
     }
@@ -410,8 +596,22 @@ function applyOperation(
       if (sprite.frameIds.length <= 1) throw new Error('A sprite must retain at least one frame');
       const frame = sprite.frames[operation.frameId];
       if (!frame) throw new Error(`Frame ${operation.frameId} does not exist`);
+      const previousSprite = structuredClone(sprite);
       const index = sprite.frameIds.indexOf(frame.id);
       const cels = Object.values(sprite.cels).filter((cel) => cel.frameId === frame.id).map((cel) => structuredClone(cel));
+      const removedCelIds = new Set(cels.map((cel) => cel.id));
+      for (const cel of Object.values(sprite.cels)) {
+        if (removedCelIds.has(cel.id) || !cel.linkedToCelId) continue;
+        const resolved = resolvePixelCel(sprite, cel.id);
+        if (!resolved) throw new Error(`Cel ${cel.id} has a cyclic or missing link`);
+        let cursor: typeof cel | undefined = cel; let dependsOnRemovedCel = false; const visited = new Set<string>();
+        while (cursor?.linkedToCelId && !visited.has(cursor.id)) {
+          visited.add(cursor.id);
+          if (removedCelIds.has(cursor.linkedToCelId)) { dependsOnRemovedCel = true; break; }
+          cursor = sprite.cels[cursor.linkedToCelId];
+        }
+        if (dependsOnRemovedCel) { cel.chunks = structuredClone(resolved.chunks); delete cel.linkedToCelId; touch(cel, timestamp); }
+      }
       for (const cel of cels) delete sprite.cels[cel.id];
       delete sprite.frames[frame.id];
       sprite.frameIds.splice(index, 1);
@@ -420,7 +620,7 @@ function applyOperation(
         return [{ ...tag, fromFrameId: tag.fromFrameId === frame.id ? sprite.frameIds[Math.max(0, index - 1)] : tag.fromFrameId, toFrameId: tag.toFrameId === frame.id ? sprite.frameIds[Math.min(sprite.frameIds.length - 1, index)] : tag.toFrameId }];
       });
       touch(sprite, timestamp);
-      return { kind: 'pixel.frame.add', spriteId: sprite.id, frame: structuredClone(frame), cels, index, expectedRevision: sprite.revision };
+      return { kind: 'pixel.asset.replace', asset: previousSprite, expectedRevision: sprite.revision };
     }
     case 'pixel.asset.add': {
       const pixel = requirePixel(document, operationIndex);
@@ -463,6 +663,7 @@ function applyOperation(
       const cel = sprite.cels[operation.celId];
       if (!cel) throw new Error(`Cel ${operation.celId} does not exist`);
       assertRevision(cel, operation.expectedRevision, operationIndex);
+      assertSpriteCoordinates(sprite, operation.changes);
       const inverse = writePixels(cel, operation.changes);
       touch(cel, timestamp);
       touch(sprite, timestamp);
@@ -474,6 +675,19 @@ function applyOperation(
         expectedRevision: cel.revision,
       };
     }
+    case 'pixel.cel.region': {
+      const pixel = requirePixel(document, operationIndex);
+      const sprite = pixel.pixelAssets[operation.spriteId] as PixelSprite | undefined;
+      if (!sprite || sprite.type !== 'sprite') throw new Error('Pixel region changes require a sprite');
+      const cel = sprite.cels[operation.celId];
+      if (!cel) throw new Error(`Cel ${operation.celId} does not exist`);
+      assertRevision(cel, operation.expectedRevision, operationIndex);
+      assertSpriteCoordinates(sprite, operation.runs);
+      const inverse = writePixelRuns(cel, operation.runs);
+      touch(cel, timestamp);
+      touch(sprite, timestamp);
+      return { kind: 'pixel.cel.region', spriteId: sprite.id, celId: cel.id, runs: inverse, expectedRevision: cel.revision };
+    }
     case 'pixel.tilemap.set': {
       const pixel = requirePixel(document, operationIndex);
       const map = pixel.pixelAssets[operation.mapId] as PixelTilemap | undefined;
@@ -481,6 +695,7 @@ function applyOperation(
       const layer = map.layers[operation.layerId];
       if (!layer || layer.type !== 'tile' || !layer.chunks) throw new Error('Tile changes require a tile layer');
       assertRevision(layer, operation.expectedRevision, operationIndex);
+      assertTileCoordinates(map, operation.changes);
       const inverse = writeTiles(layer.chunks, operation.changes);
       touch(layer, timestamp);
       touch(map, timestamp);
@@ -492,7 +707,59 @@ function applyOperation(
         expectedRevision: layer.revision,
       };
     }
+    case 'pixel.tilemap.region': {
+      const pixel = requirePixel(document, operationIndex);
+      const map = pixel.pixelAssets[operation.mapId] as PixelTilemap | undefined;
+      if (!map || map.type !== 'tilemap') throw new Error('Tile region changes require a tilemap');
+      const layer = map.layers[operation.layerId];
+      if (!layer || layer.type !== 'tile' || !layer.chunks) throw new Error('Tile region changes require a tile layer');
+      assertRevision(layer, operation.expectedRevision, operationIndex);
+      assertTileCoordinates(map, operation.runs);
+      const inverse = writeTileRuns(layer.chunks, operation.runs);
+      touch(layer, timestamp);
+      touch(map, timestamp);
+      return { kind: 'pixel.tilemap.region', mapId: map.id, layerId: layer.id, runs: inverse, expectedRevision: layer.revision };
+    }
   }
+}
+
+function inverseWithCurrentRevision(document: AIDrawDocument, operation: CanvasOperation): CanvasOperation {
+  const value = structuredClone(operation);
+  if (document.kind === 'illustration') {
+    if (value.kind === 'illustration.artboard.replace' || value.kind === 'illustration.artboard.translate' || value.kind === 'illustration.guides.replace' || value.kind === 'illustration.snap-settings.replace' || value.kind === 'illustration.animation.settings.replace') return { ...value, expectedRevision: document.revision };
+    if (value.kind === 'illustration.layer.replace') return { ...value, expectedRevision: document.layers[value.layer.id]?.revision };
+    if (value.kind === 'illustration.layer.move' || value.kind === 'illustration.layer.delete' || value.kind === 'illustration.paint.stroke') return { ...value, expectedRevision: document.layers[value.layerId]?.revision };
+    if (value.kind === 'illustration.object.replace') return { ...value, expectedRevision: document.objects[value.object.id]?.revision };
+    if (value.kind === 'illustration.object.move' || value.kind === 'illustration.object.delete') return { ...value, expectedRevision: document.objects[value.objectId]?.revision };
+    if (value.kind === 'illustration.animation.keyframe.upsert') return { ...value, expectedRevision: document.animation.keyframes[value.keyframe.id]?.revision };
+    if (value.kind === 'illustration.animation.keyframe.delete') return { ...value, expectedRevision: document.animation.keyframes[value.keyframeId]?.revision };
+    return value;
+  }
+  if (value.kind === 'pixel.palette.reorder' || value.kind === 'pixel.links.replace') return { ...value, expectedRevision: document.revision };
+  if (value.kind === 'pixel.frame.add' || value.kind === 'pixel.frame.delete') {
+    const asset = document.pixelAssets[value.spriteId]; return { ...value, expectedRevision: asset?.type === 'sprite' ? asset.revision : undefined };
+  }
+  if (value.kind === 'pixel.frame.replace') {
+    const asset = document.pixelAssets[value.spriteId]; return { ...value, expectedRevision: asset?.type === 'sprite' ? asset.frames[value.frame.id]?.revision : undefined };
+  }
+  if (value.kind === 'pixel.asset.replace') return { ...value, expectedRevision: document.pixelAssets[value.asset.id]?.revision };
+  if (value.kind === 'pixel.asset.delete') return { ...value, expectedRevision: document.pixelAssets[value.assetId]?.revision };
+  if (value.kind === 'pixel.cel.set' || value.kind === 'pixel.cel.region') {
+    const asset = document.pixelAssets[value.spriteId]; return { ...value, expectedRevision: asset?.type === 'sprite' ? asset.cels[value.celId]?.revision : undefined };
+  }
+  if (value.kind === 'pixel.tilemap.set' || value.kind === 'pixel.tilemap.region') {
+    const asset = document.pixelAssets[value.mapId]; return { ...value, expectedRevision: asset?.type === 'tilemap' ? asset.layers[value.layerId]?.revision : undefined };
+  }
+  return value;
+}
+
+function rebaseInverseRevisions(document: AIDrawDocument, operations: CanvasOperation[], timestamp: string): CanvasOperation[] {
+  const simulation = structuredClone(document); const rebased: CanvasOperation[] = [];
+  for (let index = 0; index < operations.length; index += 1) {
+    const operation = inverseWithCurrentRevision(simulation, operations[index]);
+    applyOperation(simulation, operation, index, timestamp); rebased.push(operation);
+  }
+  return rebased;
 }
 
 export function applyTransaction(
@@ -524,6 +791,7 @@ export function applyTransaction(
       operationCount: transaction.operations.length,
     });
   }
+  const rebasedInverseOperations = rebaseInverseRevisions(document, inverseOperations, timestamp);
 
   return {
     document,
@@ -534,7 +802,7 @@ export function applyTransaction(
       actor: structuredClone(transaction.actor),
       label: `Undo ${transaction.label}`,
       createdAt: timestamp,
-      operations: inverseOperations,
+      operations: rebasedInverseOperations,
       playback: { mode: 'instant', speed: 1 },
     },
   };

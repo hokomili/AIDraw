@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<tileset version="1.10" tiledversion="1.11.2" name="XML Terrain" tilewidth="16" tileheight="16" tilecount="2" columns="2">
+  <transformations hflip="1" vflip="1" rotate="0" preferuntransformed="0"/>
+  <tile id="0" probability="0.4">
+    <properties>
+      <property name="friction" type="float" value="0.75"/>
+    </properties>
+    <objectgroup>
+      <object id="1" name="Slope" type="ramp" x="0" y="0">
+        <polyline points="0,16 8,8 16,0"/>
+        <properties><property name="oneWay" type="bool" value="true"/></properties>
+      </object>
+    </objectgroup>
+  </tile>
+  <wangsets>
+    <wangset name="XML edge" type="edge">
+      <wangcolor name="Stone" color="#8794a8" tile="1" probability="0.5"/>
+      <wangtile tileid="0" wangid="1,0,1,0,1,0,1,0"/>
+    </wangset>
+  </wangsets>
+</tileset>

@@ -1,6 +1,9 @@
 import type { ForgeConfig } from '@electron-forge/shared-types';
 import { MakerSquirrel } from '@electron-forge/maker-squirrel';
 import { MakerZIP } from '@electron-forge/maker-zip';
+import { MakerDMG } from '@electron-forge/maker-dmg';
+import { MakerDeb } from '@electron-forge/maker-deb';
+import { MakerRpm } from '@electron-forge/maker-rpm';
 import { VitePlugin } from '@electron-forge/plugin-vite';
 import { AutoUnpackNativesPlugin } from '@electron-forge/plugin-auto-unpack-natives';
 import { resolve } from 'node:path';
@@ -9,12 +12,12 @@ import process from 'node:process';
 const packagedRuntimeRoots = [
   '/.vite',
   '/node_modules/@napi-rs/canvas',
-  '/node_modules/@napi-rs/canvas-win32-x64-msvc',
   '/node_modules/ajv',
   '/node_modules/ajv-formats',
   '/node_modules/fast-deep-equal',
   '/node_modules/fast-uri',
   '/node_modules/json-schema-traverse',
+  '/node_modules/paper',
   '/node_modules/require-from-string',
 ];
 
@@ -23,13 +26,14 @@ const config: ForgeConfig = {
   packagerConfig: {
     asar: { unpack: '**/*.node' },
     prune: false,
-    // Vite bundles the application graph. Keep only the native raster binding
-    // and AJV helpers referenced by generated standalone validator functions.
+    // Vite bundles the application graph. Keep the native raster binding,
+    // Paper's deliberately externalized geometry runtime, and AJV helpers
+    // referenced by generated standalone validator functions.
     ignore: (filePath) => {
       if (!filePath) return false;
       const keep = packagedRuntimeRoots.some((root) =>
         filePath === root || filePath.startsWith(`${root}/`) || root.startsWith(`${filePath}/`),
-      );
+      ) || filePath.startsWith('/node_modules/@napi-rs/canvas-');
       return !keep;
     },
     download: {
@@ -44,13 +48,34 @@ const config: ForgeConfig = {
       name: 'aidraw',
       setupExe: 'AIDraw-Setup.exe',
     }),
-    new MakerZIP({}, ['win32']),
+    new MakerDMG({ name: 'AIDraw' }, ['darwin']),
+    new MakerDeb({
+      options: {
+        name: 'aidraw', productName: 'AIDraw', genericName: 'Drawing Studio',
+        description: 'Agent-native mixed-media and pixel-art studio',
+        maintainer: 'AIDraw contributors', homepage: 'https://github.com/hokomili/AIDraw',
+        categories: ['Graphics'], mimeType: ['application/x-aidraw'],
+      },
+    }, ['linux']),
+    new MakerRpm({
+      options: {
+        name: 'aidraw', productName: 'AIDraw', genericName: 'Drawing Studio',
+        description: 'Agent-native mixed-media and pixel-art studio',
+        license: 'MIT', homepage: 'https://github.com/hokomili/AIDraw',
+        categories: ['Graphics'], mimeType: ['application/x-aidraw'],
+      },
+    }, ['linux']),
+    new MakerZIP({}, ['win32', 'darwin', 'linux']),
   ],
   hooks: {
     packageAfterCopy: async (_forgeConfig, buildPath, _electronVersion, platform) => {
-      if (platform !== 'win32') return;
       const { flipFuses, FuseV1Options, FuseVersion } = await import('@electron/fuses');
-      await flipFuses(resolve(buildPath, '..', '..', 'electron.exe'), {
+      const electronBinary = platform === 'win32'
+        ? resolve(buildPath, '..', '..', 'electron.exe')
+        : platform === 'darwin'
+          ? resolve(buildPath, '..', '..', 'MacOS', 'Electron')
+          : resolve(buildPath, '..', '..', 'electron');
+      await flipFuses(electronBinary, {
         version: FuseVersion.V1,
         strictlyRequireAllFuses: true,
         [FuseV1Options.RunAsNode]: false,
@@ -62,6 +87,7 @@ const config: ForgeConfig = {
         [FuseV1Options.LoadBrowserProcessSpecificV8Snapshot]: false,
         [FuseV1Options.GrantFileProtocolExtraPrivileges]: false,
         [FuseV1Options.WasmTrapHandlers]: true,
+        resetAdHocDarwinSignature: platform === 'darwin' && process.arch === 'arm64',
       });
     },
   },
@@ -71,6 +97,11 @@ const config: ForgeConfig = {
       build: [
         {
           entry: 'src/main/main.ts',
+          config: 'vite.main.config.ts',
+          target: 'main',
+        },
+        {
+          entry: 'src/main/utility-worker.ts',
           config: 'vite.main.config.ts',
           target: 'main',
         },

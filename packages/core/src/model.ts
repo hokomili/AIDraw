@@ -7,6 +7,11 @@ export interface Actor {
   kind: ActorKind;
   name: string;
   color: string;
+  client?: {
+    model?: string;
+    reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
+    taskId?: string;
+  };
 }
 
 export interface EntityBase {
@@ -52,6 +57,7 @@ export interface PointSample {
 export interface ColorStop {
   offset: number;
   color: string;
+  opacity?: number;
 }
 
 export type PaintStyle =
@@ -84,6 +90,8 @@ export interface ObjectBase extends EntityBase {
   transform: Transform;
   /** Non-destructive Gaussian blur applied to the rendered object in pixels. */
   blur?: number;
+  /** Ordered non-destructive color and blur adjustments applied after the object's own paint. */
+  filters?: ImageFilter[];
   maskObjectId?: Id;
   shadow?: { color: string; blur: number; offsetX: number; offsetY: number };
 }
@@ -155,6 +163,8 @@ export interface ImageObject extends ObjectBase {
   assetId: Id;
   width: number;
   height: number;
+  sourceWidth?: number;
+  sourceHeight?: number;
   crop?: { x: number; y: number; width: number; height: number };
   filters: ImageFilter[];
 }
@@ -182,7 +192,35 @@ export interface RasterStroke {
   hardness: number;
   flow: number;
   mode: 'paint' | 'erase';
-  preset: 'hard-round' | 'soft-round' | 'pencil' | 'marker' | 'airbrush' | 'eraser';
+  preset: 'hard-round' | 'soft-round' | 'pencil' | 'marker' | 'airbrush' | 'eraser' | 'watercolor' | 'custom';
+  brushPresetId?: Id;
+  dynamics?: RasterBrushDynamics;
+}
+
+export type RasterBrushTip = 'round' | 'flat' | 'chalk' | 'watercolor';
+
+export interface RasterBrushDynamics {
+  tip: RasterBrushTip;
+  spacing: number;
+  stabilization: number;
+  scatter: number;
+  sizeJitter: number;
+  opacityJitter: number;
+  angle: number;
+  roundness: number;
+  wetness: number;
+  granulation: number;
+  seed: number;
+}
+
+export interface RasterBrushPreset {
+  id: Id;
+  name: string;
+  size: number;
+  opacity: number;
+  hardness: number;
+  flow: number;
+  dynamics: Omit<RasterBrushDynamics, 'seed'>;
 }
 
 export interface LayerBase extends EntityBase {
@@ -192,6 +230,8 @@ export interface LayerBase extends EntityBase {
   opacity: number;
   blendMode: BlendMode;
   maskLayerId?: Id;
+  /** Ordered adjustments applied to the isolated layer or layer-group composite. */
+  filters?: ImageFilter[];
 }
 
 export interface GroupLayer extends LayerBase {
@@ -208,6 +248,12 @@ export interface PaintLayer extends LayerBase {
   type: 'paint';
   tileSize: 256;
   tileAssetIds: Record<string, Id>;
+  /** Derived sparse-raster cache. Editable strokes remain the source of truth. */
+  tileCache?: {
+    version: 1;
+    strokeCount: number;
+    strokesSha256: string;
+  };
   strokes: RasterStroke[];
 }
 
@@ -221,10 +267,107 @@ export interface Artboard {
   dpi: number;
 }
 
+export interface IllustrationGuide {
+  id: Id;
+  orientation: 'horizontal' | 'vertical';
+  position: number;
+  color: string;
+  locked: boolean;
+}
+
+export interface IllustrationSnapSettings {
+  artboard: boolean;
+  objects: boolean;
+  guides: boolean;
+  grid: boolean;
+  pixel: boolean;
+  gridSize: number;
+  tolerance: number;
+}
+
+export type IllustrationAnimationPlayback = 'once' | 'loop' | 'ping-pong';
+export type IllustrationKeyframeEasing = 'linear' | 'hold' | 'ease-in-out';
+
+/**
+ * A durable object pose on the illustration timeline. Keyframes intentionally
+ * store a complete pose so headless clients and the renderer resolve the same
+ * result without depending on transient editor state.
+ */
+export interface IllustrationKeyframe extends EntityBase {
+  objectId: Id;
+  timeMs: number;
+  transform: Transform;
+  opacity: number;
+  visible: boolean;
+  easing: IllustrationKeyframeEasing;
+}
+
+export interface IllustrationAnimation {
+  durationMs: number;
+  framesPerSecond: number;
+  playback: IllustrationAnimationPlayback;
+  keyframeIds: Id[];
+  keyframes: Record<Id, IllustrationKeyframe>;
+}
+
 export interface PaletteEntry {
   id: Id;
   name: string;
   color: string;
+}
+
+export interface PaletteCycle {
+  id: Id;
+  name: string;
+  fromIndex: number;
+  toIndex: number;
+  direction: 'forward' | 'reverse';
+  stepMs: number;
+}
+
+export interface PixelStampCell {
+  x: number;
+  y: number;
+  index: number;
+}
+
+export interface PixelStamp {
+  id: Id;
+  name: string;
+  width: number;
+  height: number;
+  anchorX: number;
+  anchorY: number;
+  cells: PixelStampCell[];
+}
+
+export interface TileStampCell {
+  x: number;
+  y: number;
+  gid: number;
+}
+
+export interface TileStamp {
+  id: Id;
+  name: string;
+  width: number;
+  height: number;
+  anchorX: number;
+  anchorY: number;
+  cells: TileStampCell[];
+}
+
+export interface BitmapGlyph {
+  width: number;
+  advance: number;
+  rows: string[];
+}
+
+export interface BitmapFont {
+  id: Id;
+  name: string;
+  lineHeight: number;
+  glyphs: Record<string, BitmapGlyph>;
 }
 
 export interface PixelChunk {
@@ -326,6 +469,8 @@ export interface PixelTileset extends EntityBase {
   firstGid: number;
   tileWidth: number;
   tileHeight: number;
+  margin: number;
+  spacing: number;
   columns: number;
   rows: number;
   spriteAssetId: Id;
@@ -420,7 +565,7 @@ export interface ActivityEntry {
 }
 
 export interface DocumentBase {
-  schemaVersion: 1;
+  schemaVersion: 2;
   id: Id;
   revision: number;
   name: string;
@@ -439,6 +584,10 @@ export interface IllustrationDocument extends DocumentBase {
   layerIds: Id[];
   layers: Record<Id, IllustrationLayer>;
   objects: Record<Id, IllustrationObject>;
+  brushPresets: RasterBrushPreset[];
+  guides: IllustrationGuide[];
+  snapSettings: IllustrationSnapSettings;
+  animation: IllustrationAnimation;
 }
 
 export interface PixelDocument extends DocumentBase {
@@ -446,6 +595,10 @@ export interface PixelDocument extends DocumentBase {
   scope: 'standalone' | 'project';
   standaloneType?: 'sprite' | 'tilemap';
   palette: PaletteEntry[];
+  paletteCycles: PaletteCycle[];
+  stamps: PixelStamp[];
+  tileStamps: TileStamp[];
+  bitmapFonts: BitmapFont[];
   assetIds: Id[];
   pixelAssets: Record<Id, PixelAsset>;
   activeAssetId: Id;
@@ -460,7 +613,7 @@ export interface PixelDocument extends DocumentBase {
 
 export type AIDrawDocument = IllustrationDocument | PixelDocument;
 
-export type JobKind = 'playback' | 'approval' | 'generation' | 'import' | 'export' | 'save';
+export type JobKind = 'playback' | 'approval' | 'generation' | 'import' | 'export' | 'save' | 'batch';
 export type JobStatus =
   | 'queued'
   | 'waiting-for-user'
@@ -491,6 +644,15 @@ export interface AsyncJob<T = unknown> {
       trustFolder?: string;
       overwritePaths?: string[];
       fields: Array<{ label: string; value: string; tone?: 'default' | 'warning' | 'paid' }>;
+      previews?: Array<{
+        role: 'source' | 'mask';
+        assetId: Id;
+        name: string;
+        mimeType: string;
+        width: number;
+        height: number;
+        dataUrl: string;
+      }>;
     };
   };
 }

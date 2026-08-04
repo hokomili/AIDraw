@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createPixelDocument, readPixel, resizePixelSpriteCanvas, writePixels, writeTiles, readTile, type TilemapChunk } from '@aidraw/core';
+import { createPixelDocument, decodeTiledGid, encodeTiledGid, readPixel, resizePixelSpriteCanvas, writePixelRuns, writePixels, writeTileRuns, writeTiles, readTile, type TilemapChunk } from '@aidraw/core';
 
 describe('chunked indexed pixels and sparse tiles', () => {
   it('round-trips pixels across positive and negative chunk boundaries', () => {
@@ -22,6 +22,39 @@ describe('chunked indexed pixels and sparse tiles', () => {
     expect(readTile(chunk, 34, 2)).toBe(0xf000_0042);
     writeTiles(chunks, inverse);
     expect(readTile(chunk, 34, 2)).toBe(0);
+  });
+
+  it('round-trips Tiled flip and diagonal flags as unsigned GIDs', () => {
+    const encoded = encodeTiledGid(0x0abc_def0, { hFlip: true, vFlip: true, diagonal: true });
+    expect(encoded).toBe(0xeabc_def0);
+    expect(decodeTiledGid(encoded)).toEqual({ gid: 0x0abc_def0, hFlip: true, vFlip: true, diagonal: true });
+    expect(() => encodeTiledGid(0x1000_0000)).toThrow(/28-bit/);
+  });
+
+  it('writes compact pixel and tile runs across chunk boundaries with compact exact inverses', () => {
+    const document = createPixelDocument('sprite'); const sprite = document.pixelAssets[document.activeAssetId];
+    if (sprite.type !== 'sprite') throw new Error('Expected sprite'); const cel = Object.values(sprite.cels)[0];
+    writePixels(cel, [{ x: 30, y: 4, index: 2 }, { x: 33, y: 4, index: 2 }]);
+    const inverse = writePixelRuns(cel, [{ x: 30, y: 4, length: 8, index: 7 }]);
+    expect(Array.from({ length: 8 }, (_, offset) => readPixel(cel, 30 + offset, 4))).toEqual(new Array(8).fill(7));
+    expect(inverse.length).toBeLessThan(8);
+    writePixelRuns(cel, inverse);
+    expect(Array.from({ length: 8 }, (_, offset) => readPixel(cel, 30 + offset, 4))).toEqual([2, 0, 0, 2, 0, 0, 0, 0]);
+
+    const chunks: Record<string, TilemapChunk> = {};
+    const tileInverse = writeTileRuns(chunks, [{ x: 31, y: -2, length: 4, gid: 0xe000_0003 }]);
+    expect([31, 32, 33, 34].map((x) => readTile(chunks[`${Math.floor(x / 32)},-1`], x, -2))).toEqual(new Array(4).fill(0xe000_0003));
+    writeTileRuns(chunks, tileInverse);
+    expect([31, 32, 33, 34].map((x) => readTile(chunks[`${Math.floor(x / 32)},-1`], x, -2))).toEqual(new Array(4).fill(0));
+  });
+
+  it('undoes repeated writes to the same cell in reverse write order', () => {
+    const document = createPixelDocument('sprite'); const sprite = document.pixelAssets[document.activeAssetId];
+    if (sprite.type !== 'sprite') throw new Error('Expected sprite'); const cel = Object.values(sprite.cels)[0];
+    const inverse = writePixels(cel, [{ x: 1, y: 1, index: 3 }, { x: 1, y: 1, index: 8 }]);
+    expect(readPixel(cel, 1, 1)).toBe(8);
+    writePixels(cel, inverse);
+    expect(readPixel(cel, 1, 1)).toBe(0);
   });
 
   it('treats a legacy cel with no chunk table as empty and repairs it on write', () => {

@@ -1,0 +1,61 @@
+{
+  "type": "map",
+  "version": "1.10",
+  "tiledversion": "1.11.2",
+  "orientation": "isometric",
+  "renderorder": "right-down",
+  "infinite": false,
+  "width": 2,
+  "height": 2,
+  "tilewidth": 16,
+  "tileheight": 16,
+  "properties": [
+    { "name": "weather", "type": "string", "value": "snow" },
+    { "name": "seed", "type": "int", "value": 42 }
+  ],
+  "tilesets": [
+    { "firstgid": 17, "source": "terrain.tsj" }
+  ],
+  "layers": [
+    {
+      "id": 1,
+      "name": "World",
+      "type": "group",
+      "opacity": 0.8,
+      "layers": [
+        {
+          "id": 2,
+          "name": "Rails",
+          "type": "tilelayer",
+          "width": 2,
+          "height": 2,
+          "parallaxx": 0.75,
+          "parallaxy": 0.5,
+          "data": [17, 2147483666, 0, 17]
+        },
+        {
+          "id": 3,
+          "name": "Signals",
+          "type": "objectgroup",
+          "objects": [
+            {
+              "id": 1,
+              "name": "Signal zone",
+              "type": "trigger",
+              "x": 4,
+              "y": 5,
+              "polygon": [
+                { "x": 0, "y": 0 },
+                { "x": 8, "y": 0 },
+                { "x": 4, "y": 9 }
+              ],
+              "properties": [
+                { "name": "enabled", "type": "bool", "value": true }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -3,9 +3,16 @@ import { createIllustrationDocument, createPixelDocument, migrateDocument, readP
 
 describe('document migrations', () => {
   it('upgrades an unversioned greenfield document and rejects future schemas', () => {
-    const legacy = createIllustrationDocument('Legacy') as unknown as Record<string, unknown>; delete legacy.schemaVersion; delete legacy.provenance;
-    const migrated = migrateDocument(legacy); expect(migrated.schemaVersion).toBe(1); expect(migrated.provenance).toEqual([]);
+    const legacy = createIllustrationDocument('Legacy') as unknown as Record<string, unknown>; delete legacy.schemaVersion; delete legacy.provenance; delete legacy.animation;
+    const migrated = migrateDocument(legacy); expect(migrated.schemaVersion).toBe(2); expect(migrated.provenance).toEqual([]); if (migrated.kind !== 'illustration') throw new Error('Expected illustration'); expect(migrated.animation).toMatchObject({ durationMs: 2_000, framesPerSecond: 12, playback: 'loop', keyframeIds: [] });
     expect(() => migrateDocument({ ...legacy, schemaVersion: 99 })).toThrow(/newer/);
+  });
+
+  it('upgrades a schema-1 illustration fixture without changing stable identity or artwork', () => {
+    const source = createIllustrationDocument('Schema one fixture'); const legacy = structuredClone(source) as unknown as Record<string, unknown>; legacy.schemaVersion = 1; delete legacy.animation;
+    const migrated = migrateDocument(legacy); if (migrated.kind !== 'illustration') throw new Error('Expected illustration');
+    expect(migrated).toMatchObject({ schemaVersion: 2, id: source.id, name: source.name, revision: source.revision, layerIds: source.layerIds, objects: source.objects });
+    expect(migrated.animation).toEqual({ durationMs: 2_000, framesPerSecond: 12, playback: 'loop', keyframeIds: [], keyframes: {} });
   });
 
   it('repairs incomplete agent-authored sprite frames and cels during recovery', () => {

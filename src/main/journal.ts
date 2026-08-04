@@ -81,4 +81,8 @@ export class RecoveryJournal {
       return [];
     }
   }
+
+  async flush(): Promise<void> {
+    await Promise.all([...this.writeQueues.values()]);
+  }
 }

@@ -10,7 +10,7 @@ const formats: ExportFormat[] = ['png', 'jpeg', 'webp', 'svg', 'pdf', 'psd', 'gi
 export type CliCommand =
   | { kind: 'help' }
   | { kind: 'version' }
-  | { kind: 'batch-export'; inputPath: string; outputPath: string; format?: ExportFormat; scale: number; overwrite: boolean };
+  | { kind: 'batch-export'; inputPath: string; outputPath: string; format?: ExportFormat; scale: number; animationTag?: string; overwrite: boolean };
 
 export interface BatchExportResult {
   inputPath: string;
@@ -34,7 +34,7 @@ export function parseCliArguments(arguments_: string[]): CliCommand | undefined 
   if (arguments_.includes('-h') || arguments_.includes('--help')) return { kind: 'help' };
   if (arguments_.includes('--version')) return { kind: 'version' };
 
-  let outputPath: string | undefined; let format: ExportFormat | undefined; let scale = 1; let overwrite = false; let batch = false;
+  let outputPath: string | undefined; let format: ExportFormat | undefined; let scale = 1; let animationTag: string | undefined; let overwrite = false; let batch = false;
   const positional: string[] = [];
   for (let index = 0; index < arguments_.length; index += 1) {
     const argument = arguments_[index];
@@ -42,6 +42,7 @@ export function parseCliArguments(arguments_: string[]): CliCommand | undefined 
     else if (argument === '--overwrite') overwrite = true;
     else if (argument === '--save-as') { outputPath = nextValue(arguments_, index, argument); index += 1; }
     else if (argument === '--scale') { scale = normalizeExportScale(nextValue(arguments_, index, argument)); index += 1; }
+    else if (argument === '--animation-tag') { animationTag = nextValue(arguments_, index, argument).trim(); if (!animationTag || animationTag.length > 120) throw new Error('--animation-tag must contain from 1 to 120 characters.'); index += 1; }
     else if (argument === '--format') {
       const value = nextValue(arguments_, index, argument);
       if (!formats.includes(value as ExportFormat)) throw new Error(`Unknown export format “${value}”.`);
@@ -52,7 +53,7 @@ export function parseCliArguments(arguments_: string[]): CliCommand | undefined 
   if (!batch) throw new Error('Batch export requires --batch or -b.');
   if (positional.length !== 1) throw new Error(`Batch export requires exactly one input .aidraw file; received ${positional.length}.`);
   if (!outputPath) throw new Error('Batch export requires --save-as <output>.');
-  return { kind: 'batch-export', inputPath: positional[0], outputPath, format, scale, overwrite };
+  return { kind: 'batch-export', inputPath: positional[0], outputPath, format, scale, animationTag, overwrite };
 }
 
 export function cliHelp(executable = 'AIDraw.exe'): string {
@@ -66,6 +67,7 @@ export function cliHelp(executable = 'AIDraw.exe'): string {
     '  --save-as <path>     Exact output path',
     '  --format <format>    Optional explicit format (required for sprite-sheet)',
     '  --scale <1-64>       Integer nearest-neighbor scale for pixel presentation exports',
+    '  --animation-tag <id/name>  Export one exact sprite tag range (GIF/APNG/sprite-sheet)',
     '  --overwrite          Replace an existing exact output path',
     '  -h, --help           Show this help',
     '  --version            Show the AIDraw version',
@@ -146,7 +148,12 @@ export async function executeBatchExport(command: Extract<CliCommand, { kind: 'b
   const format = command.format ?? inferFormat(command.outputPath);
   if (!format) throw new Error('Cannot infer the export format. Add --format <format>.');
   if (!extensionMatches(format, command.outputPath)) throw new Error(`The output extension does not match --format ${format}.`);
-  const artifact = await exportDocument(loaded.document, format, { scale: command.scale });
+  let animationTagId: string | undefined;
+  if (command.animationTag) {
+    if (!['gif', 'apng', 'sprite-sheet'].includes(format) || loaded.document.kind !== 'pixel') throw new Error('--animation-tag requires a GIF, APNG, or sprite-sheet export from a pixel sprite.');
+    const sprite = loaded.document.pixelAssets[loaded.document.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('--animation-tag requires an active pixel sprite.'); const tag = sprite.tags.find((entry) => entry.id === command.animationTag || entry.name.toLocaleLowerCase() === command.animationTag!.toLocaleLowerCase()); if (!tag) throw new Error(`Animation tag “${command.animationTag}” does not exist.`); animationTagId = tag.id;
+  }
+  const artifact = await exportDocument(loaded.document, format, { scale: command.scale, animationTagId });
   const requested = resolve(command.outputPath);
   const target = extname(requested) ? requested : `${requested}.${artifact.extension}`;
   const entries = outputEntries(artifact, format, target);

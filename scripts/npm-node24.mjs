@@ -17,8 +17,8 @@ function nodeMajor(executable) {
 const nodeCandidates = [
   process.env.AIDRAW_NODE24_EXE,
   process.execPath,
-  join(homedir(), '.cache', 'codex-runtimes', 'codex-primary-runtime', 'dependencies', 'node', 'bin', 'node.exe'),
-  'C:\\Program Files\\nodejs\\node.exe',
+  join(homedir(), '.cache', 'codex-runtimes', 'codex-primary-runtime', 'dependencies', 'node', 'bin', process.platform === 'win32' ? 'node.exe' : 'node'),
+  ...(process.platform === 'win32' ? ['C:\\Program Files\\nodejs\\node.exe'] : ['/usr/local/bin/node', '/usr/bin/node']),
 ].filter(Boolean).map((candidate) => resolve(candidate));
 const node24 = [...new Set(nodeCandidates)].find((candidate) => exists(candidate) && nodeMajor(candidate) === 24);
 if (!node24) {
@@ -29,7 +29,8 @@ const pathDirectories = (process.env.PATH ?? '').split(delimiter).filter(Boolean
 const npmCandidates = [
   process.env.AIDRAW_NPM_CLI,
   join(dirname(node24), 'node_modules', 'npm', 'bin', 'npm-cli.js'),
-  'C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js',
+  join(dirname(dirname(node24)), 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+  ...(process.platform === 'win32' ? ['C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js'] : ['/usr/local/lib/node_modules/npm/bin/npm-cli.js', '/usr/lib/node_modules/npm/bin/npm-cli.js']),
   ...pathDirectories.map((directory) => join(directory, 'node_modules', 'npm', 'bin', 'npm-cli.js')),
 ].filter(Boolean).map((candidate) => resolve(candidate));
 const npmCli = [...new Set(npmCandidates)].find(exists);

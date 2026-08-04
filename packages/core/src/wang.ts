@@ -7,7 +7,7 @@ const positions: Array<keyof WangNeighborhood> = ['top', 'topRight', 'right', 'b
 export function matchingWangTiles(set: WangSet, neighborhood: WangNeighborhood): WangTile[] {
   return set.tiles.filter((tile) => positions.every((position, index) => {
     const wanted = neighborhood[position];
-    return wanted === undefined || wanted === 0 || tile.wangId[index] === wanted;
+    return wanted === undefined || tile.wangId[index] === wanted;
   }));
 }
 export function selectWangTile(set: WangSet, neighborhood: WangNeighborhood, random = Math.random): WangTile | undefined {
@@ -25,4 +25,52 @@ export function selectWangTile(set: WangSet, neighborhood: WangNeighborhood, ran
     if (target <= 0) return matches[index];
   }
   return matches.at(-1);
+}
+
+export interface WangTerrainPaintResult {
+  changes: Array<{ x: number; y: number; tileId: number }>;
+  unmatched: Array<{ x: number; y: number; wangId: WangTile['wangId'] }>;
+}
+
+export function paintWangTerrain(
+  set: WangSet,
+  x: number,
+  y: number,
+  colorId: number,
+  getTileId: (x: number, y: number) => number | undefined,
+  erase = false,
+  random = Math.random,
+): WangTerrainPaintResult {
+  if (!set.colors.some((color) => color.id === colorId)) throw new Error('Wang color ' + colorId + ' does not exist in ' + set.name + '.');
+  const empty = (): WangTile['wangId'] => [0, 0, 0, 0, 0, 0, 0, 0];
+  const existing = (targetX: number, targetY: number): WangTile['wangId'] => {
+    const tileId = getTileId(targetX, targetY);
+    return [...(set.tiles.find((tile) => tile.tileId === tileId)?.wangId ?? empty())] as WangTile['wangId'];
+  };
+  const desired = new Map<string, { x: number; y: number; wangId: WangTile['wangId'] }>();
+  const targetValue = erase ? 0 : colorId;
+  desired.set(x + ',' + y, { x, y, wangId: [targetValue, targetValue, targetValue, targetValue, targetValue, targetValue, targetValue, targetValue] });
+  const neighbors: Array<{ dx: number; dy: number; pairs: Array<[number, number]> }> = [
+    { dx: 0, dy: -1, pairs: [[0, 4], [1, 3], [7, 5]] },
+    { dx: 1, dy: -1, pairs: [[1, 5]] },
+    { dx: 1, dy: 0, pairs: [[2, 6], [1, 7], [3, 5]] },
+    { dx: 1, dy: 1, pairs: [[3, 7]] },
+    { dx: 0, dy: 1, pairs: [[4, 0], [3, 1], [5, 7]] },
+    { dx: -1, dy: 1, pairs: [[5, 1]] },
+    { dx: -1, dy: 0, pairs: [[6, 2], [5, 3], [7, 1]] },
+    { dx: -1, dy: -1, pairs: [[7, 3]] },
+  ];
+  for (const neighbor of neighbors) {
+    const targetX = x + neighbor.dx; const targetY = y + neighbor.dy; const wangId = existing(targetX, targetY);
+    for (const [, neighborSlot] of neighbor.pairs) wangId[neighborSlot] = targetValue;
+    desired.set(targetX + ',' + targetY, { x: targetX, y: targetY, wangId });
+  }
+  const result: WangTerrainPaintResult = { changes: [], unmatched: [] };
+  for (const entry of desired.values()) {
+    const neighborhood = Object.fromEntries(positions.map((position, index) => [position, entry.wangId[index]])) as WangNeighborhood;
+    const tile = selectWangTile(set, neighborhood, random);
+    if (tile) result.changes.push({ x: entry.x, y: entry.y, tileId: tile.tileId });
+    else result.unmatched.push(entry);
+  }
+  return result;
 }

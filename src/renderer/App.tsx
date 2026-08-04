@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -41,6 +42,7 @@ import {
   Play,
   Pipette,
   Redo2,
+  Repeat2,
   Save,
   Search,
   Shapes,
@@ -64,38 +66,75 @@ import type {
   IllustrationDocument,
   IllustrationLayer,
   IllustrationObject,
+  PaintStyle,
   PixelDocument,
+  PaletteCycle,
   PixelLayer,
   PixelSprite,
   PixelTileset,
+  RasterBrushPreset,
+  TextObject,
+  TextStyle,
   TilemapLayer,
   WangSet,
 } from "@aidraw/core";
 import {
   HUMAN_ACTOR,
   IDENTITY_TRANSFORM,
+  applyTextStyleRange,
+  countPaletteIndexUsage,
   createId,
   createPixelSprite,
   createPixelTilemap,
   createPixelTileset,
+  illustrationAtTime,
   nowIso,
   resizePixelSpriteCanvas,
+  replaceStyledText,
+  replaceAndDeletePaletteIndexOperations,
+  resolveRasterBrushPreset,
+  textStyleAt,
 } from "@aidraw/core";
 import type {
+  GeneratedOutput,
   GenerationJobResult,
   GenerationMode,
   GenerationProvider,
+  GenerationRequest,
 } from "../common/generation";
+import { GENERATION_PROVIDER_MODES, generationRequestError } from "../common/generation-capabilities";
+import { packPixelLinks, pixelLinkHealth } from "../common/pixel-links";
+import type { PaletteImportMode } from "../common/palette-interchange";
 import { approximateLocalObjectBounds } from "../common/illustration-geometry";
 import { buildPolishedGoldMaterial } from "../common/material-presets";
+import { inspectPathNodes, setPathClosed, splitPathAtNode } from "../common/path-nodes";
+import { convertPathArcsToCubics } from "../common/path-conversion";
+import { joinPathObjects } from "../common/path-topology";
+import { alignIllustrationObjects, distributeIllustrationObjects, type AlignmentTarget, type DistributionMode } from "../common/alignment";
+import { actorClientLabel, actorIdentityLabel } from "../common/actor-identity";
+import { AGENT_CLIENTS, type AgentClientId, type AgentClientSetupResult } from "../common/agent-clients";
+import { cropImageToAspect, resetImageCrop } from "../common/image-crop";
+import { flattenLayerTree, layerTreeDescendants, moveLayerTreeEntry } from "../common/layer-tree";
+import { assignWangTile, deleteWangColor, deleteWangSet, upsertWangColor, upsertWangSet } from "../common/wang-authoring";
+import { TILE_VARIANT_GROUP_PROPERTY, tileVariantCandidates } from "../common/tile-variants";
 import type {
+  BatchDocumentResult,
+  CheckpointComparisonResult,
+  DocumentPreset,
   EngineStatus,
+  InterchangeReport,
   NewDocumentKind,
   NewDocumentOptions,
+  PixelLinkAction,
+  SpriteSheetSelection,
 } from "../common/contracts";
+import { calculateSpriteSheetLayout, type SpriteSheetSliceOptions } from "../common/sprite-sheet";
 import { IllustrationCanvas } from "./canvas/IllustrationCanvas";
 import { PixelCanvas } from "./canvas/PixelCanvas";
 import { useEditorStore, type EditorTool } from "./store";
+import { EditorDialog } from "./components/EditorDialog";
+import { CollisionShapeEditor } from "./components/CollisionShapeEditor";
+import { IllustrationAnimationPanel } from "./components/IllustrationAnimationPanel";
 
 type Icon = ComponentType<{ size?: number; strokeWidth?: number }>;
 
@@ -172,22 +211,32 @@ function ModalShell({
   children: React.ReactNode;
 }) {
   const surfaceRef = useRef<HTMLElement>(null);
+  const dialogId = useId();
+  const titleId = `${dialogId}-title`;
+  const descriptionId = `${dialogId}-description`;
   useEffect(() => {
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
+    const focusableSelector = 'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href], [contenteditable="true"], [tabindex]:not([tabindex="-1"])';
+    const focusableElements = () => [...(surfaceRef.current?.querySelectorAll<HTMLElement>(focusableSelector) ?? [])].filter((element) => element.offsetParent !== null);
+    const focusFrame = window.requestAnimationFrame(() => {
+      if (!surfaceRef.current?.contains(document.activeElement)) focusableElements()[0]?.focus();
+    });
     const onKeyDown = (event: KeyboardEvent) => {
+      if (!surfaceRef.current) return;
       if (event.key === "Escape") {
+        event.preventDefault();
         onClose();
         return;
       }
       if (event.key !== "Tab") return;
-      const focusable = [
-        ...(surfaceRef.current?.querySelectorAll<HTMLElement>(
-          'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])',
-        ) ?? []),
-      ].filter((element) => element.offsetParent !== null);
-      if (!focusable.length) return;
+      const focusable = focusableElements();
+      if (!focusable.length) { event.preventDefault(); surfaceRef.current.focus(); return; }
       const first = focusable[0];
       const last = focusable.at(-1)!;
-      if (event.shiftKey && document.activeElement === first) {
+      if (!surfaceRef.current.contains(document.activeElement)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+      } else if (event.shiftKey && document.activeElement === first) {
         event.preventDefault();
         last.focus();
       } else if (!event.shiftKey && document.activeElement === last) {
@@ -196,7 +245,11 @@ function ModalShell({
       }
     };
     window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      window.removeEventListener("keydown", onKeyDown);
+      if (previouslyFocused?.isConnected) previouslyFocused.focus();
+    };
   }, [onClose]);
 
   return (
@@ -211,12 +264,14 @@ function ModalShell({
         className={`modal-surface ${className}`}
         role="dialog"
         aria-modal="true"
-        aria-labelledby={`${className}-title`}
+        aria-labelledby={titleId}
+        aria-describedby={description ? descriptionId : undefined}
+        tabIndex={-1}
       >
         <header className="modal-header">
           <div>
-            <strong id={`${className}-title`}>{title}</strong>
-            {description && <p>{description}</p>}
+            <strong id={titleId}>{title}</strong>
+            {description && <p id={descriptionId}>{description}</p>}
           </div>
           <button
             type="button"
@@ -315,6 +370,7 @@ function NewDocumentDialog({
   initialKind?: NewDocumentKind;
 }) {
   const newDocument = useEditorStore((state) => state.newDocument);
+  const notify = useEditorStore((state) => state.notify);
   const initialDefinition = newDocumentDefinitions.find(
     (entry) => entry.kind === initialKind,
   )!;
@@ -333,9 +389,22 @@ function NewDocumentDialog({
   const [tileWidth, setTileWidth] = useState("16");
   const [tileHeight, setTileHeight] = useState("16");
   const [creating, setCreating] = useState(false);
+  const [customPresets, setCustomPresets] = useState<DocumentPreset[]>([]);
+  const [presetName, setPresetName] = useState("");
+  const [savingPreset, setSavingPreset] = useState(false);
   const definition = newDocumentDefinitions.find(
     (entry) => entry.kind === kind,
   )!;
+
+  useEffect(() => {
+    let active = true;
+    void window.aidraw.listDocumentPresets().then((presets) => {
+      if (active) setCustomPresets(presets);
+    }).catch(() => {
+      if (active) notify("Custom document presets could not be loaded.", "warning");
+    });
+    return () => { active = false; };
+  }, [notify]);
 
   const chooseKind = (next: NewDocumentKind) => {
     const defaults = newDocumentDefinitions.find(
@@ -346,23 +415,56 @@ function NewDocumentDialog({
     setHeight(String(defaults.height));
   };
 
-  const create = async (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
+  const configuredOptions = (): NewDocumentOptions => {
     const options: NewDocumentOptions = {
       kind,
-      name: name.trim() || undefined,
       width: pixelDimension(width, definition.width),
       height: pixelDimension(height, definition.height),
     };
-    if (kind === "illustration")
-      options.background =
-        backgroundMode === "transparent" ? null : backgroundColor;
+    if (kind === "illustration") options.background = backgroundMode === "transparent" ? null : backgroundColor;
     if (kind === "tilemap") {
       options.orientation = orientation;
       options.infinite = infinite;
       options.tileWidth = pixelDimension(tileWidth, 16);
       options.tileHeight = pixelDimension(tileHeight, 16);
     }
+    return options;
+  };
+
+  const applyPreset = (preset: DocumentPreset) => {
+    const options = preset.options;
+    setWidth(String(options.width ?? definition.width));
+    setHeight(String(options.height ?? definition.height));
+    if (kind === "illustration") {
+      setBackgroundMode(options.background === null ? "transparent" : "solid");
+      if (typeof options.background === "string") setBackgroundColor(options.background.slice(0, 7));
+    }
+    if (kind === "tilemap") {
+      setOrientation(options.orientation ?? "orthogonal");
+      setInfinite(options.infinite ?? false);
+      setTileWidth(String(options.tileWidth ?? 16));
+      setTileHeight(String(options.tileHeight ?? 16));
+    }
+  };
+
+  const savePreset = async () => {
+    if (!presetName.trim()) return;
+    setSavingPreset(true);
+    try {
+      const preset = await window.aidraw.saveDocumentPreset({ name: presetName, options: configuredOptions() });
+      setCustomPresets((current) => [...current.filter((entry) => entry.id !== preset.id), preset]);
+      setPresetName("");
+      notify(`Saved document preset “${preset.name}”.`, "success");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "The document preset could not be saved.", "error");
+    } finally {
+      setSavingPreset(false);
+    }
+  };
+
+  const create = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const options: NewDocumentOptions = { ...configuredOptions(), name: name.trim() || undefined };
     setCreating(true);
     try {
       await newDocument(options);
@@ -513,6 +615,19 @@ function NewDocumentDialog({
                 </button>
               ))}
             </div>
+            {customPresets.some((preset) => preset.kind === kind) && <div className="custom-document-presets" aria-label="Custom document presets">
+              {customPresets.filter((preset) => preset.kind === kind).map((preset) => {
+                const active = pixelDimension(width) === preset.options.width && pixelDimension(height) === preset.options.height;
+                return <div className={`custom-document-preset ${active ? "is-active" : ""}`} key={preset.id}>
+                  <button type="button" onClick={() => applyPreset(preset)}><strong>{preset.name}</strong><small>{preset.options.width} × {preset.options.height}</small></button>
+                  <button type="button" className="delete-custom-preset" aria-label={`Delete ${preset.name} preset`} title="Delete preset" onClick={() => void window.aidraw.deleteDocumentPreset(preset.id).then(({ deleted }) => { if (deleted) setCustomPresets((current) => current.filter((entry) => entry.id !== preset.id)); })}><X size={13} /></button>
+                </div>;
+              })}
+            </div>}
+            <div className="save-document-preset">
+              <label className="dialog-field"><span>Reusable preset name</span><input value={presetName} maxLength={80} placeholder={`${pixelDimension(width, definition.width)} × ${pixelDimension(height, definition.height)}`} onChange={(event) => setPresetName(event.target.value)} /></label>
+              <button type="button" disabled={savingPreset || !presetName.trim()} onClick={() => void savePreset()}>{savingPreset ? "Saving…" : "Save current"}</button>
+            </div>
 
             {kind === "illustration" && (
               <div className="configuration-section">
@@ -638,11 +753,29 @@ function NewDocumentDialog({
   );
 }
 
+function BatchResultDialog({ title, result, onClose }: { title: string; result: BatchDocumentResult; onClose: () => void }) {
+  const failed = result.items.filter((item) => item.status === "failed").length;
+  return <EditorDialog title={title} description={`${result.items.length} document${result.items.length === 1 ? "" : "s"} processed${failed ? ` · ${failed} failed` : ""}.`} className="batch-result-dialog" onClose={onClose}><div className="batch-result-list">{result.items.map((item) => <div className={`batch-result-row is-${item.status}`} key={item.documentId}><span><strong>{item.name}</strong><small>{item.filePath ?? item.error ?? item.warnings?.join(" ") ?? item.status}</small></span><em>{item.status}</em></div>)}</div><footer className="modal-footer"><button type="button" className="primary-modal-button" onClick={onClose}>Done</button></footer></EditorDialog>;
+}
+
+function BatchExportDialog({ documentCount, onClose }: { documentCount: number; onClose: () => void }) {
+  const [format, setFormat] = useState<"png" | "jpeg" | "webp" | "gif" | "apng" | "sprite-sheet">("png");
+  const [scale, setScale] = useState(1);
+  const [animationTagName, setAnimationTagName] = useState("");
+  const [running, setRunning] = useState(false);
+  const [result, setResult] = useState<BatchDocumentResult>();
+  const run = async () => { setRunning(true); try { const next = await window.aidraw.batchExportDocuments(format, { scale, animationTagName: ["gif", "apng", "sprite-sheet"].includes(format) && animationTagName.trim() ? animationTagName.trim() : undefined }); if (!next.cancelled) setResult(next); } finally { setRunning(false); } };
+  if (result) return <BatchResultDialog title="Batch export complete" result={result} onClose={onClose} />;
+  return <EditorDialog title="Batch export" description={`Export all ${documentCount} open documents into one folder with collision-safe filenames.`} className="batch-export-dialog" onClose={onClose}><div className="entry-dialog-body"><label className="dialog-field"><span>Format</span><select autoFocus value={format} onChange={(event) => setFormat(event.target.value as typeof format)}><option value="png">PNG · all documents</option><option value="jpeg">JPEG · all documents</option><option value="webp">WebP · all documents</option><option value="gif">GIF · sprites and keyframed illustrations</option><option value="apng">APNG · sprites and keyframed illustrations</option><option value="sprite-sheet">Sprite sheet + JSON · pixel sprites only</option></select></label><label className="dialog-field"><span>Pixel presentation scale</span><select value={scale} onChange={(event) => setScale(Number(event.target.value))}><option value={1}>1× native</option><option value={2}>2×</option><option value={4}>4×</option><option value={8}>8× presentation</option><option value={12}>12× presentation</option><option value={16}>16×</option></select></label>{["gif", "apng", "sprite-sheet"].includes(format) && <label className="dialog-field"><span>Shared pixel-animation tag (optional)</span><input maxLength={120} value={animationTagName} onChange={(event) => setAnimationTagName(event.target.value)} placeholder="e.g. Walk" /><small>Each pixel sprite resolves this exact tag independently. Leave blank to also export complete illustration timelines.</small></label>}<p className="batch-export-note">Illustrations remain at native size. Unsupported documents are reported as skipped rather than silently converted.</p></div><footer className="modal-footer"><button type="button" className="secondary-modal-button" onClick={onClose}>Cancel</button><button type="button" className="primary-modal-button" disabled={running || documentCount === 0} onClick={() => void run()}><Download size={15} />{running ? "Exporting…" : "Choose folder and export"}</button></footer></EditorDialog>;
+}
+
 function DocumentTabs() {
   const snapshot = useEditorStore((state) => state.snapshot);
   const activate = useEditorStore((state) => state.activate);
   const [creating, setCreating] = useState<NewDocumentKind>();
   const [showAll, setShowAll] = useState(false);
+  const [batchExporting, setBatchExporting] = useState(false);
+  const [batchReport, setBatchReport] = useState<{ title: string; result: BatchDocumentResult }>();
   const [scrollState, setScrollState] = useState({ left: false, right: false });
   const viewportRef = useRef<HTMLDivElement>(null);
   const allTabsRef = useRef<HTMLDivElement>(null);
@@ -854,6 +987,7 @@ function DocumentTabs() {
                 </button>
               ))}
             </div>
+            <div className="all-tabs-batch-actions"><button type="button" onClick={async () => { setShowAll(false); const result = await window.aidraw.saveAllDocuments(); if (!result.cancelled) setBatchReport({ title: "Save All complete", result }); }}><Save size={13} /> Save all</button><button type="button" onClick={() => { setShowAll(false); setBatchExporting(true); }}><Download size={13} /> Batch export</button><button type="button" className="is-danger" onClick={async () => { setShowAll(false); const result = await window.aidraw.closeAllDocuments(); if (!result.cancelled) setBatchReport({ title: "Close All complete", result }); }}><X size={13} /> Close all</button></div>
           </div>
         )}
       </div>
@@ -871,9 +1005,48 @@ function DocumentTabs() {
             onClose={() => setCreating(undefined)}
           />
         )}
+        {batchExporting && <BatchExportDialog documentCount={documents.length} onClose={() => setBatchExporting(false)} />}
+        {batchReport && <BatchResultDialog title={batchReport.title} result={batchReport.result} onClose={() => setBatchReport(undefined)} />}
       </div>
     </div>
   );
+}
+
+function SpriteSheetImportDialog({ selection, onClose }: { selection: SpriteSheetSelection; onClose: () => void }) {
+  const notify = useEditorStore((state) => state.notify);
+  const [options, setOptions] = useState<SpriteSheetSliceOptions>({ frameWidth: selection.suggestedFrameWidth, frameHeight: selection.suggestedFrameHeight, marginX: 0, marginY: 0, spacingX: 0, spacingY: 0, order: "rows", durationMs: 100, trimTransparent: false, skipEmpty: false });
+  const [busy, setBusy] = useState(false); const [submitError, setSubmitError] = useState<string>();
+  const layoutState = useMemo(() => { try { return { layout: calculateSpriteSheetLayout(selection.width, selection.height, options) }; } catch (error) { return { error: error instanceof Error ? error.message : String(error) }; } }, [options, selection.height, selection.width]);
+  const setNumber = (key: keyof SpriteSheetSliceOptions, value: string) => setOptions((current) => ({ ...current, [key]: value === "" && key === "frameCount" ? undefined : Number(value) }));
+  const submit = async () => {
+    if (!layoutState.layout || busy) return; setBusy(true); setSubmitError(undefined);
+    try {
+      const result = await window.aidraw.importSpriteSheet(selection.id, options);
+      if (result.imported) { notify(`Imported ${layoutState.layout.frames.length} sprite-sheet cell${layoutState.layout.frames.length === 1 ? "" : "s"}. ${result.warnings.join(" ")}`, result.warnings.length ? "warning" : "success"); onClose(); }
+    } catch (error) { setSubmitError(error instanceof Error ? error.message : String(error)); }
+    finally { setBusy(false); }
+  };
+  return <ModalShell title={`Slice sprite sheet · ${selection.name}`} description={`${selection.width} × ${selection.height}px · selection expires at ${new Date(selection.expiresAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`} onClose={onClose} className="sprite-sheet-dialog">
+    <form onSubmit={(event) => { event.preventDefault(); void submit(); }}>
+      <div className="sprite-sheet-dialog-body">
+        <div className="sprite-sheet-preview"><svg viewBox={`0 0 ${selection.width} ${selection.height}`} preserveAspectRatio="xMidYMid meet" aria-label="Sprite-sheet slice preview"><image href={selection.previewDataUrl} x="0" y="0" width={selection.width} height={selection.height} />{layoutState.layout?.frames.slice(0, 512).map((frame) => <rect key={frame.index} x={frame.x} y={frame.y} width={frame.width} height={frame.height} />)}</svg><small>{layoutState.layout ? `${layoutState.layout.frames.length} of ${layoutState.layout.availableFrames} cells · ${layoutState.layout.columns} columns × ${layoutState.layout.rows} rows` : layoutState.error}</small></div>
+        <div className="sprite-sheet-fields">
+          <label className="dialog-field"><span>Frame width</span><div className="unit-input"><input autoFocus type="number" min="1" max="8192" value={options.frameWidth} onChange={(event) => setNumber("frameWidth", event.target.value)} /><em>px</em></div></label>
+          <label className="dialog-field"><span>Frame height</span><div className="unit-input"><input type="number" min="1" max="8192" value={options.frameHeight} onChange={(event) => setNumber("frameHeight", event.target.value)} /><em>px</em></div></label>
+          <label className="dialog-field"><span>Margin X</span><input type="number" min="0" max="8191" value={options.marginX} onChange={(event) => setNumber("marginX", event.target.value)} /></label>
+          <label className="dialog-field"><span>Margin Y</span><input type="number" min="0" max="8191" value={options.marginY} onChange={(event) => setNumber("marginY", event.target.value)} /></label>
+          <label className="dialog-field"><span>Spacing X</span><input type="number" min="0" max="8191" value={options.spacingX} onChange={(event) => setNumber("spacingX", event.target.value)} /></label>
+          <label className="dialog-field"><span>Spacing Y</span><input type="number" min="0" max="8191" value={options.spacingY} onChange={(event) => setNumber("spacingY", event.target.value)} /></label>
+          <label className="dialog-field"><span>Frame count</span><input type="number" min="1" max="4096" placeholder="All cells" value={options.frameCount ?? ""} onChange={(event) => setNumber("frameCount", event.target.value)} /></label>
+          <label className="dialog-field"><span>Read order</span><select value={options.order} onChange={(event) => setOptions({ ...options, order: event.target.value as SpriteSheetSliceOptions["order"] })}><option value="rows">Rows first</option><option value="columns">Columns first</option></select></label>
+          <label className="dialog-field"><span>Frame duration</span><div className="unit-input"><input type="number" min="1" max="60000" value={options.durationMs} onChange={(event) => setNumber("durationMs", event.target.value)} /><em>ms</em></div></label>
+          <div className="sprite-sheet-toggles"><label><input type="checkbox" checked={options.trimTransparent} onChange={(event) => setOptions({ ...options, trimTransparent: event.target.checked })} /><span><strong>Trim shared transparent border</strong><small>Keeps every frame aligned to one common crop.</small></span></label><label><input type="checkbox" checked={options.skipEmpty} onChange={(event) => setOptions({ ...options, skipEmpty: event.target.checked })} /><span><strong>Skip empty cells</strong><small>Fully transparent cells do not become frames.</small></span></label></div>
+        </div>
+        {(submitError || layoutState.error) && <p className="entry-dialog-error" role="alert">{submitError ?? layoutState.error}</p>}
+      </div>
+      <footer className="modal-footer"><button type="button" className="secondary-modal-button" onClick={onClose}>Cancel</button><button type="submit" className="primary-modal-button" disabled={busy || !layoutState.layout}>{busy ? "Importing…" : "Create animated sprite"}</button></footer>
+    </form>
+  </ModalShell>;
 }
 
 function TopBar() {
@@ -887,7 +1060,10 @@ function TopBar() {
   const notify = useEditorStore((state) => state.notify);
   const [exporting, setExporting] = useState(false);
   const [exportScale, setExportScale] = useState(1);
+  const [exportTagId, setExportTagId] = useState("");
+  const [spriteSheetSelection, setSpriteSheetSelection] = useState<SpriteSheetSelection>();
   const document = snapshot?.activeDocument;
+  const exportSprite = document?.kind === "pixel" && document.pixelAssets[document.activeAssetId]?.type === "sprite" ? document.pixelAssets[document.activeAssetId] as PixelSprite : undefined;
   const exportChoices =
     document?.kind === "pixel"
       ? [
@@ -906,7 +1082,7 @@ function TopBar() {
             ? ["tiled-json", "tiled-xml"]
             : []),
         ]
-      : ["png", "jpeg", "webp", "svg", "pdf", "psd"];
+      : ["png", "jpeg", "webp", "svg", "pdf", "psd", ...(document?.animation.keyframeIds.length ? ["gif", "apng"] : [])];
 
   return (
     <header className="topbar">
@@ -922,6 +1098,8 @@ function TopBar() {
         <button
           className="icon-button"
           title="Open (Ctrl+O)"
+          aria-label="Open document"
+          aria-keyshortcuts="Control+O"
           onClick={() => void open()}
         >
           <FolderOpen size={17} />
@@ -929,6 +1107,7 @@ function TopBar() {
         <button
           className="icon-button"
           title="Import artwork"
+          aria-label="Import artwork"
           onClick={async () => {
             const result = await window.aidraw.importFiles(
               document?.kind === "pixel",
@@ -944,9 +1123,12 @@ function TopBar() {
         >
           <Upload size={16} />
         </button>
+        <button className="icon-button" title="Slice a sprite-sheet image" aria-label="Slice a sprite-sheet image" onClick={async () => { try { const result = await window.aidraw.selectSpriteSheet(); if (result.selection) setSpriteSheetSelection(result.selection); } catch (error) { notify(error instanceof Error ? error.message : String(error), "error"); } }}><Grid3X3 size={16} /></button>
         <button
           className="icon-button"
           title="Save (Ctrl+S)"
+          aria-label="Save document"
+          aria-keyshortcuts="Control+S"
           onClick={() => void save()}
         >
           <Save size={17} />
@@ -955,6 +1137,8 @@ function TopBar() {
           <button
             className="icon-button"
             title="Export"
+            aria-label="Export document"
+            aria-expanded={exporting}
             onClick={() => setExporting((value) => !value)}
           >
             <Download size={16} />
@@ -984,6 +1168,7 @@ function TopBar() {
                   </select>
                 </label>
               )}
+              {exportSprite && exportSprite.tags.length > 0 && <label className="export-scale-control"><span><strong>Animation range</strong><small>GIF, APNG, sheet</small></span><select aria-label="Animation export range" value={exportSprite.tags.some((tag) => tag.id === exportTagId) ? exportTagId : ""} onChange={(event) => setExportTagId(event.target.value)}><option value="">Full timeline</option>{exportSprite.tags.map((tag) => <option key={tag.id} value={tag.id}>{tag.name} · {tag.direction}</option>)}</select></label>}
               {exportChoices.map((format) => {
                 const scalable =
                   document?.kind === "pixel" &&
@@ -998,7 +1183,7 @@ function TopBar() {
                         format as Parameters<
                           typeof window.aidraw.exportActiveDocument
                         >[0],
-                        { scale },
+                        { scale, animationTagId: ["gif", "apng", "sprite-sheet"].includes(format) && exportTagId ? exportTagId : undefined },
                       );
                       if (result.exported)
                         notify(
@@ -1022,6 +1207,8 @@ function TopBar() {
           className="icon-button"
           disabled={!canUndo}
           title="Undo my action (Ctrl+Z)"
+          aria-label="Undo my action"
+          aria-keyshortcuts="Control+Z"
           onClick={() => void undo()}
         >
           <Undo2 size={17} />
@@ -1030,11 +1217,14 @@ function TopBar() {
           className="icon-button"
           disabled={!canRedo}
           title="Redo my action (Ctrl+Y)"
+          aria-label="Redo my action"
+          aria-keyshortcuts="Control+Y"
           onClick={() => void redo()}
         >
           <Redo2 size={17} />
         </button>
       </div>
+      {spriteSheetSelection && <SpriteSheetImportDialog selection={spriteSheetSelection} onClose={() => setSpriteSheetSelection(undefined)} />}
       <DocumentTabs />
       <div className="topbar-right">
         <button
@@ -1101,6 +1291,67 @@ function ToolRail({ document }: { document: AIDrawDocument }) {
   );
 }
 
+function BrushPresetDialog({
+  initial,
+  canDelete,
+  onSave,
+  onDelete,
+  onClose,
+}: {
+  initial: RasterBrushPreset;
+  canDelete: boolean;
+  onSave: (preset: RasterBrushPreset) => Promise<void>;
+  onDelete: () => Promise<void>;
+  onClose: () => void;
+}) {
+  const [preset, setPreset] = useState(() => structuredClone(initial));
+  const [saving, setSaving] = useState(false);
+  const numberField = (
+    label: string,
+    value: number,
+    onChange: (value: number) => void,
+    min: number,
+    max: number,
+    step = 0.01,
+  ) => (
+    <label className="dialog-field">
+      <span>{label}</span>
+      <input type="number" min={min} max={max} step={step} value={value} onChange={(event) => onChange(Number(event.target.value))} />
+    </label>
+  );
+  const setDynamics = <K extends keyof RasterBrushPreset["dynamics"]>(key: K, value: RasterBrushPreset["dynamics"][K]) =>
+    setPreset((current) => ({ ...current, dynamics: { ...current.dynamics, [key]: value } }));
+  return (
+    <EditorDialog title={canDelete ? "Edit custom brush" : "Create custom brush"} description="The complete dab recipe is stored with every stroke, so headless export and replay stay reproducible." className="brush-preset-dialog" onClose={onClose}>
+      <form onSubmit={(event) => { event.preventDefault(); setSaving(true); void onSave(preset).finally(() => setSaving(false)); }}>
+        <div className="entry-dialog-body brush-preset-grid">
+          <label className="dialog-field brush-name-field"><span>Name</span><input autoFocus maxLength={200} value={preset.name} onChange={(event) => setPreset((current) => ({ ...current, name: event.target.value }))} /></label>
+          <label className="dialog-field"><span>Tip</span><select value={preset.dynamics.tip} onChange={(event) => setDynamics("tip", event.target.value as RasterBrushPreset["dynamics"]["tip"])}><option value="round">Round</option><option value="flat">Flat</option><option value="chalk">Chalk</option><option value="watercolor">Watercolor</option></select></label>
+          {numberField("Default size", preset.size, (value) => setPreset((current) => ({ ...current, size: value })), 1, 500, 1)}
+          {numberField("Opacity", preset.opacity, (value) => setPreset((current) => ({ ...current, opacity: value })), 0.01, 1)}
+          {numberField("Flow", preset.flow, (value) => setPreset((current) => ({ ...current, flow: value })), 0.01, 1)}
+          {numberField("Hardness", preset.hardness, (value) => setPreset((current) => ({ ...current, hardness: value })), 0, 1)}
+          {numberField("Spacing × size", preset.dynamics.spacing, (value) => setDynamics("spacing", value), 0.01, 4)}
+          {numberField("Stabilization", preset.dynamics.stabilization, (value) => setDynamics("stabilization", value), 0, 1)}
+          {numberField("Scatter", preset.dynamics.scatter, (value) => setDynamics("scatter", value), 0, 2)}
+          {numberField("Size jitter", preset.dynamics.sizeJitter, (value) => setDynamics("sizeJitter", value), 0, 1)}
+          {numberField("Opacity jitter", preset.dynamics.opacityJitter, (value) => setDynamics("opacityJitter", value), 0, 1)}
+          {numberField("Angle", preset.dynamics.angle, (value) => setDynamics("angle", value), -180, 180, 1)}
+          {numberField("Roundness", preset.dynamics.roundness, (value) => setDynamics("roundness", value), 0.05, 1)}
+          {numberField("Wetness", preset.dynamics.wetness, (value) => setDynamics("wetness", value), 0, 1)}
+          {numberField("Granulation", preset.dynamics.granulation, (value) => setDynamics("granulation", value), 0, 1)}
+        </div>
+        <footer className="modal-footer brush-preset-footer">
+          {canDelete && <button type="button" className="danger-button" onClick={() => void onDelete()}>Delete preset</button>}
+          <span />
+          <button type="button" className="secondary-modal-button" onClick={onClose}>Cancel</button>
+          <button type="submit" className="primary-modal-button" disabled={saving || !preset.name.trim()}>{saving ? "Saving…" : "Save preset"}</button>
+        </footer>
+      </form>
+    </EditorDialog>
+  );
+}
+
 function ContextBar({ document }: { document: AIDrawDocument }) {
   const tool = useEditorStore((state) => state.selectedTool);
   const size = useEditorStore((state) => state.brushSize);
@@ -1113,6 +1364,15 @@ function ContextBar({ document }: { document: AIDrawDocument }) {
   const secondary = useEditorStore((state) => state.secondaryColor);
   const setColor = useEditorStore((state) => state.setColor);
   const setSecondary = useEditorStore((state) => state.setSecondaryColor);
+  const ditherMatrixSize = useEditorStore((state) => state.ditherMatrixSize);
+  const setDitherMatrixSize = useEditorStore((state) => state.setDitherMatrixSize);
+  const ditherCoverage = useEditorStore((state) => state.ditherCoverage);
+  const setDitherCoverage = useEditorStore((state) => state.setDitherCoverage);
+  const ditherMixIndex = useEditorStore((state) => state.ditherMixIndex);
+  const setDitherMixIndex = useEditorStore((state) => state.setDitherMixIndex);
+  const currentPixelIndex = useEditorStore((state) => state.pixelIndex);
+  const apply = useEditorStore((state) => state.apply);
+  const [brushEditor, setBrushEditor] = useState<{ preset: RasterBrushPreset; existing: boolean }>();
   const isBrush = [
     "pen",
     "pencil",
@@ -1128,7 +1388,21 @@ function ContextBar({ document }: { document: AIDrawDocument }) {
     "darken",
   ].includes(tool);
 
+  const customBrushes = document.kind === "illustration" ? document.brushPresets ?? [] : [];
+  const activeCustomBrush = customBrushes.find((preset) => preset.id === brushPreset);
+  const chooseBrush = (id: string) => {
+    const preset = resolveRasterBrushPreset(id, customBrushes);
+    setBrushPreset(id); setSize(preset.size); setOpacity(preset.opacity);
+  };
+  const openBrushEditor = () => {
+    const source = resolveRasterBrushPreset(brushPreset, customBrushes);
+    setBrushEditor(activeCustomBrush
+      ? { preset: source, existing: true }
+      : { preset: { ...source, id: createId("brush-preset"), name: `${source.name} custom` }, existing: false });
+  };
+
   return (
+    <>
     <div className="context-bar">
       <span className="context-tool-name">
         {(document.kind === "pixel" ? pixelTools : illustrationTools).find(
@@ -1154,19 +1428,20 @@ function ContextBar({ document }: { document: AIDrawDocument }) {
                 <select
                   value={tool === "eraser" ? "eraser" : brushPreset}
                   disabled={tool === "eraser"}
-                  onChange={(event) =>
-                    setBrushPreset(event.target.value as typeof brushPreset)
-                  }
+                  onChange={(event) => chooseBrush(event.target.value)}
                 >
                   <option value="hard-round">Hard round</option>
                   <option value="soft-round">Soft round</option>
                   <option value="pencil">Pencil</option>
                   <option value="marker">Marker</option>
                   <option value="airbrush">Airbrush</option>
+                  <option value="watercolor">Watercolor wash</option>
                   <option value="eraser">Eraser</option>
+                  {customBrushes.length > 0 && <optgroup label="Custom brushes">{customBrushes.map((preset) => <option key={preset.id} value={preset.id}>{preset.name}</option>)}</optgroup>}
                 </select>
               </label>
             )}
+          {document.kind === "illustration" && tool === "brush" && <button type="button" className="context-action-button" onClick={openBrushEditor}>{activeCustomBrush ? "Edit preset" : "Customize"}</button>}
           {document.kind === "illustration" && (
             <label className="range-field">
               <span>Opacity</span>
@@ -1196,6 +1471,12 @@ function ContextBar({ document }: { document: AIDrawDocument }) {
               onChange={(event) => setSecondary(event.target.value)}
             />
           </div>
+          {document.kind === "pixel" && tool === "dither" && <>
+            <label className="compact-field"><span>Matrix</span><select value={ditherMatrixSize} onChange={(event) => setDitherMatrixSize(Number(event.target.value) as 2 | 4 | 8)}><option value={2}>2×2</option><option value={4}>4×4</option><option value={8}>8×8</option></select></label>
+            <label className="range-field"><span>Mix</span><input type="range" min="0" max="100" value={Math.round(ditherCoverage * 100)} onChange={(event) => setDitherCoverage(Number(event.target.value) / 100)} /><output>{Math.round(ditherCoverage * 100)}%</output></label>
+            <label className="compact-field"><span>Base</span><select value={Math.min(ditherMixIndex, document.palette.length - 1)} onChange={(event) => setDitherMixIndex(Number(event.target.value))}>{document.palette.map((entry, index) => <option key={entry.id} value={index}>{index}: {entry.name}</option>)}</select></label>
+            <span className="mode-chip">Mixes into index {currentPixelIndex}</span>
+          </>}
         </>
       )}
       {document.kind === "pixel" && (
@@ -1204,6 +1485,21 @@ function ContextBar({ document }: { document: AIDrawDocument }) {
         </span>
       )}
     </div>
+    {brushEditor && document.kind === "illustration" && <BrushPresetDialog
+      key={brushEditor.preset.id}
+      initial={brushEditor.preset}
+      canDelete={brushEditor.existing}
+      onClose={() => setBrushEditor(undefined)}
+      onSave={async (preset) => {
+        const normalized = { ...preset, name: preset.name.trim() };
+        const presets = brushEditor.existing ? customBrushes.map((entry) => entry.id === normalized.id ? normalized : entry) : [...customBrushes, normalized];
+        if (await apply(brushEditor.existing ? "Edit custom brush" : "Create custom brush", [{ kind: "illustration.brush-presets.replace", presets }])) { chooseBrush(normalized.id); setBrushEditor(undefined); }
+      }}
+      onDelete={async () => {
+        if (await apply("Delete custom brush", [{ kind: "illustration.brush-presets.replace", presets: customBrushes.filter((entry) => entry.id !== brushEditor.preset.id) }])) { chooseBrush("hard-round"); setBrushEditor(undefined); }
+      }}
+    />}
+    </>
   );
 }
 
@@ -1893,6 +2189,13 @@ function IllustrationLayers({ document }: { document: IllustrationDocument }) {
                 ))}
             </select>
           </label>
+          <button className="mask-author-button" onClick={() => {
+            const timestamp = nowIso(); const maskLayerId = createId("mask-layer"); const maskObjectId = createId("mask-object");
+            const maskLayer: IllustrationLayer = { id: maskLayerId, revision: 0, name: `${selectedLayer.name} mask`, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, visible: false, locked: false, opacity: 1, blendMode: "normal", type: "vector", objectIds: [] };
+            const maskObject: IllustrationObject = { id: maskObjectId, revision: 0, name: "Mask bounds", createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, layerId: maskLayerId, visible: true, locked: false, opacity: 1, blendMode: "normal", transform: structuredClone(IDENTITY_TRANSFORM), type: "shape", shape: "rectangle", width: document.artboard.width, height: document.artboard.height, fill: { kind: "solid", color: "#ffffff" }, stroke: { paint: { kind: "none" }, width: 0, opacity: 1, lineCap: "round", lineJoin: "round", dash: [] } };
+            void apply("Create editable layer mask", [{ kind: "illustration.layer.add", layer: maskLayer }, { kind: "illustration.object.add", object: maskObject }, { kind: "illustration.layer.replace", layer: { ...selectedLayer, maskLayerId }, expectedRevision: selectedLayer.revision }]);
+          }}>Create editable layer mask</button>
+          <LayerFilterStack layer={selectedLayer} onReplace={replace} />
         </div>
       )}
     </>
@@ -1918,6 +2221,152 @@ function objectBounds(object: IllustrationObject): {
   };
 }
 
+function ArtboardInspector({ document }: { document: IllustrationDocument }) {
+  const apply = useEditorStore((state) => state.apply);
+  const [draft, setDraft] = useState(() => structuredClone(document.artboard));
+  const valid = Number.isInteger(draft.width) && draft.width >= 1 && draft.width <= 8192 && Number.isInteger(draft.height) && draft.height >= 1 && draft.height <= 8192 && Number.isInteger(draft.dpi) && draft.dpi >= 1 && draft.dpi <= 1200;
+  const changed = JSON.stringify(draft) !== JSON.stringify(document.artboard);
+  const guides = document.guides ?? [];
+  const snapSettings = document.snapSettings ?? { artboard: true, objects: true, guides: true, grid: false, pixel: false, gridSize: 16, tolerance: 8 };
+  const replaceGuides = (next: typeof guides, label: string) => void apply(label, [{ kind: 'illustration.guides.replace', guides: next, expectedRevision: document.revision }]);
+  const replaceSnapping = (patch: Partial<typeof snapSettings>) => void apply('Change snapping', [{ kind: 'illustration.snap-settings.replace', settings: { ...snapSettings, ...patch }, expectedRevision: document.revision }]);
+  return (
+    <div className="layer-inspector artboard-inspector">
+      <div className="section-heading"><span>Artboard</span><small>px · sRGB</small></div>
+      <div className="two-fields">
+        <label className="field"><span>Width</span><input aria-label="Artboard width" type="number" min="1" max="8192" value={draft.width} onChange={(event) => setDraft((current) => ({ ...current, width: Number(event.target.value) }))} /></label>
+        <label className="field"><span>Height</span><input aria-label="Artboard height" type="number" min="1" max="8192" value={draft.height} onChange={(event) => setDraft((current) => ({ ...current, height: Number(event.target.value) }))} /></label>
+      </div>
+      <label className="field"><span>DPI</span><input aria-label="Artboard DPI" type="number" min="1" max="1200" value={draft.dpi} onChange={(event) => setDraft((current) => ({ ...current, dpi: Number(event.target.value) }))} /></label>
+      <label className="checkbox-row"><input type="checkbox" checked={draft.background === null} onChange={(event) => setDraft((current) => ({ ...current, background: event.target.checked ? null : '#fffdf7' }))} /><span>Transparent background</span></label>
+      {draft.background !== null && <label className="field"><span>Background</span><input aria-label="Artboard background color" type="color" value={draft.background.slice(0, 7)} onChange={(event) => setDraft((current) => ({ ...current, background: event.target.value }))} /></label>}
+      <button className="primary-button" disabled={!valid || !changed} onClick={() => void apply('Resize artboard', [{ kind: 'illustration.artboard.replace', artboard: draft, expectedRevision: document.revision }])}>Apply artboard</button>
+      <div className="section-heading"><span>Persistent guides</span><small>{guides.length}</small></div>
+      <div className="guide-add-actions"><button onClick={() => replaceGuides([...guides, { id: createId('guide'), orientation: 'vertical', position: document.artboard.width / 2, color: '#2fa7a0', locked: false }], 'Add vertical guide')}>+ Vertical</button><button onClick={() => replaceGuides([...guides, { id: createId('guide'), orientation: 'horizontal', position: document.artboard.height / 2, color: '#e65f7d', locked: false }], 'Add horizontal guide')}>+ Horizontal</button></div>
+      <div className="guide-list">{guides.map((guide) => <div className="guide-row" key={guide.id}>
+        <select value={guide.orientation} disabled={guide.locked} onChange={(event) => replaceGuides(guides.map((entry) => entry.id === guide.id ? { ...entry, orientation: event.target.value as typeof guide.orientation } : entry), 'Turn guide')}><option value="vertical">V</option><option value="horizontal">H</option></select>
+        <input aria-label={`${guide.orientation} guide position`} type="number" defaultValue={guide.position} disabled={guide.locked} onBlur={(event) => replaceGuides(guides.map((entry) => entry.id === guide.id ? { ...entry, position: Number(event.target.value) } : entry), 'Move guide')} />
+        <input aria-label="Guide color" type="color" value={guide.color.slice(0, 7)} onChange={(event) => replaceGuides(guides.map((entry) => entry.id === guide.id ? { ...entry, color: event.target.value } : entry), 'Color guide')} />
+        <button title={guide.locked ? 'Unlock guide' : 'Lock guide'} onClick={() => replaceGuides(guides.map((entry) => entry.id === guide.id ? { ...entry, locked: !entry.locked } : entry), guide.locked ? 'Unlock guide' : 'Lock guide')}>{guide.locked ? <Lock size={11} /> : <Unlock size={11} />}</button>
+        <button title="Delete guide" onClick={() => replaceGuides(guides.filter((entry) => entry.id !== guide.id), 'Delete guide')}><Trash2 size={11} /></button>
+      </div>)}</div>
+      <div className="section-heading"><span>Snapping</span><small>{snapSettings.tolerance}px tolerance</small></div>
+      <div className="snap-settings-grid">
+        {([['artboard', 'Artboard'], ['objects', 'Objects'], ['guides', 'Guides'], ['grid', 'Grid'], ['pixel', 'Pixels']] as const).map(([key, label]) => <label className="checkbox-row" key={key}><input type="checkbox" checked={snapSettings[key]} onChange={(event) => replaceSnapping({ [key]: event.target.checked })} /><span>{label}</span></label>)}
+      </div>
+      <div className="two-fields"><label className="field"><span>Grid size</span><input type="number" min="1" max="4096" value={snapSettings.gridSize} onChange={(event) => replaceSnapping({ gridSize: Math.max(1, Number(event.target.value)) })} /></label><label className="field"><span>Tolerance</span><input type="number" min="0" max="128" value={snapSettings.tolerance} onChange={(event) => replaceSnapping({ tolerance: Math.max(0, Number(event.target.value)) })} /></label></div>
+    </div>
+  );
+}
+
+type GradientFill = Extract<PaintStyle, { kind: "linear-gradient" | "radial-gradient" }>;
+
+function GradientEditor({ fill, newColor, onApply }: { fill: GradientFill; newColor: string; onApply: (fill: GradientFill) => void }) {
+  const [draft, setDraft] = useState(() => structuredClone(fill));
+  const updateStop = (index: number, patch: Partial<GradientFill["stops"][number]>) => setDraft((current) => ({ ...current, stops: current.stops.map((stop, stopIndex) => stopIndex === index ? { ...stop, ...patch } : stop) }));
+  const addStop = () => {
+    const ordered = [...draft.stops].sort((left, right) => left.offset - right.offset); let offset = 0.5; let gap = -1;
+    for (let index = 1; index < ordered.length; index += 1) { const candidate = ordered[index].offset - ordered[index - 1].offset; if (candidate > gap) { gap = candidate; offset = (ordered[index].offset + ordered[index - 1].offset) / 2; } }
+    setDraft((current) => ({ ...current, stops: [...current.stops, { offset, color: newColor, opacity: 1 }].sort((left, right) => left.offset - right.offset) }));
+  };
+  const cssStops = [...draft.stops].sort((left, right) => left.offset - right.offset).map((stop) => `${stop.color}${Math.round((stop.opacity ?? 1) * 255).toString(16).padStart(2, "0")} ${Math.round(stop.offset * 100)}%`).join(", ");
+  return (
+    <div className="gradient-editor">
+      <div className="gradient-preview" style={{ background: draft.kind === "radial-gradient" ? `radial-gradient(circle, ${cssStops})` : `linear-gradient(90deg, ${cssStops})` }} />
+      <div className="gradient-coordinates">
+        {(["x1", "y1", "x2", "y2"] as const).map((key) => <label key={key}><span>{key.toUpperCase()}</span><input type="number" value={draft[key]} onChange={(event) => setDraft((current) => ({ ...current, [key]: Number(event.target.value) }))} /></label>)}
+      </div>
+      <div className="gradient-stop-list">
+        {draft.stops.map((stop, index) => <div className="gradient-stop-row" key={`${index}:${stop.offset}`}>
+          <input aria-label={`Gradient stop ${index + 1} color`} type="color" value={stop.color.slice(0, 7)} onChange={(event) => updateStop(index, { color: event.target.value })} />
+          <label><span>Position</span><input type="number" min="0" max="100" value={Math.round(stop.offset * 100)} onChange={(event) => updateStop(index, { offset: Math.max(0, Math.min(1, Number(event.target.value) / 100)) })} /></label>
+          <label><span>Opacity</span><input type="number" min="0" max="100" value={Math.round((stop.opacity ?? 1) * 100)} onChange={(event) => updateStop(index, { opacity: Math.max(0, Math.min(1, Number(event.target.value) / 100)) })} /></label>
+          <button title="Delete gradient stop" disabled={draft.stops.length <= 2} onClick={() => setDraft((current) => ({ ...current, stops: current.stops.filter((_, stopIndex) => stopIndex !== index) }))}><Trash2 size={12} /></button>
+        </div>)}
+      </div>
+      <div className="gradient-actions"><button onClick={addStop}>Add stop</button><button className="primary-button" onClick={() => onApply({ ...draft, stops: [...draft.stops].sort((left, right) => left.offset - right.offset) })}>Apply gradient</button></div>
+    </div>
+  );
+}
+
+function TextInspector({ object, onReplace }: { object: TextObject; onReplace: (object: TextObject, label: string) => void }) {
+  const [draftText, setDraftText] = useState(object.text);
+  const [selection, setSelection] = useState({ start: 0, end: object.text.length });
+  const style = textStyleAt(object, selection.start);
+  const applyStyle = (patch: Partial<TextStyle>, label: string) => { if (selection.end > selection.start) onReplace(applyTextStyleRange(object, selection.start, selection.end, patch), label); };
+  return (
+    <div className="typography-editor">
+      <div className="section-heading"><span>Typography</span><small>{selection.end > selection.start ? `${selection.start}–${selection.end}` : "Select text to style"}</small></div>
+      <label className="field"><span>Text</span><textarea value={draftText} onChange={(event) => setDraftText(event.target.value)} onSelect={(event) => setSelection({ start: event.currentTarget.selectionStart, end: event.currentTarget.selectionEnd })} /></label>
+      <button className="primary-button" disabled={draftText === object.text} onClick={() => onReplace(replaceStyledText(object, draftText), "Edit text")}>Apply text</button>
+      <div className="two-fields">
+        <label className="field"><span>Font</span><input key={`${object.revision}:font:${selection.start}`} defaultValue={style.fontFamily} onBlur={(event) => applyStyle({ fontFamily: event.target.value.trim() || "Segoe UI" }, "Style text range")} /></label>
+        <label className="field"><span>Size</span><input key={`${object.revision}:size:${selection.start}`} type="number" min="1" max="500" defaultValue={style.fontSize} onBlur={(event) => applyStyle({ fontSize: Math.max(1, Math.min(500, Number(event.target.value))) }, "Style text range")} /></label>
+        <label className="field"><span>Weight</span><select value={style.fontWeight} onChange={(event) => applyStyle({ fontWeight: Number(event.target.value) }, "Style text range")}><option value="300">Light</option><option value="400">Regular</option><option value="500">Medium</option><option value="600">Semibold</option><option value="700">Bold</option><option value="800">Extra bold</option></select></label>
+        <label className="field"><span>Tracking</span><input key={`${object.revision}:tracking:${selection.start}`} type="number" min="-20" max="100" defaultValue={style.letterSpacing} onBlur={(event) => applyStyle({ letterSpacing: Math.max(-20, Math.min(100, Number(event.target.value))) }, "Style text range")} /></label>
+      </div>
+      <div className="typography-style-row">
+        <label><input type="checkbox" checked={style.fontStyle === "italic"} disabled={selection.end <= selection.start} onChange={(event) => applyStyle({ fontStyle: event.target.checked ? "italic" : "normal" }, "Style text range")} /> Italic</label>
+        <label><input type="checkbox" checked={Boolean(style.underline)} disabled={selection.end <= selection.start} onChange={(event) => applyStyle({ underline: event.target.checked }, "Style text range")} /> Underline</label>
+        <input aria-label="Text range color" type="color" value={style.color.slice(0, 7)} disabled={selection.end <= selection.start} onChange={(event) => applyStyle({ color: event.target.value }, "Style text range")} />
+      </div>
+      <div className="align-grid text-align-grid">{(["left", "center", "right", "justify"] as const).map((align) => <button className={object.align === align ? "is-active" : ""} key={align} onClick={() => onReplace({ ...object, align }, "Align text")}>{align}</button>)}</div>
+      <div className="transform-grid">
+        <label><span>Box width</span><input key={`${object.revision}:text-width`} type="number" min="1" max="8192" defaultValue={object.width} onBlur={(event) => onReplace({ ...object, width: Math.max(1, Number(event.target.value)) }, "Resize text box")} /></label>
+        <label><span>Box height</span><input key={`${object.revision}:text-height`} type="number" min="1" max="8192" defaultValue={object.height} onBlur={(event) => onReplace({ ...object, height: Math.max(1, Number(event.target.value)) }, "Resize text box")} /></label>
+        <label><span>Line height</span><input key={`${object.revision}:line-height`} type="number" min="0.5" max="5" step="0.05" defaultValue={object.lineHeight} onBlur={(event) => onReplace({ ...object, lineHeight: Math.max(0.5, Math.min(5, Number(event.target.value))) }, "Change line height")} /></label>
+      </div>
+      <small>Text wraps to the box width; explicit line breaks, per-range style, alignment, tracking, and underline render identically in the editor and headless export.</small>
+    </div>
+  );
+}
+
+function ObjectFilterStack({ object, onReplace }: { object: IllustrationObject; onReplace: (object: IllustrationObject, label: string) => void }) {
+  type Filters = NonNullable<IllustrationObject["filters"]>;
+  type FilterType = Filters[number]["type"];
+  const [newFilter, setNewFilter] = useState<FilterType>("brightness");
+  const filters = object.filters ?? [];
+  const replaceFilters = (next: Filters, label: string) => onReplace({ ...object, filters: next }, label);
+  const range = (type: FilterType) => type === "hue" ? { min: -180, max: 180, step: 1 } : type === "blur" ? { min: 0, max: 40, step: 0.25 } : { min: -1, max: 1, step: 0.05 };
+  const initial = (type: FilterType) => type === "hue" ? 15 : type === "blur" ? 2 : 0.15;
+  return (
+    <div className="filter-stack">
+      <div className="section-heading"><span>{object.type === "image" ? "Image" : "Object"} filter stack</span><small>{filters.length}</small></div>
+      {filters.length === 0 ? <small className="filter-empty">No adjustments. Filters remain editable and render in stack order.</small> : <div className="filter-stack-list">{filters.map((filter, index) => {
+        const limits = range(filter.type); return <div className="filter-stack-row" key={`${filter.type}:${index}`}>
+          <div className="filter-stack-title"><strong>{filter.type}</strong><output>{filter.type === "hue" ? `${Math.round(filter.value)}°` : filter.type === "blur" ? `${filter.value.toFixed(1)}px` : filter.value.toFixed(2)}</output></div>
+          <input aria-label={`${filter.type} filter value`} type="range" min={limits.min} max={limits.max} step={limits.step} value={filter.value} onChange={(event) => replaceFilters(filters.map((entry, position) => position === index ? { ...entry, value: Number(event.target.value) } : entry), `Change ${filter.type} filter`)} />
+          <div className="filter-stack-actions"><button disabled={index === 0} title="Move filter earlier" onClick={() => { const next = [...filters]; [next[index - 1], next[index]] = [next[index], next[index - 1]]; replaceFilters(next, "Reorder object filters"); }}><ArrowUp size={11} /></button><button disabled={index === filters.length - 1} title="Move filter later" onClick={() => { const next = [...filters]; [next[index], next[index + 1]] = [next[index + 1], next[index]]; replaceFilters(next, "Reorder object filters"); }}><ArrowDown size={11} /></button><button title="Remove filter" onClick={() => replaceFilters(filters.filter((_, position) => position !== index), `Remove ${filter.type} filter`)}><Trash2 size={11} /></button></div>
+        </div>;
+      })}</div>}
+      <div className="filter-stack-add"><select aria-label="New object filter" value={newFilter} onChange={(event) => setNewFilter(event.target.value as FilterType)}>{(["brightness", "contrast", "saturation", "hue", "blur"] as FilterType[]).map((type) => <option key={type} value={type}>{type}</option>)}</select><button onClick={() => replaceFilters([...filters, { type: newFilter, value: initial(newFilter) }], `Add ${newFilter} filter`)}>+ Add</button>{filters.length > 0 && <button onClick={() => replaceFilters([], "Clear object filters")}>Clear</button>}</div>
+    </div>
+  );
+}
+
+function LayerFilterStack({ layer, onReplace }: { layer: IllustrationLayer; onReplace: (layer: IllustrationLayer, label: string) => void }) {
+  type Filters = NonNullable<IllustrationLayer["filters"]>;
+  type FilterType = Filters[number]["type"];
+  const [newFilter, setNewFilter] = useState<FilterType>("brightness");
+  const filters = layer.filters ?? [];
+  const replaceFilters = (next: Filters, label: string) => onReplace({ ...layer, filters: next }, label);
+  const range = (type: FilterType) => type === "hue" ? { min: -180, max: 180, step: 1 } : type === "blur" ? { min: 0, max: 40, step: 0.25 } : { min: -1, max: 1, step: 0.05 };
+  const initial = (type: FilterType) => type === "hue" ? 15 : type === "blur" ? 2 : 0.15;
+  return (
+    <div className="filter-stack layer-filter-stack">
+      <div className="section-heading"><span>Isolated layer filter stack</span><small>{filters.length}</small></div>
+      {filters.length === 0 ? <small className="filter-empty">Filters apply after this layer or group is composited, preserving overlap behavior.</small> : <div className="filter-stack-list">{filters.map((filter, index) => {
+        const limits = range(filter.type); return <div className="filter-stack-row" key={`${filter.type}:${index}`}>
+          <div className="filter-stack-title"><strong>{filter.type}</strong><output>{filter.type === "hue" ? `${Math.round(filter.value)}°` : filter.type === "blur" ? `${filter.value.toFixed(1)}px` : filter.value.toFixed(2)}</output></div>
+          <input aria-label={`${filter.type} layer filter value`} type="range" min={limits.min} max={limits.max} step={limits.step} value={filter.value} onChange={(event) => replaceFilters(filters.map((entry, position) => position === index ? { ...entry, value: Number(event.target.value) } : entry), `Change ${filter.type} layer filter`)} />
+          <div className="filter-stack-actions"><button disabled={index === 0} title="Move filter earlier" onClick={() => { const next = [...filters]; [next[index - 1], next[index]] = [next[index], next[index - 1]]; replaceFilters(next, "Reorder layer filters"); }}><ArrowUp size={11} /></button><button disabled={index === filters.length - 1} title="Move filter later" onClick={() => { const next = [...filters]; [next[index], next[index + 1]] = [next[index + 1], next[index]]; replaceFilters(next, "Reorder layer filters"); }}><ArrowDown size={11} /></button><button title="Remove filter" onClick={() => replaceFilters(filters.filter((_, position) => position !== index), `Remove ${filter.type} layer filter`)}><Trash2 size={11} /></button></div>
+        </div>;
+      })}</div>}
+      <div className="filter-stack-add"><select aria-label="New layer filter" value={newFilter} onChange={(event) => setNewFilter(event.target.value as FilterType)}>{(["brightness", "contrast", "saturation", "hue", "blur"] as FilterType[]).map((type) => <option key={type} value={type}>{type}</option>)}</select><button onClick={() => replaceFilters([...filters, { type: newFilter, value: initial(newFilter) }], `Add ${newFilter} layer filter`)}>+ Add</button>{filters.length > 0 && <button onClick={() => replaceFilters([], "Clear layer filters")}>Clear</button>}</div>
+    </div>
+  );
+}
+
 function ObjectInspector({ document }: { document: IllustrationDocument }) {
   const selectedIds = useEditorStore((state) => state.selectedEntityIds);
   const setSelected = useEditorStore((state) => state.setSelectedEntities);
@@ -1927,6 +2376,9 @@ function ObjectInspector({ document }: { document: IllustrationDocument }) {
   const secondaryColor = useEditorStore((state) => state.secondaryColor);
   const objects = selectedIds.map((id) => document.objects[id]).filter(Boolean);
   const object = objects.at(-1);
+  const [alignmentTarget, setAlignmentTarget] = useState<AlignmentTarget>("selection");
+  const [distributionMode, setDistributionMode] = useState<DistributionMode>("centers");
+  const [pathSplitNode, setPathSplitNode] = useState(1);
   if (!object) return null;
   const replace = (next: IllustrationObject, label: string) =>
     void apply(label, [
@@ -1939,27 +2391,12 @@ function ObjectInspector({ document }: { document: IllustrationDocument }) {
   const align = (
     mode: "left" | "center-x" | "right" | "top" | "center-y" | "bottom",
   ) => {
-    const operations = objects.map((entry) => {
-      const bounds = objectBounds(entry);
-      const transform = { ...entry.transform };
-      if (mode === "left") transform.x += -bounds.x;
-      if (mode === "center-x")
-        transform.x +=
-          document.artboard.width / 2 - (bounds.x + bounds.width / 2);
-      if (mode === "right")
-        transform.x += document.artboard.width - (bounds.x + bounds.width);
-      if (mode === "top") transform.y += -bounds.y;
-      if (mode === "center-y")
-        transform.y +=
-          document.artboard.height / 2 - (bounds.y + bounds.height / 2);
-      if (mode === "bottom")
-        transform.y += document.artboard.height - (bounds.y + bounds.height);
-      return {
+    const aligned = alignIllustrationObjects(objects, mode, alignmentTarget, { x: 0, y: 0, width: document.artboard.width, height: document.artboard.height }, object.id);
+    const operations = aligned.map((entry) => ({
         kind: "illustration.object.replace" as const,
-        object: { ...entry, transform },
+        object: entry,
         expectedRevision: entry.revision,
-      };
-    });
+      }));
     void apply(`Align ${mode}`, operations);
   };
   const distribute = (axis: "x" | "y") => {
@@ -1967,30 +2404,13 @@ function ObjectInspector({ document }: { document: IllustrationDocument }) {
       notify("Select at least three objects to distribute them.", "warning");
       return;
     }
-    const sorted = [...objects].sort((a, b) =>
-      axis === "x"
-        ? objectBounds(a).x - objectBounds(b).x
-        : objectBounds(a).y - objectBounds(b).y,
-    );
-    const first = objectBounds(sorted[0]);
-    const last = objectBounds(sorted.at(-1)!);
-    const start =
-      axis === "x" ? first.x + first.width / 2 : first.y + first.height / 2;
-    const end =
-      axis === "x" ? last.x + last.width / 2 : last.y + last.height / 2;
-    const operations = sorted.map((entry, index) => {
-      const bounds = objectBounds(entry);
-      const wanted = start + ((end - start) * index) / (sorted.length - 1);
-      const transform = { ...entry.transform };
-      if (axis === "x") transform.x += wanted - (bounds.x + bounds.width / 2);
-      else transform.y += wanted - (bounds.y + bounds.height / 2);
-      return {
+    const distributed = distributeIllustrationObjects(objects, axis, distributionMode);
+    const operations = distributed.map((entry) => ({
         kind: "illustration.object.replace" as const,
-        object: { ...entry, transform },
+        object: entry,
         expectedRevision: entry.revision,
-      };
-    });
-    void apply(`Distribute ${axis}`, operations);
+      }));
+    void apply(`${distributionMode === "spacing" ? "Space" : "Distribute"} ${axis}`, operations);
   };
   const boolean = async (
     mode: "union" | "subtract" | "intersect" | "exclude",
@@ -2003,7 +2423,7 @@ function ObjectInspector({ document }: { document: IllustrationDocument }) {
       return;
     }
     try {
-      const { createBooleanPath } = await import("./canvas/path-boolean");
+      const { createBooleanPath } = await import("../common/path-boolean");
       const result = createBooleanPath(objects[0], objects[1], mode);
       const operations: CanvasOperation[] = objects.map((entry) => ({
         kind: "illustration.object.delete",
@@ -2061,6 +2481,8 @@ function ObjectInspector({ document }: { document: IllustrationDocument }) {
       entry.layerId === object.layerId &&
       (object.type !== "group" || !containsObject(object.id, entry.id)),
   );
+  const maskCandidates = Object.values(document.objects).filter((entry) => entry.id !== object.id && entry.layerId === object.layerId && (entry.type === "shape" || entry.type === "path" || entry.type === "vector-stroke"));
+  const selectionMask = objects.length > 1 && (object.type === "shape" || object.type === "path" || object.type === "vector-stroke") && objects.slice(0, -1).every((entry) => entry.layerId === object.layerId) ? object : undefined;
   const groupSelected = () => {
     if (objects.length === 0) return;
     const layerId = objects[0].layerId;
@@ -2107,6 +2529,106 @@ function ObjectInspector({ document }: { document: IllustrationDocument }) {
     void (async () => {
       if (await apply("Group objects", operations)) setSelected([group.id]);
     })();
+  };
+  const pathObjects = objects.filter(
+    (entry): entry is Extract<IllustrationObject, { type: "path" }> =>
+      entry.type === "path",
+  );
+  let pathNodeCount = 0;
+  if (object.type === "path") {
+    try {
+      pathNodeCount = inspectPathNodes(object.pathData).length;
+    } catch {
+      pathNodeCount = 0;
+    }
+  }
+  const pathSplitMinimum = object.type === "path" && object.closed ? 0 : 1;
+  const pathSplitMaximum =
+    object.type === "path"
+      ? object.closed
+        ? pathNodeCount - 1
+        : pathNodeCount - 2
+      : -1;
+  const selectedSplitNode = Math.max(
+    pathSplitMinimum,
+    Math.min(pathSplitNode, pathSplitMaximum),
+  );
+  const splitSelectedPath = async () => {
+    if (object.type !== "path" || pathSplitMaximum < pathSplitMinimum) return;
+    try {
+      const split = splitPathAtNode(object.pathData, selectedSplitNode);
+      const operations: CanvasOperation[] = [
+        {
+          kind: "illustration.object.replace",
+          object: {
+            ...object,
+            pathData: split.primaryPathData,
+            closed: false,
+          },
+          expectedRevision: object.revision,
+        },
+      ];
+      let secondaryId: string | undefined;
+      if (split.secondaryPathData) {
+        const layer = document.layers[object.layerId];
+        if (!layer || layer.type !== "vector")
+          throw new Error("The path vector layer does not exist.");
+        const timestamp = nowIso();
+        secondaryId = createId("path");
+        operations.push({
+          kind: "illustration.object.add",
+          object: {
+            ...structuredClone(object),
+            id: secondaryId,
+            revision: 0,
+            name: `${object.name} part 2`,
+            createdAt: timestamp,
+            updatedAt: timestamp,
+            createdBy: HUMAN_ACTOR.id,
+            pathData: split.secondaryPathData,
+            closed: false,
+          },
+          index: Math.max(0, layer.objectIds.indexOf(object.id) + 1),
+          parentGroupId: parentGroup?.id,
+          groupIndex:
+            parentGroup?.type === "group"
+              ? Math.max(0, parentGroup.childIds.indexOf(object.id) + 1)
+              : undefined,
+        });
+      }
+      if (await apply(object.closed ? "Cut closed path" : "Split path", operations))
+        setSelected(secondaryId ? [object.id, secondaryId] : [object.id]);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : String(error), "error");
+    }
+  };
+  const joinSelectedPaths = async () => {
+    if (pathObjects.length !== 2) {
+      notify("Select exactly two open paths to join.", "warning");
+      return;
+    }
+    const primary = pathObjects.at(-1)!;
+    const secondary = pathObjects[0];
+    try {
+      const joined = joinPathObjects(primary, secondary, "nearest");
+      if (
+        await apply("Join paths", [
+          {
+            kind: "illustration.object.replace",
+            object: joined,
+            expectedRevision: primary.revision,
+          },
+          {
+            kind: "illustration.object.delete",
+            objectId: secondary.id,
+            expectedRevision: secondary.revision,
+          },
+        ])
+      )
+        setSelected([primary.id]);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : String(error), "error");
+    }
   };
   const supportsPaint = object.type === "shape" || object.type === "path";
   return (
@@ -2296,6 +2818,7 @@ function ObjectInspector({ document }: { document: IllustrationDocument }) {
           />
         </label>
       </div>
+      <div className="alignment-options"><label className="field"><span>Align to</span><select value={alignmentTarget} onChange={(event) => setAlignmentTarget(event.target.value as AlignmentTarget)}><option value="selection">Selection bounds</option><option value="key-object">Key object · {object.name}</option><option value="artboard">Artboard</option></select></label><label className="field"><span>Distribute by</span><select value={distributionMode} onChange={(event) => setDistributionMode(event.target.value as DistributionMode)}><option value="centers">Centers</option><option value="spacing">Equal gaps</option></select></label></div>
       <div className="align-grid">
         <button onClick={() => align("left")}>Left</button>
         <button onClick={() => align("center-x")}>Center X</button>
@@ -2303,8 +2826,8 @@ function ObjectInspector({ document }: { document: IllustrationDocument }) {
         <button onClick={() => align("top")}>Top</button>
         <button onClick={() => align("center-y")}>Center Y</button>
         <button onClick={() => align("bottom")}>Bottom</button>
-        <button onClick={() => distribute("x")}>Distribute X</button>
-        <button onClick={() => distribute("y")}>Distribute Y</button>
+        <button onClick={() => distribute("x")}>{distributionMode === "spacing" ? "Space X" : "Distribute X"}</button>
+        <button onClick={() => distribute("y")}>{distributionMode === "spacing" ? "Space Y" : "Distribute Y"}</button>
       </div>
       {supportsPaint && (
         <>
@@ -2369,6 +2892,55 @@ function ObjectInspector({ document }: { document: IllustrationDocument }) {
               Radial
             </button>
           </div>
+          {(object.fill.kind === "linear-gradient" || object.fill.kind === "radial-gradient") && <GradientEditor key={`${object.id}:${object.revision}:gradient`} fill={object.fill} newColor={primaryColor} onApply={(fill) => replace({ ...object, fill }, "Edit gradient stops")} />}
+          {object.type === "path" && (
+            <div className="path-node-actions">
+              <button
+                onClick={() =>
+                  replace(
+                    {
+                      ...object,
+                      closed: !object.closed,
+                      pathData: setPathClosed(object.pathData, !object.closed),
+                    },
+                    object.closed ? "Open path" : "Close path",
+                  )
+                }
+              >
+                {object.closed ? "Open path" : "Close path"}
+              </button>
+              {/[aA]/.test(object.pathData) && <button onClick={() => { const converted = convertPathArcsToCubics(object.pathData); replace({ ...object, ...converted }, "Convert path arcs to cubics"); }}>Convert arcs to editable curves</button>}
+              <div className="path-topology-row">
+                <label>
+                  <span>Cut anchor</span>
+                  <input
+                    aria-label="Path split anchor"
+                    type="number"
+                    min={pathSplitMinimum}
+                    max={Math.max(pathSplitMinimum, pathSplitMaximum)}
+                    value={selectedSplitNode}
+                    disabled={pathSplitMaximum < pathSplitMinimum}
+                    onChange={(event) => setPathSplitNode(Number(event.target.value))}
+                  />
+                  <small>of {Math.max(0, pathNodeCount - 1)}</small>
+                </label>
+                <button
+                  disabled={pathSplitMaximum < pathSplitMinimum}
+                  onClick={() => void splitSelectedPath()}
+                >
+                  {object.closed ? "Cut open" : "Split path"}
+                </button>
+                {pathObjects.length === 2 && (
+                  <button onClick={() => void joinSelectedPaths()}>
+                    Join nearest ends
+                  </button>
+                )}
+              </div>
+              <small>
+                Node tool: Alt-click curve to add · Ctrl-click node to delete · double-click to smooth/corner · Shift-drag handle to mirror. Joining retains the most recently selected path's style.
+              </small>
+            </div>
+          )}
           <div className="section-heading">
             <span>Materials</span>
             <small>Editable stack</small>
@@ -2414,15 +2986,17 @@ function ObjectInspector({ document }: { document: IllustrationDocument }) {
           }
         >
           <option value="">None</option>
-          {Object.values(document.objects)
-            .filter((entry) => entry.id !== object.id)
-            .map((entry) => (
+          {maskCandidates.map((entry) => (
               <option value={entry.id} key={entry.id}>
                 {entry.name}
               </option>
             ))}
         </select>
       </label>
+      <div className="mask-actions">
+        {selectionMask && <button onClick={() => { const targets = objects.slice(0, -1); const operations: CanvasOperation[] = targets.map((entry) => ({ kind: "illustration.object.replace", object: { ...entry, maskObjectId: selectionMask.id }, expectedRevision: entry.revision })); operations.push({ kind: "illustration.object.replace", object: { ...selectionMask, visible: false }, expectedRevision: selectionMask.revision }); void (async () => { if (await apply("Mask selected objects", operations)) setSelected(targets.map((entry) => entry.id)); })(); }}><Layers3 size={12} /> Use top object as mask</button>}
+        {objects.some((entry) => entry.maskObjectId) && <button onClick={() => void apply("Clear object masks", objects.filter((entry) => entry.maskObjectId).map((entry) => ({ kind: "illustration.object.replace", object: { ...entry, maskObjectId: undefined }, expectedRevision: entry.revision })))}>Clear selected masks</button>}
+      </div>
       <div className="section-heading">
         <span>Appearance</span>
       </div>
@@ -2492,130 +3066,27 @@ function ObjectInspector({ document }: { document: IllustrationDocument }) {
           />
         </label>
       </div>
+      <ObjectFilterStack object={object} onReplace={replace} />
       {object.type === "text" && (
-        <>
-          <div className="section-heading">
-            <span>Typography</span>
-          </div>
-          <label className="field">
-            <span>Text</span>
-            <textarea
-              value={object.text}
-              onChange={(event) =>
-                replace(
-                  {
-                    ...object,
-                    text: event.target.value,
-                    ranges: object.ranges.map((range) => ({
-                      ...range,
-                      end: event.target.value.length,
-                    })),
-                  },
-                  "Edit text",
-                )
-              }
-            />
-          </label>
-          <div className="two-fields">
-            <label className="field">
-              <span>Font</span>
-              <input
-                value={object.ranges[0]?.fontFamily ?? "Segoe UI"}
-                onChange={(event) =>
-                  replace(
-                    {
-                      ...object,
-                      ranges: object.ranges.map((range) => ({
-                        ...range,
-                        fontFamily: event.target.value,
-                      })),
-                    },
-                    "Change font",
-                  )
-                }
-              />
-            </label>
-            <label className="field">
-              <span>Size</span>
-              <input
-                type="number"
-                value={object.ranges[0]?.fontSize ?? 48}
-                onChange={(event) =>
-                  replace(
-                    {
-                      ...object,
-                      ranges: object.ranges.map((range) => ({
-                        ...range,
-                        fontSize: Number(event.target.value),
-                      })),
-                    },
-                    "Change font size",
-                  )
-                }
-              />
-            </label>
-          </div>
-        </>
+        <TextInspector key={`${object.id}:${object.revision}:text`} object={object} onReplace={replace} />
       )}
       {object.type === "image" && (
         <>
-          <div className="section-heading">
-            <span>Image filters</span>
-          </div>
-          <div className="filter-grid">
-            {(
-              ["brightness", "contrast", "saturation", "hue", "blur"] as const
-            ).map((type) => (
-              <label key={type}>
-                <span>{type}</span>
-                <input
-                  type="range"
-                  min={type === "hue" ? -180 : type === "blur" ? 0 : -1}
-                  max={type === "hue" ? 180 : type === "blur" ? 40 : 1}
-                  step={type === "hue" ? 1 : 0.05}
-                  value={
-                    object.filters.find((filter) => filter.type === type)
-                      ?.value ?? 0
-                  }
-                  onChange={(event) =>
-                    replace(
-                      {
-                        ...object,
-                        filters: [
-                          ...object.filters.filter(
-                            (filter) => filter.type !== type,
-                          ),
-                          { type, value: Number(event.target.value) },
-                        ],
-                      },
-                      `Change ${type}`,
-                    )
-                  }
-                />
-              </label>
-            ))}
-          </div>
           <button
             className="crop-button"
             onClick={() =>
               replace(
-                {
-                  ...object,
-                  crop: object.crop
-                    ? undefined
-                    : {
-                        x: object.width * 0.1,
-                        y: object.height * 0.1,
-                        width: object.width * 0.8,
-                        height: object.height * 0.8,
-                      },
-                },
-                object.crop ? "Reset image crop" : "Crop image",
+                object.crop ? resetImageCrop(object) : cropImageToAspect(object, 1),
+                object.crop ? "Reset image crop" : "Square crop image",
               )
             }
           >
-            {object.crop ? "Reset crop" : "Inset crop 10%"}
+            {object.crop ? "Reset to full image" : "Square crop"}
           </button>
+          <div className="crop-aspect-grid">
+            {[{ label: "1:1", value: 1 }, { label: "4:3", value: 4 / 3 }, { label: "3:2", value: 3 / 2 }, { label: "16:9", value: 16 / 9 }].map((preset) => <button key={preset.label} onClick={() => replace(cropImageToAspect(object, preset.value), `Crop image ${preset.label}`)}>{preset.label}</button>)}
+          </div>
+          <small className="crop-summary">{object.crop ? `Source crop ${object.crop.x.toFixed(1)}, ${object.crop.y.toFixed(1)} · ${object.crop.width.toFixed(1)} × ${object.crop.height.toFixed(1)} px` : `Full source ${object.sourceWidth ?? object.width} × ${object.sourceHeight ?? object.height} px`} · drag on canvas with Crop; hold Shift to preserve the current aspect.</small>
         </>
       )}
     </div>
@@ -2689,6 +3160,11 @@ function PixelLayers({ document }: { document: PixelDocument }) {
   const setSelected = useEditorStore((state) => state.setSelectedEntity);
   const apply = useEditorStore((state) => state.apply);
   const notify = useEditorStore((state) => state.notify);
+  const [mapPropertyName, setMapPropertyName] = useState("");
+  const [mapPropertyValue, setMapPropertyValue] = useState("");
+  const [mapObjectType, setMapObjectType] = useState<"rectangle" | "ellipse" | "polygon" | "polyline">("rectangle");
+  const [collapsedLayerIds, setCollapsedLayerIds] = useState<Set<string>>(() => new Set());
+  const [draggedLayerId, setDraggedLayerId] = useState<string>();
   if (!asset) return <div className="empty-panel">No active pixel asset.</div>;
   const layers =
     asset.type === "sprite"
@@ -2696,6 +3172,8 @@ function PixelLayers({ document }: { document: PixelDocument }) {
       : asset.type === "tilemap"
         ? Object.values(asset.layers ?? {})
         : [];
+  const layerTable = Object.fromEntries(layers.map((layer) => [layer.id, layer]));
+  const flattenedLayers = asset.type === "sprite" || asset.type === "tilemap" ? flattenLayerTree(layerTable, asset.layerIds, collapsedLayerIds) : [];
   const updateAsset = (next: typeof asset, label: string) =>
     void apply(label, [
       {
@@ -2763,42 +3241,20 @@ function PixelLayers({ document }: { document: PixelDocument }) {
     updateAsset(next, `Delete ${layer.name}`);
     if (selected === layer.id) setSelected(undefined);
   };
-  const moveLayer = (layer: PixelLayer | TilemapLayer, parentId?: string) => {
+  const moveLayer = (layer: PixelLayer | TilemapLayer, parentId?: string, index?: number) => {
     const next = structuredClone(asset);
     if (next.type !== "sprite" && next.type !== "tilemap") return;
-    const table = next.layers as Record<string, PixelLayer | TilemapLayer>;
-    const moving = table[layer.id];
-    if (!moving) return;
-    next.layerIds = next.layerIds.filter((id) => id !== layer.id);
-    for (const current of Object.values(table))
-      if (current.childIds)
-        current.childIds = current.childIds.filter((id) => id !== layer.id);
-    moving.parentId = parentId;
-    if (parentId) {
-      const parent = table[parentId];
-      if (parent?.type !== "group") return;
-      parent.childIds = [...(parent.childIds ?? []), layer.id];
-    } else next.layerIds.push(layer.id);
+    const moved = moveLayerTreeEntry(next.layers as Record<string, PixelLayer | TilemapLayer>, next.layerIds, layer.id, parentId, index);
+    next.layers = moved.entries as typeof next.layers; next.layerIds = moved.rootIds;
     updateAsset(next, "Move layer");
   };
-  const descendants = (id: string): Set<string> => {
-    const result = new Set<string>();
-    const visit = (currentId: string) => {
-      const current =
-        asset.type === "sprite"
-          ? asset.layers[currentId]
-          : asset.type === "tilemap"
-            ? asset.layers[currentId]
-            : undefined;
-      for (const childId of current?.childIds ?? []) {
-        result.add(childId);
-        visit(childId);
-      }
-    };
-    visit(id);
-    return result;
+  const descendants = (id: string): Set<string> => layerTreeDescendants(layerTable, id);
+  const dropLayer = (event: React.DragEvent<HTMLDivElement>, target: PixelLayer | TilemapLayer) => {
+    event.preventDefault(); const source = draggedLayerId ? layerTable[draggedLayerId] : undefined; setDraggedLayerId(undefined); if (!source || source.id === target.id) return;
+    if (event.altKey && target.type === "group") { moveLayer(source, target.id); setCollapsedLayerIds((current) => { const next = new Set(current); next.delete(target.id); return next; }); return; }
+    const siblings = target.parentId ? layerTable[target.parentId]?.childIds ?? [] : asset.type === "sprite" || asset.type === "tilemap" ? asset.layerIds : []; const targetIndex = siblings.indexOf(target.id); const sourceIndex = siblings.indexOf(source.id); const adjustedTarget = sourceIndex >= 0 && sourceIndex < targetIndex ? targetIndex - 1 : targetIndex; const bounds = event.currentTarget.getBoundingClientRect(); const visuallyAbove = event.clientY < bounds.top + bounds.height / 2; moveLayer(source, target.parentId, Math.max(0, adjustedTarget + (visuallyAbove ? 1 : 0)));
   };
-  const selectedLayer = layers.find((layer) => layer.id === selected);
+  const selectedLayer = layers.find((layer) => layer.id === selected) ?? (asset.type === "tilemap" ? layers.find((layer) => layer.type === "object" && layer.objects?.some((object) => object.id === selected)) : undefined);
   if (asset.type === "tileset")
     return <TilesetPanel document={document} tileset={asset} />;
   return (
@@ -2824,13 +3280,33 @@ function PixelLayers({ document }: { document: PixelDocument }) {
           }
         />
       )}
+      {asset.type === "tilemap" && <div className="tilemap-settings">
+        <div className="section-heading"><span>Map geometry</span><small>{asset.infinite ? "Sparse infinite chunks" : "Finite bounds"}</small></div>
+        <div className="tilemap-setting-grid">
+          <label className="field"><span>Width</span><input key={"map-width-" + asset.width} type="number" min="1" max="1048576" defaultValue={asset.width} onBlur={(event) => { const width = Math.max(1, Math.round(Number(event.target.value))); if (width !== asset.width) updateAsset({ ...asset, width }, "Resize tilemap width"); }} /></label>
+          <label className="field"><span>Height</span><input key={"map-height-" + asset.height} type="number" min="1" max="1048576" defaultValue={asset.height} onBlur={(event) => { const height = Math.max(1, Math.round(Number(event.target.value))); if (height !== asset.height) updateAsset({ ...asset, height }, "Resize tilemap height"); }} /></label>
+          <label className="field"><span>Tile width</span><input key={"map-tile-width-" + asset.tileWidth} type="number" min="1" max="1024" defaultValue={asset.tileWidth} onBlur={(event) => { const tileWidth = Math.max(1, Math.round(Number(event.target.value))); if (tileWidth !== asset.tileWidth) updateAsset({ ...asset, tileWidth }, "Change map tile width"); }} /></label>
+          <label className="field"><span>Tile height</span><input key={"map-tile-height-" + asset.tileHeight} type="number" min="1" max="1024" defaultValue={asset.tileHeight} onBlur={(event) => { const tileHeight = Math.max(1, Math.round(Number(event.target.value))); if (tileHeight !== asset.tileHeight) updateAsset({ ...asset, tileHeight }, "Change map tile height"); }} /></label>
+          <label className="field"><span>Orientation</span><select value={asset.orientation} onChange={(event) => updateAsset({ ...asset, orientation: event.target.value as typeof asset.orientation }, "Change map orientation")}><option value="orthogonal">Orthogonal</option><option value="isometric">Isometric</option></select></label>
+          <label className="map-infinite-toggle"><input type="checkbox" checked={asset.infinite} onChange={(event) => updateAsset({ ...asset, infinite: event.target.checked }, event.target.checked ? "Enable infinite map" : "Use finite map")} /><span>Infinite 32×32 chunks</span></label>
+        </div>
+        <div className="section-heading"><span>Map properties</span></div>
+        <div className="tile-property-add"><input aria-label="Map property name" placeholder="name" value={mapPropertyName} onChange={(event) => setMapPropertyName(event.target.value)} /><input aria-label="Map property value" placeholder="value" value={mapPropertyValue} onChange={(event) => setMapPropertyValue(event.target.value)} /><button disabled={!mapPropertyName.trim()} onClick={() => { const value = mapPropertyValue === "true" ? true : mapPropertyValue === "false" ? false : mapPropertyValue.trim() !== "" && Number.isFinite(Number(mapPropertyValue)) ? Number(mapPropertyValue) : mapPropertyValue; updateAsset({ ...asset, properties: { ...asset.properties, [mapPropertyName.trim()]: value } }, "Set map property"); setMapPropertyName(""); setMapPropertyValue(""); }}>Add</button></div>
+        <div className="tile-property-list">{Object.entries(asset.properties).map(([key, value]) => <span key={key}><strong>{key}</strong> = {String(value)}<button onClick={() => { const properties = { ...asset.properties }; delete properties[key]; updateAsset({ ...asset, properties }, "Delete map property"); }}>×</button></span>)}</div>
+      </div>}
       <div className="panel-list layer-list">
-        {[...layers].reverse().map((layer) => (
+        {flattenedLayers.map(({ entry: layer, depth }) => (
           <div
             key={layer.id}
-            className={`layer-row ${selected === layer.id ? "is-selected" : ""}`}
-            style={{ marginLeft: layer.parentId ? 14 : 0 }}
+            className={`layer-row ${selectedLayer?.id === layer.id ? "is-selected" : ""}`}
+            style={{ marginLeft: depth * 14 }}
+            draggable
+            onDragStart={() => setDraggedLayerId(layer.id)}
+            onDragEnd={() => setDraggedLayerId(undefined)}
+            onDragOver={(event) => event.preventDefault()}
+            onDrop={(event) => dropLayer(event, layer)}
           >
+            {layer.type === "group" ? <button className="layer-collapse" title={collapsedLayerIds.has(layer.id) ? "Expand group" : "Collapse group"} onClick={() => setCollapsedLayerIds((current) => { const next = new Set(current); if (next.has(layer.id)) next.delete(layer.id); else next.add(layer.id); return next; })}>{collapsedLayerIds.has(layer.id) ? <ChevronRight size={12} /> : <ChevronDown size={12} />}</button> : <span className="layer-collapse-placeholder" />}
             <button
               className="layer-main"
               onClick={() => setSelected(layer.id)}
@@ -2958,6 +3434,12 @@ function PixelLayers({ document }: { document: PixelDocument }) {
               </select>
             </label>
           )}
+          {"parallaxX" in selectedLayer && <div className="two-fields"><label className="field"><span>Parallax X</span><input type="number" step="0.1" value={selectedLayer.parallaxX} onChange={(event) => updateLayer(selectedLayer, { parallaxX: Number(event.target.value) }, "Change layer parallax")} /></label><label className="field"><span>Parallax Y</span><input type="number" step="0.1" value={selectedLayer.parallaxY} onChange={(event) => updateLayer(selectedLayer, { parallaxY: Number(event.target.value) }, "Change layer parallax")} /></label></div>}
+          {selectedLayer.type === "object" && asset.type === "tilemap" && <div className="map-object-editor">
+            <div className="section-heading"><span>Map objects</span><small>{selectedLayer.objects?.length ?? 0}</small></div>
+            <div className="tileset-actions"><select value={mapObjectType} onChange={(event) => setMapObjectType(event.target.value as typeof mapObjectType)}><option value="rectangle">Rectangle</option><option value="ellipse">Ellipse</option><option value="polygon">Polygon</option><option value="polyline">Polyline</option></select><button onClick={() => { const points = mapObjectType === "polygon" || mapObjectType === "polyline" ? [{ x: 0, y: 0 }, { x: asset.tileWidth, y: 0 }, { x: asset.tileWidth, y: asset.tileHeight }, { x: 0, y: asset.tileHeight }] : undefined; updateLayer(selectedLayer, { objects: [...(selectedLayer.objects ?? []), { id: createId("map-object"), type: mapObjectType, x: 0, y: 0, width: asset.tileWidth, height: asset.tileHeight, points, properties: {} }] }, "Add map object"); }}>+ Object</button></div>
+            <div className="collision-list">{(selectedLayer.objects ?? []).map((object, objectIndex) => <div className={"collision-row " + (selected === object.id ? "is-selected" : "")} key={object.id} onClick={() => setSelected(object.id)}><select value={object.type} onChange={(event) => updateLayer(selectedLayer, { objects: selectedLayer.objects!.map((entry, index) => index === objectIndex ? { ...entry, type: event.target.value as typeof object.type } : entry) }, "Change map object type")}><option value="rectangle">Rectangle</option><option value="ellipse">Ellipse</option><option value="polygon">Polygon</option><option value="polyline">Polyline</option></select><input aria-label={"Object x " + (objectIndex + 1)} type="number" value={object.x} onChange={(event) => updateLayer(selectedLayer, { objects: selectedLayer.objects!.map((entry, index) => index === objectIndex ? { ...entry, x: Number(event.target.value) } : entry) }, "Move map object")} /><input aria-label={"Object y " + (objectIndex + 1)} type="number" value={object.y} onChange={(event) => updateLayer(selectedLayer, { objects: selectedLayer.objects!.map((entry, index) => index === objectIndex ? { ...entry, y: Number(event.target.value) } : entry) }, "Move map object")} /><input aria-label={"Object width " + (objectIndex + 1)} type="number" value={object.width ?? 0} onChange={(event) => updateLayer(selectedLayer, { objects: selectedLayer.objects!.map((entry, index) => index === objectIndex ? { ...entry, width: Math.max(1, Number(event.target.value)) } : entry) }, "Resize map object")} /><input aria-label={"Object height " + (objectIndex + 1)} type="number" value={object.height ?? 0} onChange={(event) => updateLayer(selectedLayer, { objects: selectedLayer.objects!.map((entry, index) => index === objectIndex ? { ...entry, height: Math.max(1, Number(event.target.value)) } : entry) }, "Resize map object")} /><button title="Delete map object" onClick={() => updateLayer(selectedLayer, { objects: selectedLayer.objects!.filter((_, index) => index !== objectIndex) }, "Delete map object")}><Trash2 size={11} /></button></div>)}</div>
+          </div>}
         </div>
       )}
     </>
@@ -2972,6 +3454,15 @@ function TilesetPanel({
   tileset: PixelTileset;
 }) {
   const apply = useEditorStore((state) => state.apply);
+  const notify = useEditorStore((state) => state.notify);
+  const [selectedTileId, setSelectedTileId] = useState(0);
+  const [collisionType, setCollisionType] = useState<"rectangle" | "ellipse" | "polygon" | "polyline">("rectangle");
+  const [selectedCollisionId, setSelectedCollisionId] = useState<string>();
+  const [collisionPropertyName, setCollisionPropertyName] = useState("");
+  const [collisionPropertyValue, setCollisionPropertyValue] = useState("");
+  const [propertyName, setPropertyName] = useState("");
+  const [propertyValue, setPropertyValue] = useState("");
+  const [selectedWangSetId, setSelectedWangSetId] = useState<string>();
   const replace = (next: PixelTileset, label: string) =>
     void apply(label, [
       {
@@ -2980,9 +3471,50 @@ function TilesetPanel({
         expectedRevision: tileset.revision,
       },
     ]);
-  const addTerrain = () => {
+  const sourceSprite = document.pixelAssets[tileset.spriteAssetId];
+  const tileCount = tileset.columns * tileset.rows;
+  const selectedTile = tileset.tiles[selectedTileId] ?? {
+    id: selectedTileId,
+    sourceX: tileset.margin + selectedTileId % tileset.columns * (tileset.tileWidth + tileset.spacing),
+    sourceY: tileset.margin + Math.floor(selectedTileId / tileset.columns) * (tileset.tileHeight + tileset.spacing),
+    probability: 1,
+    animation: [],
+    collisions: [],
+    properties: {},
+  };
+  const selectedCollision = selectedTile.collisions.find((shape) => shape.id === selectedCollisionId);
+  const updateTile = (patch: Partial<typeof selectedTile>, label: string) => {
     const next = structuredClone(tileset);
-    const terrainId = next.wangSets.length + 1;
+    next.tiles[selectedTileId] = { ...structuredClone(selectedTile), ...patch };
+    replace(next, label);
+  };
+  const reslice = (patch: Partial<Pick<PixelTileset, "tileWidth" | "tileHeight" | "margin" | "spacing">>) => {
+    const next = { ...structuredClone(tileset), ...patch };
+    if (sourceSprite?.type === "sprite") {
+      next.columns = Math.max(1, Math.floor((sourceSprite.width - next.margin * 2 + next.spacing) / (next.tileWidth + next.spacing)));
+      next.rows = Math.max(1, Math.floor((sourceSprite.height - next.margin * 2 + next.spacing) / (next.tileHeight + next.spacing)));
+    }
+    const nextTiles: PixelTileset["tiles"] = {};
+    for (let id = 0; id < next.columns * next.rows; id += 1) {
+      const existing = next.tiles[id];
+      nextTiles[id] = {
+        id,
+        sourceX: next.margin + id % next.columns * (next.tileWidth + next.spacing),
+        sourceY: next.margin + Math.floor(id / next.columns) * (next.tileHeight + next.spacing),
+        probability: existing?.probability ?? 1,
+        animation: structuredClone(existing?.animation ?? []),
+        collisions: structuredClone(existing?.collisions ?? []),
+        properties: structuredClone(existing?.properties ?? {}),
+      };
+    }
+    const dropped = Object.keys(next.tiles).filter((id) => Number(id) >= next.columns * next.rows && (next.tiles[Number(id)].animation.length || next.tiles[Number(id)].collisions.length || Object.keys(next.tiles[Number(id)].properties).length)).length;
+    next.tiles = nextTiles;
+    if (dropped) notify(dropped + " metadata-bearing tile" + (dropped === 1 ? " was" : "s were") + " removed by the new slice.", "warning");
+    replace(next, "Re-slice tileset");
+    setSelectedTileId(Math.min(selectedTileId, next.columns * next.rows - 1));
+  };
+  const addTerrain = () => {
+    const terrainId = tileset.wangSets.length + 1;
     const wangSet: WangSet = {
       id: createId("wang"),
       name: `Terrain ${terrainId}`,
@@ -3015,31 +3547,37 @@ function TilesetPanel({
         },
       ],
     };
-    next.wangSets.push(wangSet);
-    replace(next, "Add Wang terrain");
+    replace(upsertWangSet(tileset, wangSet), "Add Wang terrain");
+    setSelectedWangSetId(wangSet.id);
   };
   const addCollision = () => {
-    const next = structuredClone(tileset);
-    const tile = next.tiles[0] ?? {
-      id: 0,
-      sourceX: 0,
-      sourceY: 0,
-      probability: 1,
-      animation: [],
-      collisions: [],
-      properties: {},
-    };
-    tile.collisions.push({
+    const shape = {
       id: createId("collision"),
-      type: "rectangle",
+      type: collisionType,
       x: 0,
       y: 0,
-      width: next.tileWidth,
-      height: next.tileHeight,
+      width: tileset.tileWidth,
+      height: tileset.tileHeight,
       properties: {},
-    });
-    next.tiles[0] = tile;
-    replace(next, "Add tile collision");
+      ...((collisionType === "polygon" || collisionType === "polyline") ? { points: [{ x: 0, y: 0 }, { x: tileset.tileWidth, y: 0 }, { x: tileset.tileWidth, y: tileset.tileHeight }, { x: 0, y: tileset.tileHeight }] } : {}),
+    } as (typeof selectedTile)["collisions"][number];
+    updateTile({ collisions: [...selectedTile.collisions, shape] }, "Add tile collision");
+  };
+  const activeWangSet = tileset.wangSets.find((set) => set.id === selectedWangSetId) ?? tileset.wangSets[0];
+  const updateWangSet = (nextSet: WangSet, label: string) => {
+    replace(upsertWangSet(tileset, nextSet), label);
+  };
+  const addWangColor = () => {
+    if (!activeWangSet) return;
+    const colorId = Math.max(0, ...activeWangSet.colors.map((color) => color.id)) + 1;
+    replace(upsertWangColor(tileset, activeWangSet.id, { id: colorId, name: "Terrain " + colorId, color: document.palette[Math.min(colorId + 3, document.palette.length - 1)]?.color ?? "#ff6b7a", tileId: selectedTileId, probability: 1 }), "Add Wang color");
+  };
+  const assignWangSlot = (slot: number, colorId: number) => {
+    if (!activeWangSet) return;
+    const existing = activeWangSet.tiles.find((tile) => tile.tileId === selectedTileId);
+    const wangId = [...(existing?.wangId ?? [0, 0, 0, 0, 0, 0, 0, 0])] as WangSet["tiles"][number]["wangId"];
+    wangId[slot] = colorId;
+    replace(assignWangTile(tileset, activeWangSet.id, { tileId: selectedTileId, wangId }), "Assign Wang terrain slot");
   };
   return (
     <div className="tileset-panel">
@@ -3055,48 +3593,50 @@ function TilesetPanel({
           </small>
         </span>
       </div>
-      <div className="two-fields">
+      <div className="tileset-slice-grid">
         <label className="field">
           <span>Tile width</span>
           <input
+            key={"tile-width-" + tileset.tileWidth}
             type="number"
             min="1"
-            value={tileset.tileWidth}
-            onChange={(event) =>
-              replace(
-                {
-                  ...tileset,
-                  tileWidth: Math.max(1, Number(event.target.value)),
-                },
-                "Resize tiles",
-              )
-            }
+            defaultValue={tileset.tileWidth}
+            onBlur={(event) => { const value = Math.max(1, Math.round(Number(event.target.value))); if (value !== tileset.tileWidth) reslice({ tileWidth: value }); }}
           />
         </label>
         <label className="field">
           <span>Tile height</span>
           <input
+            key={"tile-height-" + tileset.tileHeight}
             type="number"
             min="1"
-            value={tileset.tileHeight}
-            onChange={(event) =>
-              replace(
-                {
-                  ...tileset,
-                  tileHeight: Math.max(1, Number(event.target.value)),
-                },
-                "Resize tiles",
-              )
-            }
+            defaultValue={tileset.tileHeight}
+            onBlur={(event) => { const value = Math.max(1, Math.round(Number(event.target.value))); if (value !== tileset.tileHeight) reslice({ tileHeight: value }); }}
           />
         </label>
+        <label className="field"><span>Margin</span><input key={"margin-" + tileset.margin} type="number" min="0" defaultValue={tileset.margin} onBlur={(event) => { const value = Math.max(0, Math.round(Number(event.target.value))); if (value !== tileset.margin) reslice({ margin: value }); }} /></label>
+        <label className="field"><span>Spacing</span><input key={"spacing-" + tileset.spacing} type="number" min="0" defaultValue={tileset.spacing} onBlur={(event) => { const value = Math.max(0, Math.round(Number(event.target.value))); if (value !== tileset.spacing) reslice({ spacing: value }); }} /></label>
+      </div>
+      <small className="tileset-slice-summary">{tileset.columns} columns × {tileset.rows} rows · {tileCount} tiles from {sourceSprite?.type === "sprite" ? sourceSprite.width + " × " + sourceSprite.height + "px source" : "missing source"}</small>
+      <div className="section-heading"><span>Tiles</span><small>Select one to edit metadata</small></div>
+      <div className="tile-definition-grid">{Array.from({ length: Math.min(tileCount, 256) }, (_, id) => <button key={id} className={selectedTileId === id ? "is-active" : ""} onClick={() => { setSelectedTileId(id); setSelectedCollisionId(undefined); }}>{id}</button>)}</div>
+      {tileCount > 256 && <small className="tileset-slice-summary">Showing the first 256 of {tileCount} tiles.</small>}
+      <div className="tile-definition-editor">
+        <div className="section-heading"><span>Tile {selectedTileId}</span><small>{selectedTile.sourceX}, {selectedTile.sourceY}</small></div>
+        <label className="field"><span>Painting probability</span><input key={"probability-" + selectedTileId + "-" + selectedTile.probability} type="number" min="0" step="0.05" defaultValue={selectedTile.probability} onBlur={(event) => updateTile({ probability: Math.max(0, Number(event.target.value) || 0) }, "Change tile probability")} /></label>
+        <label className="field"><span>Random variant group</span><input key={"variant-" + selectedTileId + "-" + String(selectedTile.properties[TILE_VARIANT_GROUP_PROPERTY] ?? "")} maxLength={100} defaultValue={String(selectedTile.properties[TILE_VARIANT_GROUP_PROPERTY] ?? "")} placeholder="e.g. grass" onBlur={(event) => { const properties = { ...selectedTile.properties }; const group = event.target.value.trim(); if (group) properties[TILE_VARIANT_GROUP_PROPERTY] = group; else delete properties[TILE_VARIANT_GROUP_PROPERTY]; updateTile({ properties }, "Change random variant group"); }} /><small>{tileVariantCandidates(tileset, selectedTileId).length || 1} weighted tile variant{(tileVariantCandidates(tileset, selectedTileId).length || 1) === 1 ? "" : "s"} share this group.</small></label>
+        <div className="section-heading"><span>Animation</span><button onClick={() => updateTile({ animation: [...selectedTile.animation, { tileId: selectedTileId, durationMs: 100 }] }, "Add animated tile frame")}>+ Frame</button></div>
+        {selectedTile.animation.map((frame, frameIndex) => <div className="tile-animation-row" key={frameIndex}><input aria-label={"Animation tile " + (frameIndex + 1)} type="number" min="0" max={tileCount - 1} value={frame.tileId} onChange={(event) => updateTile({ animation: selectedTile.animation.map((entry, index) => index === frameIndex ? { ...entry, tileId: Math.max(0, Math.min(tileCount - 1, Number(event.target.value))) } : entry) }, "Edit animated tile frame")} /><input aria-label={"Animation duration " + (frameIndex + 1)} type="number" min="1" max="60000" value={frame.durationMs} onChange={(event) => updateTile({ animation: selectedTile.animation.map((entry, index) => index === frameIndex ? { ...entry, durationMs: Math.max(1, Math.min(60_000, Number(event.target.value))) } : entry) }, "Edit animated tile timing")} /><button title="Delete animation frame" onClick={() => updateTile({ animation: selectedTile.animation.filter((_, index) => index !== frameIndex) }, "Delete animated tile frame")}><Trash2 size={11} /></button></div>)}
+        <div className="section-heading"><span>Custom properties</span></div>
+        <div className="tile-property-add"><input aria-label="Property name" placeholder="name" value={propertyName} onChange={(event) => setPropertyName(event.target.value)} /><input aria-label="Property value" placeholder="value" value={propertyValue} onChange={(event) => setPropertyValue(event.target.value)} /><button disabled={!propertyName.trim()} onClick={() => { const parsed = propertyValue === "true" ? true : propertyValue === "false" ? false : propertyValue.trim() !== "" && Number.isFinite(Number(propertyValue)) ? Number(propertyValue) : propertyValue; updateTile({ properties: { ...selectedTile.properties, [propertyName.trim()]: parsed } }, "Set tile property"); setPropertyName(""); setPropertyValue(""); }}>Add</button></div>
+        <div className="tile-property-list">{Object.entries(selectedTile.properties).map(([key, value]) => <span key={key}><strong>{key}</strong> = {String(value)}<button title="Delete property" onClick={() => { const properties = { ...selectedTile.properties }; delete properties[key]; updateTile({ properties }, "Delete tile property"); }}>×</button></span>)}</div>
       </div>
       <div className="section-heading">
         <span>Wang terrain</span>
         <small>{tileset.wangSets.length}</small>
       </div>
       {tileset.wangSets.map((set) => (
-        <div className="terrain-row" key={set.id}>
+        <button className={"terrain-row " + (activeWangSet?.id === set.id ? "is-active" : "")} key={set.id} onClick={() => setSelectedWangSetId(set.id)}>
           <span
             className="terrain-chip"
             style={
@@ -3111,12 +3651,24 @@ function TilesetPanel({
               {set.type} · {set.tiles.length} mapped tiles
             </small>
           </span>
-        </div>
+        </button>
       ))}
       <div className="tileset-actions">
         <button onClick={addTerrain}>+ Terrain</button>
-        <button onClick={addCollision}>+ Tile 1 collision</button>
+        <button disabled={!activeWangSet} onClick={addWangColor}>+ Color</button>
+        <button disabled={!activeWangSet} onClick={() => { if (!activeWangSet) return; replace(deleteWangSet(tileset, activeWangSet.id), "Delete Wang terrain"); setSelectedWangSetId(undefined); }}>Delete terrain</button>
       </div>
+      {activeWangSet && <div className="wang-editor">
+        <div className="two-fields"><label className="field"><span>Set name</span><input key={activeWangSet.id + activeWangSet.name} defaultValue={activeWangSet.name} onBlur={(event) => { const name = event.target.value.trim(); if (name && name !== activeWangSet.name) updateWangSet({ ...activeWangSet, name }, "Rename Wang set"); }} /></label><label className="field"><span>Mode</span><select value={activeWangSet.type} onChange={(event) => updateWangSet({ ...activeWangSet, type: event.target.value as WangSet["type"] }, "Change Wang set mode")}><option value="edge">Edge</option><option value="corner">Corner</option><option value="mixed">Mixed</option></select></label></div>
+        <div className="wang-color-list">{activeWangSet.colors.map((color, colorIndex) => <div className="wang-color-row" key={color.id}><input aria-label={"Wang color " + color.id} type="color" value={color.color.slice(0, 7)} onChange={(event) => updateWangSet({ ...activeWangSet, colors: activeWangSet.colors.map((entry, index) => index === colorIndex ? { ...entry, color: event.target.value } : entry) }, "Change Wang color")} /><input aria-label={"Wang color name " + color.id} value={color.name} onChange={(event) => updateWangSet({ ...activeWangSet, colors: activeWangSet.colors.map((entry, index) => index === colorIndex ? { ...entry, name: event.target.value } : entry) }, "Rename Wang color")} /><input aria-label={"Wang color probability " + color.id} type="number" min="0" step="0.05" value={color.probability} onChange={(event) => updateWangSet({ ...activeWangSet, colors: activeWangSet.colors.map((entry, index) => index === colorIndex ? { ...entry, probability: Math.max(0, Number(event.target.value) || 0) } : entry) }, "Change Wang probability")} /><button title="Delete Wang color" onClick={() => replace(deleteWangColor(tileset, activeWangSet.id, color.id), "Delete Wang color")}><Trash2 size={10} /></button></div>)}</div>
+        <div className="section-heading"><span>Tile {selectedTileId} Wang slots</span><small>edge / corner clockwise</small></div>
+        <div className="wang-slot-grid">{["Top edge", "Top-right corner", "Right edge", "Bottom-right corner", "Bottom edge", "Bottom-left corner", "Left edge", "Top-left corner"].map((label, slot) => <label key={label}><span>{label}</span><select value={activeWangSet.tiles.find((tile) => tile.tileId === selectedTileId)?.wangId[slot] ?? 0} onChange={(event) => assignWangSlot(slot, Number(event.target.value))}><option value={0}>None</option>{activeWangSet.colors.map((color) => <option key={color.id} value={color.id}>{color.name}</option>)}</select></label>)}</div>
+      </div>}
+      <div className="section-heading"><span>Tile {selectedTileId} collisions</span><small>{selectedTile.collisions.length}</small></div>
+      <div className="tileset-actions"><select aria-label="Collision shape type" value={collisionType} onChange={(event) => setCollisionType(event.target.value as typeof collisionType)}><option value="rectangle">Rectangle</option><option value="ellipse">Ellipse</option><option value="polygon">Polygon</option><option value="polyline">Polyline</option></select><button onClick={addCollision}>+ Shape</button></div>
+      <CollisionShapeEditor documentId={document.id} tilesetId={tileset.id} sprite={sourceSprite?.type === "sprite" ? sourceSprite : undefined} palette={document.palette} sourceX={selectedTile.sourceX} sourceY={selectedTile.sourceY} width={tileset.tileWidth} height={tileset.tileHeight} shapes={selectedTile.collisions} selectedId={selectedCollisionId} onSelect={setSelectedCollisionId} onCommit={(shape, label) => updateTile({ collisions: selectedTile.collisions.map((entry) => entry.id === shape.id ? shape : entry) }, label)} />
+      <div className="collision-list">{selectedTile.collisions.map((shape, shapeIndex) => <div className={"collision-row " + (selectedCollisionId === shape.id ? "is-selected" : "")} key={shape.id} onClick={() => setSelectedCollisionId(shape.id)}><select aria-label={"Collision type " + (shapeIndex + 1)} value={shape.type} onChange={(event) => updateTile({ collisions: selectedTile.collisions.map((entry, index) => index === shapeIndex ? { ...entry, type: event.target.value as typeof shape.type } : entry) }, "Change collision type")}><option value="rectangle">Rectangle</option><option value="ellipse">Ellipse</option><option value="polygon">Polygon</option><option value="polyline">Polyline</option></select><input aria-label={"Collision x " + (shapeIndex + 1)} type="number" value={shape.x} onChange={(event) => updateTile({ collisions: selectedTile.collisions.map((entry, index) => index === shapeIndex ? { ...entry, x: Number(event.target.value) } : entry) }, "Move collision")} /><input aria-label={"Collision y " + (shapeIndex + 1)} type="number" value={shape.y} onChange={(event) => updateTile({ collisions: selectedTile.collisions.map((entry, index) => index === shapeIndex ? { ...entry, y: Number(event.target.value) } : entry) }, "Move collision")} /><input aria-label={"Collision width " + (shapeIndex + 1)} type="number" value={shape.width ?? tileset.tileWidth} onChange={(event) => updateTile({ collisions: selectedTile.collisions.map((entry, index) => index === shapeIndex ? { ...entry, width: Math.max(1, Number(event.target.value)) } : entry) }, "Resize collision")} /><input aria-label={"Collision height " + (shapeIndex + 1)} type="number" value={shape.height ?? tileset.tileHeight} onChange={(event) => updateTile({ collisions: selectedTile.collisions.map((entry, index) => index === shapeIndex ? { ...entry, height: Math.max(1, Number(event.target.value)) } : entry) }, "Resize collision")} /><button title="Delete collision" onClick={() => { updateTile({ collisions: selectedTile.collisions.filter((_, index) => index !== shapeIndex) }, "Delete collision"); setSelectedCollisionId(undefined); }}><Trash2 size={11} /></button></div>)}</div>
+      {selectedCollision && <div className="collision-property-editor"><div className="section-heading"><span>Collision properties</span><small>{Object.keys(selectedCollision.properties).length}</small></div><div className="tile-property-add"><input aria-label="Collision property name" placeholder="name" value={collisionPropertyName} onChange={(event) => setCollisionPropertyName(event.target.value)} /><input aria-label="Collision property value" placeholder="value" value={collisionPropertyValue} onChange={(event) => setCollisionPropertyValue(event.target.value)} /><button disabled={!collisionPropertyName.trim()} onClick={() => { const parsed = collisionPropertyValue === "true" ? true : collisionPropertyValue === "false" ? false : collisionPropertyValue.trim() !== "" && Number.isFinite(Number(collisionPropertyValue)) ? Number(collisionPropertyValue) : collisionPropertyValue; updateTile({ collisions: selectedTile.collisions.map((entry) => entry.id === selectedCollision.id ? { ...entry, properties: { ...entry.properties, [collisionPropertyName.trim()]: parsed } } : entry) }, "Set collision property"); setCollisionPropertyName(""); setCollisionPropertyValue(""); }}>Add</button></div><div className="tile-property-list">{Object.entries(selectedCollision.properties).map(([key, value]) => <span key={key}><strong>{key}</strong> = {String(value)}<button title="Delete collision property" onClick={() => { const properties = { ...selectedCollision.properties }; delete properties[key]; updateTile({ collisions: selectedTile.collisions.map((entry) => entry.id === selectedCollision.id ? { ...entry, properties } : entry) }, "Delete collision property"); }}>×</button></span>)}</div></div>}
       <div className="section-heading">
         <span>Transformations</span>
       </div>
@@ -3162,7 +3714,13 @@ function PalettePanel({ document }: { document: PixelDocument }) {
   const setIndex = useEditorStore((state) => state.setPixelIndex);
   const setColor = useEditorStore((state) => state.setColor);
   const apply = useEditorStore((state) => state.apply);
+  const notify = useEditorStore((state) => state.notify);
+  const [cycleDraft, setCycleDraft] = useState<PaletteCycle>();
+  const [paletteImportMode, setPaletteImportMode] = useState<PaletteImportMode>("replace-slots");
+  const [replacementIndex, setReplacementIndex] = useState(0);
   const selected = document.palette[index] ?? document.palette[0];
+  const selectedUsage = useMemo(() => countPaletteIndexUsage(document, index, 10_000), [document, index]);
+  const customOverride = index > 0 && Object.values(document.pixelAssets).some((asset) => asset.type === "sprite" && Object.values(asset.paletteOverrides).some((override) => override[index] && JSON.stringify(override[index]) !== JSON.stringify(document.palette[index])));
   const updateSelectedColor = async (color: string) => {
     const palette = structuredClone(document.palette);
     palette[index] = {
@@ -3174,11 +3732,67 @@ function PalettePanel({ document }: { document: PixelDocument }) {
     ]);
     setColor(color);
   };
+  const openNewCycle = () => {
+    const fromIndex = Math.max(1, Math.min(index || 1, Math.max(1, document.palette.length - 2)));
+    setCycleDraft({ id: createId("cycle"), name: "Cycle " + (document.paletteCycles.length + 1), fromIndex, toIndex: Math.min(document.palette.length - 1, fromIndex + 1), direction: "forward", stepMs: 180 });
+  };
+  const saveCycle = async () => {
+    if (!cycleDraft) return;
+    const exists = document.paletteCycles.some((cycle) => cycle.id === cycleDraft.id);
+    const cycles = exists ? document.paletteCycles.map((cycle) => cycle.id === cycleDraft.id ? { ...cycleDraft, name: cycleDraft.name.trim() } : cycle) : [...document.paletteCycles, { ...cycleDraft, name: cycleDraft.name.trim() }];
+    if (await apply(exists ? "Edit palette cycle" : "Add palette cycle", [{ kind: "pixel.palette-cycles.replace", cycles }])) setCycleDraft(undefined);
+  };
+  const movePaletteEntry = async (direction: -1 | 1) => {
+    const target = index + direction; if (index <= 0 || target <= 0 || target >= document.palette.length) return;
+    const entryIds = document.palette.map((entry) => entry.id); [entryIds[index], entryIds[target]] = [entryIds[target], entryIds[index]];
+    if (await apply("Reorder palette color", [{ kind: "pixel.palette.reorder", entryIds, expectedRevision: document.revision }])) setIndex(target);
+  };
+  const deletePaletteEntry = async () => {
+    if (index <= 0 || selectedUsage || customOverride) return;
+    const entryIds = document.palette.map((entry) => entry.id); const [removedId] = entryIds.splice(index, 1); entryIds.push(removedId);
+    const reordered = entryIds.map((id) => document.palette.find((entry) => entry.id === id)!); const oldToNew = new Map(document.palette.map((entry, oldIndex) => [oldIndex, entryIds.indexOf(entry.id)]));
+    const cycles = document.paletteCycles.flatMap((cycle) => { const members = Array.from({ length: cycle.toIndex - cycle.fromIndex + 1 }, (_, offset) => cycle.fromIndex + offset).filter((member) => member !== index).map((member) => oldToNew.get(member)!).filter((member) => member < reordered.length - 1); return members.length ? [{ ...cycle, fromIndex: Math.min(...members), toIndex: Math.max(...members) }] : []; });
+    if (await apply("Delete unused palette color", [{ kind: "pixel.palette.reorder", entryIds, expectedRevision: document.revision }, { kind: "pixel.palette-cycles.replace", cycles }, { kind: "pixel.palette.replace", palette: reordered.slice(0, -1) }])) setIndex(Math.min(index, reordered.length - 2));
+  };
+  const replaceAndDeletePaletteEntry = async () => {
+    if (index <= 0) return;
+    try {
+      const target = replacementIndex === index || replacementIndex >= document.palette.length ? 0 : replacementIndex;
+      if (await apply("Replace and delete palette color", replaceAndDeletePaletteIndexOperations(document, index, target))) {
+        const nextTarget = target > index ? target - 1 : target;
+        setIndex(Math.min(nextTarget, document.palette.length - 2));
+        setReplacementIndex(0);
+      }
+    } catch (error) { notify(error instanceof Error ? error.message : String(error), "error"); }
+  };
+  const importPalette = async () => {
+    const result = await window.aidraw.importPalette(document.id, paletteImportMode);
+    if (!result.imported) return;
+    const summary = paletteImportMode === "append-unique"
+      ? `Added ${result.added} color${result.added === 1 ? "" : "s"}${result.skipped ? `; skipped ${result.skipped}` : ""}.`
+      : `Updated ${result.updated} palette slot${result.updated === 1 ? "" : "s"}${result.added ? ` and added ${result.added}` : ""}.`;
+    notify(`${summary}${result.warnings.length ? ` ${result.warnings.join(" ")}` : ""}`, result.warnings.length ? "warning" : "success");
+  };
+  const exportPalette = async (format: "json" | "gpl") => {
+    const result = await window.aidraw.exportPalette(document.id, format);
+    if (result.exported) notify(`Exported palette to ${result.filePath}.${result.warnings.length ? ` ${result.warnings.join(" ")}` : ""}`, result.warnings.length ? "warning" : "success");
+  };
+  const cycleError = cycleDraft && (!cycleDraft.name.trim() ? "Enter a cycle name." : cycleDraft.fromIndex < 1 || cycleDraft.toIndex < cycleDraft.fromIndex || cycleDraft.toIndex >= document.palette.length ? "Choose an ordered range inside the non-transparent palette." : cycleDraft.stepMs < 16 || cycleDraft.stepMs > 60_000 ? "Use a step time from 16 to 60,000 ms." : undefined);
   return (
+    <>
     <section className="palette-section">
       <div className="section-heading">
         <span>Indexed palette</span>
         <small>{document.palette.length}/256</small>
+      </div>
+      <div className="palette-file-actions">
+        <select aria-label="Palette import behavior" value={paletteImportMode} onChange={(event) => setPaletteImportMode(event.target.value as PaletteImportMode)} title="How imported palette colors affect existing indexed artwork">
+          <option value="replace-slots">Replace colors by index</option>
+          <option value="append-unique">Append unique colors</option>
+        </select>
+        <button type="button" onClick={() => void importPalette()} title="Import AIDraw JSON or GIMP GPL palette"><Upload size={11} /> Import</button>
+        <button type="button" onClick={() => void exportPalette("json")} title="Export portable AIDraw palette JSON"><Download size={11} /> JSON</button>
+        <button type="button" onClick={() => void exportPalette("gpl")} title="Export GIMP palette (transparent index omitted)"><Download size={11} /> GPL</button>
       </div>
       <div className="palette-grid">
         {document.palette.map((entry, entryIndex) => (
@@ -3221,6 +3835,8 @@ function PalettePanel({ document }: { document: PixelDocument }) {
         >
           ›
         </button>
+        <button title="Move selected color one slot earlier" disabled={index <= 1} onClick={() => void movePaletteEntry(-1)}><ChevronLeft size={11} /></button>
+        <button title="Move selected color one slot later" disabled={index <= 0 || index >= document.palette.length - 1} onClick={() => void movePaletteEntry(1)}><ChevronRight size={11} /></button>
         <button
           title="Add palette color"
           disabled={document.palette.length >= 256}
@@ -3242,6 +3858,12 @@ function PalettePanel({ document }: { document: PixelDocument }) {
         >
           +
         </button>
+        <button title={index === 0 ? "Transparent index 0 cannot be deleted" : selectedUsage ? `Replace this color first; it is used ${selectedUsage}${selectedUsage >= 10_000 ? "+" : ""} times` : customOverride ? "Clear this color's frame-specific overrides before deleting it" : "Delete unused palette color"} disabled={index === 0 || Boolean(selectedUsage) || customOverride || document.palette.length <= 1} onClick={() => void deletePaletteEntry()}><Trash2 size={11} /></button>
+      </div>
+      {index > 0 && document.palette.length > 1 && <div className="palette-remap-row"><span>Replace index {index} everywhere with</span><select aria-label="Replacement palette color" value={replacementIndex === index ? 0 : replacementIndex} onChange={(event) => setReplacementIndex(Number(event.target.value))}>{document.palette.map((entry, entryIndex) => entryIndex === index ? null : <option key={entry.id} value={entryIndex}>{entryIndex}: {entry.name}</option>)}</select><button onClick={() => void replaceAndDeletePaletteEntry()}><Trash2 size={11} /> Replace & delete</button></div>}
+      <div className="palette-cycle-editor">
+        <div className="section-heading"><span>Named color cycles</span><button disabled={document.palette.length < 3} onClick={openNewCycle}>+ Cycle</button></div>
+        {document.paletteCycles.length === 0 ? <small>No ranges yet. Cycling preview currently rotates every non-transparent color.</small> : <div className="palette-cycle-list">{document.paletteCycles.map((cycle) => <div className="palette-cycle-row" key={cycle.id}><button className="palette-cycle-main" onClick={() => setCycleDraft(structuredClone(cycle))}><Repeat2 size={12} /><span><strong>{cycle.name}</strong><small>{cycle.fromIndex}–{cycle.toIndex} · {cycle.direction} · {cycle.stepMs}ms</small></span></button><button title="Delete palette cycle" onClick={() => void apply("Delete palette cycle", [{ kind: "pixel.palette-cycles.replace", cycles: document.paletteCycles.filter((entry) => entry.id !== cycle.id) }])}><Trash2 size={12} /></button></div>)}</div>}
       </div>
       <div className="conversion-editor">
         <div className="section-heading">
@@ -3298,33 +3920,48 @@ function PalettePanel({ document }: { document: PixelDocument }) {
         </small>
       </div>
     </section>
+    {cycleDraft && <ModalShell title={document.paletteCycles.some((cycle) => cycle.id === cycleDraft.id) ? "Edit palette cycle" : "Add palette cycle"} description="Cycle an exact indexed range without changing stored pixels." onClose={() => setCycleDraft(undefined)} className="palette-cycle-dialog">
+      <form onSubmit={(event) => { event.preventDefault(); if (!cycleError) void saveCycle(); }}>
+        <div className="entry-dialog-body palette-cycle-grid">
+          <label className="dialog-field cycle-name-field"><span>Name</span><input autoFocus maxLength={120} value={cycleDraft.name} onChange={(event) => setCycleDraft({ ...cycleDraft, name: event.target.value })} /></label>
+          <label className="dialog-field"><span>First index</span><input type="number" min={1} max={document.palette.length - 1} value={cycleDraft.fromIndex} onChange={(event) => setCycleDraft({ ...cycleDraft, fromIndex: Number(event.target.value) })} /></label>
+          <label className="dialog-field"><span>Last index</span><input type="number" min={1} max={document.palette.length - 1} value={cycleDraft.toIndex} onChange={(event) => setCycleDraft({ ...cycleDraft, toIndex: Number(event.target.value) })} /></label>
+          <label className="dialog-field"><span>Direction</span><select value={cycleDraft.direction} onChange={(event) => setCycleDraft({ ...cycleDraft, direction: event.target.value as PaletteCycle["direction"] })}><option value="forward">Forward</option><option value="reverse">Reverse</option></select></label>
+          <label className="dialog-field"><span>Step (ms)</span><input type="number" min={16} max={60_000} value={cycleDraft.stepMs} onChange={(event) => setCycleDraft({ ...cycleDraft, stepMs: Number(event.target.value) })} /></label>
+          <div className="entry-dialog-preview cycle-range-preview"><strong>Preview contract</strong><span>{cycleError ?? (cycleDraft.toIndex - cycleDraft.fromIndex + 1) + " colors · " + (1000 / cycleDraft.stepMs).toFixed(2) + " steps/second"}</span></div>
+          {cycleError && <p className="entry-dialog-error" role="alert">{cycleError}</p>}
+        </div>
+        <footer className="modal-footer"><button type="button" className="secondary-modal-button" onClick={() => setCycleDraft(undefined)}>Cancel</button><button type="submit" className="primary-modal-button" disabled={Boolean(cycleError)}>Save cycle</button></footer>
+      </form>
+    </ModalShell>}
+    </>
   );
 }
 
-type CodexSetupResult = {
-  status: "configured" | "cancelled" | "manual";
-  message: string;
-};
-
-function CodexSetupResultDialog({
+function AgentSetupResultDialog({
   result,
   onClose,
 }: {
-  result: CodexSetupResult;
+  result: AgentClientSetupResult;
   onClose: () => void;
 }) {
   const configured = result.status === "configured";
+  const hasManualSettings = Boolean(result.setupSnippet);
   return (
     <ModalShell
       title={
         configured
-          ? "Restart Codex to finish"
-          : "Codex connection needs attention"
+          ? `Finish ${result.clientName} setup`
+          : hasManualSettings
+            ? `Connect ${result.clientName}`
+            : `${result.clientName} connection needs attention`
       }
       description={
         configured
-          ? "AIDraw is configured. One required step remains before new tasks can use it."
-          : "AIDraw could not complete the automatic connection."
+          ? "AIDraw is configured. Complete the client-side step before starting agent work."
+          : hasManualSettings
+            ? "Use these generic Streamable HTTP settings in the client’s MCP configuration."
+            : "AIDraw could not complete the automatic connection."
       }
       onClose={onClose}
       className="codex-setup-dialog"
@@ -3339,18 +3976,24 @@ function CodexSetupResultDialog({
           <strong>
             {configured
               ? "Connection saved successfully"
-              : "Automatic setup did not finish"}
+              : hasManualSettings
+                ? "Authenticated connection settings"
+                : "Automatic setup did not finish"}
           </strong>
           <p>{result.message}</p>
         </div>
-        {configured && (
+        {result.setupSnippet && (
+          <div className="agent-setup-snippet">
+            <span>Private MCP configuration</span>
+            <code>{result.setupSnippet}</code>
+            <button type="button" onClick={() => void navigator.clipboard.writeText(result.setupSnippet!)}>Copy configuration</button>
+          </div>
+        )}
+        {configured && result.restartRequired && (
           <div className="restart-required">
             <span>Required next step</span>
-            <strong>Fully quit and restart Codex</strong>
-            <p>
-              After restarting, every new local Codex task can discover AIDraw’s
-              MCP tools. The AIDraw engine may continue running headlessly.
-            </p>
+            <strong>{result.restartInstruction}</strong>
+            <p>After reconnecting, new local agent sessions can discover AIDraw’s MCP tools. The AIDraw engine may continue running headlessly.</p>
           </div>
         )}
       </div>
@@ -3361,29 +4004,130 @@ function CodexSetupResultDialog({
           autoFocus
           onClick={onClose}
         >
-          {configured ? "I’ll restart Codex" : "Close"}
+          {configured ? "Got it" : "Close"}
         </button>
       </footer>
     </ModalShell>
   );
 }
 
+function CheckpointComparisonDialog({
+  comparison,
+  onClose,
+  onRestore,
+  onMerge,
+}: {
+  comparison: CheckpointComparisonResult;
+  onClose: () => void;
+  onRestore: () => Promise<void>;
+  onMerge: (sourceIds: string[]) => Promise<void>;
+}) {
+  const [mode, setMode] = useState<"side-by-side" | "overlay">("side-by-side");
+  const [opacity, setOpacity] = useState(50);
+  const [restoring, setRestoring] = useState(false);
+  const [merging, setMerging] = useState(false);
+  const [selectedCandidates, setSelectedCandidates] = useState<string[]>([]);
+  return (
+    <ModalShell
+      title={`Compare · ${comparison.checkpoint.name}`}
+      description={`Saved at revision ${comparison.saved.revision}; current revision ${comparison.current.revision}. Both views are rendered from editable canonical state.`}
+      className="checkpoint-comparison-dialog"
+      onClose={onClose}
+    >
+      <div className="checkpoint-compare-toolbar">
+        <button className={mode === "side-by-side" ? "is-active" : ""} onClick={() => setMode("side-by-side")}>Side by side</button>
+        <button className={mode === "overlay" ? "is-active" : ""} onClick={() => setMode("overlay")}>Overlay</button>
+        {mode === "overlay" && (
+          <label>
+            <span>Current {opacity}%</span>
+            <input type="range" min="0" max="100" value={opacity} onChange={(event) => setOpacity(Number(event.target.value))} />
+          </label>
+        )}
+      </div>
+      <div className={`checkpoint-compare-stage is-${mode}`}>
+        <figure className="checkpoint-saved">
+          <figcaption>Checkpoint</figcaption>
+          <img src={comparison.saved.dataUrl} alt={`${comparison.checkpoint.name} checkpoint`} />
+        </figure>
+        <figure className="checkpoint-current" style={mode === "overlay" ? { opacity: opacity / 100 } : undefined}>
+          <figcaption>Current</figcaption>
+          <img src={comparison.current.dataUrl} alt="Current document" />
+        </figure>
+      </div>
+      <div className="checkpoint-merge-panel">
+        <span><strong>Selective merge</strong><small>Duplicate chosen top-level layers or project assets into the current branch without replacing it.</small></span>
+        <div className="checkpoint-merge-candidates">{comparison.candidates.map((candidate) => <label key={candidate.id}><input type="checkbox" checked={selectedCandidates.includes(candidate.id)} onChange={(event) => setSelectedCandidates((current) => event.target.checked ? [...current, candidate.id] : current.filter((id) => id !== candidate.id))} /><span><strong>{candidate.name}</strong><small>{candidate.detail}</small></span></label>)}</div>
+      </div>
+      <footer className="modal-footer checkpoint-compare-footer">
+        <span>Reject leaves the current branch untouched.</span>
+        <button onClick={onClose}>Reject</button>
+        <button disabled={restoring || merging || selectedCandidates.length === 0} onClick={async () => { setMerging(true); try { await onMerge(selectedCandidates); } finally { setMerging(false); } }}>{merging ? "Merging…" : `Merge selected${selectedCandidates.length ? ` (${selectedCandidates.length})` : ""}`}</button>
+        <button
+          className="primary"
+          disabled={restoring}
+          onClick={async () => {
+            setRestoring(true);
+            try { await onRestore(); } finally { setRestoring(false); }
+          }}
+        >
+          {restoring ? "Restoring…" : "Accept checkpoint"}
+        </button>
+      </footer>
+    </ModalShell>
+  );
+}
+
+function InterchangeReportDialog({ report, onClose }: { report: InterchangeReport; onClose: () => void }) {
+  const notify = useEditorStore((state) => state.notify);
+  const pathRows = [
+    ...report.sourcePaths.map((path) => ({ label: "Source", path })),
+    ...report.destinationPaths.map((path) => ({ label: "Output", path })),
+  ];
+  return <ModalShell title={`${report.kind === "import" ? "Import" : "Export"} report · ${report.format.toUpperCase()}`} description={`${report.status} by ${actorIdentityLabel(report.actor)} at ${new Date(report.createdAt).toLocaleString()}. This report remains available after restart.`} className="interchange-report-dialog" onClose={onClose}>
+    <div className="interchange-report-body">
+      <dl className="interchange-report-summary">
+        <div><dt>Documents</dt><dd>{report.documentNames.join(", ") || "No document created"}</dd></div>
+        <div><dt>Warnings</dt><dd>{report.warnings.length}</dd></div>
+        <div><dt>Raster fallbacks</dt><dd>{report.rasterized.length}</dd></div>
+      </dl>
+      {pathRows.length > 0 && <section><h4>Files</h4>{pathRows.map((entry, index) => <div className="interchange-path" key={`${entry.path}-${index}`}><span>{entry.label}</span><code>{entry.path}</code></div>)}</section>}
+      {report.error && <section className="interchange-error"><h4>Failure</h4><p>{report.error}</p></section>}
+      {report.warnings.length > 0 && <section><h4>Warnings and conversions</h4><ul>{report.warnings.map((warning, index) => <li key={`${warning}-${index}`}>{warning}</li>)}</ul></section>}
+      {report.rasterized.length > 0 && <section><h4>Rasterized or flattened content</h4><ul>{report.rasterized.map((entry, index) => <li key={`${entry}-${index}`}>{entry}</li>)}</ul></section>}
+      {!report.error && report.warnings.length === 0 && report.rasterized.length === 0 && <div className="interchange-clean">No fidelity warnings were reported by this adapter.</div>}
+    </div>
+    <footer className="modal-footer"><button onClick={onClose}>Close</button><button className="primary" onClick={async () => { const result = await window.aidraw.exportInterchangeReport(report.id); if (result.exported) notify(`Saved report to ${result.filePath}.`, "success"); }}>Export report JSON</button></footer>
+  </ModalShell>;
+}
+
 function ActivityPanel() {
   const snapshot = useEditorStore((state) => state.snapshot);
   const notify = useEditorStore((state) => state.notify);
   const playbacks = useEditorStore((state) => state.playbacks);
+  const reportPulse = useEditorStore((state) => state.reportPulse);
   const document = snapshot?.activeDocument;
   const sessions = snapshot?.mcp.sessions ?? [];
   const [credentials, setCredentials] = useState<{
     url?: string;
     token: string;
   }>();
-  const [setupResult, setSetupResult] = useState<CodexSetupResult>();
+  const [selectedClient, setSelectedClient] = useState<AgentClientId>("codex");
+  const [setupResult, setSetupResult] = useState<AgentClientSetupResult>();
   const [configuring, setConfiguring] = useState(false);
   const [engine, setEngine] = useState<EngineStatus>();
+  const [checkpointName, setCheckpointName] = useState("");
+  const [checkpointComparison, setCheckpointComparison] = useState<CheckpointComparisonResult>();
+  const [interchangeReports, setInterchangeReports] = useState<InterchangeReport[]>([]);
+  const [selectedReport, setSelectedReport] = useState<InterchangeReport>();
   useEffect(() => {
     void window.aidraw.getEngineStatus().then(setEngine);
   }, []);
+  useEffect(() => {
+    let active = true;
+    if (!document?.id) { setInterchangeReports([]); return () => { active = false; }; }
+    void window.aidraw.listInterchangeReports(document.id).then((reports) => { if (active) setInterchangeReports(reports); });
+    return () => { active = false; };
+  }, [document?.id, reportPulse]);
   if (!document) return null;
   const latestAgentActivity = new Map<string, string>();
   for (const entry of [...document.activity].reverse()) {
@@ -3426,16 +4170,19 @@ function ActivityPanel() {
             )
           }
         >
-          {engine?.startsAtLogin ? "Starts with Windows" : "Start with Windows"}
+          {engine?.startsAtLogin ? "Starts at login" : "Start at login"}
         </button>
       </div>
       <div className="connection-actions">
+        <select aria-label="Agent client" value={selectedClient} onChange={(event) => setSelectedClient(event.target.value as AgentClientId)}>
+          {AGENT_CLIENTS.map((client) => <option key={client.id} value={client.id}>{client.name}</option>)}
+        </select>
         <button
           disabled={configuring}
           onClick={async () => {
             setConfiguring(true);
             try {
-              const result = await window.aidraw.configureCodex();
+              const result = await window.aidraw.configureAgentClient(selectedClient);
               if (result.status === "cancelled") notify(result.message, "info");
               else setSetupResult(result);
               setEngine(await window.aidraw.getEngineStatus());
@@ -3444,7 +4191,7 @@ function ActivityPanel() {
             }
           }}
         >
-          <Bot size={13} /> {configuring ? "Connecting…" : "Connect Codex"}
+          <Bot size={13} /> {configuring ? "Connecting…" : selectedClient === "generic" ? "Show settings" : "Connect"}
         </button>
         <button
           onClick={async () =>
@@ -3513,6 +4260,8 @@ function ActivityPanel() {
                 ))}
               </dl>
             )}
+            {(job.approval?.review?.previews?.length ?? 0) > 0 && <div className="approval-previews" aria-label="Generation source and mask previews">{job.approval!.review!.previews!.map((preview) => <figure key={`${preview.role}-${preview.assetId}`}><div className={preview.role === "mask" ? "is-mask" : undefined}><img src={preview.dataUrl} alt={`${preview.role === "mask" ? "Mask" : "Source"}: ${preview.name}`} /></div><figcaption><strong>{preview.role === "mask" ? "Mask" : "Source"} · {preview.name}</strong><small>{preview.width} × {preview.height}px · {preview.mimeType}</small></figcaption></figure>)}</div>}
+            {job.kind === "generation" && <div className="approval-trust-note generation-trust-note">This approval authorizes this exact provider request once. It does not trust future prompts, providers, source assets, or paid requests.</div>}
             <div className="approval-expiry">
               This request expires at{" "}
               {new Date(job.approval?.expiresAt ?? 0).toLocaleTimeString([], {
@@ -3583,11 +4332,77 @@ function ActivityPanel() {
           <span>
             <strong>{session.actor.name}</strong>
             <small>
+              {actorClientLabel(session.actor)
+                ? `${actorClientLabel(session.actor)} · `
+                : ""}
               {session.status} · {session.queueDepth} queued
             </small>
           </span>
         </div>
       ))}
+      <div className="checkpoint-panel">
+        <div className="section-heading">
+          <span>Checkpoints & variants</span>
+          <small>{snapshot?.checkpoints.length ?? 0}/32</small>
+        </div>
+        <form
+          className="checkpoint-create"
+          onSubmit={async (event) => {
+            event.preventDefault();
+            const name = checkpointName.trim();
+            if (!name) return;
+            try {
+              await window.aidraw.createCheckpoint(document.id, name);
+              setCheckpointName("");
+              notify(`Checkpoint “${name}” created.`, "success");
+            } catch (error) {
+              notify(error instanceof Error ? error.message : String(error), "error");
+            }
+          }}
+        >
+          <input aria-label="Checkpoint name" maxLength={80} placeholder="Name this branch point…" value={checkpointName} onChange={(event) => setCheckpointName(event.target.value)} />
+          <button disabled={!checkpointName.trim()}>Save state</button>
+        </form>
+        <div className="checkpoint-list">
+          {(snapshot?.checkpoints ?? []).map((checkpoint) => (
+            <div className="checkpoint-row" key={checkpoint.id}>
+              <span className="checkpoint-icon"><Repeat2 size={12} /></span>
+              <span className="checkpoint-copy">
+                <strong>{checkpoint.name}</strong>
+                <small>{checkpoint.kind === "automatic" ? "Safety branch" : actorIdentityLabel(checkpoint.createdBy)} · r{checkpoint.sourceRevision} · {new Date(checkpoint.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</small>
+              </span>
+              <span className="checkpoint-actions">
+                <button title="Compare checkpoint" onClick={async () => {
+                  try { setCheckpointComparison(await window.aidraw.compareCheckpoint(document.id, checkpoint.id)); }
+                  catch (error) { notify(error instanceof Error ? error.message : String(error), "error"); }
+                }}>Compare</button>
+                <button title="Restore checkpoint" onClick={async () => {
+                  const result = await window.aidraw.restoreCheckpoint(document.id, checkpoint.id);
+                  if (result.status === "committed") notify(`Restored “${checkpoint.name}”. The previous branch was saved automatically.`, "success");
+                  else notify(result.message ?? "Checkpoint restore failed.", result.status === "locked" ? "warning" : "error");
+                }}>Restore</button>
+                <button className="danger" title="Delete checkpoint" onClick={async () => {
+                  const result = await window.aidraw.deleteCheckpoint(document.id, checkpoint.id);
+                  if (!result.deleted) notify(result.message ?? "Checkpoint delete failed.", "warning");
+                  if (checkpointComparison?.checkpoint.id === checkpoint.id) setCheckpointComparison(undefined);
+                }}><Trash2 size={10} /></button>
+              </span>
+            </div>
+          ))}
+          {(snapshot?.checkpoints.length ?? 0) === 0 && <small className="checkpoint-empty">Save an editable branch point before trying a risky human or agent change.</small>}
+        </div>
+      </div>
+      <div className="interchange-reports-panel">
+        <div className="section-heading"><span>Import & export reports</span><small>{interchangeReports.length}</small></div>
+        <div className="interchange-report-list">
+          {interchangeReports.slice(0, 12).map((report) => <button className={`interchange-report-row is-${report.status}`} key={report.id} onClick={() => setSelectedReport(report)}>
+            <span className="interchange-report-icon">{report.kind === "import" ? <Upload size={12} /> : <Download size={12} />}</span>
+            <span><strong>{report.kind === "import" ? "Imported" : "Exported"} {report.format.toUpperCase()}</strong><small>{new Date(report.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} · {report.warnings.length + report.rasterized.length} note{report.warnings.length + report.rasterized.length === 1 ? "" : "s"}</small></span>
+            <em>{report.status}</em>
+          </button>)}
+          {interchangeReports.length === 0 && <small className="checkpoint-empty">Completed imports and exports will keep their fidelity reports here.</small>}
+        </div>
+      </div>
       <div className="section-heading">
         <span>Document activity</span>
         <small>{document.activity.length}</small>
@@ -3613,7 +4428,7 @@ function ActivityPanel() {
               <span className="activity-copy">
                 <strong>{entry.label}</strong>
                 <small>
-                  {entry.actor.name} ·{" "}
+                  {actorIdentityLabel(entry.actor)} ·{" "}
                   {new Date(entry.timestamp).toLocaleTimeString([], {
                     hour: "2-digit",
                     minute: "2-digit",
@@ -3687,13 +4502,66 @@ function ActivityPanel() {
         )}
       </div>
       {setupResult && (
-        <CodexSetupResultDialog
+        <AgentSetupResultDialog
           result={setupResult}
           onClose={() => setSetupResult(undefined)}
         />
       )}
+      {checkpointComparison && (
+        <CheckpointComparisonDialog
+          comparison={checkpointComparison}
+          onClose={() => setCheckpointComparison(undefined)}
+          onRestore={async () => {
+            const result = await window.aidraw.restoreCheckpoint(document.id, checkpointComparison.checkpoint.id);
+            if (result.status !== "committed") {
+              notify(result.message ?? "Checkpoint restore failed.", result.status === "locked" ? "warning" : "error");
+              return;
+            }
+            setCheckpointComparison(undefined);
+            notify(`Accepted “${checkpointComparison.checkpoint.name}”. The previous branch was saved automatically.`, "success");
+          }}
+          onMerge={async (sourceIds) => {
+            const result = await window.aidraw.mergeCheckpoint(document.id, checkpointComparison.checkpoint.id, sourceIds);
+            if (result.status !== "committed") { notify(result.message ?? "Checkpoint merge failed.", result.status === "locked" ? "warning" : "error"); return; }
+            setCheckpointComparison(undefined); notify(`Merged ${sourceIds.length} checkpoint selection${sourceIds.length === 1 ? "" : "s"} into the current branch.`, "success");
+          }}
+        />
+      )}
+      {selectedReport && <InterchangeReportDialog report={selectedReport} onClose={() => setSelectedReport(undefined)} />}
     </div>
   );
+}
+
+function GenerationComparisonDialog({
+  source,
+  output,
+  onClose,
+  onAccept,
+  onReject,
+}: {
+  source: GeneratedOutput;
+  output: GeneratedOutput;
+  onClose: () => void;
+  onAccept: () => Promise<void>;
+  onReject: () => Promise<void>;
+}) {
+  const [mode, setMode] = useState<"side-by-side" | "overlay">("side-by-side");
+  const [opacity, setOpacity] = useState(50);
+  const [zoom, setZoom] = useState(100);
+  const [busy, setBusy] = useState<"accept" | "reject">();
+  const sourceUrl = `data:${source.mimeType};base64,${source.data}`;
+  const outputUrl = `data:${output.mimeType};base64,${output.data}`;
+  return <ModalShell title="Compare generated result" description="The before image was frozen before the provider request. Zoom and scrolling are shared so alignment stays inspectable." className="generation-comparison-dialog" onClose={onClose}>
+    <div className="generation-compare-toolbar">
+      <span className="segmented-buttons"><button className={mode === "side-by-side" ? "is-active" : ""} onClick={() => setMode("side-by-side")}>Side by side</button><button className={mode === "overlay" ? "is-active" : ""} onClick={() => setMode("overlay")}>Overlay</button></span>
+      <label><span>Zoom {zoom}%</span><input type="range" min="25" max="400" step="25" value={zoom} onChange={(event) => setZoom(Number(event.target.value))} /></label>
+      {mode === "overlay" && <label><span>Result {opacity}%</span><input type="range" min="0" max="100" value={opacity} onChange={(event) => setOpacity(Number(event.target.value))} /></label>}
+    </div>
+    <div className={`generation-compare-stage is-${mode}`}>
+      {mode === "side-by-side" ? <div className="generation-compare-strip" style={{ width: `${zoom}%` }}><figure><figcaption>Before</figcaption><img src={sourceUrl} alt="Source before generation" /></figure><figure><figcaption>Result</figcaption><img src={outputUrl} alt="Generated result" /></figure></div> : <div className="generation-overlay-frame" style={{ width: `${zoom}%`, aspectRatio: `${output.width} / ${output.height}` }}><img src={sourceUrl} alt="Source before generation" /><img src={outputUrl} alt="Generated result overlay" style={{ opacity: opacity / 100 }} /></div>}
+    </div>
+    <footer className="modal-footer generation-compare-footer"><span>Reject removes this unaccepted result from the in-memory job.</span><button disabled={Boolean(busy)} onClick={async () => { setBusy("reject"); try { await onReject(); } finally { setBusy(undefined); } }}>{busy === "reject" ? "Rejecting…" : "Reject result"}</button><button className="primary" disabled={Boolean(busy)} onClick={async () => { setBusy("accept"); try { await onAccept(); } finally { setBusy(undefined); } }}>{busy === "accept" ? "Accepting…" : "Accept as new layer/cel"}</button></footer>
+  </ModalShell>;
 }
 
 function GenerationPanel({ document }: { document: AIDrawDocument }) {
@@ -3715,6 +4583,9 @@ function GenerationPanel({ document }: { document: AIDrawDocument }) {
     useState<Record<GenerationProvider, { configured: boolean }>>();
   const [comfyEndpoint, setComfyEndpoint] = useState("http://127.0.0.1:8188");
   const [comfyWorkflow, setComfyWorkflow] = useState<Record<string, unknown>>();
+  const [comfyMappings, setComfyMappings] = useState<Record<string, string>>({});
+  const [outpaint, setOutpaint] = useState({ left: 256, right: 256, up: 256, down: 256, creativity: 0.5 });
+  const [generationComparison, setGenerationComparison] = useState<{ jobId: string; source: GeneratedOutput; output: GeneratedOutput }>();
   const generationJobs = (snapshot?.jobs ?? []).filter(
     (job) =>
       job.kind === "generation" &&
@@ -3724,6 +4595,9 @@ function GenerationPanel({ document }: { document: AIDrawDocument }) {
   const imageAssets = Object.values(document.assets).filter(
     (asset) => asset.data && asset.mimeType.startsWith("image/"),
   );
+  const requestedSize = aspectIntent === "square" ? { width: 1024, height: 1024 } : aspectIntent === "portrait" ? { width: 1024, height: 1536 } : aspectIntent === "landscape" ? { width: 1536, height: 1024 } : document.kind === "illustration" ? { width: document.artboard.width, height: document.artboard.height } : { width: 1024, height: 1024 };
+  const generationDraft = { documentId: document.id, provider, mode, prompt, negativePrompt: negativePrompt || undefined, sourceAssetIds, maskAssetId, size: requestedSize, aspectIntent, resultCount, providerOptions: provider === "comfyui" ? { endpoint: comfyEndpoint, workflow: comfyWorkflow, mappings: Object.fromEntries(Object.entries(comfyMappings).filter(([, value]) => value.trim()).map(([key, value]) => [key, value.trim()])) } : provider === "stability" && mode === "outpaint" ? outpaint : {} } satisfies GenerationRequest;
+  const generationError = generationRequestError(document, generationDraft);
 
   useEffect(() => {
     void window.aidraw.getProviderStatus().then(setProviderStatus);
@@ -3731,35 +4605,7 @@ function GenerationPanel({ document }: { document: AIDrawDocument }) {
 
   const startGeneration = async () => {
     try {
-      const requestedSize =
-        aspectIntent === "square"
-          ? { width: 1024, height: 1024 }
-          : aspectIntent === "portrait"
-            ? { width: 1024, height: 1536 }
-            : aspectIntent === "landscape"
-              ? { width: 1536, height: 1024 }
-              : document.kind === "illustration"
-                ? {
-                    width: document.artboard.width,
-                    height: document.artboard.height,
-                  }
-                : { width: 1024, height: 1024 };
-      await window.aidraw.generationStart({
-        documentId: document.id,
-        provider,
-        mode,
-        prompt,
-        negativePrompt: negativePrompt || undefined,
-        sourceAssetIds,
-        maskAssetId,
-        size: requestedSize,
-        aspectIntent,
-        resultCount,
-        providerOptions:
-          provider === "comfyui"
-            ? { endpoint: comfyEndpoint, workflow: comfyWorkflow }
-            : {},
-      });
+      await window.aidraw.generationStart(generationDraft);
       notify("Generation started.", "success");
     } catch (error) {
       notify(error instanceof Error ? error.message : String(error), "error");
@@ -3781,9 +4627,7 @@ function GenerationPanel({ document }: { document: AIDrawDocument }) {
         <span>Provider</span>
         <select
           value={provider}
-          onChange={(event) =>
-            setProvider(event.target.value as GenerationProvider)
-          }
+          onChange={(event) => { const next = event.target.value as GenerationProvider; setProvider(next); if (!GENERATION_PROVIDER_MODES[next].includes(mode)) setMode(GENERATION_PROVIDER_MODES[next][0]); }}
         >
           <option value="openai">
             OpenAI · gpt-image-2 {providerStatus?.openai.configured ? "✓" : ""}
@@ -3798,13 +4642,9 @@ function GenerationPanel({ document }: { document: AIDrawDocument }) {
         <span>Mode</span>
         <select
           value={mode}
-          onChange={(event) => setMode(event.target.value as GenerationMode)}
+          onChange={(event) => { const next = event.target.value as GenerationMode; setMode(next); if (next === "create") setSourceAssetIds([]); if (next !== "inpaint") setMaskAssetId(undefined); }}
         >
-          <option value="create">Create new</option>
-          <option value="edit">Edit selection</option>
-          <option value="inpaint">Inpaint</option>
-          <option value="outpaint">Outpaint</option>
-          <option value="variation">Variation</option>
+          {GENERATION_PROVIDER_MODES[provider].map((entry) => <option key={entry} value={entry}>{entry === "create" ? "Create new" : entry === "edit" ? "Edit selection" : entry[0].toUpperCase() + entry.slice(1)}</option>)}
         </select>
       </label>
       <label className="field">
@@ -3820,7 +4660,7 @@ function GenerationPanel({ document }: { document: AIDrawDocument }) {
           }
         />
       </label>
-      {provider !== "openai" && (
+      {provider !== "openai" && !(provider === "stability" && mode === "outpaint") && (
         <label className="field">
           <span>Negative prompt</span>
           <textarea
@@ -3913,6 +4753,16 @@ function GenerationPanel({ document }: { document: AIDrawDocument }) {
           )}
         </div>
       )}
+      {provider === "stability" && mode === "outpaint" && (
+        <div className="generation-sources">
+          <div className="section-heading"><span>Directional expansion</span><small>0–2,000 px per side</small></div>
+          <div className="two-fields">
+            {(["left", "right", "up", "down"] as const).map((direction) => <label className="field" key={direction}><span>{direction[0].toUpperCase() + direction.slice(1)}</span><input type="number" min="0" max="2000" step="1" value={outpaint[direction]} onChange={(event) => setOutpaint((current) => ({ ...current, [direction]: Math.max(0, Math.min(2_000, Math.round(Number(event.target.value) || 0))) }))} /></label>)}
+          </div>
+          <label className="field"><span>Creativity {outpaint.creativity.toFixed(2)}</span><input type="range" min="0" max="1" step="0.05" value={outpaint.creativity} onChange={(event) => setOutpaint((current) => ({ ...current, creativity: Number(event.target.value) }))} /></label>
+          <small>Stability requires at least one non-zero side. The accepted result remains non-destructive.</small>
+        </div>
+      )}
       {provider === "comfyui" && (
         <>
           <label className="field">
@@ -3941,6 +4791,20 @@ function GenerationPanel({ document }: { document: AIDrawDocument }) {
                 : "Choose JSON exported with Save (API Format)"}
             </small>
           </label>
+          <details className="comfy-mapping-editor">
+            <summary>Workflow input mapping</summary>
+            <small>Optional. Leave blank to auto-detect common nodes; enter a node ID and input name for custom workflows.</small>
+            {([
+              ["Prompt", "promptNodeId", "promptNodeIdInput"],
+              ["Negative prompt", "negativePromptNodeId", "negativePromptNodeIdInput"],
+              ["Source image", "sourceNodeId", "sourceNodeIdInput"],
+              ["Mask image", "maskNodeId", "maskNodeIdInput"],
+              ["Seed", "seedNodeId", "seedNodeIdInput"],
+              ["Width", "widthNodeId", "widthNodeIdInput"],
+              ["Height", "heightNodeId", "heightNodeIdInput"],
+              ["Batch size", "batchSizeNodeId", "batchSizeNodeIdInput"],
+            ] as const).map(([label, nodeKey, inputKey]) => <div className="two-fields comfy-mapping-row" key={nodeKey}><label className="field"><span>{label} node ID</span><input value={comfyMappings[nodeKey] ?? ""} onChange={(event) => setComfyMappings((current) => ({ ...current, [nodeKey]: event.target.value }))} placeholder="Auto" /></label><label className="field"><span>Input name</span><input value={comfyMappings[inputKey] ?? ""} onChange={(event) => setComfyMappings((current) => ({ ...current, [inputKey]: event.target.value }))} placeholder="Auto" /></label></div>)}
+          </details>
         </>
       )}
       {provider !== "comfyui" && (
@@ -3969,7 +4833,7 @@ function GenerationPanel({ document }: { document: AIDrawDocument }) {
               setCredential("");
               setShowCredential(false);
               setProviderStatus(await window.aidraw.getProviderStatus());
-              notify("Credential encrypted with Windows DPAPI.", "success");
+              notify("Credential encrypted with operating-system protected storage.", "success");
             }}
           >
             Save encrypted
@@ -3990,16 +4854,12 @@ function GenerationPanel({ document }: { document: AIDrawDocument }) {
       )}
       <button
         className="primary-button"
-        disabled={
-          !prompt.trim() ||
-          (provider === "comfyui" && !comfyWorkflow) ||
-          (mode !== "create" && sourceAssetIds.length === 0) ||
-          (mode === "inpaint" && !maskAssetId)
-        }
+        disabled={Boolean(generationError)}
         onClick={() => void startGeneration()}
       >
         <Sparkles size={16} /> Generate
       </button>
+      {generationError && <p className="entry-dialog-error" role="alert">{generationError}</p>}
       <p className="fine-print">
         Human requests start immediately. Agent requests always wait for your
         in-app approval.
@@ -4044,8 +4904,9 @@ function GenerationPanel({ document }: { document: AIDrawDocument }) {
                         src={`data:${output.mimeType};base64,${output.data}`}
                         alt="Generated result"
                       />
-                      <button
-                        onClick={async () => {
+                      <div className="result-card-actions">
+                      {result.comparisonSource && <button onClick={() => setGenerationComparison({ jobId: job.id, source: result.comparisonSource!, output })}>Compare</button>}
+                      <button disabled={result.acceptedOutputId === output.id} onClick={async () => {
                           const accepted = await window.aidraw.generationAccept(
                             job.id,
                             output.id,
@@ -4059,8 +4920,10 @@ function GenerationPanel({ document }: { document: AIDrawDocument }) {
                           );
                         }}
                       >
-                        Accept as {document.kind === "pixel" ? "cel" : "layer"}
+                        {result.acceptedOutputId === output.id ? "Accepted" : `Accept as ${document.kind === "pixel" ? "cel" : "layer"}`}
                       </button>
+                      <button className="reject-generation-result" disabled={result.acceptedOutputId === output.id} onClick={async () => { const rejected = await window.aidraw.generationReject(job.id, output.id); if (!rejected.rejected) notify(rejected.message ?? "Could not reject result.", "warning"); }}>Reject</button>
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -4069,6 +4932,21 @@ function GenerationPanel({ document }: { document: AIDrawDocument }) {
           })}
         </div>
       )}
+      {generationComparison && <GenerationComparisonDialog
+        source={generationComparison.source}
+        output={generationComparison.output}
+        onClose={() => setGenerationComparison(undefined)}
+        onAccept={async () => {
+          const accepted = await window.aidraw.generationAccept(generationComparison.jobId, generationComparison.output.id);
+          notify(accepted.accepted ? "Result added to the document." : accepted.message ?? "Could not accept result.", accepted.accepted ? "success" : "error");
+          if (accepted.accepted) setGenerationComparison(undefined);
+        }}
+        onReject={async () => {
+          const rejected = await window.aidraw.generationReject(generationComparison.jobId, generationComparison.output.id);
+          if (rejected.rejected) setGenerationComparison(undefined);
+          else notify(rejected.message ?? "Could not reject result.", "warning");
+        }}
+      />}
     </div>
   );
 }
@@ -4159,28 +5037,25 @@ function AssetsPanel({ document }: { document: AIDrawDocument }) {
     void apply("Add tilemap", [{ kind: "pixel.asset.add", asset: map }]);
   };
   const packProject = () => {
-    const missing = document.linkedAssets.filter(
-      (link) =>
-        !link.cachedPreviewAssetId ||
-        !document.assets[link.cachedPreviewAssetId]?.data,
-    );
-    if (missing.length) {
+    try {
+      const linkedAssets = packPixelLinks(document);
+      void apply("Pack project links", [
+        { kind: "pixel.links.replace", linkedAssets, expectedRevision: document.revision },
+      ]);
+    } catch (error) {
       notify(
-        `${missing.length} linked asset${missing.length === 1 ? "" : "s"} cannot be packed because its cached source is unavailable.`,
+        error instanceof Error ? error.message : "Project links could not be packed.",
         "warning",
       );
-      return;
     }
-    void apply("Pack project links", [
-      {
-        kind: "pixel.links.replace",
-        linkedAssets: document.linkedAssets.map((link) => ({
-          ...link,
-          mode: "embedded" as const,
-          relativePath: undefined,
-        })),
-      },
-    ]);
+  };
+  const manageLink = async (linkId: string, action: PixelLinkAction) => {
+    try {
+      const result = await window.aidraw.managePixelLink(document.id, linkId, action);
+      if (result.updated) notify(result.message ?? "Project link updated.", "success");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Project link could not be updated.", "error");
+    }
   };
   return (
     <div className="assets-panel">
@@ -4237,6 +5112,35 @@ function AssetsPanel({ document }: { document: AIDrawDocument }) {
           External links retain relative paths, hashes, and cached source data.
           Pack Project embeds them for sharing.
         </small>
+        {document.linkedAssets.length === 0 ? (
+          <span className="project-link-empty">Imported Tiled sources will appear here.</span>
+        ) : (
+          <div className="project-link-list" aria-label="Linked project assets">
+            {document.linkedAssets.map((link) => {
+              const health = pixelLinkHealth(document, link);
+              const status = health === "ready"
+                ? link.mode === "embedded" ? "Embedded" : "Linked"
+                : health === "hash-mismatch" ? "Hash mismatch"
+                  : health === "missing-path" ? "Missing path" : "Missing cache";
+              return (
+                <div className="project-link-row" key={link.id}>
+                  <span className="project-link-summary" title={link.relativePath ?? link.name}>
+                    <strong>{link.name}</strong>
+                    <small className={health === "ready" ? "is-ready" : "is-error"}>{status}</small>
+                  </span>
+                  <span className="project-link-actions">
+                    {link.mode === "linked" ? (
+                      <button type="button" disabled={health !== "ready"} onClick={() => void manageLink(link.id, "embed")}>Embed</button>
+                    ) : (
+                      <button type="button" disabled={health !== "ready"} onClick={() => void manageLink(link.id, "extract")}>Extract</button>
+                    )}
+                    <button type="button" onClick={() => void manageLink(link.id, "relink")}>Relink</button>
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        )}
         <button
           disabled={
             !document.linkedAssets.some((link) => link.mode === "linked")
@@ -4252,8 +5156,18 @@ function AssetsPanel({ document }: { document: AIDrawDocument }) {
 
 function RightSidebar({ document }: { document: AIDrawDocument }) {
   const panel = useEditorStore((state) => state.rightPanel);
+  const visiblePanel = panel === "animation" && document.kind !== "illustration" ? "layers" : panel;
   const setPanel = useEditorStore((state) => state.setRightPanel);
   const apply = useEditorStore((state) => state.apply);
+  const panelOrder: Array<"layers" | "assets" | "animation" | "activity" | "generation"> = document.kind === "illustration" ? ["layers", "assets", "animation", "activity", "generation"] : ["layers", "assets", "activity", "generation"];
+  const handlePanelKeys = (event: React.KeyboardEvent<HTMLElement>) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const current = Math.max(0, panelOrder.indexOf(visiblePanel));
+    const next = event.key === "Home" ? 0 : event.key === "End" ? panelOrder.length - 1 : (current + (event.key === "ArrowRight" ? 1 : -1) + panelOrder.length) % panelOrder.length;
+    setPanel(panelOrder[next]);
+    requestAnimationFrame(() => globalThis.document.getElementById(`inspector-tab-${panelOrder[next]}`)?.focus());
+  };
   const addIllustrationLayer = (type: IllustrationLayer["type"]) =>
     void apply(`Add ${type} layer`, [
       {
@@ -4337,9 +5251,14 @@ function RightSidebar({ document }: { document: AIDrawDocument }) {
   };
   return (
     <aside className="right-sidebar">
-      <nav className="panel-tabs" aria-label="Inspector panels">
+      <nav className="panel-tabs" role="tablist" aria-label="Inspector panels" onKeyDown={handlePanelKeys}>
         <button
-          className={panel === "layers" ? "is-active" : ""}
+          id="inspector-tab-layers"
+          role="tab"
+          aria-selected={visiblePanel === "layers"}
+          aria-controls="inspector-panel"
+          tabIndex={visiblePanel === "layers" ? 0 : -1}
+          className={visiblePanel === "layers" ? "is-active" : ""}
           onClick={() => setPanel("layers")}
           title="Layers"
         >
@@ -4347,15 +5266,38 @@ function RightSidebar({ document }: { document: AIDrawDocument }) {
           <span>Layers</span>
         </button>
         <button
-          className={panel === "assets" ? "is-active" : ""}
+          id="inspector-tab-assets"
+          role="tab"
+          aria-selected={visiblePanel === "assets"}
+          aria-controls="inspector-panel"
+          tabIndex={visiblePanel === "assets" ? 0 : -1}
+          className={visiblePanel === "assets" ? "is-active" : ""}
           onClick={() => setPanel("assets")}
           title="Assets"
         >
           <Image size={17} />
           <span>Assets</span>
         </button>
+        {document.kind === "illustration" && <button
+          id="inspector-tab-animation"
+          role="tab"
+          aria-selected={visiblePanel === "animation"}
+          aria-controls="inspector-panel"
+          tabIndex={visiblePanel === "animation" ? 0 : -1}
+          className={visiblePanel === "animation" ? "is-active" : ""}
+          onClick={() => setPanel("animation")}
+          title="Animate"
+        >
+          <Play size={17} />
+          <span>Animate</span>
+        </button>}
         <button
-          className={panel === "activity" ? "is-active" : ""}
+          id="inspector-tab-activity"
+          role="tab"
+          aria-selected={visiblePanel === "activity"}
+          aria-controls="inspector-panel"
+          tabIndex={visiblePanel === "activity" ? 0 : -1}
+          className={visiblePanel === "activity" ? "is-active" : ""}
           onClick={() => setPanel("activity")}
           title="Activity"
         >
@@ -4363,7 +5305,12 @@ function RightSidebar({ document }: { document: AIDrawDocument }) {
           <span>Activity</span>
         </button>
         <button
-          className={panel === "generation" ? "is-active" : ""}
+          id="inspector-tab-generation"
+          role="tab"
+          aria-selected={visiblePanel === "generation"}
+          aria-controls="inspector-panel"
+          tabIndex={visiblePanel === "generation" ? 0 : -1}
+          className={visiblePanel === "generation" ? "is-active" : ""}
           onClick={() => setPanel("generation")}
           title="Generate"
         >
@@ -4371,8 +5318,8 @@ function RightSidebar({ document }: { document: AIDrawDocument }) {
           <span>Generate</span>
         </button>
       </nav>
-      <div className="panel-content">
-        {panel === "layers" && (
+      <div id="inspector-panel" className="panel-content" role="tabpanel" aria-labelledby={`inspector-tab-${visiblePanel}`} tabIndex={0}>
+        {visiblePanel === "layers" && (
           <>
             <div className="panel-title">
               <span>
@@ -4442,6 +5389,7 @@ function RightSidebar({ document }: { document: AIDrawDocument }) {
             </div>
             {document.kind === "illustration" ? (
               <>
+                <ArtboardInspector key={`${document.id}:${document.artboard.width}:${document.artboard.height}:${document.artboard.background}:${document.artboard.dpi}`} document={document} />
                 <IllustrationLayers document={document} />
                 <ObjectInspector document={document} />
               </>
@@ -4451,9 +5399,10 @@ function RightSidebar({ document }: { document: AIDrawDocument }) {
             {document.kind === "pixel" && <PalettePanel document={document} />}
           </>
         )}
-        {panel === "assets" && <AssetsPanel document={document} />}
-        {panel === "activity" && <ActivityPanel />}
-        {panel === "generation" && <GenerationPanel document={document} />}
+        {visiblePanel === "assets" && <AssetsPanel document={document} />}
+        {visiblePanel === "animation" && document.kind === "illustration" && <IllustrationAnimationPanel document={document} />}
+        {visiblePanel === "activity" && <ActivityPanel />}
+        {visiblePanel === "generation" && <GenerationPanel document={document} />}
       </div>
     </aside>
   );
@@ -4495,8 +5444,10 @@ function StatusBar({ document }: { document: AIDrawDocument }) {
             <span
               key={entry.actor.id}
               className="tiny-actor"
+              role="img"
+              aria-label={actorIdentityLabel(entry.actor)}
               style={{ "--actor": entry.actor.color } as React.CSSProperties}
-              title={entry.actor.name}
+              title={actorIdentityLabel(entry.actor)}
             >
               <Bot size={11} />
             </span>
@@ -4507,16 +5458,19 @@ function StatusBar({ document }: { document: AIDrawDocument }) {
         className="stop-agents"
         onClick={() => void window.aidraw.stopAgents(document.id)}
         disabled={agents.length === 0}
+        aria-label="Stop all agents working on this document"
       >
         <OctagonX size={14} /> Stop All Agents
       </button>
       <div className="zoom-control">
         <button
+          aria-label="Zoom out"
           onClick={() => setZoom(zoom / (document.kind === "pixel" ? 2 : 1.25))}
         >
           −
         </button>
         <input
+          aria-label="Canvas zoom"
           type="range"
           min={document.kind === "pixel" ? 1 : 5}
           max={document.kind === "pixel" ? 6400 : 800}
@@ -4524,11 +5478,12 @@ function StatusBar({ document }: { document: AIDrawDocument }) {
           onChange={(event) => setZoom(Number(event.target.value) / 100)}
         />
         <button
+          aria-label="Zoom in"
           onClick={() => setZoom(zoom * (document.kind === "pixel" ? 2 : 1.25))}
         >
           +
         </button>
-        <output>{Math.round(zoom * 100)}%</output>
+        <output aria-live="polite">{Math.round(zoom * 100)}%</output>
       </div>
     </footer>
   );
@@ -4536,7 +5491,7 @@ function StatusBar({ document }: { document: AIDrawDocument }) {
 
 function LoadingScreen() {
   return (
-    <div className="loading-screen">
+    <div className="loading-screen" role="status" aria-live="polite">
       <span className="brand-mark large">
         <span />
         <span />
@@ -4552,11 +5507,30 @@ export function App() {
   const snapshot = useEditorStore((state) => state.snapshot);
   const loading = useEditorStore((state) => state.loading);
   const toast = useEditorStore((state) => state.toast);
+  const canvasAnimation = useEditorStore((state) => state.canvasAnimation);
   const document = snapshot?.activeDocument;
+  const canvasDocument = useMemo(() => document?.kind === "illustration" && canvasAnimation?.illustrationTimeMs !== undefined ? illustrationAtTime(document, canvasAnimation.illustrationTimeMs) : document, [canvasAnimation, document]);
 
   useEffect(() => {
     void initialize();
   }, [initialize]);
+
+  useEffect(() => {
+    const publish = (state = useEditorStore.getState()) => {
+      void window.aidraw.updateEditorAdvisory({
+        documentId: state.snapshot?.activeDocumentId,
+        tool: state.selectedTool,
+        selectedEntityIds: state.selectedEntityIds,
+        zoom: state.zoom,
+        viewport: state.canvasViewport,
+        animation: state.canvasAnimation,
+      }).catch(() => undefined);
+    };
+    publish();
+    return useEditorStore.subscribe((state, previous) => {
+      if (state.snapshot?.activeDocumentId !== previous.snapshot?.activeDocumentId || state.selectedTool !== previous.selectedTool || state.selectedEntityIds !== previous.selectedEntityIds || state.zoom !== previous.zoom || state.canvasViewport !== previous.canvasViewport || state.canvasAnimation !== previous.canvasAnimation) publish(state);
+    });
+  }, []);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -4569,6 +5543,11 @@ export function App() {
       if (event.key === "Delete" || event.key === "Backspace") {
         const state = useEditorStore.getState();
         const active = state.snapshot?.activeDocument;
+        if (active?.kind === "pixel") {
+          event.preventDefault();
+          window.dispatchEvent(new CustomEvent("aidraw:pixel-selection-command", { detail: "delete" }));
+          return;
+        }
         if (active?.kind === "illustration" && state.selectedEntityIds.length) {
           event.preventDefault();
           void state.apply(
@@ -4583,6 +5562,11 @@ export function App() {
           );
           state.setSelectedEntities([]);
         }
+        return;
+      }
+      if (event.key === "Escape") {
+        const active = useEditorStore.getState().snapshot?.activeDocument;
+        if (active?.kind === "pixel") window.dispatchEvent(new CustomEvent("aidraw:pixel-selection-command", { detail: "clear" }));
         return;
       }
       if (!(event.ctrlKey || event.metaKey)) return;
@@ -4607,6 +5591,11 @@ export function App() {
       if (event.key.toLowerCase() === "c" || event.key.toLowerCase() === "x") {
         event.preventDefault();
         const state = useEditorStore.getState();
+        const active = state.snapshot?.activeDocument;
+        if (active?.kind === "pixel") {
+          window.dispatchEvent(new CustomEvent("aidraw:pixel-selection-command", { detail: event.key.toLowerCase() === "x" ? "cut" : "copy" }));
+          return;
+        }
         void window.aidraw
           .copySelection(state.selectedEntityIds)
           .then((result) => {
@@ -4632,6 +5621,10 @@ export function App() {
       }
       if (event.key.toLowerCase() === "v") {
         event.preventDefault();
+        if (useEditorStore.getState().snapshot?.activeDocument?.kind === "pixel") {
+          window.dispatchEvent(new CustomEvent("aidraw:pixel-selection-command", { detail: "paste" }));
+          return;
+        }
         void window.aidraw
           .pasteClipboard()
           .then((response) =>
@@ -4644,6 +5637,10 @@ export function App() {
                 response.status === "committed" ? "success" : "warning",
               ),
           );
+      }
+      if (event.key.toLowerCase() === "a" && useEditorStore.getState().snapshot?.activeDocument?.kind === "pixel") {
+        event.preventDefault();
+        window.dispatchEvent(new CustomEvent("aidraw:pixel-selection-command", { detail: "select-all" }));
       }
     };
     window.addEventListener("keydown", onKey);
@@ -4668,10 +5665,10 @@ export function App() {
       <ContextBar document={document} />
       <ToolRail document={document} />
       <main className="canvas-workspace">
-        {document.kind === "illustration" ? (
-          <IllustrationCanvas document={document} />
+        {canvasDocument?.kind === "illustration" ? (
+          <IllustrationCanvas document={canvasDocument} />
         ) : (
-          <PixelCanvas document={document} />
+          <PixelCanvas document={canvasDocument as PixelDocument} />
         )}
       </main>
       <RightSidebar document={document} />

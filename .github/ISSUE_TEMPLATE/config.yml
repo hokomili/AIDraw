@@ -1,5 +1,5 @@
 blank_issues_enabled: false
 contact_links:
   - name: Private security report
-    url: https://github.com/aidraw/aidraw/security/advisories/new
+    url: https://github.com/hokomili/AIDraw/security/advisories/new
     about: Report vulnerabilities privately; never disclose tokens in an issue.

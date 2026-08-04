@@ -1,4 +1,5 @@
 import type { PixelCel, PixelChunk, PixelDocument, PixelSprite, PixelTilemap, PixelTileset, TilemapChunk } from './model';
+import type { PixelIndexRun, TileGidRun } from './operations';
 
 export const PIXEL_CHUNK_SIZE = 32;
 export const TILED_FLIP_HORIZONTAL = 0x8000_0000;
@@ -9,6 +10,11 @@ export const TILED_GID_MASK = 0x0fff_ffff;
 export function decodeTiledGid(raw: number): { gid: number; hFlip: boolean; vFlip: boolean; diagonal: boolean } {
   const value = raw >>> 0;
   return { gid: value & TILED_GID_MASK, hFlip: Boolean(value & TILED_FLIP_HORIZONTAL), vFlip: Boolean(value & TILED_FLIP_VERTICAL), diagonal: Boolean(value & TILED_FLIP_DIAGONAL) };
+}
+
+export function encodeTiledGid(gid: number, transforms: { hFlip?: boolean; vFlip?: boolean; diagonal?: boolean } = {}): number {
+  if (!Number.isInteger(gid) || gid < 0 || gid > TILED_GID_MASK) throw new Error('Tiled GIDs must be integers inside the 28-bit tile range.');
+  return (gid | (transforms.hFlip ? TILED_FLIP_HORIZONTAL : 0) | (transforms.vFlip ? TILED_FLIP_VERTICAL : 0) | (transforms.diagonal ? TILED_FLIP_DIAGONAL : 0)) >>> 0;
 }
 
 export function resolveTilesetForGid(document: PixelDocument, map: PixelTilemap, gid: number): { tileset: PixelTileset; localId: number } | undefined {
@@ -77,13 +83,31 @@ export function writePixels(
   cel: PixelCel,
   changes: Array<{ x: number; y: number; index: number }>,
 ): Array<{ x: number; y: number; index: number }> {
-  if (!cel.chunks || typeof cel.chunks !== 'object') cel.chunks = {};
-  const inverse: Array<{ x: number; y: number; index: number }> = [];
-  const decoded = new Map<string, { chunk: PixelChunk; values: Uint8Array }>();
+  const writer = createPixelWriter(cel);
+  const inverse = changes.map((change) => ({ x: change.x, y: change.y, index: writer.write(change.x, change.y, change.index) }));
+  writer.flush();
+  return inverse.reverse();
+}
 
-  for (const change of changes) {
-    const chunkX = chunkCoordinate(change.x);
-    const chunkY = chunkCoordinate(change.y);
+export function remapPixelCelIndices(cel: PixelCel, indexMap: readonly number[]): void {
+  const changes: Array<{ x: number; y: number; index: number }> = [];
+  for (const chunk of Object.values(cel.chunks ?? {})) {
+    const values = decodePixelChunk(chunk);
+    for (let offset = 0; offset < values.length; offset += 1) {
+      const current = values[offset] ?? 0; const next = indexMap[current] ?? current;
+      if (next === current) continue;
+      changes.push({ x: chunk.x + offset % chunk.width, y: chunk.y + Math.floor(offset / chunk.width), index: next });
+    }
+  }
+  if (changes.length) writePixels(cel, changes);
+}
+
+function createPixelWriter(cel: PixelCel) {
+  if (!cel.chunks || typeof cel.chunks !== 'object') cel.chunks = {};
+  const decoded = new Map<string, { chunk: PixelChunk; values: Uint8Array }>();
+  const entryAt = (x: number, y: number) => {
+    const chunkX = chunkCoordinate(x);
+    const chunkY = chunkCoordinate(y);
     const key = chunkKey(chunkX, chunkY);
     let entry = decoded.get(key);
     if (!entry) {
@@ -95,14 +119,36 @@ export function writePixels(
       decoded.set(key, entry);
       cel.chunks[key] = chunk;
     }
-    const localX = ((change.x % PIXEL_CHUNK_SIZE) + PIXEL_CHUNK_SIZE) % PIXEL_CHUNK_SIZE;
-    const localY = ((change.y % PIXEL_CHUNK_SIZE) + PIXEL_CHUNK_SIZE) % PIXEL_CHUNK_SIZE;
-    const offset = localY * PIXEL_CHUNK_SIZE + localX;
-    inverse.push({ x: change.x, y: change.y, index: entry.values[offset] ?? 0 });
-    entry.values[offset] = Math.max(0, Math.min(255, Math.round(change.index)));
-  }
+    return entry;
+  };
+  return {
+    write(x: number, y: number, index: number): number {
+      const entry = entryAt(x, y);
+      const localX = ((x % PIXEL_CHUNK_SIZE) + PIXEL_CHUNK_SIZE) % PIXEL_CHUNK_SIZE;
+      const localY = ((y % PIXEL_CHUNK_SIZE) + PIXEL_CHUNK_SIZE) % PIXEL_CHUNK_SIZE;
+      const offset = localY * PIXEL_CHUNK_SIZE + localX;
+      const previous = entry.values[offset] ?? 0;
+      entry.values[offset] = Math.max(0, Math.min(255, Math.round(index)));
+      return previous;
+    },
+    flush(): void { for (const { chunk, values } of decoded.values()) chunk.data = encodeBytes(values); },
+  };
+}
 
-  for (const { chunk, values } of decoded.values()) chunk.data = encodeBytes(values);
+function appendPixelRun(runs: PixelIndexRun[], x: number, y: number, index: number): void {
+  const previous = runs.at(-1);
+  if (previous && previous.y === y && previous.index === index && previous.x + previous.length === x && previous.length < 65_536) previous.length += 1;
+  else runs.push({ x, y, length: 1, index });
+}
+
+export function writePixelRuns(cel: PixelCel, runs: PixelIndexRun[]): PixelIndexRun[] {
+  const writer = createPixelWriter(cel);
+  const inverse: PixelIndexRun[] = [];
+  for (const run of runs) for (let offset = 0; offset < run.length; offset += 1) {
+    const x = run.x + offset;
+    appendPixelRun(inverse, x, run.y, writer.write(x, run.y, run.index));
+  }
+  writer.flush();
   return inverse;
 }
 
@@ -151,15 +197,26 @@ export function readTile(chunk: TilemapChunk, x: number, y: number): number {
   return decodeUint32(chunk.data)[localY * PIXEL_CHUNK_SIZE + localX] ?? 0;
 }
 
+export function readTileAt(chunks: Record<string, TilemapChunk>, x: number, y: number): number {
+  const chunk = chunks[chunkKey(chunkCoordinate(x), chunkCoordinate(y))];
+  return chunk ? readTile(chunk, x, y) : 0;
+}
+
 export function writeTiles(
   chunks: Record<string, TilemapChunk>,
   changes: Array<{ x: number; y: number; gid: number }>,
 ): Array<{ x: number; y: number; gid: number }> {
-  const inverse: Array<{ x: number; y: number; gid: number }> = [];
+  const writer = createTileWriter(chunks);
+  const inverse = changes.map((change) => ({ x: change.x, y: change.y, gid: writer.write(change.x, change.y, change.gid) }));
+  writer.flush();
+  return inverse.reverse();
+}
+
+function createTileWriter(chunks: Record<string, TilemapChunk>) {
   const decoded = new Map<string, { chunk: TilemapChunk; values: Uint32Array }>();
-  for (const change of changes) {
-    const chunkX = chunkCoordinate(change.x);
-    const chunkY = chunkCoordinate(change.y);
+  const entryAt = (x: number, y: number) => {
+    const chunkX = chunkCoordinate(x);
+    const chunkY = chunkCoordinate(y);
     const key = chunkKey(chunkX, chunkY);
     let entry = decoded.get(key);
     if (!entry) {
@@ -168,13 +225,36 @@ export function writeTiles(
       decoded.set(key, entry);
       chunks[key] = chunk;
     }
-    const localX = ((change.x % PIXEL_CHUNK_SIZE) + PIXEL_CHUNK_SIZE) % PIXEL_CHUNK_SIZE;
-    const localY = ((change.y % PIXEL_CHUNK_SIZE) + PIXEL_CHUNK_SIZE) % PIXEL_CHUNK_SIZE;
-    const offset = localY * PIXEL_CHUNK_SIZE + localX;
-    inverse.push({ x: change.x, y: change.y, gid: entry.values[offset] ?? 0 });
-    entry.values[offset] = Math.max(0, Math.round(change.gid));
+    return entry;
+  };
+  return {
+    write(x: number, y: number, gid: number): number {
+      const entry = entryAt(x, y);
+      const localX = ((x % PIXEL_CHUNK_SIZE) + PIXEL_CHUNK_SIZE) % PIXEL_CHUNK_SIZE;
+      const localY = ((y % PIXEL_CHUNK_SIZE) + PIXEL_CHUNK_SIZE) % PIXEL_CHUNK_SIZE;
+      const offset = localY * PIXEL_CHUNK_SIZE + localX;
+      const previous = entry.values[offset] ?? 0;
+      entry.values[offset] = Math.max(0, Math.round(gid));
+      return previous;
+    },
+    flush(): void { for (const { chunk, values } of decoded.values()) chunk.data = encodeUint32(values); },
+  };
+}
+
+function appendTileRun(runs: TileGidRun[], x: number, y: number, gid: number): void {
+  const previous = runs.at(-1);
+  if (previous && previous.y === y && previous.gid === gid && previous.x + previous.length === x && previous.length < 65_536) previous.length += 1;
+  else runs.push({ x, y, length: 1, gid });
+}
+
+export function writeTileRuns(chunks: Record<string, TilemapChunk>, runs: TileGidRun[]): TileGidRun[] {
+  const writer = createTileWriter(chunks);
+  const inverse: TileGidRun[] = [];
+  for (const run of runs) for (let offset = 0; offset < run.length; offset += 1) {
+    const x = run.x + offset;
+    appendTileRun(inverse, x, run.y, writer.write(x, run.y, run.gid));
   }
-  for (const { chunk, values } of decoded.values()) chunk.data = encodeUint32(values);
+  writer.flush();
   return inverse;
 }
 

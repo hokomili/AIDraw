@@ -11,6 +11,7 @@ import type {
   PixelTilemap,
   TilemapLayer,
 } from './model';
+import { createDefaultBitmapFont } from './bitmap-font';
 import { HUMAN_ACTOR } from './model';
 import { createId, nowIso } from './ids';
 
@@ -36,7 +37,7 @@ export const DEFAULT_PALETTE: PaletteEntry[] = [
 function baseDocument(name: string) {
   const timestamp = nowIso();
   return {
-    schemaVersion: 1 as const,
+    schemaVersion: 2 as const,
     id: createId('doc'),
     revision: 0,
     name,
@@ -91,6 +92,10 @@ export function createIllustrationDocument(name = 'Untitled illustration'): Illu
     layerIds: [vectorLayer.id, paintLayer.id],
     layers: { [vectorLayer.id]: vectorLayer, [paintLayer.id]: paintLayer },
     objects: {},
+    brushPresets: [],
+    guides: [],
+    snapSettings: { artboard: true, objects: true, guides: true, grid: false, pixel: false, gridSize: 16, tolerance: 8 },
+    animation: { durationMs: 2_000, framesPerSecond: 12, playback: 'loop', keyframeIds: [], keyframes: {} },
   };
 }
 
@@ -186,7 +191,7 @@ export function createPixelTileset(name: string, spriteAssetId: string, tileWidt
   const timestamp = nowIso();
   return {
     id: createId('tileset'), revision: 0, name, type: 'tileset', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
-    firstGid: 1, tileWidth, tileHeight, columns, rows, spriteAssetId, tiles: {}, wangSets: [], transformations: { hFlip: true, vFlip: true, rotate: true },
+    firstGid: 1, tileWidth, tileHeight, margin: 0, spacing: 0, columns, rows, spriteAssetId, tiles: {}, wangSets: [], transformations: { hFlip: true, vFlip: true, rotate: true },
   };
 }
 
@@ -201,6 +206,10 @@ export function createPixelDocument(
     scope: mode === 'project' ? 'project' : 'standalone',
     standaloneType: mode === 'project' ? undefined : mode,
     palette: structuredClone(DEFAULT_PALETTE),
+    paletteCycles: [],
+    stamps: [],
+    tileStamps: [],
+    bitmapFonts: [createDefaultBitmapFont()],
     assetIds: [primary.id],
     pixelAssets: { [primary.id]: primary },
     activeAssetId: primary.id,

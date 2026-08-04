@@ -51,6 +51,28 @@ describe('document service collaboration semantics', () => {
     await service.compactRecovery();
   });
 
+  it('restores a named editable checkpoint while preserving the abandoned branch automatically', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-service-'));
+    temporaryPaths.push(root);
+    const service = new DocumentService(new RecoveryJournal(root), '1.0.0');
+    service.initialize();
+    const original = service.snapshot().activeDocument!;
+    const checkpoint = service.createCheckpoint(original.id, 'Clean composition');
+    expect(checkpoint).toMatchObject({ name: 'Clean composition', sourceRevision: 0, kind: 'manual', createdBy: { id: HUMAN_ACTOR.id } });
+    expect((await service.apply({ id: createId('tx'), clientOperationId: createId('op'), documentId: original.id, actor: HUMAN_ACTOR, label: 'Risky branch', createdAt: nowIso(), operations: [{ kind: 'document.rename', name: 'Risky experiment' }] })).status).toBe('committed');
+
+    const restored = await service.restoreCheckpoint(original.id, checkpoint.id);
+    expect(restored).toMatchObject({ status: 'committed', revision: 2 });
+    const current = service.getDocument(original.id)!;
+    expect(current.name).toBe(original.name);
+    expect(current.activity.at(-1)).toMatchObject({ label: 'Restore checkpoint · Clean composition', actor: { id: HUMAN_ACTOR.id } });
+    const checkpoints = service.listCheckpoints(original.id);
+    expect(checkpoints).toEqual(expect.arrayContaining([expect.objectContaining({ id: checkpoint.id, kind: 'manual' }), expect.objectContaining({ kind: 'automatic', name: 'Before restore · Clean composition', sourceRevision: 1 })]));
+    const safety = checkpoints.find((entry) => entry.kind === 'automatic')!;
+    expect(service.getCheckpoint(original.id, safety.id)?.document.name).toBe('Risky experiment');
+    expect(service.snapshot().canUndo).toBe(false);
+  });
+
   it('does not recover an untitled document after it is explicitly discarded', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aidraw-service-'));
     temporaryPaths.push(root);
@@ -151,5 +173,17 @@ describe('document service collaboration semantics', () => {
     expect((await service.apply(write(11, 11, HUMAN_ACTOR, 1))).status).toBe('committed');
     if (lock.lockId) service.releaseLock(lock.lockId);
     await service.compactRecovery();
+  });
+
+  it('protects a pixel asset replacement while its inspector gesture holds an asset lock', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-service-')); temporaryPaths.push(root);
+    const service = new DocumentService(new RecoveryJournal(root), '1.0.0'); service.initialize();
+    const snapshot = service.create({ kind: 'sprite', name: 'Asset lock' }); const document = snapshot.activeDocument!; if (document.kind !== 'pixel') throw new Error('Expected pixel document'); const sprite = document.pixelAssets[document.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('Expected sprite');
+    const lock = service.acquireLock({ documentId: document.id, objectIds: [sprite.id] }); expect(lock.acquired).toBe(true);
+    const agent: Actor = { id: 'agent-asset-lock-test', kind: 'agent', name: 'Asset lock agent', color: '#8268dd' };
+    const replacement = { ...structuredClone(sprite), name: 'Agent replacement' };
+    expect(await service.apply({ id: createId('tx'), clientOperationId: createId('op'), documentId: document.id, actor: agent, label: 'Replace held asset', createdAt: nowIso(), operations: [{ kind: 'pixel.asset.replace', asset: replacement, expectedRevision: sprite.revision }] })).toMatchObject({ status: 'locked' });
+    expect((await service.apply({ id: createId('tx'), clientOperationId: createId('op'), documentId: document.id, actor: HUMAN_ACTOR, label: 'Human replaces held asset', createdAt: nowIso(), operations: [{ kind: 'pixel.asset.replace', asset: { ...replacement, name: 'Human replacement' }, expectedRevision: sprite.revision }] })).status).toBe('committed');
+    if (lock.lockId) service.releaseLock(lock.lockId); await service.compactRecovery();
   });
 });

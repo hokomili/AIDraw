@@ -21,10 +21,12 @@ describe('durable trace replay masks', () => {
         layerId: 'layer-1',
         changes: [{ x: -1, y: 32, gid: 9 }],
       },
+      { kind: 'pixel.cel.region', spriteId: 'sprite-1', celId: 'cel-1', runs: [{ x: 8, y: 3, length: 3, index: 4 }] },
+      { kind: 'pixel.tilemap.region', mapId: 'map-1', layerId: 'layer-1', runs: [{ x: 2, y: 32, length: 2, gid: 9 }] },
     ])]);
 
-    expect(masks.celPixels.get('cel-1')).toEqual(new Set([replayPointKey(2, 3), replayPointKey(5, 7)]));
-    expect(masks.tileCells.get(replayTileLayerKey('map-1', 'layer-1'))).toEqual(new Set([replayPointKey(-1, 32)]));
+    expect(masks.celPixels.get('cel-1')).toEqual(new Set([replayPointKey(2, 3), replayPointKey(5, 7), replayPointKey(8, 3), replayPointKey(9, 3), replayPointKey(10, 3)]));
+    expect(masks.tileCells.get(replayTileLayerKey('map-1', 'layer-1'))).toEqual(new Set([replayPointKey(-1, 32), replayPointKey(2, 32), replayPointKey(3, 32)]));
   });
 
   it('conceals committed illustration objects and paint strokes only for replays', () => {

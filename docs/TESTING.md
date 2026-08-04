@@ -56,10 +56,12 @@ Connection and MCP state files contain a localhost bearer token. Keep them insid
 Example Level 1 bootstrap (replace the run ID once and use separate shell calls so each exit code is preserved):
 
 ```powershell
+$AIDrawRepo = (Resolve-Path .).Path
+$AIDrawRun = Join-Path $AIDrawRepo 'test-results\luna-high\<run-id>-level1'
 node scripts/npm-node24.mjs run test:level1:auto
-node scripts/qa-session.mjs start --exe E:\AIDraw\out\AIDraw-win32-x64\AIDraw.exe --profile E:\AIDraw\test-results\luna-high\<run-id>-level1\profile --connection E:\AIDraw\test-results\luna-high\<run-id>-level1\connection.json --manifest E:\AIDraw\test-results\luna-high\<run-id>-level1\session.json --mode interactive --launch-context unsandboxed-gui
-node scripts/qa-session.mjs status --manifest E:\AIDraw\test-results\luna-high\<run-id>-level1\session.json
-node scripts/qa-mcp.mjs init --connection E:\AIDraw\test-results\luna-high\<run-id>-level1\connection.json --state E:\AIDraw\test-results\luna-high\<run-id>-level1\mcp-state.json --actor-name "QA Luna high L1 <run-id>" --actor-color "#7C3AED"
+node scripts/qa-session.mjs start --exe "$AIDrawRepo\out\AIDraw-win32-x64\AIDraw.exe" --profile "$AIDrawRun\profile" --connection "$AIDrawRun\connection.json" --manifest "$AIDrawRun\session.json" --mode interactive --launch-context unsandboxed-gui
+node scripts/qa-session.mjs status --manifest "$AIDrawRun\session.json"
+node scripts/qa-mcp.mjs init --connection "$AIDrawRun\connection.json" --state "$AIDrawRun\mcp-state.json" --actor-name "QA Luna high L1 <run-id>" --actor-color "#7C3AED"
 ```
 
 The coordinator owns `qa-session start`, `show`, and `stop`; those native-process operations run outside the Codex filesystem sandbox. Luna owns the sandboxed automated, status, MCP-client, Computer Use, assertion, and reporting steps. Write complex tool arguments to JSON files in the run root and pass `--args-file`; this avoids shell quoting from changing the MCP payload. At cleanup, Luna runs `qa-mcp close`, writes a draft result, and returns `TEST_COMPLETE_AWAITING_COORDINATOR_STOP`. After the coordinator stops the isolated engine and the harness redacts its connection credential, the same Luna task is resumed once to verify cleanup and finalize `report.md`. The harness preserves the non-secret profile/evidence; it does not delete test artifacts.

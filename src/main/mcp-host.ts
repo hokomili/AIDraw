@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type Server as HttpServer, type Ser
 import { mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { McpServer, ResourceTemplate } from '@modelcontextprotocol/server';
+import { createCanvas, loadImage } from '@napi-rs/canvas';
 import {
   NodeStreamableHTTPServerTransport,
   localhostHostValidation,
@@ -11,17 +12,60 @@ import {
 import { z } from 'zod';
 import {
   CanvasOperationSchema,
+  NewDocumentOptionsSchema,
+  applyTextStyleRange,
+  bitmapTextCells,
   createId,
+  deletePixelAnimationTag,
+  duplicatePixelFrame,
+  encodeTiledGid,
   nowIso,
+  orderedDitherIndex,
+  placePixelStamp,
+  placeTileStamp,
+  readPixel,
+  replaceAndDeletePaletteIndexOperations,
+  replaceStyledText,
+  reorderPixelFrame,
+  resolvePixelCel,
+  stepPaletteByLuminance,
+  setPixelFrameCelsLinked,
+  setPixelFramePaletteOverride,
+  transformPixelStamp,
+  transformTileStamp,
+  upsertPixelAnimationTag,
+  type AIDrawDocument,
   type Actor,
   type AsyncJob,
   type CanvasOperation,
   type CanvasTransaction,
+  type IllustrationDocument,
+  type IllustrationObject,
+  type PixelDocument,
+  type PixelSprite,
 } from '@aidraw/core';
+import { alignIllustrationObjects, distributeIllustrationObjects } from '../common/alignment';
+import { exportIllustrationFragment, exportPixelFragment, importDocumentFragmentOperations, documentFragmentBytes } from '../common/document-fragment';
+import { buildPolishedGoldMaterial } from '../common/material-presets';
+import { convertPathNode, deletePathNode, inspectPathNodes, insertPathNode, movePathPoint, setPathClosed, splitPathAtNode } from '../common/path-nodes';
+import { transformPixelSelection } from '../common/pixel-selection';
+import { scaleGridSelection } from '../common/grid-selection';
+import { cropImageObject, cropImageToAspect, resetImageCrop } from '../common/image-crop';
+import { createBooleanPath } from '../common/path-boolean';
+import { convertPathArcsToCubics } from '../common/path-conversion';
+import { joinPathObjects } from '../common/path-topology';
+import { assignWangTile, deleteWangColor, deleteWangSet, upsertWangColor, upsertWangSet } from '../common/wang-authoring';
+import { TILE_VARIANT_SEED_PROPERTY, chooseTileVariant } from '../common/tile-variants';
+import { validateGenerationRequest } from '../common/generation-capabilities';
+import type { GenerationRequest } from '../common/generation';
+import { embedPixelLink, packPixelLinks } from '../common/pixel-links';
 import { DocumentService } from './document-service';
+import { BatchManager } from './batch-manager';
 import { PlaybackScheduler } from './playback-scheduler';
-import { renderDocument } from './render-document';
 import { plannedExportCompanionPaths, type ExportFormat } from './export-document';
+import { quantizeImageToPalette } from './quantize-image';
+import { captureObservation, MAX_OBSERVATION_PIXELS, type CaptureObservation } from './capture-observation';
+import { projectLinkFileExtension, verifiedPixelLinkCache } from './pixel-link-files';
 
 const PORT_START = 48200;
 const PORT_END = 48231;
@@ -32,11 +76,521 @@ interface McpSession {
   mcp: McpServer;
   transport: NodeStreamableHTTPServerTransport;
   actor: Actor;
+  subscriptions: Set<string>;
 }
 
 interface PortSettings { version: 1; preferredPort: number }
 interface FolderTrustSettings { version: 1; folders: string[] }
 type ApprovalDecision = 'allow-once' | 'allow-session' | 'allow-always' | 'deny';
+
+const ObservationRegionSchema = z.object({
+  x: z.number().int().nonnegative(),
+  y: z.number().int().nonnegative(),
+  width: z.number().int().positive(),
+  height: z.number().int().positive(),
+}).strict();
+const ObservationBackgroundSchema = z.union([
+  z.enum(['document', 'transparent']),
+  z.string().regex(/^#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?$/),
+]);
+const SpriteSheetImportOptionsSchema = z.object({
+  frameWidth: z.number().int().min(1).max(8_192),
+  frameHeight: z.number().int().min(1).max(8_192),
+  marginX: z.number().int().min(0).max(8_191).default(0),
+  marginY: z.number().int().min(0).max(8_191).default(0),
+  spacingX: z.number().int().min(0).max(8_191).default(0),
+  spacingY: z.number().int().min(0).max(8_191).default(0),
+  frameCount: z.number().int().min(1).max(4_096).optional(),
+  order: z.enum(['rows', 'columns']).default('rows'),
+  durationMs: z.number().int().min(1).max(60_000).default(100),
+  trimTransparent: z.boolean().default(false),
+  skipEmpty: z.boolean().default(false),
+}).strict();
+const AgentQuantizeOperationSchema = z.object({
+  kind: z.literal('pixel.image.quantize'),
+  assetId: z.string().min(1),
+  spriteId: z.string().min(1),
+  celId: z.string().min(1),
+  x: z.number().int().nonnegative().default(0),
+  y: z.number().int().nonnegative().default(0),
+  width: z.number().int().min(1).max(8_192).optional(),
+  height: z.number().int().min(1).max(8_192).optional(),
+  expectedRevision: z.number().int().nonnegative().optional(),
+}).strict();
+const ExpectedRevisionsSchema = z.record(z.string(), z.number().int().nonnegative());
+const SemanticPixelRegionSchema = z.object({ x: z.number().int().nonnegative(), y: z.number().int().nonnegative(), width: z.number().int().positive(), height: z.number().int().positive() }).strict();
+const PixelFloodFillSchema = z.object({ kind: z.literal('pixel.flood-fill'), spriteId: z.string().min(1), celId: z.string().min(1), x: z.number().int().nonnegative(), y: z.number().int().nonnegative(), index: z.number().int().min(0).max(255), expectedRevision: z.number().int().nonnegative() }).strict();
+const PixelReplaceColorSchema = z.object({ kind: z.literal('pixel.replace-color'), spriteId: z.string().min(1), celId: z.string().min(1), fromIndex: z.number().int().min(0).max(255), toIndex: z.number().int().min(0).max(255), region: SemanticPixelRegionSchema.optional(), expectedRevision: z.number().int().nonnegative() }).strict();
+const PixelPaletteReplaceDeleteSchema = z.object({ kind: z.literal('pixel.palette.replace-delete'), sourceIndex: z.number().int().min(1).max(255), replacementIndex: z.number().int().min(0).max(255), expectedRevision: z.number().int().nonnegative() }).strict();
+const PixelAdjustIndexSchema = z.object({ kind: z.literal('pixel.adjust-index'), spriteId: z.string().min(1), celId: z.string().min(1), delta: z.number().int().min(-255).max(255).refine((value) => value !== 0), order: z.enum(['index', 'luminance']).default('index'), region: SemanticPixelRegionSchema.optional(), expectedRevision: z.number().int().nonnegative() }).strict();
+const PixelOrderedDitherSchema = z.object({ kind: z.literal('pixel.ordered-dither'), spriteId: z.string().min(1), celId: z.string().min(1), region: SemanticPixelRegionSchema, indexA: z.number().int().min(0).max(255), indexB: z.number().int().min(0).max(255), coverage: z.number().min(0).max(1), matrixSize: z.union([z.literal(2), z.literal(4), z.literal(8)]).default(4), phaseX: z.number().int().min(-8_192).max(8_192).default(0), phaseY: z.number().int().min(-8_192).max(8_192).default(0), expectedRevision: z.number().int().nonnegative() }).strict();
+const PixelBitmapTextSchema = z.object({ kind: z.literal('pixel.bitmap-text.paint'), spriteId: z.string().min(1), celId: z.string().min(1), fontId: z.string().min(1), text: z.string().min(1).max(2_000), x: z.number().int().min(-8_192).max(8_192), y: z.number().int().min(-8_192).max(8_192), index: z.number().int().min(0).max(255), letterSpacing: z.number().int().min(0).max(32).default(0), lineSpacing: z.number().int().min(0).max(64).default(0), scale: z.number().int().min(1).max(16).default(1), align: z.enum(['left', 'center', 'right']).default('left'), expectedRevision: z.number().int().nonnegative() }).strict();
+const PixelSelectionTransformSchema = z.object({
+  kind: z.literal('pixel.selection.transform'),
+  spriteId: z.string().min(1),
+  celId: z.string().min(1),
+  runs: z.array(z.object({ x: z.number().int().nonnegative(), y: z.number().int().nonnegative(), length: z.number().int().min(1).max(65_536) }).strict()).min(1).max(65_536),
+  transform: z.enum(['move', 'flip-horizontal', 'flip-vertical', 'rotate-clockwise', 'rotate-counterclockwise', 'scale']),
+  offsetX: z.number().int().min(-8_192).max(8_192).default(0),
+  offsetY: z.number().int().min(-8_192).max(8_192).default(0),
+  scaleX: z.number().int().min(1).max(64).default(1),
+  scaleY: z.number().int().min(1).max(64).default(1),
+  expectedRevision: z.number().int().nonnegative(),
+}).strict();
+const PixelFrameDuplicateSchema = z.object({ kind: z.literal('pixel.frame.duplicate'), spriteId: z.string().min(1), frameId: z.string().min(1), expectedRevision: z.number().int().nonnegative() }).strict();
+const PixelFrameMoveSchema = z.object({ kind: z.literal('pixel.frame.move'), spriteId: z.string().min(1), frameId: z.string().min(1), direction: z.enum(['left', 'right']), expectedRevision: z.number().int().nonnegative() }).strict();
+const PixelFrameCelsLinkSchema = z.object({ kind: z.literal('pixel.frame.cels.link'), spriteId: z.string().min(1), frameId: z.string().min(1), linked: z.boolean(), expectedRevision: z.number().int().nonnegative() }).strict();
+const PixelFrameDurationSchema = z.object({ kind: z.literal('pixel.frame.duration.set'), spriteId: z.string().min(1), frameId: z.string().min(1), durationMs: z.number().int().min(1).max(60_000), expectedRevision: z.number().int().nonnegative() }).strict();
+const AnimationTagInputSchema = z.object({ id: z.string().min(1), name: z.string().trim().min(1).max(200), fromFrameId: z.string().min(1), toFrameId: z.string().min(1), direction: z.enum(['forward', 'reverse', 'ping-pong']), color: z.string().regex(/^#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?$/) }).strict();
+const PixelAnimationTagUpsertSchema = z.object({ kind: z.literal('pixel.animation.tag.upsert'), spriteId: z.string().min(1), tag: AnimationTagInputSchema, expectedRevision: z.number().int().nonnegative() }).strict();
+const PixelAnimationTagDeleteSchema = z.object({ kind: z.literal('pixel.animation.tag.delete'), spriteId: z.string().min(1), tagId: z.string().min(1), expectedRevision: z.number().int().nonnegative() }).strict();
+const PixelPaletteOverrideSchema = z.object({ kind: z.literal('pixel.palette-override.set'), spriteId: z.string().min(1), frameId: z.string().min(1), colors: z.array(z.string().regex(/^#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?$/)).min(1).max(256).nullable(), expectedRevision: z.number().int().nonnegative() }).strict();
+const PixelProjectLinkEmbedSchema = z.object({ kind: z.literal('pixel.project-link.embed'), linkId: z.string().min(1), expectedRevision: z.number().int().nonnegative() }).strict();
+const PixelProjectLinksPackSchema = z.object({ kind: z.literal('pixel.project-links.pack'), expectedRevision: z.number().int().nonnegative() }).strict();
+const PixelStampPlaceSchema = z.object({ kind: z.literal('pixel.stamp.place'), stampId: z.string().min(1), spriteId: z.string().min(1), celId: z.string().min(1), x: z.number().int().min(-8_192).max(16_384), y: z.number().int().min(-8_192).max(16_384), transform: z.enum(['flip-horizontal', 'flip-vertical', 'rotate-clockwise', 'rotate-counterclockwise']).optional(), expectedRevision: z.number().int().nonnegative() }).strict();
+const PixelTileStampPlaceSchema = z.object({ kind: z.literal('pixel.tile-stamp.place'), stampId: z.string().min(1), mapId: z.string().min(1), layerId: z.string().min(1), x: z.number().int().min(-16_777_216).max(16_777_216), y: z.number().int().min(-16_777_216).max(16_777_216), transform: z.enum(['flip-horizontal', 'flip-vertical', 'rotate-clockwise', 'rotate-counterclockwise']).optional(), expectedRevision: z.number().int().nonnegative() }).strict();
+const PixelTileVariantsPaintSchema = z.object({ kind: z.literal('pixel.tile-variants.paint'), mapId: z.string().min(1), layerId: z.string().min(1), tilesetId: z.string().min(1), tileId: z.number().int().nonnegative(), points: z.array(z.object({ x: z.number().int().min(-16_777_216).max(16_777_216), y: z.number().int().min(-16_777_216).max(16_777_216) }).strict()).min(1).max(65_536), seed: z.number().int().min(-2_147_483_648).max(2_147_483_647).optional(), transforms: z.object({ hFlip: z.boolean().default(false), vFlip: z.boolean().default(false), diagonal: z.boolean().default(false) }).strict().optional(), expectedRevision: z.number().int().nonnegative() }).strict();
+const MapObjectInputSchema = z.object({ id: z.string().min(1), type: z.enum(['rectangle', 'ellipse', 'polygon', 'polyline']), x: z.number().finite().min(-16_777_216).max(16_777_216), y: z.number().finite().min(-16_777_216).max(16_777_216), width: z.number().finite().positive().max(16_777_216).optional(), height: z.number().finite().positive().max(16_777_216).optional(), points: z.array(z.object({ x: z.number().finite(), y: z.number().finite() }).strict()).max(65_536).optional(), properties: z.record(z.string(), z.union([z.string(), z.number().finite(), z.boolean()])) }).strict().superRefine((object, context) => { if ((object.type === 'rectangle' || object.type === 'ellipse') && (object.width === undefined || object.height === undefined)) context.addIssue({ code: 'custom', message: 'Rectangle and ellipse map objects require width and height.' }); if ((object.type === 'polygon' || object.type === 'polyline') && (!object.points || object.points.length < 2)) context.addIssue({ code: 'custom', path: ['points'], message: 'Polygon and polyline map objects require at least two points.' }); });
+const PixelMapObjectUpsertSchema = z.object({ kind: z.literal('pixel.map-object.upsert'), mapId: z.string().min(1), layerId: z.string().min(1), object: MapObjectInputSchema, expectedRevision: z.number().int().nonnegative() }).strict();
+const PixelMapObjectDeleteSchema = z.object({ kind: z.literal('pixel.map-object.delete'), mapId: z.string().min(1), layerId: z.string().min(1), objectId: z.string().min(1), expectedRevision: z.number().int().nonnegative() }).strict();
+const PixelTilesetCollisionUpsertSchema = z.object({ kind: z.literal('pixel.tileset-collision.upsert'), tilesetId: z.string().min(1), tileId: z.number().int().nonnegative(), shape: MapObjectInputSchema, expectedRevision: z.number().int().nonnegative() }).strict();
+const PixelTilesetCollisionDeleteSchema = z.object({ kind: z.literal('pixel.tileset-collision.delete'), tilesetId: z.string().min(1), tileId: z.number().int().nonnegative(), shapeId: z.string().min(1), expectedRevision: z.number().int().nonnegative() }).strict();
+const WangColorInputSchema = z.object({ id: z.number().int().min(1).max(255), name: z.string().trim().min(1).max(100), color: z.string().regex(/^#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?$/), tileId: z.number().int().nonnegative(), probability: z.number().finite().nonnegative() }).strict();
+const WangIdInputSchema = z.tuple([z.number().int().min(0).max(255), z.number().int().min(0).max(255), z.number().int().min(0).max(255), z.number().int().min(0).max(255), z.number().int().min(0).max(255), z.number().int().min(0).max(255), z.number().int().min(0).max(255), z.number().int().min(0).max(255)]);
+const WangTileInputSchema = z.object({ tileId: z.number().int().nonnegative(), wangId: WangIdInputSchema }).strict();
+const WangSetInputSchema = z.object({ id: z.string().min(1).max(200), name: z.string().trim().min(1).max(100), type: z.enum(['edge', 'corner', 'mixed']), colors: z.array(WangColorInputSchema).max(255), tiles: z.array(WangTileInputSchema).max(65_536) }).strict();
+const PixelWangSetUpsertSchema = z.object({ kind: z.literal('pixel.wang-set.upsert'), tilesetId: z.string().min(1), wangSet: WangSetInputSchema, expectedRevision: z.number().int().nonnegative() }).strict();
+const PixelWangSetDeleteSchema = z.object({ kind: z.literal('pixel.wang-set.delete'), tilesetId: z.string().min(1), wangSetId: z.string().min(1), expectedRevision: z.number().int().nonnegative() }).strict();
+const PixelWangColorUpsertSchema = z.object({ kind: z.literal('pixel.wang-color.upsert'), tilesetId: z.string().min(1), wangSetId: z.string().min(1), color: WangColorInputSchema, expectedRevision: z.number().int().nonnegative() }).strict();
+const PixelWangColorDeleteSchema = z.object({ kind: z.literal('pixel.wang-color.delete'), tilesetId: z.string().min(1), wangSetId: z.string().min(1), colorId: z.number().int().min(1).max(255), expectedRevision: z.number().int().nonnegative() }).strict();
+const PixelWangTileAssignSchema = z.object({ kind: z.literal('pixel.wang-tile.assign'), tilesetId: z.string().min(1), wangSetId: z.string().min(1), tile: WangTileInputSchema, expectedRevision: z.number().int().nonnegative() }).strict();
+const IllustrationAlignSchema = z.object({ kind: z.literal('illustration.objects.align'), objectIds: z.array(z.string().min(1)).min(1).max(256), expectedRevisions: ExpectedRevisionsSchema, mode: z.enum(['left', 'center-x', 'right', 'top', 'center-y', 'bottom']), target: z.enum(['artboard', 'selection', 'key-object']).default('selection'), keyObjectId: z.string().min(1).optional() }).strict();
+const IllustrationDistributeSchema = z.object({ kind: z.literal('illustration.objects.distribute'), objectIds: z.array(z.string().min(1)).min(3).max(256), expectedRevisions: ExpectedRevisionsSchema, axis: z.enum(['x', 'y']), mode: z.enum(['centers', 'spacing']).default('centers') }).strict();
+const IllustrationBooleanSchema = z.object({ kind: z.literal('illustration.path.boolean'), objectIds: z.tuple([z.string().min(1), z.string().min(1)]), expectedRevisions: ExpectedRevisionsSchema, mode: z.enum(['union', 'subtract', 'intersect', 'exclude']) }).strict();
+const IllustrationMaterialSchema = z.object({ kind: z.literal('illustration.material.apply'), objectId: z.string().min(1), expectedRevision: z.number().int().nonnegative(), preset: z.literal('polished-gold') }).strict();
+const IllustrationGradientSetSchema = z.object({
+  kind: z.literal('illustration.gradient.set'),
+  objectId: z.string().min(1),
+  gradientKind: z.enum(['linear-gradient', 'radial-gradient']),
+  x1: z.number().finite(), y1: z.number().finite(), x2: z.number().finite(), y2: z.number().finite(),
+  stops: z.array(z.object({ offset: z.number().finite().min(0).max(1), color: z.string().regex(/^#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?$/), opacity: z.number().finite().min(0).max(1).optional() }).strict()).min(2).max(32),
+  expectedRevision: z.number().int().nonnegative(),
+}).strict();
+const IllustrationImageCropSchema = z.object({
+  kind: z.literal('illustration.image.crop'), objectId: z.string().min(1), expectedRevision: z.number().int().nonnegative(), action: z.enum(['rectangle', 'aspect', 'reset']),
+  rectangle: z.object({ x: z.number().finite().nonnegative(), y: z.number().finite().nonnegative(), width: z.number().finite().positive(), height: z.number().finite().positive() }).strict().optional(),
+  aspect: z.number().finite().positive().max(1_000).optional(),
+}).strict().superRefine((operation, context) => {
+  if (operation.action === 'rectangle' && !operation.rectangle) context.addIssue({ code: 'custom', path: ['rectangle'], message: 'Rectangle crop requires display-space bounds.' });
+  if (operation.action === 'aspect' && operation.aspect === undefined) context.addIssue({ code: 'custom', path: ['aspect'], message: 'Aspect crop requires a positive ratio.' });
+  if (operation.action !== 'rectangle' && operation.rectangle) context.addIssue({ code: 'custom', path: ['rectangle'], message: 'Rectangle bounds are only valid for rectangle crops.' });
+  if (operation.action !== 'aspect' && operation.aspect !== undefined) context.addIssue({ code: 'custom', path: ['aspect'], message: 'Aspect is only valid for aspect crops.' });
+});
+const IllustrationImageFiltersSchema = z.object({
+  kind: z.enum(['illustration.image.filters.replace', 'illustration.object.filters.replace']), objectId: z.string().min(1), expectedRevision: z.number().int().nonnegative(),
+  filters: z.array(z.object({ type: z.enum(['brightness', 'contrast', 'saturation', 'hue', 'blur']), value: z.number().finite() }).strict().superRefine((filter, context) => {
+    const valid = filter.type === 'hue' ? filter.value >= -180 && filter.value <= 180 : filter.type === 'blur' ? filter.value >= 0 && filter.value <= 40 : filter.value >= -1 && filter.value <= 1;
+    if (!valid) context.addIssue({ code: 'custom', path: ['value'], message: `Filter value is outside the supported ${filter.type} range.` });
+  })).max(64),
+}).strict();
+const IllustrationLayerFiltersSchema = z.object({ kind: z.literal('illustration.layer.filters.replace'), layerId: z.string().min(1), expectedRevision: z.number().int().nonnegative(), filters: IllustrationImageFiltersSchema.shape.filters }).strict();
+const IllustrationObjectMaskSchema = z.object({ kind: z.literal('illustration.object.mask.set'), objectIds: z.array(z.string().min(1)).min(1).max(256), maskObjectId: z.string().min(1).nullable(), expectedRevisions: ExpectedRevisionsSchema }).strict();
+const IllustrationLayerMaskSchema = z.object({ kind: z.literal('illustration.layer.mask.set'), layerId: z.string().min(1), maskLayerId: z.string().min(1).nullable(), expectedRevision: z.number().int().nonnegative() }).strict();
+const TextStylePatchSchema = z.object({
+  fontFamily: z.string().trim().min(1).max(200).optional(), fontSize: z.number().finite().min(1).max(500).optional(), fontWeight: z.number().int().min(100).max(900).optional(),
+  fontStyle: z.enum(['normal', 'italic']).optional(), color: z.string().regex(/^#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?$/).optional(), letterSpacing: z.number().finite().min(-20).max(100).optional(), underline: z.boolean().optional(),
+}).strict().refine((patch) => Object.keys(patch).length > 0, 'At least one text style field is required.');
+const IllustrationTextStyleSchema = z.object({ kind: z.literal('illustration.text.style'), objectId: z.string().min(1), start: z.number().int().nonnegative(), end: z.number().int().positive(), style: TextStylePatchSchema, expectedRevision: z.number().int().nonnegative() }).strict();
+const IllustrationTextContentSchema = z.object({ kind: z.literal('illustration.text.content.set'), objectId: z.string().min(1), text: z.string().max(100_000), expectedRevision: z.number().int().nonnegative() }).strict();
+const IllustrationPathNodeMoveSchema = z.object({ kind: z.literal('illustration.path.node.move'), objectId: z.string().min(1), nodeIndex: z.number().int().nonnegative(), point: z.enum(['anchor', 'in', 'out']), x: z.number().finite(), y: z.number().finite(), mirror: z.boolean().default(false), expectedRevision: z.number().int().nonnegative() }).strict();
+const IllustrationPathNodeInsertSchema = z.object({ kind: z.literal('illustration.path.node.insert'), objectId: z.string().min(1), segmentIndex: z.number().int().nonnegative(), time: z.number().finite().gt(0).lt(1).default(0.5), expectedRevision: z.number().int().nonnegative() }).strict();
+const IllustrationPathNodeDeleteSchema = z.object({ kind: z.literal('illustration.path.node.delete'), objectId: z.string().min(1), nodeIndex: z.number().int().nonnegative(), expectedRevision: z.number().int().nonnegative() }).strict();
+const IllustrationPathNodeConvertSchema = z.object({ kind: z.literal('illustration.path.node.convert'), objectId: z.string().min(1), nodeIndex: z.number().int().nonnegative(), nodeKind: z.enum(['corner', 'smooth']), expectedRevision: z.number().int().nonnegative() }).strict();
+const IllustrationPathClosedSchema = z.object({ kind: z.literal('illustration.path.closed.set'), objectId: z.string().min(1), closed: z.boolean(), expectedRevision: z.number().int().nonnegative() }).strict();
+const IllustrationPathArcConvertSchema = z.object({ kind: z.literal('illustration.path.arcs.convert'), objectId: z.string().min(1), expectedRevision: z.number().int().nonnegative() }).strict();
+const IllustrationPathSplitSchema = z.object({ kind: z.literal('illustration.path.split'), objectId: z.string().min(1), nodeIndex: z.number().int().nonnegative(), newObjectId: z.string().min(1).max(500).optional(), expectedRevision: z.number().int().nonnegative() }).strict();
+const IllustrationPathJoinSchema = z.object({
+  kind: z.literal('illustration.path.join'),
+  primaryObjectId: z.string().min(1),
+  secondaryObjectId: z.string().min(1),
+  endpoints: z.enum(['nearest', 'end-start', 'start-end', 'start-start', 'end-end']).default('nearest'),
+  expectedRevisions: ExpectedRevisionsSchema,
+}).strict().refine((operation) => operation.primaryObjectId !== operation.secondaryObjectId, 'Join targets must be different paths.');
+const DocumentFragmentImportSchema = z.object({
+  kind: z.literal('document.fragment.import'),
+  fragment: z.unknown(),
+  targetLayerId: z.string().min(1).optional(),
+  offsetX: z.number().finite().min(-1_000_000).max(1_000_000).optional(),
+  offsetY: z.number().finite().min(-1_000_000).max(1_000_000).optional(),
+}).strict();
+const ObservationFragmentSchema = z.object({
+  kind: z.enum(['illustration-objects', 'pixel-assets']),
+  objectIds: z.array(z.string().min(1)).min(1).max(192).optional(),
+  assetId: z.string().min(1).optional(),
+}).strict();
+
+function agentJobSummary(job: AsyncJob): Record<string, unknown> {
+  const dependency = job.status === 'waiting-for-user' && job.approval
+    ? {
+        kind: 'user-approval',
+        expiresAt: job.approval.expiresAt,
+        permittedDecisions: [...job.approval.options],
+        guidance: 'A human must review this request in AIDraw. job_manage cannot approve it.',
+      }
+    : undefined;
+  return {
+    id: job.id,
+    kind: job.kind,
+    status: job.status,
+    actor: structuredClone(job.actor),
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+    progress: job.progress,
+    message: job.message,
+    error: job.error ? structuredClone(job.error) : undefined,
+    batch: job.kind === 'batch' && job.result && typeof job.result === 'object'
+      ? structuredClone(job.result as Record<string, unknown>)
+      : undefined,
+    dependency,
+  };
+}
+
+function compactIndexedChanges(changes: Array<{ x: number; y: number; index: number }>, offsetX: number, offsetY: number) {
+  const runs: Array<{ x: number; y: number; length: number; index: number }> = [];
+  const ordered = [...changes].sort((left, right) => left.y - right.y || left.x - right.x);
+  for (const change of ordered) {
+    const x = change.x + offsetX; const y = change.y + offsetY; const previous = runs.at(-1);
+    if (previous && previous.y === y && previous.index === change.index && previous.x + previous.length === x && previous.length < 65_536) previous.length += 1;
+    else runs.push({ x, y, length: 1, index: change.index });
+  }
+  return runs;
+}
+
+function pixelSemanticTarget(document: AIDrawDocument, spriteId: string, celId: string): { document: PixelDocument; sprite: PixelSprite; celId: string } {
+  if (document.kind !== 'pixel') throw new Error('This semantic pixel operation requires a pixel document.');
+  const sprite = document.pixelAssets[spriteId]; if (!sprite || sprite.type !== 'sprite') throw new Error(`Target sprite ${spriteId} does not exist.`);
+  const requestedCel = sprite.cels[celId]; if (!requestedCel) throw new Error(`Target cel ${celId} does not exist in sprite ${sprite.id}.`);
+  const cel = resolvePixelCel(sprite, requestedCel.id);
+  if (!cel) throw new Error(`Cel ${requestedCel.id} has a cyclic or missing link.`);
+  return { document, sprite, celId: cel.id };
+}
+
+function pixelSpriteTarget(document: AIDrawDocument, spriteId: string): PixelSprite {
+  if (document.kind !== 'pixel') throw new Error('This semantic pixel operation requires a pixel document.');
+  const sprite = document.pixelAssets[spriteId];
+  if (!sprite || sprite.type !== 'sprite') throw new Error(`Target sprite ${spriteId} does not exist.`);
+  return sprite;
+}
+
+function boundedPixelRegion(sprite: PixelSprite, region?: { x: number; y: number; width: number; height: number }) {
+  const target = region ?? { x: 0, y: 0, width: sprite.width, height: sprite.height };
+  if (target.x + target.width > sprite.width || target.y + target.height > sprite.height) throw new Error('Semantic pixel region must fit completely inside the sprite.');
+  if (target.width * target.height > 1_000_000) throw new Error('Semantic pixel operations are limited to one million target cells.');
+  return target;
+}
+
+function pixelRegionOperation(sprite: PixelSprite, celId: string, changes: Array<{ x: number; y: number; index: number }>, expectedRevision: number): CanvasOperation[] {
+  if (changes.length === 0) throw new Error('The semantic pixel operation would not change any cells.');
+  return [{ kind: 'pixel.cel.region', spriteId: sprite.id, celId, runs: compactIndexedChanges(changes, 0, 0), expectedRevision }];
+}
+
+function semanticObjects(document: AIDrawDocument, objectIds: string[], expectedRevisions: Record<string, number>): { document: IllustrationDocument; objects: IllustrationObject[] } {
+  if (document.kind !== 'illustration') throw new Error('This semantic illustration operation requires an illustration document.');
+  if (new Set(objectIds).size !== objectIds.length) throw new Error('Semantic object lists may not contain duplicates.');
+  const objects = objectIds.map((id) => { const object = document.objects[id]; if (!object) throw new Error(`Object ${id} does not exist.`); if (expectedRevisions[id] === undefined) throw new Error(`expectedRevisions is missing ${id}.`); return object; });
+  return { document, objects };
+}
+
+function semanticPath(document: AIDrawDocument, objectId: string): { document: IllustrationDocument; object: Extract<IllustrationObject, { type: 'path' }> } {
+  if (document.kind !== 'illustration') throw new Error('Semantic path operations require an illustration document.');
+  const object = document.objects[objectId];
+  if (!object || object.type !== 'path') throw new Error(`Path object ${objectId} does not exist.`);
+  return { document, object };
+}
+
+type QuantizeImage = typeof quantizeImageToPalette;
+
+async function expandAgentCanvasOperation(document: AIDrawDocument, value: Record<string, unknown>, quantizeImage: QuantizeImage, actor: Actor): Promise<CanvasOperation[]> {
+  if (value.kind === 'document.fragment.import') {
+    const operation = DocumentFragmentImportSchema.parse(value);
+    return importDocumentFragmentOperations(document, operation.fragment, {
+      targetLayerId: operation.targetLayerId,
+      offsetX: operation.offsetX,
+      offsetY: operation.offsetY,
+    });
+  }
+  if (value.kind === 'pixel.image.quantize') {
+    const operation = AgentQuantizeOperationSchema.parse(value); const target = pixelSemanticTarget(document, operation.spriteId, operation.celId); const asset = target.document.assets[operation.assetId];
+    if (!asset?.data) throw new Error(`Source asset ${operation.assetId} has no embedded raster data.`);
+    const width = operation.width ?? target.sprite.width - operation.x; const height = operation.height ?? target.sprite.height - operation.y;
+    boundedPixelRegion(target.sprite, { x: operation.x, y: operation.y, width, height }); const settings = target.document.conversionDefaults;
+    const changes = await quantizeImage(Buffer.from(asset.data, 'base64'), width, height, target.document.palette, { alphaThreshold: settings.alphaThreshold, dithering: settings.dithering, includeTransparent: true });
+    return [{
+      kind: 'pixel.cel.region', spriteId: target.sprite.id, celId: target.celId, runs: compactIndexedChanges(changes, operation.x, operation.y), expectedRevision: operation.expectedRevision,
+      conversion: { sourceAssetId: asset.id, resample: settings.resample, paletteMetric: settings.paletteMetric, dithering: settings.dithering, alphaThreshold: settings.alphaThreshold, width, height },
+    }];
+  }
+  if (value.kind === 'pixel.palette.replace-delete') {
+    const operation = PixelPaletteReplaceDeleteSchema.parse(value);
+    if (document.kind !== 'pixel') throw new Error('Palette replacement requires a pixel document.');
+    if (operation.expectedRevision !== document.revision) throw new Error(`Pixel document revision changed from ${operation.expectedRevision} to ${document.revision}; observe and retry.`);
+    return replaceAndDeletePaletteIndexOperations(document, operation.sourceIndex, operation.replacementIndex);
+  }
+  if (value.kind === 'pixel.flood-fill') {
+    const operation = PixelFloodFillSchema.parse(value); const target = pixelSemanticTarget(document, operation.spriteId, operation.celId); boundedPixelRegion(target.sprite);
+    if (operation.x >= target.sprite.width || operation.y >= target.sprite.height) throw new Error('Flood-fill seed is outside the sprite.');
+    if (operation.index >= target.document.palette.length) throw new Error('Flood-fill palette index does not exist.');
+    const cel = target.sprite.cels[target.celId]; const sourceIndex = readPixel(cel, operation.x, operation.y); if (sourceIndex === operation.index) throw new Error('Flood fill already has the requested index.');
+    const visited = new Uint8Array(target.sprite.width * target.sprite.height); const queue = [operation.y * target.sprite.width + operation.x]; visited[queue[0]] = 1; const changes: Array<{ x: number; y: number; index: number }> = [];
+    for (let cursor = 0; cursor < queue.length; cursor += 1) { const cell = queue[cursor]; const x = cell % target.sprite.width; const y = Math.floor(cell / target.sprite.width); if (readPixel(cel, x, y) !== sourceIndex) continue; changes.push({ x, y, index: operation.index }); for (const [nextX, nextY] of [[x - 1, y], [x + 1, y], [x, y - 1], [x, y + 1]]) { if (nextX < 0 || nextY < 0 || nextX >= target.sprite.width || nextY >= target.sprite.height) continue; const next = nextY * target.sprite.width + nextX; if (!visited[next]) { visited[next] = 1; queue.push(next); } } }
+    return pixelRegionOperation(target.sprite, target.celId, changes, operation.expectedRevision);
+  }
+  if (value.kind === 'pixel.replace-color') {
+    const operation = PixelReplaceColorSchema.parse(value); const target = pixelSemanticTarget(document, operation.spriteId, operation.celId); const region = boundedPixelRegion(target.sprite, operation.region);
+    if (operation.toIndex >= target.document.palette.length) throw new Error('Replacement palette index does not exist.');
+    if (operation.fromIndex === operation.toIndex) throw new Error('Source and replacement palette indices are identical.');
+    const cel = target.sprite.cels[target.celId]; const changes: Array<{ x: number; y: number; index: number }> = [];
+    for (let y = region.y; y < region.y + region.height; y += 1) for (let x = region.x; x < region.x + region.width; x += 1) if (readPixel(cel, x, y) === operation.fromIndex) changes.push({ x, y, index: operation.toIndex });
+    return pixelRegionOperation(target.sprite, target.celId, changes, operation.expectedRevision);
+  }
+  if (value.kind === 'pixel.adjust-index') {
+    const operation = PixelAdjustIndexSchema.parse(value); const target = pixelSemanticTarget(document, operation.spriteId, operation.celId); const region = boundedPixelRegion(target.sprite, operation.region); const cel = target.sprite.cels[target.celId]; const changes: Array<{ x: number; y: number; index: number }> = [];
+    for (let y = region.y; y < region.y + region.height; y += 1) for (let x = region.x; x < region.x + region.width; x += 1) { const current = readPixel(cel, x, y); if (!current) continue; const index = operation.order === 'luminance' ? stepPaletteByLuminance(target.document.palette, current, operation.delta > 0 ? 'lighter' : 'darker') : Math.max(1, Math.min(target.document.palette.length - 1, current + operation.delta)); if (index !== current) changes.push({ x, y, index }); }
+    return pixelRegionOperation(target.sprite, target.celId, changes, operation.expectedRevision);
+  }
+  if (value.kind === 'pixel.ordered-dither') {
+    const operation = PixelOrderedDitherSchema.parse(value); const target = pixelSemanticTarget(document, operation.spriteId, operation.celId); const region = boundedPixelRegion(target.sprite, operation.region);
+    if (operation.indexA >= target.document.palette.length || operation.indexB >= target.document.palette.length) throw new Error('Dither palette index does not exist.');
+    const changes: Array<{ x: number; y: number; index: number }> = [];
+    for (let y = region.y; y < region.y + region.height; y += 1) for (let x = region.x; x < region.x + region.width; x += 1) changes.push({ x, y, index: orderedDitherIndex(x, y, operation.indexA, operation.indexB, operation.coverage, operation.matrixSize, operation.phaseX, operation.phaseY) });
+    return pixelRegionOperation(target.sprite, target.celId, changes, operation.expectedRevision);
+  }
+  if (value.kind === 'pixel.bitmap-text.paint') {
+    const operation = PixelBitmapTextSchema.parse(value); const target = pixelSemanticTarget(document, operation.spriteId, operation.celId); const font = target.document.bitmapFonts.find((entry) => entry.id === operation.fontId); if (!font) throw new Error(`Bitmap font ${operation.fontId} does not exist.`); if (operation.index >= target.document.palette.length) throw new Error(`Palette index ${operation.index} does not exist.`);
+    const points = bitmapTextCells(font, operation.text, operation).filter((point) => point.x >= 0 && point.y >= 0 && point.x < target.sprite.width && point.y < target.sprite.height); if (!points.length) throw new Error('Bitmap text falls completely outside the sprite.');
+    return pixelRegionOperation(target.sprite, target.celId, points.map((point) => ({ ...point, index: operation.index })), operation.expectedRevision);
+  }
+  if (value.kind === 'pixel.selection.transform') {
+    const operation = PixelSelectionTransformSchema.parse(value); const target = pixelSemanticTarget(document, operation.spriteId, operation.celId); const points: Array<{ x: number; y: number }> = []; let total = 0;
+    for (const run of operation.runs) {
+      total += run.length; if (total > 1_000_000) throw new Error('Pixel selection transforms are limited to one million cells.');
+      if (run.x + run.length > target.sprite.width || run.y >= target.sprite.height) throw new Error('Every selection run must fit completely inside the sprite.');
+      for (let offset = 0; offset < run.length; offset += 1) points.push({ x: run.x + offset, y: run.y });
+    }
+    if (operation.transform === 'move' && operation.offsetX === 0 && operation.offsetY === 0) throw new Error('A move selection transform requires a non-zero offset.');
+    if (operation.transform !== 'move' && (operation.offsetX !== 0 || operation.offsetY !== 0)) throw new Error('Selection offsets are only valid for move transforms.');
+    if (operation.transform !== 'scale' && (operation.scaleX !== 1 || operation.scaleY !== 1)) throw new Error('Scale factors are only valid for scale transforms.');
+    if (operation.transform === 'scale' && operation.scaleX === 1 && operation.scaleY === 1) throw new Error('A scale transform requires at least one factor greater than one.');
+    const cel = target.sprite.cels[target.celId];
+    const changes = operation.transform === 'scale'
+      ? scaleGridSelection(points, (x, y) => readPixel(cel, x, y), operation.scaleX, operation.scaleY, { width: target.sprite.width, height: target.sprite.height }, 0).changes.map((entry) => ({ x: entry.x, y: entry.y, index: entry.value }))
+      : transformPixelSelection(points, (x, y) => readPixel(cel, x, y), operation.transform, { width: target.sprite.width, height: target.sprite.height }, { x: operation.offsetX, y: operation.offsetY }).changes;
+    return [{ kind: 'pixel.cel.region', spriteId: target.sprite.id, celId: target.celId, runs: compactIndexedChanges(changes, 0, 0), expectedRevision: operation.expectedRevision }];
+  }
+  if (value.kind === 'pixel.frame.duplicate') {
+    const operation = PixelFrameDuplicateSchema.parse(value); const target = pixelSpriteTarget(document, operation.spriteId);
+    const duplicate = duplicatePixelFrame(target, operation.frameId, { actorId: actor.id, timestamp: nowIso() });
+    return [{ kind: 'pixel.frame.add', spriteId: target.id, ...duplicate, expectedRevision: operation.expectedRevision }];
+  }
+  if (value.kind === 'pixel.frame.move') {
+    const operation = PixelFrameMoveSchema.parse(value); const target = pixelSpriteTarget(document, operation.spriteId);
+    return [{ kind: 'pixel.asset.replace', asset: reorderPixelFrame(target, operation.frameId, operation.direction === 'left' ? -1 : 1), expectedRevision: operation.expectedRevision }];
+  }
+  if (value.kind === 'pixel.frame.cels.link') {
+    const operation = PixelFrameCelsLinkSchema.parse(value); const target = pixelSpriteTarget(document, operation.spriteId);
+    return [{ kind: 'pixel.asset.replace', asset: setPixelFrameCelsLinked(target, operation.frameId, operation.linked), expectedRevision: operation.expectedRevision }];
+  }
+  if (value.kind === 'pixel.frame.duration.set') {
+    const operation = PixelFrameDurationSchema.parse(value); const target = pixelSpriteTarget(document, operation.spriteId); const frame = target.frames[operation.frameId];
+    if (!frame) throw new Error(`Frame ${operation.frameId} does not exist.`);
+    return [{ kind: 'pixel.frame.replace', spriteId: target.id, frame: { ...frame, durationMs: operation.durationMs }, expectedRevision: operation.expectedRevision }];
+  }
+  if (value.kind === 'pixel.animation.tag.upsert') {
+    const operation = PixelAnimationTagUpsertSchema.parse(value); const target = pixelSpriteTarget(document, operation.spriteId);
+    return [{ kind: 'pixel.asset.replace', asset: upsertPixelAnimationTag(target, operation.tag), expectedRevision: operation.expectedRevision }];
+  }
+  if (value.kind === 'pixel.animation.tag.delete') {
+    const operation = PixelAnimationTagDeleteSchema.parse(value); const target = pixelSpriteTarget(document, operation.spriteId);
+    return [{ kind: 'pixel.asset.replace', asset: deletePixelAnimationTag(target, operation.tagId), expectedRevision: operation.expectedRevision }];
+  }
+  if (value.kind === 'pixel.palette-override.set') {
+    const operation = PixelPaletteOverrideSchema.parse(value); const target = pixelSpriteTarget(document, operation.spriteId);
+    if (document.kind !== 'pixel') throw new Error('Frame palette overrides require a pixel document.');
+    if (operation.colors && operation.colors.length !== document.palette.length) throw new Error(`Frame palette overrides require exactly ${document.palette.length} colors.`);
+    const palette = operation.colors?.map((color, index) => ({ ...document.palette[index], color }));
+    return [{ kind: 'pixel.asset.replace', asset: setPixelFramePaletteOverride(target, operation.frameId, palette), expectedRevision: operation.expectedRevision }];
+  }
+  if (value.kind === 'pixel.project-link.embed') {
+    const operation = PixelProjectLinkEmbedSchema.parse(value);
+    if (document.kind !== 'pixel') throw new Error('Project links require a pixel document.');
+    const link = document.linkedAssets.find((entry) => entry.id === operation.linkId); if (!link) throw new Error(`Project link ${operation.linkId} does not exist.`);
+    if (link.mode === 'embedded') throw new Error(`Project link ${operation.linkId} is already embedded.`);
+    return [{ kind: 'pixel.links.replace', linkedAssets: embedPixelLink(document, operation.linkId), expectedRevision: operation.expectedRevision }];
+  }
+  if (value.kind === 'pixel.project-links.pack') {
+    const operation = PixelProjectLinksPackSchema.parse(value);
+    if (document.kind !== 'pixel') throw new Error('Project links require a pixel document.');
+    if (!document.linkedAssets.some((entry) => entry.mode === 'linked')) throw new Error('The pixel project has no external links to pack.');
+    return [{ kind: 'pixel.links.replace', linkedAssets: packPixelLinks(document), expectedRevision: operation.expectedRevision }];
+  }
+  if (value.kind === 'pixel.stamp.place') {
+    const operation = PixelStampPlaceSchema.parse(value); const target = pixelSemanticTarget(document, operation.spriteId, operation.celId);
+    const stamp = target.document.stamps.find((entry) => entry.id === operation.stampId); if (!stamp) throw new Error(`Pixel stamp ${operation.stampId} does not exist.`);
+    const placement = placePixelStamp(operation.transform ? transformPixelStamp(stamp, operation.transform) : stamp, operation.x, operation.y, { width: target.sprite.width, height: target.sprite.height });
+    return pixelRegionOperation(target.sprite, target.celId, placement.changes, operation.expectedRevision);
+  }
+  if (value.kind === 'pixel.tile-stamp.place') {
+    const operation = PixelTileStampPlaceSchema.parse(value);
+    if (document.kind !== 'pixel') throw new Error('Tile stamps require a pixel document.');
+    const map = document.pixelAssets[operation.mapId]; if (!map || map.type !== 'tilemap') throw new Error('Tile stamp target map does not exist.');
+    const layer = map.layers[operation.layerId]; if (!layer || layer.type !== 'tile') throw new Error('Tile stamp target layer does not exist.');
+    const stamp = document.tileStamps.find((entry) => entry.id === operation.stampId); if (!stamp) throw new Error('Tile stamp ' + operation.stampId + ' does not exist.');
+    const placement = placeTileStamp(operation.transform ? transformTileStamp(stamp, operation.transform) : stamp, operation.x, operation.y, map.infinite ? undefined : { width: map.width, height: map.height });
+    if (!placement.changes.length) throw new Error('The tile stamp falls completely outside the finite map.');
+    return [{ kind: 'pixel.tilemap.set', mapId: map.id, layerId: layer.id, changes: placement.changes, expectedRevision: operation.expectedRevision }];
+  }
+  if (value.kind === 'pixel.tile-variants.paint') {
+    const operation = PixelTileVariantsPaintSchema.parse(value);
+    if (document.kind !== 'pixel') throw new Error('Tile variants require a pixel project.');
+    const map = document.pixelAssets[operation.mapId]; if (!map || map.type !== 'tilemap') throw new Error(`Tilemap ${operation.mapId} does not exist.`);
+    const layer = map.layers[operation.layerId]; if (!layer || layer.type !== 'tile') throw new Error(`Tile layer ${operation.layerId} does not exist.`);
+    const tileset = document.pixelAssets[operation.tilesetId]; if (!tileset || tileset.type !== 'tileset' || !map.tilesetIds.includes(tileset.id)) throw new Error(`Tileset ${operation.tilesetId} is not attached to this map.`);
+    if (operation.tileId >= tileset.columns * tileset.rows) throw new Error(`Tile ${operation.tileId} falls outside the tileset slice.`);
+    const unique = new Map(operation.points.map((point) => [`${point.x},${point.y}`, point]));
+    const points = [...unique.values()]; if (!map.infinite && points.some((point) => point.x < 0 || point.y < 0 || point.x >= map.width || point.y >= map.height)) throw new Error('Variant paint points must fit completely inside a finite map.');
+    const seed = operation.seed ?? Math.trunc(Number(map.properties[TILE_VARIANT_SEED_PROPERTY]) || 0);
+    const transforms = operation.transforms ?? { hFlip: false, vFlip: false, diagonal: false };
+    const changes = points.map((point) => ({ ...point, gid: encodeTiledGid(tileset.firstGid + chooseTileVariant(tileset, operation.tileId, point.x, point.y, seed), transforms) }));
+    return [{ kind: 'pixel.tilemap.set', mapId: map.id, layerId: layer.id, changes, expectedRevision: operation.expectedRevision }];
+  }
+  if (value.kind === 'pixel.map-object.upsert' || value.kind === 'pixel.map-object.delete') {
+    const operation = value.kind === 'pixel.map-object.upsert' ? PixelMapObjectUpsertSchema.parse(value) : PixelMapObjectDeleteSchema.parse(value); if (document.kind !== 'pixel') throw new Error('Map objects require a pixel project.'); const source = document.pixelAssets[operation.mapId]; if (!source || source.type !== 'tilemap') throw new Error(`Tilemap ${operation.mapId} does not exist.`); const layer = source.layers[operation.layerId]; if (!layer || layer.type !== 'object') throw new Error('Map objects require an existing object layer.'); const map = structuredClone(source); const nextLayer = map.layers[operation.layerId]; if (nextLayer.type !== 'object') throw new Error('Map object layer changed unexpectedly.');
+    if (operation.kind === 'pixel.map-object.upsert') { const index = (nextLayer.objects ?? []).findIndex((object) => object.id === operation.object.id); if (index < 0) nextLayer.objects = [...(nextLayer.objects ?? []), operation.object]; else nextLayer.objects = (nextLayer.objects ?? []).map((object, position) => position === index ? operation.object : object); }
+    else { if (!(nextLayer.objects ?? []).some((object) => object.id === operation.objectId)) throw new Error(`Map object ${operation.objectId} does not exist.`); nextLayer.objects = (nextLayer.objects ?? []).filter((object) => object.id !== operation.objectId); }
+    return [{ kind: 'pixel.asset.replace', asset: map, expectedRevision: operation.expectedRevision }];
+  }
+  if (value.kind === 'pixel.tileset-collision.upsert' || value.kind === 'pixel.tileset-collision.delete') {
+    const operation = value.kind === 'pixel.tileset-collision.upsert' ? PixelTilesetCollisionUpsertSchema.parse(value) : PixelTilesetCollisionDeleteSchema.parse(value); if (document.kind !== 'pixel') throw new Error('Tileset collisions require a pixel project.'); const source = document.pixelAssets[operation.tilesetId]; if (!source || source.type !== 'tileset') throw new Error(`Tileset ${operation.tilesetId} does not exist.`); if (operation.tileId >= source.columns * source.rows) throw new Error(`Tile ${operation.tileId} falls outside the tileset slice.`); const tileset = structuredClone(source); const tile = tileset.tiles[operation.tileId] ?? { id: operation.tileId, sourceX: tileset.margin + operation.tileId % tileset.columns * (tileset.tileWidth + tileset.spacing), sourceY: tileset.margin + Math.floor(operation.tileId / tileset.columns) * (tileset.tileHeight + tileset.spacing), probability: 1, animation: [], collisions: [], properties: {} };
+    if (operation.kind === 'pixel.tileset-collision.upsert') { const existing = tile.collisions.findIndex((shape) => shape.id === operation.shape.id); tile.collisions = existing < 0 ? [...tile.collisions, operation.shape] : tile.collisions.map((shape, index) => index === existing ? operation.shape : shape); }
+    else { if (!tile.collisions.some((shape) => shape.id === operation.shapeId)) throw new Error(`Collision shape ${operation.shapeId} does not exist on tile ${operation.tileId}.`); tile.collisions = tile.collisions.filter((shape) => shape.id !== operation.shapeId); }
+    tileset.tiles[operation.tileId] = tile; return [{ kind: 'pixel.asset.replace', asset: tileset, expectedRevision: operation.expectedRevision }];
+  }
+  if (value.kind === 'pixel.wang-set.upsert' || value.kind === 'pixel.wang-set.delete' || value.kind === 'pixel.wang-color.upsert' || value.kind === 'pixel.wang-color.delete' || value.kind === 'pixel.wang-tile.assign') {
+    if (document.kind !== 'pixel') throw new Error('Wang authoring requires a pixel project.');
+    const parsed = value.kind === 'pixel.wang-set.upsert' ? PixelWangSetUpsertSchema.parse(value)
+      : value.kind === 'pixel.wang-set.delete' ? PixelWangSetDeleteSchema.parse(value)
+        : value.kind === 'pixel.wang-color.upsert' ? PixelWangColorUpsertSchema.parse(value)
+          : value.kind === 'pixel.wang-color.delete' ? PixelWangColorDeleteSchema.parse(value)
+            : PixelWangTileAssignSchema.parse(value);
+    const source = document.pixelAssets[parsed.tilesetId]; if (!source || source.type !== 'tileset') throw new Error(`Tileset ${parsed.tilesetId} does not exist.`);
+    const asset = parsed.kind === 'pixel.wang-set.upsert' ? upsertWangSet(source, parsed.wangSet)
+      : parsed.kind === 'pixel.wang-set.delete' ? deleteWangSet(source, parsed.wangSetId)
+        : parsed.kind === 'pixel.wang-color.upsert' ? upsertWangColor(source, parsed.wangSetId, parsed.color)
+          : parsed.kind === 'pixel.wang-color.delete' ? deleteWangColor(source, parsed.wangSetId, parsed.colorId)
+            : assignWangTile(source, parsed.wangSetId, parsed.tile);
+    return [{ kind: 'pixel.asset.replace', asset, expectedRevision: parsed.expectedRevision }];
+  }
+  if (value.kind === 'illustration.objects.align') {
+    const operation = IllustrationAlignSchema.parse(value); const target = semanticObjects(document, operation.objectIds, operation.expectedRevisions);
+    const aligned = alignIllustrationObjects(target.objects, operation.mode, operation.target, { x: 0, y: 0, width: target.document.artboard.width, height: target.document.artboard.height }, operation.keyObjectId);
+    return aligned.map((object): CanvasOperation => ({ kind: 'illustration.object.replace', object, expectedRevision: operation.expectedRevisions[object.id] }));
+  }
+  if (value.kind === 'illustration.objects.distribute') {
+    const operation = IllustrationDistributeSchema.parse(value); const target = semanticObjects(document, operation.objectIds, operation.expectedRevisions);
+    const distributed = distributeIllustrationObjects(target.objects, operation.axis, operation.mode);
+    return distributed.map((object): CanvasOperation => ({ kind: 'illustration.object.replace', object, expectedRevision: operation.expectedRevisions[object.id] }));
+  }
+  if (value.kind === 'illustration.path.boolean') {
+    const operation = IllustrationBooleanSchema.parse(value); const target = semanticObjects(document, operation.objectIds, operation.expectedRevisions); if (target.objects[0].layerId !== target.objects[1].layerId) throw new Error('Path boolean inputs must share one vector layer.');
+    const object = createBooleanPath(target.objects[0], target.objects[1], operation.mode);
+    return [
+      { kind: 'illustration.object.delete', objectId: target.objects[0].id, expectedRevision: operation.expectedRevisions[target.objects[0].id] },
+      { kind: 'illustration.object.delete', objectId: target.objects[1].id, expectedRevision: operation.expectedRevisions[target.objects[1].id] },
+      { kind: 'illustration.object.add', object },
+    ];
+  }
+  if (value.kind === 'illustration.material.apply') {
+    const operation = IllustrationMaterialSchema.parse(value); if (document.kind !== 'illustration') throw new Error('Material presets require an illustration document.'); const object = document.objects[operation.objectId]; if (!object) throw new Error(`Object ${operation.objectId} does not exist.`); const material = buildPolishedGoldMaterial(document, object); return material.operations.map((entry) => entry.kind === 'illustration.object.replace' && entry.object.id === object.id ? { ...entry, expectedRevision: operation.expectedRevision } : entry);
+  }
+  if (value.kind === 'illustration.gradient.set') {
+    const operation = IllustrationGradientSetSchema.parse(value); if (document.kind !== 'illustration') throw new Error('Gradient editing requires an illustration document.'); const object = document.objects[operation.objectId];
+    if (!object || (object.type !== 'shape' && object.type !== 'path')) throw new Error('Gradient editing requires a shape or path object.');
+    return [{ kind: 'illustration.object.replace', object: { ...object, fill: { kind: operation.gradientKind, x1: operation.x1, y1: operation.y1, x2: operation.x2, y2: operation.y2, stops: [...operation.stops].sort((left, right) => left.offset - right.offset) } }, expectedRevision: operation.expectedRevision }];
+  }
+  if (value.kind === 'illustration.image.crop') {
+    const operation = IllustrationImageCropSchema.parse(value); if (document.kind !== 'illustration') throw new Error('Image crops require an illustration document.'); const source = document.objects[operation.objectId]; if (!source || source.type !== 'image') throw new Error(`Image object ${operation.objectId} does not exist.`);
+    const object = operation.action === 'reset' ? resetImageCrop(source) : operation.action === 'aspect' ? cropImageToAspect(source, operation.aspect!) : cropImageObject(source, operation.rectangle!);
+    return [{ kind: 'illustration.object.replace', object, expectedRevision: operation.expectedRevision }];
+  }
+  if (value.kind === 'illustration.image.filters.replace' || value.kind === 'illustration.object.filters.replace') {
+    const operation = IllustrationImageFiltersSchema.parse(value); if (document.kind !== 'illustration') throw new Error('Object filters require an illustration document.'); const object = document.objects[operation.objectId]; if (!object) throw new Error(`Illustration object ${operation.objectId} does not exist.`); if (operation.kind === 'illustration.image.filters.replace' && object.type !== 'image') throw new Error(`Image object ${operation.objectId} does not exist.`);
+    return [{ kind: 'illustration.object.replace', object: { ...object, filters: operation.filters }, expectedRevision: operation.expectedRevision }];
+  }
+  if (value.kind === 'illustration.layer.filters.replace') {
+    const operation = IllustrationLayerFiltersSchema.parse(value); if (document.kind !== 'illustration') throw new Error('Layer filters require an illustration document.'); const layer = document.layers[operation.layerId]; if (!layer) throw new Error(`Illustration layer ${operation.layerId} does not exist.`);
+    return [{ kind: 'illustration.layer.replace', layer: { ...layer, filters: operation.filters }, expectedRevision: operation.expectedRevision }];
+  }
+  if (value.kind === 'illustration.object.mask.set') {
+    const operation = IllustrationObjectMaskSchema.parse(value); const target = semanticObjects(document, operation.objectIds, operation.expectedRevisions);
+    if (operation.maskObjectId) { const mask = target.document.objects[operation.maskObjectId]; if (!mask || (mask.type !== 'shape' && mask.type !== 'path' && mask.type !== 'vector-stroke')) throw new Error('Object masks require an existing path-capable mask object.'); if (operation.objectIds.includes(mask.id)) throw new Error('A mask object cannot mask itself.'); if (target.objects.some((object) => object.layerId !== mask.layerId)) throw new Error('Object masks and their targets must share one vector layer.'); }
+    return target.objects.map((object): CanvasOperation => ({ kind: 'illustration.object.replace', object: { ...object, maskObjectId: operation.maskObjectId ?? undefined }, expectedRevision: operation.expectedRevisions[object.id] }));
+  }
+  if (value.kind === 'illustration.layer.mask.set') {
+    const operation = IllustrationLayerMaskSchema.parse(value); if (document.kind !== 'illustration') throw new Error('Layer masks require an illustration document.'); const layer = document.layers[operation.layerId]; if (!layer) throw new Error(`Layer ${operation.layerId} does not exist.`); if (operation.maskLayerId) { const mask = document.layers[operation.maskLayerId]; if (!mask || mask.type !== 'vector') throw new Error('A layer mask must reference an existing vector layer.'); if (mask.id === layer.id) throw new Error('A layer cannot mask itself.'); }
+    return [{ kind: 'illustration.layer.replace', layer: { ...layer, maskLayerId: operation.maskLayerId ?? undefined }, expectedRevision: operation.expectedRevision }];
+  }
+  if (value.kind === 'illustration.text.content.set') {
+    const operation = IllustrationTextContentSchema.parse(value); if (document.kind !== 'illustration') throw new Error('Text editing requires an illustration document.'); const object = document.objects[operation.objectId]; if (!object || object.type !== 'text') throw new Error('The text target does not exist.');
+    return [{ kind: 'illustration.object.replace', object: replaceStyledText(object, operation.text), expectedRevision: operation.expectedRevision }];
+  }
+  if (value.kind === 'illustration.text.style') {
+    const operation = IllustrationTextStyleSchema.parse(value); if (document.kind !== 'illustration') throw new Error('Text editing requires an illustration document.'); const object = document.objects[operation.objectId]; if (!object || object.type !== 'text') throw new Error('The text target does not exist.');
+    return [{ kind: 'illustration.object.replace', object: applyTextStyleRange(object, operation.start, operation.end, operation.style), expectedRevision: operation.expectedRevision }];
+  }
+  if (value.kind === 'illustration.path.node.move') {
+    const operation = IllustrationPathNodeMoveSchema.parse(value); const target = semanticPath(document, operation.objectId);
+    return [{ kind: 'illustration.object.replace', object: { ...target.object, pathData: movePathPoint(target.object.pathData, operation.nodeIndex, operation.point, operation.x, operation.y, operation.mirror) }, expectedRevision: operation.expectedRevision }];
+  }
+  if (value.kind === 'illustration.path.node.insert') {
+    const operation = IllustrationPathNodeInsertSchema.parse(value); const target = semanticPath(document, operation.objectId);
+    return [{ kind: 'illustration.object.replace', object: { ...target.object, pathData: insertPathNode(target.object.pathData, operation.segmentIndex, operation.time) }, expectedRevision: operation.expectedRevision }];
+  }
+  if (value.kind === 'illustration.path.node.delete') {
+    const operation = IllustrationPathNodeDeleteSchema.parse(value); const target = semanticPath(document, operation.objectId);
+    return [{ kind: 'illustration.object.replace', object: { ...target.object, pathData: deletePathNode(target.object.pathData, operation.nodeIndex) }, expectedRevision: operation.expectedRevision }];
+  }
+  if (value.kind === 'illustration.path.node.convert') {
+    const operation = IllustrationPathNodeConvertSchema.parse(value); const target = semanticPath(document, operation.objectId);
+    return [{ kind: 'illustration.object.replace', object: { ...target.object, pathData: convertPathNode(target.object.pathData, operation.nodeIndex, operation.nodeKind) }, expectedRevision: operation.expectedRevision }];
+  }
+  if (value.kind === 'illustration.path.closed.set') {
+    const operation = IllustrationPathClosedSchema.parse(value); const target = semanticPath(document, operation.objectId);
+    return [{ kind: 'illustration.object.replace', object: { ...target.object, pathData: setPathClosed(target.object.pathData, operation.closed), closed: operation.closed }, expectedRevision: operation.expectedRevision }];
+  }
+  if (value.kind === 'illustration.path.arcs.convert') {
+    const operation = IllustrationPathArcConvertSchema.parse(value); const target = semanticPath(document, operation.objectId); const converted = convertPathArcsToCubics(target.object.pathData);
+    return [{ kind: 'illustration.object.replace', object: { ...target.object, ...converted }, expectedRevision: operation.expectedRevision }];
+  }
+  if (value.kind === 'illustration.path.split') {
+    const operation = IllustrationPathSplitSchema.parse(value); const target = semanticPath(document, operation.objectId); const split = splitPathAtNode(target.object.pathData, operation.nodeIndex);
+    const operations: CanvasOperation[] = [{ kind: 'illustration.object.replace', object: { ...target.object, pathData: split.primaryPathData, closed: false }, expectedRevision: operation.expectedRevision }];
+    if (split.secondaryPathData) {
+      const timestamp = nowIso(); const layer = target.document.layers[target.object.layerId]; if (!layer || layer.type !== 'vector') throw new Error('The path vector layer does not exist.');
+      const parent = Object.values(target.document.objects).find((entry) => entry.type === 'group' && entry.childIds.includes(target.object.id));
+      const object = { ...structuredClone(target.object), id: operation.newObjectId ?? createId('path'), revision: 0, name: `${target.object.name} part 2`, createdAt: timestamp, updatedAt: timestamp, pathData: split.secondaryPathData, closed: false };
+      operations.push({ kind: 'illustration.object.add', object, index: Math.max(0, layer.objectIds.indexOf(target.object.id) + 1), parentGroupId: parent?.id, groupIndex: parent?.type === 'group' ? Math.max(0, parent.childIds.indexOf(target.object.id) + 1) : undefined });
+    }
+    return operations;
+  }
+  if (value.kind === 'illustration.path.join') {
+    const operation = IllustrationPathJoinSchema.parse(value); const primary = semanticPath(document, operation.primaryObjectId); const secondary = semanticPath(document, operation.secondaryObjectId);
+    return [
+      { kind: 'illustration.object.replace', object: joinPathObjects(primary.object, secondary.object, operation.endpoints), expectedRevision: operation.expectedRevisions[primary.object.id] },
+      { kind: 'illustration.object.delete', objectId: secondary.object.id, expectedRevision: operation.expectedRevisions[secondary.object.id] },
+    ];
+  }
+  return [CanvasOperationSchema.parse(value)];
+}
 
 function jsonText(value: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(value, null, 2) }], structuredContent: value as Record<string, unknown> };
@@ -87,6 +641,7 @@ function approvalReview(
   };
   if (kind === 'generation') {
     add('Provider', request.provider);
+    add('Model / workflow', request.provider === 'openai' ? 'gpt-image-2' : request.provider === 'stability' ? 'Stability generation API' : 'Selected ComfyUI API workflow');
     add('Mode', request.mode);
     add('Prompt', request.prompt);
     add('Negative prompt', request.negativePrompt);
@@ -100,7 +655,9 @@ function approvalReview(
     add('Action', request.action ?? title);
     add('Format', request.format);
     add('Presentation scale', request.scale ? `${request.scale}×` : undefined);
+    add('Animation tag', typeof request.animationTagId === 'string' ? request.animationTagId : undefined);
     add('Pixel import', request.pixelMode === true ? 'Yes' : undefined);
+    add('Project link', request.projectLinkId);
     if (overwritePaths.length) add('Will overwrite', overwritePaths.join('\n'), 'warning');
     else if (target && (kind === 'save' || kind === 'export')) add('Overwrite check', 'No existing target detected');
   }
@@ -113,8 +670,25 @@ function approvalReview(
   };
 }
 
+async function generationApprovalPreviews(document: AIDrawDocument | undefined, request: Record<string, unknown>): Promise<NonNullable<NonNullable<NonNullable<AsyncJob['approval']>['review']>['previews']>> {
+  if (!document) return [];
+  const sources = Array.isArray(request.sourceAssetIds) ? request.sourceAssetIds.filter((value): value is string => typeof value === 'string').slice(0, 4).map((assetId) => ({ role: 'source' as const, assetId })) : [];
+  const targets = [...sources, ...(typeof request.maskAssetId === 'string' ? [{ role: 'mask' as const, assetId: request.maskAssetId }] : [])];
+  const previews: NonNullable<NonNullable<NonNullable<AsyncJob['approval']>['review']>['previews']> = [];
+  for (const target of targets) {
+    const asset = document.assets[target.assetId]; if (!asset?.data || !asset.mimeType.startsWith('image/')) continue;
+    try {
+      const image = await loadImage(Buffer.from(asset.data, 'base64')); const scale = Math.min(1, 180 / image.width, 120 / image.height); const width = Math.max(1, Math.round(image.width * scale)); const height = Math.max(1, Math.round(image.height * scale)); const canvas = createCanvas(width, height); const context = canvas.getContext('2d'); context.imageSmoothingEnabled = true; context.drawImage(image, 0, 0, width, height); const data = canvas.toBuffer('image/png'); if (data.byteLength > 256 * 1024) continue;
+      previews.push({ role: target.role, assetId: asset.id, name: asset.name, mimeType: asset.mimeType, width: image.width, height: image.height, dataUrl: `data:image/png;base64,${data.toString('base64')}` });
+    } catch { /* The validator still reports the asset ID; an undecodable preview never grants or blocks approval. */ }
+  }
+  return previews;
+}
+
 export class McpHost {
   readonly scheduler: PlaybackScheduler;
+  private readonly batches: BatchManager;
+  private readonly activeBatchTransactions = new Map<string, string>();
   private readonly sessions = new Map<string, McpSession>();
   private httpServer?: HttpServer;
   private token = '';
@@ -130,8 +704,11 @@ export class McpHost {
     private readonly preferredPortPath: string,
     private readonly cancelJob?: (jobId: string) => void,
     private readonly runApprovedJob?: (job: AsyncJob) => void,
+    private readonly quantizeImage: QuantizeImage = quantizeImageToPalette,
+    private readonly captureCanvasObservation: CaptureObservation = captureObservation,
   ) {
     this.scheduler = new PlaybackScheduler(documents);
+    this.batches = new BatchManager(documents, join(dirname(preferredPortPath), 'batches.json'));
     this.documents.on('event', (event) => {
       if (event.type !== 'workspace') return;
       for (const tab of event.snapshot.documents) {
@@ -147,6 +724,7 @@ export class McpHost {
 
   async start(token: string): Promise<{ port: number; url: string; tokenHint: string }> {
     this.token = token;
+    await this.batches.initialize();
     await this.readFolderTrust();
     const preferred = await this.readPreferredPort();
     const candidates = [preferred, ...Array.from({ length: PORT_END - PORT_START + 1 }, (_, index) => PORT_START + index)]
@@ -185,6 +763,8 @@ export class McpHost {
     this.sessionTrustedFolders.clear();
     if (this.httpServer) await new Promise<void>((resolve) => this.httpServer!.close(() => resolve()));
     this.httpServer = undefined;
+    await this.batches.flush();
+    await this.documents.flushRecovery();
   }
 
   private async listen(port: number): Promise<void> {
@@ -267,6 +847,7 @@ export class McpHost {
       actor: { id: createId('agent'), kind: 'agent', name: `Agent ${this.sessions.size + 1}`, color: AGENT_COLORS[actorIndex] },
       mcp: undefined as unknown as McpServer,
       transport: new NodeStreamableHTTPServerTransport({ sessionIdGenerator: () => randomUUID() }),
+      subscriptions: new Set(),
     };
     state.mcp = this.buildServer(state);
     await state.mcp.connect(state.transport);
@@ -288,7 +869,8 @@ export class McpHost {
       const targetPaths = requestedPath ? [requestedPath, ...companionPaths] : [];
       const overwritePaths = (await Promise.all(targetPaths.map(async (target) => await stat(target).then(() => target, () => undefined)))).filter((target): target is string => Boolean(target));
       const request = requestedPath ? { ...rawRequest, path: requestedPath, overwritePaths } : rawRequest;
-      const timestamp = nowIso();
+      const timestamp = nowIso(); const review = approvalReview(kind, title, request, requestedPath, overwritePaths, trustable);
+      if (kind === 'generation') review.previews = await generationApprovalPreviews(document, request);
       const job: AsyncJob = {
         id: createId('job'), kind, status: 'waiting-for-user', actor: structuredClone(session.actor), createdAt: timestamp, updatedAt: timestamp,
         progress: 0, message: `${title} is waiting for in-app approval.`, result: { documentId, request },
@@ -297,7 +879,7 @@ export class McpHost {
           description,
           expiresAt: new Date(Date.now() + 120_000).toISOString(),
           options: trustable ? ['allow-once', 'allow-session', 'allow-always', 'deny'] : ['allow-once', 'deny'],
-          review: approvalReview(kind, title, request, requestedPath, overwritePaths, trustable),
+          review,
         },
       };
       if (trustable && requestedPath && overwritePaths.length === 0 && this.isTrustedPath(session.actor.id, requestedPath)) { const approved = { ...job, status: 'queued' as const, message: 'Approved by trusted folder policy.', approval: undefined, result: { documentId, request, approvalDecision: 'trusted-folder' } }; this.documents.upsertJob(approved); this.runApprovedJob?.(approved); return jsonText({ jobId: approved.id, status: approved.status, trust: 'folder' }); }
@@ -336,59 +918,196 @@ export class McpHost {
     server.registerTool('session_manage', {
       title: 'Manage AIDraw agent session',
       description: 'Join, identify, inspect, or leave the live AIDraw workspace.',
-      inputSchema: z.object({ action: z.enum(['join', 'inspect', 'leave']), name: z.string().min(1).max(80).optional(), color: z.string().optional(), documentId: z.string().optional() }),
+      inputSchema: z.object({ action: z.enum(['join', 'inspect', 'leave']), name: z.string().min(1).max(80).optional(), color: z.string().optional(), documentId: z.string().optional(), model: z.string().trim().min(1).max(200).optional(), reasoningEffort: z.enum(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']).optional(), taskId: z.string().trim().min(1).max(200).optional() }).strict(),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    }, async ({ action, name, color, documentId }) => {
+    }, async ({ action, name, color, documentId, model, reasoningEffort, taskId }) => {
       if (action === 'join') {
         if (name) session.actor.name = name;
         session.actor.color = normalizeColor(color, session.actor.color);
+        if (model || reasoningEffort || taskId) session.actor.client = { model, reasoningEffort, taskId };
         this.documents.updatePresence({ actor: session.actor, documentId, queueDepth: 0, status: 'idle' });
       } else if (action === 'leave') this.documents.removePresence(session.actor.id);
-      return jsonText({ actor: session.actor, presence: this.documents.getMcpInfo().sessions });
+      const activeDocumentId = this.documents.getActiveDocumentId();
+      const inspectedDocumentId = documentId ?? activeDocumentId;
+      return jsonText({
+        actor: session.actor,
+        presence: this.documents.getMcpInfo().sessions,
+        workspace: {
+          activeDocumentId,
+          humanOccupancy: inspectedDocumentId ? this.documents.getHumanOccupancy(inspectedDocumentId) : undefined,
+          editorAdvisory: this.documents.getEditorAdvisory(),
+        },
+      });
     });
 
     server.registerTool('canvas_observe', {
       title: 'Observe AIDraw canvas',
-      description: 'Read a structured document snapshot or revision diff. PNG capture is reported when available.',
-      inputSchema: z.object({ documentId: z.string().optional(), sinceRevision: z.number().int().nonnegative().optional(), includePng: z.boolean().default(false) }),
+      description: 'Read a structured document snapshot or revision diff and optionally capture a bounded layer/frame/region PNG with nearest-neighbor scaling.',
+      inputSchema: z.object({
+        documentId: z.string().optional(),
+        sinceRevision: z.number().int().nonnegative().optional(),
+        includePng: z.boolean().default(false),
+        assetId: z.string().min(1).optional(),
+        frameId: z.string().min(1).optional(),
+        layerId: z.string().min(1).optional(),
+        region: ObservationRegionSchema.optional(),
+        scale: z.number().int().min(1).max(16).default(1),
+        background: ObservationBackgroundSchema.default('document'),
+        compareTransactionId: z.string().min(1).optional(),
+        checkpointId: z.string().min(1).optional(),
+        fragment: ObservationFragmentSchema.optional(),
+        pathObjectId: z.string().min(1).optional(),
+        illustrationTimeMs: z.number().int().min(0).max(600_000).optional(),
+      }).strict().refine((value) => !(value.checkpointId && value.compareTransactionId), 'Checkpoint and transaction comparisons cannot be combined.'),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    }, async ({ documentId, sinceRevision, includePng }) => {
+    }, async ({ documentId, sinceRevision, includePng, assetId, frameId, layerId, region, scale, background, compareTransactionId, checkpointId, fragment, pathObjectId, illustrationTimeMs }) => {
       const id = documentId ?? this.documents.getActiveDocumentId();
       if (!id) return jsonText({ error: 'no_open_document' });
-      const document = this.documents.getDocument(id);
-      if (!document) return jsonText({ error: 'document_not_open' });
-      const changes = sinceRevision === undefined ? undefined : this.documents.getChanges(id, sinceRevision);
-      const png = includePng ? (await renderDocument(document)).toBuffer('image/png').toString('base64') : undefined;
-      return jsonText({ document: changes === undefined ? document : undefined, changes, revision: document.revision, png: png ? { available: true, mimeType: 'image/png', data: png } : undefined });
+      const currentDocument = this.documents.getDocument(id);
+      if (!currentDocument) return jsonText({ error: 'document_not_open' });
+      const checkpoint = checkpointId ? this.documents.getCheckpoint(id, checkpointId) : undefined;
+      if (checkpointId && !checkpoint) return jsonText({ error: 'checkpoint_not_found', checkpointId });
+      const document = checkpoint?.document ?? currentDocument;
+      const changes = checkpoint || sinceRevision === undefined ? undefined : this.documents.getChanges(id, sinceRevision);
+      const target = { assetId, frameId, layerId, region, scale, background, illustrationTimeMs };
+      let fragmentResult: Record<string, unknown> | undefined;
+      if (fragment) {
+        try {
+          if (document.kind === 'illustration' && fragment.kind === 'illustration-objects') {
+            if (!fragment.objectIds?.length) throw new Error('Illustration fragment observations require objectIds.');
+            const data = exportIllustrationFragment(document, fragment.objectIds);
+            fragmentResult = { available: true, byteLength: documentFragmentBytes(data), data };
+          } else if (document.kind === 'pixel' && fragment.kind === 'pixel-assets') {
+            const data = exportPixelFragment(document, fragment.assetId);
+            fragmentResult = { available: true, byteLength: documentFragmentBytes(data), data };
+          } else fragmentResult = { available: false, error: 'fragment_kind_mismatch', message: `A ${fragment.kind} fragment cannot be exported from a ${document.kind} document.` };
+        } catch (error) {
+          fragmentResult = { available: false, error: 'fragment_export_failed', message: error instanceof Error ? error.message : 'The fragment could not be exported.' };
+        }
+      }
+      let pathResult: Record<string, unknown> | undefined;
+      if (pathObjectId) {
+        try {
+          const targetPath = semanticPath(document, pathObjectId).object;
+          pathResult = { available: true, objectId: targetPath.id, revision: targetPath.revision, closed: targetPath.closed, nodes: inspectPathNodes(targetPath.pathData) };
+        } catch (error) { pathResult = { available: false, error: 'path_nodes_unavailable', message: error instanceof Error ? error.message : 'Path nodes could not be inspected.' }; }
+      }
+      const comparison = compareTransactionId ? this.documents.getLastComparison(id, compareTransactionId) : undefined;
+      const perImagePixels = compareTransactionId ? Math.floor(MAX_OBSERVATION_PIXELS / 2) : MAX_OBSERVATION_PIXELS;
+      const png = includePng ? await this.captureCanvasObservation(document, target, perImagePixels) : undefined;
+      const comparisonResult = !compareTransactionId ? undefined
+        : !includePng ? { available: false, error: 'comparison_requires_png', guidance: 'Set includePng=true to request a paired observation.' }
+        : !comparison ? { available: false, error: 'comparison_unavailable', transactionId: compareTransactionId, guidance: 'Only the most recent committed transaction for an open document is retained for race-free comparison.' }
+        : { available: true, transactionId: compareTransactionId, beforeRevision: comparison.before.revision, afterRevision: comparison.after.revision, before: await this.captureCanvasObservation(comparison.before, target, perImagePixels), after: png };
+      return jsonText({
+        document: fragment ? undefined : changes === undefined ? document : undefined,
+        changes,
+        revision: document.revision,
+        currentRevision: currentDocument.revision,
+        target: { ...target, compareTransactionId, checkpointId },
+        checkpoint: checkpoint ? this.documents.listCheckpoints(id).find((entry) => entry.id === checkpoint.id) : undefined,
+        fragment: fragmentResult,
+        path: pathResult,
+        humanOccupancy: this.documents.getHumanOccupancy(id),
+        editorAdvisory: this.documents.getEditorAdvisory(),
+        png: compareTransactionId ? undefined : png,
+        comparison: comparisonResult,
+      });
     });
 
     server.registerTool('canvas_apply', {
       title: 'Apply visible AIDraw transaction',
-      description: 'Submit up to 256 idempotent canvas operations. Agent work plays visibly and respects human locks and entity revisions.',
-      inputSchema: z.object({ documentId: z.string(), clientOperationId: z.string().min(1).max(200), label: z.string().min(1).max(200), operations: z.array(z.record(z.string(), z.unknown())).min(1).max(256), playback: z.object({ mode: z.enum(['animated', 'instant']).default('animated'), speed: z.number().min(0.25).max(4).default(1) }).optional() }),
+      description: 'Submit up to 256 idempotent canvas operations. Agent work plays visibly and respects human locks and entity revisions. Optional durable batch metadata sequences resumable multi-transaction work.',
+      inputSchema: z.object({
+        documentId: z.string(),
+        clientOperationId: z.string().min(1).max(200),
+        label: z.string().min(1).max(200),
+        operations: z.array(z.record(z.string(), z.unknown())).min(1).max(256),
+        playback: z.object({ mode: z.enum(['animated', 'instant']).default('animated'), speed: z.number().min(0.25).max(4).default(1) }).optional(),
+        batch: z.object({ jobId: z.string().min(1), resumeToken: z.string().min(32).max(200), sequence: z.number().int().min(0).max(9_999) }).strict().optional(),
+      }).strict(),
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
-    }, async ({ documentId, clientOperationId, label, operations, playback }) => {
-      const parsedOperations = operations.map((operation) => CanvasOperationSchema.parse(operation)) as CanvasOperation[];
+    }, async ({ documentId, clientOperationId, label, operations, playback, batch }) => {
+      const document = this.documents.getDocument(documentId);
+      if (!document) return jsonText({ status: 'conflict', message: 'Document is not open.' });
+      const parsedOperations: CanvasOperation[] = [];
+      for (const operation of operations) parsedOperations.push(...await expandAgentCanvasOperation(document, operation, this.quantizeImage, session.actor));
+      if (parsedOperations.length === 0 || parsedOperations.length > 256) return jsonText({ status: 'conflict', message: 'Semantic expansion must produce 1–256 canonical operations.' });
       const transaction: CanvasTransaction = { id: createId('tx'), clientOperationId, documentId, actor: structuredClone(session.actor), label, createdAt: nowIso(), operations: parsedOperations, playback: playback ?? { mode: 'animated', speed: 1 } };
-      const result = await this.scheduler.submit(transaction);
-      return jsonText(result);
+      if (batch) {
+        const preparation = await this.batches.prepare(batch, documentId, clientOperationId, session.actor);
+        if (!preparation.accepted) return jsonText({ ...preparation.response, batch: { jobId: batch.jobId, expectedSequence: preparation.expectedSequence, duplicate: preparation.duplicate } });
+        this.activeBatchTransactions.set(batch.jobId, transaction.id);
+      }
+      let result;
+      try { result = await this.scheduler.submit(transaction); }
+      catch (error) { result = { status: 'conflict' as const, message: error instanceof Error ? error.message : 'The batch transaction failed.' }; }
+      if (batch && this.activeBatchTransactions.get(batch.jobId) === transaction.id) this.activeBatchTransactions.delete(batch.jobId);
+      const batchJob = batch ? await this.batches.finish(batch, clientOperationId, result) : undefined;
+      return jsonText({ ...result, batch: batchJob ? { jobId: batchJob.id, progress: batchJob.progress, status: batchJob.status, ...(batchJob.result as Record<string, unknown>) } : undefined });
     });
 
     server.registerTool('history_manage', {
       title: 'Manage this agent’s AIDraw history',
-      description: 'Undo or redo only transactions authored by the calling agent session.',
-      inputSchema: z.object({ action: z.enum(['undo', 'redo']), documentId: z.string().optional() }),
+      description: 'Undo or redo only this session’s transactions, replay a durable trace, or create/list/restore/delete/selectively merge named document checkpoints.',
+      inputSchema: z.object({ action: z.enum(['undo', 'redo', 'replay', 'checkpoint-list', 'checkpoint-create', 'checkpoint-restore', 'checkpoint-merge', 'checkpoint-delete']), documentId: z.string().optional(), transactionId: z.string().min(1).optional(), checkpointId: z.string().min(1).optional(), sourceIds: z.array(z.string().min(1)).min(1).max(32).optional(), name: z.string().trim().min(1).max(80).optional() }).strict(),
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
-    }, async ({ action, documentId }) => jsonText(action === 'undo' ? await this.documents.undo(documentId, session.actor) : await this.documents.redo(documentId, session.actor)));
+    }, async ({ action, documentId, transactionId, checkpointId, sourceIds, name }) => {
+      if (action === 'undo') return jsonText(await this.documents.undo(documentId, session.actor));
+      if (action === 'redo') return jsonText(await this.documents.redo(documentId, session.actor));
+      const id = documentId ?? this.documents.getActiveDocumentId();
+      if (!id) return action === 'replay' ? jsonText({ replaying: false, reason: 'no_open_document' }) : jsonText({ error: 'no_open_document' });
+      if (action === 'checkpoint-list') return jsonText({ documentId: id, checkpoints: this.documents.listCheckpoints(id) });
+      if (action === 'checkpoint-create') {
+        if (!name) return jsonText({ error: 'checkpoint_name_required' });
+        try { return jsonText({ checkpoint: this.documents.createCheckpoint(id, name, session.actor) }); }
+        catch (error) { return jsonText({ error: 'checkpoint_create_failed', message: error instanceof Error ? error.message : String(error) }); }
+      }
+      if (action === 'checkpoint-restore') {
+        if (!checkpointId) return jsonText({ status: 'conflict', message: 'checkpointId is required.' });
+        return jsonText(await this.documents.restoreCheckpoint(id, checkpointId, session.actor));
+      }
+      if (action === 'checkpoint-merge') {
+        if (!checkpointId || !sourceIds) return jsonText({ status: 'conflict', message: 'checkpointId and sourceIds are required.' });
+        return jsonText(await this.documents.mergeCheckpoint(id, checkpointId, sourceIds, session.actor));
+      }
+      if (action === 'checkpoint-delete') {
+        if (!checkpointId) return jsonText({ deleted: false, message: 'checkpointId is required.' });
+        return jsonText(this.documents.deleteCheckpoint(id, checkpointId, session.actor));
+      }
+      if (!transactionId) return jsonText({ replaying: false, reason: 'transaction_id_required' });
+      const trace = await this.documents.findTrace(id, transactionId);
+      if (!trace) return jsonText({ replaying: false, reason: 'trace_not_found' });
+      return jsonText({ ...this.scheduler.replay(trace.transaction), documentId: id, transactionId });
+    });
 
     server.registerTool('document_manage', {
       title: 'Manage AIDraw documents',
       description: 'List, create, activate, open, save, save-as, or close documents. New file paths and overwrites become visible in-app approval jobs.',
-      inputSchema: z.object({ action: z.enum(['list', 'new', 'activate', 'open', 'save', 'save-as', 'close']), documentId: z.string().optional(), path: z.string().optional(), kind: z.enum(['illustration', 'sprite', 'tilemap', 'project']).optional(), name: z.string().optional(), width: z.number().int().positive().optional(), height: z.number().int().positive().optional() }),
+      inputSchema: z.object({
+        action: z.enum(['list', 'new', 'activate', 'open', 'save', 'save-as', 'close']),
+        documentId: z.string().optional(),
+        path: z.string().optional(),
+        kind: z.enum(['illustration', 'sprite', 'tilemap', 'project']).optional(),
+        name: z.string().trim().min(1).max(200).optional(),
+        width: z.number().int().min(1).max(8_192).optional(),
+        height: z.number().int().min(1).max(8_192).optional(),
+        background: z.union([z.string().regex(/^#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?$/), z.null()]).optional(),
+        orientation: z.enum(['orthogonal', 'isometric']).optional(),
+        infinite: z.boolean().optional(),
+        tileWidth: z.number().int().min(1).max(1_024).optional(),
+        tileHeight: z.number().int().min(1).max(1_024).optional(),
+      }).strict(),
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
-    }, async ({ action, documentId, path, kind, name, width, height }) => {
-      if (action === 'list') return jsonText({ documents: this.documents.snapshot(session.actor.id).documents });
-      if (action === 'new') return jsonText(this.documents.create({ kind: kind ?? 'illustration', name, width, height }));
+    }, async ({ action, documentId, path, kind, name, width, height, background, orientation, infinite, tileWidth, tileHeight }) => {
+      if (action === 'list') {
+        const snapshot = this.documents.snapshot(session.actor.id);
+        return jsonText({ activeDocumentId: snapshot.activeDocumentId, documents: snapshot.documents });
+      }
+      if (action === 'new') {
+        const options = NewDocumentOptionsSchema.parse({ kind: kind ?? 'illustration', name, width, height, background, orientation, infinite, tileWidth, tileHeight });
+        return jsonText(this.documents.create(options));
+      }
       if (action === 'activate' && documentId) return jsonText(this.documents.activate(documentId));
       if (action === 'open' && path) return approvalJob('import', 'Open AIDraw document', 'Review the exact path before AIDraw reads this native document.', documentId, { action, path });
       if (action === 'save' && documentId) {
@@ -402,32 +1121,89 @@ export class McpHost {
     });
 
     server.registerTool('asset_import', {
-      title: 'Import asset', description: 'Import an exact path after in-app review; this tool never enumerates or deletes files.',
-      inputSchema: z.object({ documentId: z.string().optional(), path: z.string().min(1), pixelMode: z.boolean().default(false) }),
+      title: 'Import asset', description: 'Import an exact path after in-app review; optional sprite-sheet slicing, indexed palette, and pixel-project relink modes use the same human-visible file authority. This tool never enumerates or deletes files.',
+      inputSchema: z.object({ documentId: z.string().optional(), path: z.string().min(1), pixelMode: z.boolean().default(false), spriteSheet: SpriteSheetImportOptionsSchema.optional(), paletteMode: z.enum(['replace-slots', 'append-unique']).optional(), projectLinkId: z.string().min(1).optional() }).strict(),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
-    }, async ({ documentId, path, pixelMode }) => approvalJob('import', 'Import asset', 'Review the requested path and target mode before AIDraw reads it.', documentId, { action: 'import', path, pixelMode }));
+    }, async ({ documentId, path, pixelMode, spriteSheet, paletteMode, projectLinkId }) => {
+      if ([spriteSheet, paletteMode, projectLinkId].filter(Boolean).length > 1) return jsonText({ error: 'invalid_arguments', message: 'Choose spriteSheet, paletteMode, or projectLinkId, not more than one.' });
+      if ((paletteMode || projectLinkId) && !documentId) return jsonText({ error: 'document_id_required', message: `${projectLinkId ? 'Project relink' : 'Palette import'} requires a target pixel document.` });
+      const extension = extname(path).toLowerCase();
+      if (spriteSheet && !['.png', '.jpg', '.jpeg', '.webp'].includes(extension)) return jsonText({ error: 'unsupported_sprite_sheet', message: 'Sprite-sheet slicing accepts PNG, JPEG, or WebP images.' });
+      if (paletteMode && !['.json', '.gpl'].includes(extension)) return jsonText({ error: 'unsupported_palette', message: 'Palette import accepts AIDraw JSON or GIMP GPL files.' });
+      if (projectLinkId) {
+        if (pixelMode) return jsonText({ error: 'invalid_arguments', message: 'projectLinkId cannot be combined with pixelMode.' });
+        if (!['.png', '.apng', '.jpg', '.jpeg', '.webp', '.gif'].includes(extension)) return jsonText({ error: 'unsupported_project_link', message: 'Project relink accepts PNG, APNG, JPEG, WebP, or GIF images.' });
+        const document = this.documents.getDocument(documentId!); if (!document || document.kind !== 'pixel') return jsonText({ error: 'pixel_document_required' });
+        if (!document.filePath) return jsonText({ error: 'saved_project_required', message: 'Save the AIDraw project before creating a relative external link.' });
+        if (!document.linkedAssets.some((link) => link.id === projectLinkId)) return jsonText({ error: 'project_link_not_found', projectLinkId });
+        return approvalJob('import', 'Relink pixel-project source', 'Review the replacement source and target project before AIDraw reads it.', documentId, { action: 'project-link-relink', path, projectLinkId });
+      }
+      return approvalJob('import', spriteSheet ? 'Slice sprite sheet' : paletteMode ? 'Import indexed palette' : 'Import asset', 'Review the requested path, target document, and import settings before AIDraw reads it.', documentId, { action: 'import', path, pixelMode: spriteSheet ? true : pixelMode, spriteSheet, paletteMode });
+    });
 
     server.registerTool('document_export', {
-      title: 'Export document', description: 'Export to an exact path after in-app review, including every overwrite. Pixel presentation exports can use integer nearest-neighbor scaling.',
-      inputSchema: z.object({ documentId: z.string(), path: z.string().min(1), format: z.enum(['png', 'jpeg', 'webp', 'svg', 'pdf', 'psd', 'gif', 'apng', 'sprite-sheet', 'tiled-json', 'tiled-xml']), scale: z.number().int().min(1).max(64).default(1) }),
+      title: 'Export document', description: 'Export a document or extract one cached pixel-project link to an exact path after in-app review, including every overwrite. Pixel presentation exports can use integer nearest-neighbor scaling.',
+      inputSchema: z.object({ documentId: z.string(), path: z.string().min(1), format: z.enum(['png', 'jpeg', 'webp', 'svg', 'pdf', 'psd', 'gif', 'apng', 'sprite-sheet', 'tiled-json', 'tiled-xml']).optional(), scale: z.number().int().min(1).max(64).default(1), animationTagId: z.string().min(1).optional(), projectLinkId: z.string().min(1).optional() }).strict(),
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
-    }, async ({ documentId, path, format, scale }) => extname(path) ? approvalJob('export', 'Export document', 'Review format, scale, destination, and overwrite impact before AIDraw writes it.', documentId, { action: 'export', path, format, scale }) : jsonText({ error: 'extension_required', message: 'Provide an exact export filename including its extension.' }));
+    }, async ({ documentId, path, format, scale, animationTagId, projectLinkId }) => {
+      if (!extname(path)) return jsonText({ error: 'extension_required', message: 'Provide an exact export filename including its extension.' });
+      if (projectLinkId) {
+        if (format || animationTagId || scale !== 1) return jsonText({ error: 'invalid_arguments', message: 'Project-link extraction cannot be combined with document format, animation tag, or presentation scale.' });
+        const document = this.documents.getDocument(documentId); if (!document || document.kind !== 'pixel') return jsonText({ error: 'pixel_document_required' });
+        if (!document.filePath) return jsonText({ error: 'saved_project_required', message: 'Save the AIDraw project before extracting a relative external link.' });
+        if (!document.linkedAssets.some((link) => link.id === projectLinkId)) return jsonText({ error: 'project_link_not_found', projectLinkId });
+        try {
+          const extension = projectLinkFileExtension(verifiedPixelLinkCache(document, projectLinkId).asset);
+          const targetExtension = extname(path).toLowerCase(); const accepted = extension === 'jpg' ? ['.jpg', '.jpeg'] : extension === 'apng' ? ['.apng', '.png'] : [`.${extension}`];
+          if (!accepted.includes(targetExtension)) return jsonText({ error: 'extension_mismatch', message: `The cached source must be extracted as ${accepted.join(' or ')}.` });
+        } catch (error) { return jsonText({ error: 'project_link_unavailable', message: error instanceof Error ? error.message : String(error) }); }
+        return approvalJob('export', 'Extract pixel-project source', 'Review the cached source, destination, and overwrite impact before AIDraw writes it.', documentId, { action: 'project-link-extract', path, projectLinkId });
+      }
+      return format ? approvalJob('export', 'Export document', 'Review format, scale, animation range, destination, and overwrite impact before AIDraw writes it.', documentId, { action: 'export', path, format, scale, animationTagId }) : jsonText({ error: 'format_required', message: 'Document export requires a format.' });
+    });
 
     server.registerTool('generation_start', {
       title: 'Generate imagery', description: 'Create a provider-specific generation approval showing prompt, sources, result count, and potential paid requests.',
       inputSchema: z.object({ documentId: z.string(), provider: z.enum(['openai', 'stability', 'comfyui']), mode: z.enum(['create', 'edit', 'inpaint', 'outpaint', 'variation']), prompt: z.string().min(1), negativePrompt: z.string().optional(), sourceAssetIds: z.array(z.string()).default([]), maskAssetId: z.string().optional(), size: z.union([z.literal('auto'), z.object({ width: z.number().int().positive(), height: z.number().int().positive() })]).default('auto'), aspectIntent: z.enum(['canvas', 'square', 'portrait', 'landscape']).optional(), resultCount: z.number().int().min(1).max(4).default(1), seed: z.number().int().optional(), providerOptions: z.record(z.string(), z.unknown()).default({}) }),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
-    }, async (request) => approvalJob('generation', 'Generate imagery', 'Review provider, prompt, sources, mask, result count, and the potentially paid request count.', request.documentId, request, false));
+    }, async (request) => { try { validateGenerationRequest(this.documents.getDocument(request.documentId), request as GenerationRequest); return approvalJob('generation', 'Generate imagery', 'Review provider, prompt, sources, mask, result count, and the potentially paid request count.', request.documentId, request, false); } catch (error) { return jsonText({ error: 'unsupported_generation_request', message: error instanceof Error ? error.message : String(error) }); } });
 
     server.registerTool('job_manage', {
       title: 'Inspect or cancel AIDraw jobs',
-      description: 'Inspect, briefly wait for, or cancel asynchronous playback, approval, import/export, and generation work.',
-      inputSchema: z.object({ action: z.enum(['inspect', 'wait', 'approve-dependent', 'cancel']), jobId: z.string(), timeoutMs: z.number().int().min(0).max(30_000).default(0) }),
+      description: 'List this session’s jobs, inspect or briefly wait for one, report a user-approval dependency, cancel owned work, or start/resume a durable transaction batch.',
+      inputSchema: z.object({
+        action: z.enum(['list', 'inspect', 'wait', 'approve-dependent', 'cancel', 'start-batch', 'resume-batch']),
+        jobId: z.string().min(1).optional(),
+        timeoutMs: z.number().int().min(0).max(30_000).default(0),
+        documentId: z.string().min(1).optional(),
+        totalTransactions: z.number().int().min(1).max(10_000).optional(),
+        label: z.string().min(1).max(200).optional(),
+        resumeToken: z.string().min(32).max(200).optional(),
+      }).strict(),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    }, async ({ action, jobId, timeoutMs }) => {
+    }, async ({ action, jobId, timeoutMs, documentId, totalTransactions, label, resumeToken }) => {
+      if (action === 'start-batch') {
+        if (!documentId || totalTransactions === undefined) return jsonText({ error: 'batch_arguments_required', message: 'documentId and totalTransactions are required.' });
+        try {
+          const started = await this.batches.start(documentId, totalTransactions, label ?? 'Agent batch', session.actor);
+          return jsonText({ job: agentJobSummary(started.job), resumeToken: started.resumeToken, nextSequence: started.nextSequence });
+        } catch (error) { return jsonText({ error: 'batch_start_failed', message: error instanceof Error ? error.message : 'The durable batch could not start.' }); }
+      }
+      if (action === 'resume-batch') {
+        if (!jobId || !resumeToken) return jsonText({ error: 'batch_credentials_required', message: 'jobId and resumeToken are required.' });
+        const job = await this.batches.resume(jobId, resumeToken, session.actor);
+        return job ? jsonText({ job: agentJobSummary(job), nextSequence: (job.result as { nextSequence?: number } | undefined)?.nextSequence }) : jsonText({ error: 'job_not_found' });
+      }
+      if (action === 'list') return jsonText({ jobs: this.documents.listJobs(session.actor.id).map(agentJobSummary) });
+      if (!jobId) return jsonText({ error: 'job_id_required' });
       let job = this.documents.getJob(jobId);
+      if (!job || job.actor.id !== session.actor.id) return jsonText({ error: 'job_not_found' });
       if (action === 'cancel' && job && !['completed', 'failed', 'cancelled'].includes(job.status)) {
-        this.cancelJob?.(jobId); job = this.documents.getJob(jobId) ?? job;
+        if (job.kind === 'batch') {
+          job = await this.batches.cancel(jobId, session.actor.id) ?? job;
+          const transactionId = this.activeBatchTransactions.get(jobId); if (transactionId) this.scheduler.cancelTransaction(transactionId);
+        }
+        else this.cancelJob?.(jobId); job = this.documents.getJob(jobId) ?? job;
         if (!['cancelled', 'completed', 'failed'].includes(job.status)) { job = { ...job, status: 'cancelled', updatedAt: nowIso(), message: 'Cancelled by the originating agent.' }; this.documents.upsertJob(job); }
       } else if (action === 'wait' && job && timeoutMs > 0) {
         const deadline = Date.now() + timeoutMs;
@@ -436,19 +1212,22 @@ export class McpHost {
           job = this.documents.getJob(jobId) ?? job;
         }
       }
-      return jsonText(job ?? { error: 'job_not_found' });
+      return jsonText(agentJobSummary(job));
     });
+    const subscribable = (uri: string) => uri === 'aidraw://documents' || /^aidraw:\/\/documents\/[^/]+\/(?:manifest|snapshot|trace|changes\/\d+)$/.test(uri);
+    server.server.setRequestHandler('resources/subscribe', async (request) => {
+      const uri = request.params.uri; if (!subscribable(uri)) throw new Error('Only AIDraw document resources can be subscribed.');
+      if (!session.subscriptions.has(uri) && session.subscriptions.size >= 128) throw new Error('A session may subscribe to at most 128 AIDraw resources.');
+      session.subscriptions.add(uri); return {};
+    });
+    server.server.setRequestHandler('resources/unsubscribe', async (request) => { session.subscriptions.delete(request.params.uri); return {}; });
     return server;
   }
 
   private async notifyDocumentUpdated(documentId: string, revision: number): Promise<void> {
     for (const session of this.sessions.values()) {
-      await Promise.allSettled([
-        session.mcp.server.sendResourceUpdated({ uri: `aidraw://documents/${documentId}/manifest` }),
-        session.mcp.server.sendResourceUpdated({ uri: `aidraw://documents/${documentId}/snapshot` }),
-        session.mcp.server.sendResourceUpdated({ uri: `aidraw://documents/${documentId}/changes/${revision - 1}` }),
-        session.mcp.server.sendResourceUpdated({ uri: `aidraw://documents/${documentId}/trace` }),
-      ]);
+      const uris = [`aidraw://documents/${documentId}/manifest`, `aidraw://documents/${documentId}/snapshot`, `aidraw://documents/${documentId}/changes/${revision - 1}`, `aidraw://documents/${documentId}/trace`].filter((uri) => session.subscriptions.has(uri));
+      await Promise.allSettled(uris.map((uri) => session.mcp.server.sendResourceUpdated({ uri })));
     }
   }
 

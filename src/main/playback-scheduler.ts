@@ -14,9 +14,23 @@ interface PlaybackTask {
 const MAX_LANES = 4;
 const MAX_QUEUED_PER_ACTOR = 4;
 const MAX_GLOBAL_SAMPLES = 1_000_000;
+const MAX_CONCURRENT_REPLAYS = 1;
+
+export interface ReplayRequestResult {
+  replaying: boolean;
+  reason?: 'already-replaying' | 'replay-busy' | 'replay-too-large';
+}
 
 function safeSampleLength(value: unknown): number {
   return Array.isArray(value) ? Math.max(1, value.length) : 1;
+}
+
+function safeRunSamples(value: unknown): number {
+  if (!Array.isArray(value) || value.length === 0) return 1;
+  return Math.max(1, value.reduce((total, run) => {
+    const length = run && typeof run === 'object' && 'length' in run && Number.isFinite(run.length) ? Math.max(0, Math.floor(Number(run.length))) : 0;
+    return Math.min(MAX_GLOBAL_SAMPLES + 1, total + length);
+  }, 0));
 }
 
 export function operationSamples(operation: CanvasOperation): number {
@@ -25,6 +39,7 @@ export function operationSamples(operation: CanvasOperation): number {
   if (operation.kind === 'illustration.object.add' && operation.object?.type === 'vector-stroke') return safeSampleLength(operation.object.points);
   if (operation.kind === 'illustration.object.replace' && operation.object?.type === 'vector-stroke') return safeSampleLength(operation.object.points);
   if (operation.kind === 'pixel.cel.set' || operation.kind === 'pixel.tilemap.set') return safeSampleLength(operation.changes);
+  if (operation.kind === 'pixel.cel.region' || operation.kind === 'pixel.tilemap.region') return safeRunSamples(operation.runs);
   return 1;
 }
 
@@ -36,6 +51,18 @@ export function transactionSamples(transaction: CanvasTransaction): number {
 function slicePoints<T extends PointSample | { x: number; y: number }>(points: T[], progress: number): T[] {
   if (points.length <= 1) return progress > 0 ? points : [];
   return points.slice(0, Math.max(1, Math.ceil(points.length * progress)));
+}
+
+function sliceRuns<T extends { length: number }>(runs: T[], progress: number): T[] {
+  let remaining = Math.max(1, Math.ceil(runs.reduce((sum, run) => sum + run.length, 0) * progress));
+  const visible: T[] = [];
+  for (const run of runs) {
+    if (remaining <= 0) break;
+    const length = Math.min(run.length, remaining);
+    if (length > 0) visible.push({ ...run, length });
+    remaining -= length;
+  }
+  return visible;
 }
 
 export function visibleOperations(operations: CanvasOperation[], progress: number): CanvasOperation[] {
@@ -64,6 +91,12 @@ export function visibleOperations(operations: CanvasOperation[], progress: numbe
     } else if (operation.kind === 'pixel.tilemap.set') {
       const changes = Array.isArray(operation.changes) ? operation.changes : [];
       if (changes.length) visible.push({ ...operation, changes: changes.slice(0, Math.max(1, Math.ceil(changes.length * operationProgress))) });
+    } else if (operation.kind === 'pixel.cel.region') {
+      const runs = Array.isArray(operation.runs) ? operation.runs : [];
+      if (runs.length) visible.push({ ...operation, runs: sliceRuns(runs, operationProgress) });
+    } else if (operation.kind === 'pixel.tilemap.region') {
+      const runs = Array.isArray(operation.runs) ? operation.runs : [];
+      if (runs.length) visible.push({ ...operation, runs: sliceRuns(runs, operationProgress) });
     } else if (operationProgress >= 0.5) visible.push(structuredClone(operation));
   }
   return visible;
@@ -83,6 +116,10 @@ function cursorFor(operations: CanvasOperation[]): { x: number; y: number; tool?
   if (operation.kind === 'pixel.cel.set' || operation.kind === 'pixel.tilemap.set') {
     const point = Array.isArray(operation.changes) ? operation.changes.at(-1) : undefined;
     return point ? { x: point.x, y: point.y, tool: 'pencil' } : undefined;
+  }
+  if (operation.kind === 'pixel.cel.region' || operation.kind === 'pixel.tilemap.region') {
+    const run = Array.isArray(operation.runs) ? operation.runs.at(-1) : undefined;
+    return run ? { x: run.x + Math.max(0, run.length - 1), y: run.y, tool: 'region' } : undefined;
   }
   return undefined;
 }
@@ -129,12 +166,14 @@ export class PlaybackScheduler {
     });
   }
 
-  replay(transaction: CanvasTransaction): boolean {
+  replay(transaction: CanvasTransaction): ReplayRequestResult {
     const replayId = `trace:${transaction.id}`;
-    if (this.replays.has(replayId)) return false;
+    if (this.replays.has(replayId)) return { replaying: false, reason: 'already-replaying' };
+    if (this.replays.size >= MAX_CONCURRENT_REPLAYS) return { replaying: false, reason: 'replay-busy' };
+    if (transactionSamples(transaction) > MAX_GLOBAL_SAMPLES) return { replaying: false, reason: 'replay-too-large' };
     this.replays.add(replayId);
     void this.playReplay(transaction, replayId);
-    return true;
+    return { replaying: true };
   }
 
   private async playReplay(transaction: CanvasTransaction, replayId: string): Promise<void> {
@@ -199,6 +238,23 @@ export class PlaybackScheduler {
       this.queues.set(actorId, retained);
     }
     return stopped;
+  }
+
+  cancelTransaction(transactionId: string): boolean {
+    const active = [...this.active].find((task) => task.transaction.id === transactionId);
+    if (active) { active.cancelled = true; return true; }
+    for (const [actorId, queue] of this.queues) {
+      const index = queue.findIndex((task) => task.transaction.id === transactionId);
+      if (index < 0) continue;
+      const [task] = queue.splice(index, 1);
+      this.release(task);
+      task.resolve({ status: 'cancelled', message: 'Cancelled before playback began.' });
+      this.documents.updatePresence({ actor: task.transaction.actor, documentId: task.transaction.documentId, queueDepth: queue.length, status: queue.length ? 'waiting' : 'idle' });
+      if (queue.length === 0) this.queues.delete(actorId);
+      this.pump();
+      return true;
+    }
+    return false;
   }
 
   private pump(): void {

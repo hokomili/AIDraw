@@ -7,6 +7,10 @@ import { RecoveryJournal } from './journal';
 import { McpHost } from './mcp-host';
 import { ProviderCredentialStore } from './provider-credentials';
 import { TransactionTraceStore } from './trace-store';
+import { RasterUtilitySupervisor } from './utility-supervisor';
+import { DocumentPresetStore } from './document-preset-store';
+import { InterchangeReportStore } from './interchange-report-store';
+import { renderDocumentDimensions } from './render-document';
 
 export interface EngineRuntimeOptions {
   userDataPath: string;
@@ -24,6 +28,10 @@ export class EngineRuntime {
   readonly mcpHost: McpHost;
   readonly providerCredentials: ProviderCredentialStore;
   readonly generationManager: GenerationManager;
+  readonly rasterUtilities: RasterUtilitySupervisor;
+  readonly generationUtilities: RasterUtilitySupervisor;
+  readonly documentPresets: DocumentPresetStore;
+  readonly interchangeReports: InterchangeReportStore;
   private recoveryTimer?: NodeJS.Timeout;
   private started = false;
 
@@ -34,14 +42,29 @@ export class EngineRuntime {
       appVersion,
       new TransactionTraceStore(join(userDataPath, 'traces')),
     );
+    this.rasterUtilities = new RasterUtilitySupervisor();
+    this.generationUtilities = new RasterUtilitySupervisor();
     this.providerCredentials = new ProviderCredentialStore(join(userDataPath, 'credentials', 'generation.json'));
-    this.generationManager = new GenerationManager(this.service, this.providerCredentials);
+    this.generationManager = new GenerationManager(
+      this.service,
+      this.providerCredentials,
+      (input, control) => this.generationUtilities.generate(input.jobId, input.document, input.request, input.credential, control),
+      async (document) => {
+        const artifact = await this.rasterUtilities.exportDocument(document, 'png');
+        return { data: artifact.data.toString('base64'), ...renderDocumentDimensions(document) };
+      },
+      (encoded, width, height, palette, alphaThreshold, dithering) => this.rasterUtilities.quantizeImage(encoded, width, height, palette, { alphaThreshold, dithering }),
+    );
+    this.documentPresets = new DocumentPresetStore(join(userDataPath, 'settings', 'document-presets.json'));
+    this.interchangeReports = new InterchangeReportStore(join(userDataPath, 'reports', 'interchange.json'));
     this.mcpHost = new McpHost(
       this.service,
       appVersion,
       join(userDataPath, 'mcp-port.json'),
       (jobId) => { this.generationManager.cancel(jobId); },
       options.runApprovedFileJob,
+      (encoded, width, height, palette, settings) => this.rasterUtilities.quantizeImage(encoded, width, height, palette, settings),
+      (document, request, maxPixels) => this.rasterUtilities.captureObservation(document, request, maxPixels ?? 4_194_304),
     );
   }
 
@@ -67,6 +90,8 @@ export class EngineRuntime {
     this.recoveryTimer = undefined;
     await this.service.compactRecovery();
     await this.mcpHost.stop();
+    this.rasterUtilities.stop();
+    this.generationUtilities.stop();
     this.service.setMcpInfo({ running: false });
   }
 }

@@ -1,0 +1,12 @@
+{
+  "name": "canvas",
+  "version": "3.2.0-aidraw.1",
+  "description": "AIDraw compatibility name for the bundled @napi-rs/canvas runtime",
+  "license": "MIT",
+  "private": true,
+  "main": "index.cjs",
+  "types": "index.d.ts",
+  "dependencies": {
+    "@napi-rs/canvas": "1.0.3"
+  }
+}

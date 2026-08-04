@@ -134,7 +134,7 @@ async function main() {
   const prepared = [];
   for (const fileName of sourceFiles) prepared.push(await prepare(fileName));
   const report = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     createdAt: new Date().toISOString(),
     sourceDir: INPUT_DIR,
     outputDir: OUTPUT_DIR,

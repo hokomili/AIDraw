@@ -314,7 +314,7 @@ async function run() {
   const officialSizes = Object.fromEntries(await Promise.all(officialPaths.map(async (path) => [path, (await readFile(path)).byteLength])));
 
   const report = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     test: 'AIDraw packaged public-MCP headless pixel-animation acceptance',
     verdict: finalSprite.frameIds.length === 4 && rendererPagesBeforeMutations === 0 && healthWhileRendererClosed.uiRequired === false && lunaTraceEntries.length >= 9 && fileJobs.every((job) => job.status === 'completed') ? 'pass' : 'fail',
     runAt: new Date().toISOString(),

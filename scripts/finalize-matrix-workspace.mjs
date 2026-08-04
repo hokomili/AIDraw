@@ -203,7 +203,7 @@ function archiveFromDocument(document, definition, sourceFiles = {}, preview, tr
   persisted.assets = assets;
   const manifest = {
     format: 'AIDraw',
-    schemaVersion: 1,
+    schemaVersion: 2,
     documentId: persisted.id,
     documentKind: persisted.kind,
     name: persisted.name,
@@ -228,7 +228,7 @@ function inspectArchive(bytes, definition) {
   }
   const manifest = JSON.parse(strFromU8(files['manifest.json']));
   const document = JSON.parse(strFromU8(files['document.json']));
-  if (manifest.format !== 'AIDraw' || manifest.schemaVersion !== 1) throw new Error(`${definition.name} has an invalid native manifest.`);
+  if (manifest.format !== 'AIDraw' || ![1, 2].includes(manifest.schemaVersion)) throw new Error(`${definition.name} has an invalid native manifest.`);
   if (manifest.name !== definition.name || document.name !== definition.name) throw new Error(`${definition.name} was not canonicalized.`);
   return { document, metrics: assertComplete(definition, document) };
 }
@@ -343,7 +343,7 @@ async function main() {
   }
 
   const report = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     createdAt: new Date().toISOString(),
     applied: false,
     targetDir: resolve(TARGET_DIR),

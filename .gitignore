@@ -22,3 +22,17 @@ autonomous-output/
 .env
 .env.*
 !.env.example
+
+# OS/editor metadata
+.DS_Store
+Thumbs.db
+.idea/
+
+# Explicit MCP bootstrap handoffs and signing credentials are always local.
+aidraw-connection*.json
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore

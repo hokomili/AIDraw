@@ -4,14 +4,14 @@ Thank you for helping improve AIDraw. Contributions must preserve the editor's t
 
 ## Setup
 
-Use Windows 11 x64 and Node 24 LTS.
+Use Node 24 LTS on Windows, macOS, or Linux. Windows 11 x64 is the currently locally verified development target; changes affecting macOS or Linux require their native CI jobs before release promotion.
 
 ```powershell
 npm ci --cache .npm-cache
 npm run verify
 ```
 
-For UI or collaboration changes, also run `npm run test:e2e`. For packaging changes, run `npm run make` and verify both the Squirrel installer and portable ZIP.
+For UI or collaboration changes, also run `npm run test:e2e` on Windows. For packaging changes, run `npm run make` on every affected OS and verify its native artifacts: Squirrel/ZIP on Windows, DMG/ZIP on macOS, or DEB/RPM/ZIP on Linux.
 
 ## Change expectations
 

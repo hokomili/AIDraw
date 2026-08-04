@@ -1,10 +1,9 @@
 import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readFile, realpath, stat } from 'node:fs/promises';
 import { gunzipSync, inflateSync } from 'node:zlib';
-import { basename, dirname, extname, relative, resolve } from 'node:path';
-import { createCanvas, DOMMatrix, ImageData, Path2D } from '@napi-rs/canvas';
+import { basename, dirname, extname, isAbsolute, relative, resolve } from 'node:path';
+import { createCanvas, DOMMatrix, ImageData, Path2D, loadImage } from '@napi-rs/canvas';
 import { readPsd, type Layer as PsdLayer } from 'ag-psd';
-import UPNG from 'upng-js';
 import { decompressFrames, parseGIF } from 'gifuct-js';
 import { XMLParser } from 'fast-xml-parser';
 import { nativeImage } from 'electron';
@@ -22,24 +21,80 @@ import {
   type AIDrawDocument,
   type CollisionShape,
   type DocumentAsset,
+  type BlendMode,
   type IllustrationLayer,
   type ImageObject,
-  type PaintStyle,
-  type PathObject,
-  type ShapeObject,
-  type StrokeStyle,
   type TextObject,
+  type TextStyleRange,
   type TileDefinition,
   type WangSet,
 } from '@aidraw/core';
 import { quantizeToPalette } from './quantize';
+import { quantizeRgbaToPalette } from './quantize-image';
+import { decodeApng } from './apng';
+import { inspectGif } from './gif';
+import { calculateSpriteSheetLayout, validateSpriteSheetSliceOptions, type SpriteSheetSliceOptions } from '../common/sprite-sheet';
+import { inspectImageHeader, MAX_INLINE_IMAGE_DIMENSION, MAX_INLINE_IMAGE_PIXELS } from './transaction-policy';
+import { importEditableSvg } from './svg-import';
 
 export interface ImportResult { documents: AIDrawDocument[]; warnings: string[] }
 
-function sha256(bytes: Buffer): string { return createHash('sha256').update(bytes).digest('hex'); }
-function solid(color: string | undefined, fallback = '#27213c'): PaintStyle { return color === 'none' ? { kind: 'none' } : { kind: 'solid', color: color ?? fallback }; }
-function stroke(color: string | undefined, width: number | undefined): StrokeStyle { return { paint: solid(color, '#27213c'), width: width ?? 1, opacity: 1, lineCap: 'round', lineJoin: 'round', dash: [] }; }
+export const MAX_STRUCTURED_IMPORT_BYTES = 16 * 1024 * 1024;
+export const MAX_BINARY_IMPORT_BYTES = 256 * 1024 * 1024;
+const MAX_SPRITE_SHEET_FRAMES = 4_096;
+const MAX_SPRITE_SHEET_EXPANDED_PIXELS = 64 * 1024 * 1024;
+const MAX_PSD_LAYERS = 2_048;
+const MAX_PSD_EXPANDED_PIXELS = 64 * 1024 * 1024;
+const MAX_PDF_PAGES = 256;
+const MAX_PDF_EXPANDED_PIXELS = 64 * 1024 * 1024;
+const MAX_TILED_LAYERS = 4_096;
+const MAX_TILED_DEPTH = 64;
+const MAX_TILED_LAYER_CELLS = 4_194_304;
+const MAX_TILED_TOTAL_CELLS = 16_777_216;
+const MAX_TILED_OBJECTS = 100_000;
+const MAX_TILESET_TILES = 1_048_576;
 
+function safeJson(bytes: Buffer, label: string): Record<string, any> {
+  try {
+    const value = JSON.parse(bytes.toString('utf8')) as unknown;
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('the root value must be an object');
+    return value as Record<string, any>;
+  } catch (error) {
+    throw new Error(`${label} is not valid JSON: ${error instanceof Error ? error.message : String(error)}.`);
+  }
+}
+
+function assertSafeXml(bytes: Buffer, label: string): string {
+  const text = bytes.toString('utf8');
+  if (/<!\s*(?:DOCTYPE|ENTITY)\b/i.test(text)) throw new Error(`${label} cannot contain DTD or entity declarations.`);
+  return text;
+}
+
+export async function readBoundedImportFile(filePath: string, maxBytes = MAX_BINARY_IMPORT_BYTES, label = 'Import file'): Promise<Buffer> {
+  const details = await stat(filePath);
+  if (!details.isFile()) throw new Error(`${label} is not a regular file.`);
+  if (details.size > maxBytes) throw new Error(`${label} exceeds the ${Math.floor(maxBytes / 1024 / 1024)} MiB safety limit.`);
+  const bytes = await readFile(filePath);
+  if (bytes.byteLength > maxBytes) throw new Error(`${label} grew beyond the ${Math.floor(maxBytes / 1024 / 1024)} MiB safety limit while it was being read.`);
+  return bytes;
+}
+
+async function readCompanionFile(rootFilePath: string, sourceFilePath: string, reference: string, maxBytes: number, label: string): Promise<{ bytes: Buffer; path: string }> {
+  if (!reference || reference.includes('\0') || isAbsolute(reference)) throw new Error(`${label} must use a non-empty relative path.`);
+  const authorityRoot = await realpath(dirname(rootFilePath));
+  const target = await realpath(resolve(dirname(sourceFilePath), reference));
+  const fromRoot = relative(authorityRoot, target);
+  if (fromRoot === '..' || fromRoot.startsWith(`..\\`) || fromRoot.startsWith('../') || isAbsolute(fromRoot)) throw new Error(`${label} resolves outside the approved import folder.`);
+  return { bytes: await readBoundedImportFile(target, maxBytes, label), path: target };
+}
+
+function assertImageDimensions(width: number, height: number, label: string): void {
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1 || width > MAX_INLINE_IMAGE_DIMENSION || height > MAX_INLINE_IMAGE_DIMENSION || width * height > MAX_INLINE_IMAGE_PIXELS) {
+    throw new Error(`${label} dimensions ${width}×${height} exceed AIDraw's 8192px/16MP import limit.`);
+  }
+}
+
+function sha256(bytes: Buffer): string { return createHash('sha256').update(bytes).digest('hex'); }
 function entityBase(name: string, layerId: string) {
   const timestamp = nowIso();
   return { id: createId('object'), revision: 0, name, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, layerId, visible: true, locked: false, opacity: 1, blendMode: 'normal' as const, transform: structuredClone(IDENTITY_TRANSFORM) };
@@ -50,9 +105,12 @@ function imageAsset(name: string, mimeType: string, bytes: Buffer, source: Docum
 }
 
 function importRaster(bytes: Buffer, name: string, mimeType: string, pixelMode: boolean): ImportResult {
+  const header = inspectImageHeader(bytes);
+  assertImageDimensions(header.width, header.height, 'Image');
   const decoded = nativeImage.createFromBuffer(bytes);
   if (decoded.isEmpty()) throw new Error('Image is corrupt or uses an unsupported codec.');
   const size = decoded.getSize();
+  if (size.width !== header.width || size.height !== header.height) throw new Error('Decoded image dimensions disagree with its file header.');
   if (pixelMode) {
     const document = createPixelDocument('sprite', name);
     const sprite = document.pixelAssets[document.activeAssetId];
@@ -69,40 +127,41 @@ function importRaster(bytes: Buffer, name: string, mimeType: string, pixelMode: 
   document.artboard.width = size.width; document.artboard.height = size.height; document.artboard.background = null;
   const layer = document.layerIds.map((id) => document.layers[id]).find((entry) => entry.type === 'vector')!;
   const asset = imageAsset(name, mimeType, bytes); document.assets[asset.id] = asset;
-  const object: ImageObject = { ...entityBase(name, layer.id), type: 'image', assetId: asset.id, width: size.width, height: size.height, filters: [] };
+  const object: ImageObject = { ...entityBase(name, layer.id), type: 'image', assetId: asset.id, width: size.width, height: size.height, sourceWidth: size.width, sourceHeight: size.height, filters: [] };
   document.objects[object.id] = object; if (layer.type === 'vector') layer.objectIds.push(object.id);
   document.dirty = true;
   return { documents: [document], warnings: [] };
 }
 
-function importApng(bytes: Buffer, name: string): ImportResult | undefined {
-  const decoded = UPNG.decode(Uint8Array.from(bytes).buffer); const rgbaFrames = UPNG.toRGBA8(decoded); if (rgbaFrames.length <= 1 && !decoded.tabs.acTL) return undefined;
-  const document = createPixelDocument('sprite', name); const sprite = createPixelSprite(name, decoded.width, decoded.height); document.pixelAssets = { [sprite.id]: sprite }; document.assetIds = [sprite.id]; document.activeAssetId = sprite.id; const layerId = sprite.layerIds[0]; const firstFrameId = sprite.frameIds[0]; const firstCel = Object.values(sprite.cels)[0]; sprite.frames[firstFrameId].durationMs = Math.max(1, decoded.frames[0]?.delay ?? 100);
-  rgbaFrames.forEach((rgba, index) => {
-    const canvas = createCanvas(decoded.width, decoded.height); canvas.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(rgba), decoded.width, decoded.height), 0, 0); const png = canvas.toBuffer('image/png');
-    if (index === 0) { writePixels(firstCel, quantizeToPalette(png, decoded.width, decoded.height, document.palette)); return; }
-    const timestamp = nowIso(); const frameId = createId('frame'); const celId = createId('cel'); sprite.frameIds.push(frameId); sprite.frames[frameId] = { id: frameId, revision: 0, name: `Frame ${index + 1}`, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, durationMs: Math.max(1, decoded.frames[index]?.delay ?? 100) }; sprite.cels[celId] = { id: celId, revision: 0, name: `Pixels · Frame ${index + 1}`, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, layerId, frameId, chunks: {} }; writePixels(sprite.cels[celId], quantizeToPalette(png, decoded.width, decoded.height, document.palette));
+export function importApngBytes(bytes: Buffer, name: string): ImportResult | undefined {
+  const decoded = decodeApng(bytes); if (!decoded) return undefined;
+  const document = createPixelDocument('sprite', name); const sprite = createPixelSprite(name, decoded.width, decoded.height); document.pixelAssets = { [sprite.id]: sprite }; document.assetIds = [sprite.id]; document.activeAssetId = sprite.id; const layerId = sprite.layerIds[0]; const firstFrameId = sprite.frameIds[0]; const firstCel = Object.values(sprite.cels)[0]; sprite.frames[firstFrameId].durationMs = decoded.frames[0]?.delayMs ?? 100;
+  decoded.frames.forEach((frame, index) => {
+    const changes = quantizeRgbaToPalette(frame.rgba, decoded.width, decoded.height, document.palette, { alphaThreshold: document.conversionDefaults.alphaThreshold, dithering: document.conversionDefaults.dithering, includeTransparent: true });
+    if (index === 0) { writePixels(firstCel, changes); return; }
+    const timestamp = nowIso(); const frameId = createId('frame'); const celId = createId('cel'); sprite.frameIds.push(frameId); sprite.frames[frameId] = { id: frameId, revision: 0, name: `Frame ${index + 1}`, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, durationMs: frame.delayMs }; sprite.cels[celId] = { id: celId, revision: 0, name: `Pixels · Frame ${index + 1}`, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, layerId, frameId, chunks: {} }; writePixels(sprite.cels[celId], changes);
   });
   const source = imageAsset(`${name} source`, 'image/apng', bytes); document.assets[source.id] = source;
   document.dirty = true; return { documents: [document], warnings: [] };
 }
 
-function importGif(bytes: Buffer, name: string): ImportResult {
-  const parsed = parseGIF(Uint8Array.from(bytes).buffer); const frames = decompressFrames(parsed, true);
+export function importGifBytes(bytes: Buffer, name: string): ImportResult {
+  const inspected = inspectGif(bytes); const parsed = parseGIF(Uint8Array.from(bytes).buffer); const frames = decompressFrames(parsed, true);
   if (!frames.length) throw new Error('GIF contains no decodable frames.');
-  const width = parsed.lsd.width; const height = parsed.lsd.height; const document = createPixelDocument('sprite', name); const sprite = createPixelSprite(name, width, height);
+  if (frames.length !== inspected.frameCount) throw new Error('GIF decoder frame count disagrees with the validated container.');
+  const width = inspected.width; const height = inspected.height; const document = createPixelDocument('sprite', name); const sprite = createPixelSprite(name, width, height);
   document.pixelAssets = { [sprite.id]: sprite }; document.assetIds = [sprite.id]; document.activeAssetId = sprite.id;
   const layerId = sprite.layerIds[0]; const firstFrameId = sprite.frameIds[0]; const firstCel = Object.values(sprite.cels)[0]; const canvas = createCanvas(width, height); const context = canvas.getContext('2d'); context.imageSmoothingEnabled = false;
   frames.forEach((frame, index) => {
     const restore = frame.disposalType === 3 ? context.getImageData(0, 0, width, height) : undefined;
     const patchCanvas = createCanvas(frame.dims.width, frame.dims.height); patchCanvas.getContext('2d').putImageData(new ImageData(frame.patch, frame.dims.width, frame.dims.height), 0, 0);
-    context.drawImage(patchCanvas, frame.dims.left, frame.dims.top); const png = canvas.toBuffer('image/png');
+    context.drawImage(patchCanvas, frame.dims.left, frame.dims.top); const changes = quantizeRgbaToPalette(context.getImageData(0, 0, width, height).data, width, height, document.palette, { alphaThreshold: document.conversionDefaults.alphaThreshold, dithering: document.conversionDefaults.dithering, includeTransparent: true });
     if (index === 0) {
-      sprite.frames[firstFrameId].durationMs = Math.max(10, frame.delay || 100); writePixels(firstCel, quantizeToPalette(png, width, height, document.palette));
+      sprite.frames[firstFrameId].durationMs = Math.max(10, frame.delay || 100); writePixels(firstCel, changes);
     } else {
       const timestamp = nowIso(); const frameId = createId('frame'); const celId = createId('cel'); sprite.frameIds.push(frameId);
       sprite.frames[frameId] = { id: frameId, revision: 0, name: `Frame ${index + 1}`, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, durationMs: Math.max(10, frame.delay || 100) };
-      sprite.cels[celId] = { id: celId, revision: 0, name: `Pixels · Frame ${index + 1}`, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, layerId, frameId, chunks: {} }; writePixels(sprite.cels[celId], quantizeToPalette(png, width, height, document.palette));
+      sprite.cels[celId] = { id: celId, revision: 0, name: `Pixels · Frame ${index + 1}`, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, layerId, frameId, chunks: {} }; writePixels(sprite.cels[celId], changes);
     }
     if (frame.disposalType === 2) context.clearRect(frame.dims.left, frame.dims.top, frame.dims.width, frame.dims.height);
     else if (frame.disposalType === 3 && restore) context.putImageData(restore, 0, 0);
@@ -112,69 +171,146 @@ function importGif(bytes: Buffer, name: string): ImportResult {
 }
 
 async function importSpriteSheet(bytes: Buffer, name: string, filePath: string): Promise<ImportResult> {
-  const metadata = JSON.parse(bytes.toString('utf8')) as Record<string, any>; const frameSources = Array.isArray(metadata.frames) ? metadata.frames : Object.entries(metadata.frames ?? {}).map(([filename, frame]) => ({ filename, ...(frame as Record<string, unknown>) }));
-  if (!frameSources.length) throw new Error('Sprite-sheet metadata contains no frames.'); const imageReference = String(metadata.meta?.image ?? `${name}.png`); const imagePath = resolve(dirname(filePath), imageReference); const imageBytes = await readFile(imagePath); const sourceImage = nativeImage.createFromBuffer(imageBytes); if (sourceImage.isEmpty()) throw new Error(`Sprite-sheet image ${imageReference} is unreadable.`);
-  const firstRect = frameSources[0].frame ?? frameSources[0]; const width = Number(firstRect.w ?? firstRect.width); const height = Number(firstRect.h ?? firstRect.height); const document = createPixelDocument('sprite', name); const sprite = createPixelSprite(name, width, height); document.pixelAssets = { [sprite.id]: sprite }; document.assetIds = [sprite.id]; document.activeAssetId = sprite.id; const layerId = sprite.layerIds[0]; const importedFrameIds: string[] = [];
-  for (let index = 0; index < frameSources.length; index += 1) { const source = frameSources[index]; const rect = source.frame ?? source; const png = sourceImage.crop({ x: Number(rect.x ?? 0), y: Number(rect.y ?? 0), width: Number(rect.w ?? rect.width ?? width), height: Number(rect.h ?? rect.height ?? height) }).resize({ width, height, quality: 'best' }).toPNG(); let frameId: string; let celId: string;
-    if (index === 0) { frameId = sprite.frameIds[0]; celId = Object.values(sprite.cels)[0].id; sprite.frames[frameId].name = String(source.filename ?? source.name ?? 'Frame 1'); sprite.frames[frameId].durationMs = Math.max(1, Number(source.duration ?? 100)); }
-    else { const timestamp = nowIso(); frameId = createId('frame'); celId = createId('cel'); sprite.frameIds.push(frameId); sprite.frames[frameId] = { id: frameId, revision: 0, name: String(source.filename ?? source.name ?? `Frame ${index + 1}`), createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, durationMs: Math.max(1, Number(source.duration ?? 100)) }; sprite.cels[celId] = { id: celId, revision: 0, name: `Pixels · Frame ${index + 1}`, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, layerId, frameId, chunks: {} }; }
+  const metadata = safeJson(bytes, 'Sprite-sheet metadata'); const frameSources = Array.isArray(metadata.frames) ? metadata.frames : Object.entries(metadata.frames ?? {}).map(([filename, frame]) => ({ filename, ...(frame as Record<string, unknown>) }));
+  if (!frameSources.length) throw new Error('Sprite-sheet metadata contains no frames.');
+  if (frameSources.length > MAX_SPRITE_SHEET_FRAMES) throw new Error(`Sprite-sheet metadata exceeds the ${MAX_SPRITE_SHEET_FRAMES.toLocaleString('en-US')}-frame limit.`);
+  const imageReference = String(metadata.meta?.image ?? `${name}.png`); const companion = await readCompanionFile(filePath, filePath, imageReference, MAX_BINARY_IMPORT_BYTES, 'Sprite-sheet image'); const imagePath = companion.path; const imageBytes = companion.bytes;
+  const imageHeader = inspectImageHeader(imageBytes); assertImageDimensions(imageHeader.width, imageHeader.height, 'Sprite-sheet image');
+  const sourceImage = nativeImage.createFromBuffer(imageBytes); if (sourceImage.isEmpty()) throw new Error(`Sprite-sheet image ${imageReference} is unreadable.`);
+  const sourceSize = sourceImage.getSize(); if (sourceSize.width !== imageHeader.width || sourceSize.height !== imageHeader.height) throw new Error('Decoded sprite-sheet dimensions disagree with its file header.');
+  const firstRect = frameSources[0].frame ?? frameSources[0]; const width = Number(firstRect.w ?? firstRect.width); const height = Number(firstRect.h ?? firstRect.height); assertImageDimensions(width, height, 'Sprite frame');
+  if (width * height * frameSources.length > MAX_SPRITE_SHEET_EXPANDED_PIXELS) throw new Error('Sprite-sheet frames exceed the 64-megapixel expanded import budget.');
+  const document = createPixelDocument('sprite', name); const sprite = createPixelSprite(name, width, height); document.pixelAssets = { [sprite.id]: sprite }; document.assetIds = [sprite.id]; document.activeAssetId = sprite.id; const layerId = sprite.layerIds[0]; const importedFrameIds: string[] = [];
+  for (let index = 0; index < frameSources.length; index += 1) { const source = frameSources[index]; const rect = source.frame ?? source; let frameId: string; let celId: string;
+    const frameX = Number(rect.x ?? 0); const frameY = Number(rect.y ?? 0); const frameWidth = Number(rect.w ?? rect.width ?? width); const frameHeight = Number(rect.h ?? rect.height ?? height); const duration = Number(source.duration ?? 100);
+    if (![frameX, frameY, frameWidth, frameHeight].every(Number.isInteger) || frameX < 0 || frameY < 0 || frameWidth < 1 || frameHeight < 1 || frameX + frameWidth > sourceSize.width || frameY + frameHeight > sourceSize.height) throw new Error(`Sprite-sheet frame ${index + 1} has an invalid or out-of-bounds rectangle.`);
+    if (!Number.isFinite(duration) || duration < 1 || duration > 60_000) throw new Error(`Sprite-sheet frame ${index + 1} has an invalid duration.`);
+    const png = sourceImage.crop({ x: frameX, y: frameY, width: frameWidth, height: frameHeight }).resize({ width, height, quality: 'best' }).toPNG();
+    if (index === 0) { frameId = sprite.frameIds[0]; celId = Object.values(sprite.cels)[0].id; sprite.frames[frameId].name = String(source.filename ?? source.name ?? 'Frame 1'); sprite.frames[frameId].durationMs = duration; }
+    else { const timestamp = nowIso(); frameId = createId('frame'); celId = createId('cel'); sprite.frameIds.push(frameId); sprite.frames[frameId] = { id: frameId, revision: 0, name: String(source.filename ?? source.name ?? `Frame ${index + 1}`), createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, durationMs: duration }; sprite.cels[celId] = { id: celId, revision: 0, name: `Pixels · Frame ${index + 1}`, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, layerId, frameId, chunks: {} }; }
     importedFrameIds.push(frameId); writePixels(sprite.cels[celId], quantizeToPalette(png, width, height, document.palette));
   }
-  const tags = arrayify(metadata.meta?.frameTags ?? metadata.meta?.tags); sprite.tags = tags.map((tag: any) => { const from = typeof tag.from === 'number' ? importedFrameIds[tag.from] : importedFrameIds.includes(tag.fromFrameId) ? tag.fromFrameId : importedFrameIds[0]; const to = typeof tag.to === 'number' ? importedFrameIds[tag.to] : importedFrameIds.includes(tag.toFrameId) ? tag.toFrameId : importedFrameIds.at(-1)!; return { id: createId('tag'), name: String(tag.name ?? 'Animation'), fromFrameId: from, toFrameId: to, direction: tag.direction === 'reverse' || tag.direction === 'ping-pong' || tag.direction === 'pingpong' ? (tag.direction === 'reverse' ? 'reverse' : 'ping-pong') : 'forward', color: String(tag.color ?? '#9b87f5') }; });
+  const tags = arrayify(metadata.meta?.frameTags ?? metadata.meta?.tags); if (tags.length > 1_024) throw new Error('Sprite-sheet metadata exceeds the 1,024-tag limit.'); sprite.tags = tags.map((tag: any) => { const from = typeof tag.from === 'number' ? importedFrameIds[tag.from] : importedFrameIds.includes(tag.fromFrameId) ? tag.fromFrameId : importedFrameIds[0]; const to = typeof tag.to === 'number' ? importedFrameIds[tag.to] : importedFrameIds.includes(tag.toFrameId) ? tag.toFrameId : importedFrameIds.at(-1)!; return { id: createId('tag'), name: String(tag.name ?? 'Animation'), fromFrameId: from, toFrameId: to, direction: tag.direction === 'reverse' || tag.direction === 'ping-pong' || tag.direction === 'pingpong' ? (tag.direction === 'reverse' ? 'reverse' : 'ping-pong') : 'forward', color: String(tag.color ?? '#9b87f5') }; });
   const embedded = imageAsset(basename(imagePath), `image/${extname(imagePath).slice(1).replace('jpg', 'jpeg') || 'png'}`, imageBytes); document.assets[embedded.id] = embedded; document.linkedAssets.push({ id: createId('link'), name: basename(imagePath), mode: 'linked', relativePath: relative(dirname(filePath), imagePath).replace(/\\/g, '/'), sha256: embedded.sha256, cachedPreviewAssetId: embedded.id }); document.dirty = true; return { documents: [document], warnings: [] };
+}
+
+function rgbaCrop(source: Uint8ClampedArray, sourceWidth: number, x: number, y: number, width: number, height: number): Uint8ClampedArray {
+  const output = new Uint8ClampedArray(width * height * 4);
+  for (let row = 0; row < height; row += 1) {
+    const start = ((y + row) * sourceWidth + x) * 4;
+    output.set(source.subarray(start, start + width * 4), row * width * 4);
+  }
+  return output;
+}
+
+export async function importSlicedSpriteSheetBytes(bytes: Buffer, name: string, mimeType: string, value: SpriteSheetSliceOptions): Promise<ImportResult> {
+  const options = validateSpriteSheetSliceOptions(value); const header = inspectImageHeader(bytes); assertImageDimensions(header.width, header.height, 'Sprite sheet'); const image = await loadImage(bytes);
+  const width = image.width; const height = image.height;
+  if (width !== header.width || height !== header.height) throw new Error('Decoded sprite-sheet dimensions disagree with its file header.');
+  const layout = calculateSpriteSheetLayout(width, height, options); const canvas = createCanvas(width, height); const context = canvas.getContext('2d'); context.imageSmoothingEnabled = false; context.drawImage(image, 0, 0);
+  const decoded = layout.frames.map((frame) => ({ frame, rgba: context.getImageData(frame.x, frame.y, frame.width, frame.height).data }));
+  const kept = options.skipEmpty ? decoded.filter(({ rgba }) => { for (let offset = 3; offset < rgba.length; offset += 4) if (rgba[offset] > 0) return true; return false; }) : decoded;
+  if (!kept.length) throw new Error('Every selected sprite-sheet frame is fully transparent.');
+  let trim = { x: 0, y: 0, width: options.frameWidth, height: options.frameHeight }; let hasOpaque = false;
+  if (options.trimTransparent) {
+    let minX = options.frameWidth; let minY = options.frameHeight; let maxX = -1; let maxY = -1;
+    for (const { rgba } of kept) for (let y = 0; y < options.frameHeight; y += 1) for (let x = 0; x < options.frameWidth; x += 1) if (rgba[(y * options.frameWidth + x) * 4 + 3] > 0) { hasOpaque = true; minX = Math.min(minX, x); minY = Math.min(minY, y); maxX = Math.max(maxX, x); maxY = Math.max(maxY, y); }
+    if (hasOpaque) trim = { x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1 };
+  }
+  const document = createPixelDocument('sprite', name); const sprite = createPixelSprite(name, trim.width, trim.height); document.pixelAssets = { [sprite.id]: sprite }; document.assetIds = [sprite.id]; document.activeAssetId = sprite.id;
+  const layerId = sprite.layerIds[0]; const firstFrameId = sprite.frameIds[0]; const firstCel = Object.values(sprite.cels)[0];
+  kept.forEach(({ frame, rgba }, index) => {
+    const pixels = rgbaCrop(rgba, options.frameWidth, trim.x, trim.y, trim.width, trim.height); const changes = quantizeRgbaToPalette(pixels, trim.width, trim.height, document.palette, { alphaThreshold: document.conversionDefaults.alphaThreshold, dithering: document.conversionDefaults.dithering, includeTransparent: true });
+    if (index === 0) { sprite.frames[firstFrameId].name = `Frame ${frame.index + 1}`; sprite.frames[firstFrameId].durationMs = options.durationMs; writePixels(firstCel, changes); return; }
+    const timestamp = nowIso(); const frameId = createId('frame'); const celId = createId('cel'); sprite.frameIds.push(frameId); sprite.frames[frameId] = { id: frameId, revision: 0, name: `Frame ${frame.index + 1}`, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, durationMs: options.durationMs }; sprite.cels[celId] = { id: celId, revision: 0, name: `Pixels · Frame ${frame.index + 1}`, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, layerId, frameId, chunks: {} }; writePixels(sprite.cels[celId], changes);
+  });
+  const source = imageAsset(`${name} source`, mimeType, bytes); document.assets[source.id] = source; document.dirty = true;
+  const warnings = [`Sliced ${kept.length} frame${kept.length === 1 ? '' : 's'} from a ${layout.columns}×${layout.rows} grid; the source sheet is embedded.`];
+  if (options.skipEmpty && kept.length !== decoded.length) warnings.push(`Skipped ${decoded.length - kept.length} fully transparent frame${decoded.length - kept.length === 1 ? '' : 's'}.`);
+  if (options.trimTransparent && hasOpaque && (trim.width !== options.frameWidth || trim.height !== options.frameHeight)) warnings.push(`Trimmed the shared transparent border from ${options.frameWidth}×${options.frameHeight} to ${trim.width}×${trim.height} without changing frame alignment.`);
+  else if (options.trimTransparent && !hasOpaque) warnings.push('No opaque pixels were available for shared-border trimming.');
+  warnings.push('Full-color sheet pixels were quantized to the document indexed palette.');
+  return { documents: [document], warnings };
 }
 
 function arrayify<T>(value: T | T[] | undefined): T[] { return value === undefined ? [] : Array.isArray(value) ? value : [value]; }
 
 function importSvg(bytes: Buffer, name: string): ImportResult {
-  const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '', parseAttributeValue: true });
-  const root = parser.parse(bytes.toString('utf8')).svg as Record<string, unknown> | undefined;
-  if (!root) throw new Error('SVG root element was not found.');
-  const width = Number(root.width ?? String(root.viewBox ?? '0 0 1920 1080').split(/\s+/)[2] ?? 1920);
-  const height = Number(root.height ?? String(root.viewBox ?? '0 0 1920 1080').split(/\s+/)[3] ?? 1080);
-  const document = createIllustrationDocument(name); document.artboard.width = width; document.artboard.height = height; document.artboard.background = null;
-  const layer = document.layerIds.map((id) => document.layers[id]).find((entry) => entry.type === 'vector')!;
-  const add = (object: ShapeObject | PathObject | TextObject) => { document.objects[object.id] = object; if (layer.type === 'vector') layer.objectIds.push(object.id); };
-  for (const rect of arrayify(root.rect as Record<string, unknown> | Array<Record<string, unknown>>)) {
-    const object: ShapeObject = { ...entityBase(String(rect.id ?? 'Rectangle'), layer.id), type: 'shape', shape: 'rectangle', width: Number(rect.width ?? 0), height: Number(rect.height ?? 0), cornerRadius: Number(rect.rx ?? 0), fill: solid(String(rect.fill ?? '#27213c')), stroke: stroke(rect.stroke ? String(rect.stroke) : 'none', Number(rect['stroke-width'] ?? 1)) };
-    object.transform.x = Number(rect.x ?? 0); object.transform.y = Number(rect.y ?? 0); add(object);
-  }
-  for (const ellipse of [...arrayify(root.ellipse as Record<string, unknown> | Array<Record<string, unknown>>), ...arrayify(root.circle as Record<string, unknown> | Array<Record<string, unknown>>)]) {
-    const rx = Number(ellipse.rx ?? ellipse.r ?? 0); const ry = Number(ellipse.ry ?? ellipse.r ?? 0);
-    const object: ShapeObject = { ...entityBase(String(ellipse.id ?? 'Ellipse'), layer.id), type: 'shape', shape: 'ellipse', width: rx * 2, height: ry * 2, fill: solid(String(ellipse.fill ?? '#27213c')), stroke: stroke(ellipse.stroke ? String(ellipse.stroke) : 'none', Number(ellipse['stroke-width'] ?? 1)) };
-    object.transform.x = Number(ellipse.cx ?? rx) - rx; object.transform.y = Number(ellipse.cy ?? ry) - ry; add(object);
-  }
-  for (const path of arrayify(root.path as Record<string, unknown> | Array<Record<string, unknown>>)) {
-    add({ ...entityBase(String(path.id ?? 'Path'), layer.id), type: 'path', pathData: String(path.d ?? ''), closed: /[zZ]\s*$/.test(String(path.d ?? '')), fill: solid(String(path.fill ?? 'none')), stroke: stroke(path.stroke ? String(path.stroke) : 'none', Number(path['stroke-width'] ?? 1)), fillRule: path['fill-rule'] === 'evenodd' ? 'evenodd' : 'nonzero' });
-  }
-  for (const line of arrayify(root.line as Record<string, unknown> | Array<Record<string, unknown>>)) {
-    const object: ShapeObject = { ...entityBase(String(line.id ?? 'Line'), layer.id), type: 'shape', shape: 'line', width: Number(line.x2 ?? 0) - Number(line.x1 ?? 0), height: Number(line.y2 ?? 0) - Number(line.y1 ?? 0), fill: { kind: 'none' }, stroke: stroke(String(line.stroke ?? '#27213c'), Number(line['stroke-width'] ?? 1)) };
-    object.transform.x = Number(line.x1 ?? 0); object.transform.y = Number(line.y1 ?? 0); add(object);
-  }
-  for (const text of arrayify(root.text as Record<string, unknown> | Array<Record<string, unknown>>)) {
-    const content = String(text['#text'] ?? text.text ?? ''); const fontSize = Number(text['font-size'] ?? 48);
-    const object: TextObject = { ...entityBase(String(text.id ?? 'Text'), layer.id), type: 'text', text: content, width: Math.max(1, content.length * fontSize), height: fontSize * 1.3, align: 'left', lineHeight: 1.2, ranges: [{ start: 0, end: content.length, fontFamily: String(text['font-family'] ?? 'sans-serif'), fontSize, fontWeight: Number(text['font-weight'] ?? 400), fontStyle: text['font-style'] === 'italic' ? 'italic' : 'normal', color: String(text.fill ?? '#27213c'), letterSpacing: Number(text['letter-spacing'] ?? 0) }] };
-    object.transform.x = Number(text.x ?? 0); object.transform.y = Number(text.y ?? 0) - fontSize; add(object);
-  }
-  document.dirty = true;
-  const unsupported = ['g', 'defs', 'filter', 'mask', 'clipPath', 'use', 'foreignObject'].filter((tag) => root[tag] !== undefined);
-  return { documents: [document], warnings: unsupported.length ? [`SVG elements requiring more complex interpretation were preserved only when referenced by supported objects: ${unsupported.join(', ')}.`] : [] };
+  const imported = importEditableSvg(assertSafeXml(bytes, 'SVG'), name);
+  return { documents: [imported.document], warnings: imported.warnings };
 }
 
-function flattenPsdLayers(layers: PsdLayer[] | undefined, prefix = ''): Array<{ layer: PsdLayer; name: string }> {
-  return (layers ?? []).flatMap((layer, index) => layer.children?.length ? flattenPsdLayers(layer.children, `${prefix}${layer.name ?? `Group ${index + 1}`}/`) : [{ layer, name: `${prefix}${layer.name ?? `Layer ${index + 1}`}` }]);
+function flattenPsdLayers(layers: PsdLayer[] | undefined, prefix = '', depth = 0, budget = { count: 0, pixels: 0 }): Array<{ layer: PsdLayer; name: string }> {
+  if (depth > MAX_TILED_DEPTH) throw new Error('PSD layer nesting exceeds the 64-level safety limit.');
+  const flattened: Array<{ layer: PsdLayer; name: string }> = [];
+  for (const [index, layer] of (layers ?? []).entries()) {
+    budget.count += 1; if (budget.count > MAX_PSD_LAYERS) throw new Error(`PSD exceeds the ${MAX_PSD_LAYERS.toLocaleString('en-US')}-layer safety limit.`);
+    if (layer.imageData) { assertImageDimensions(layer.imageData.width, layer.imageData.height, `PSD layer ${budget.count}`); budget.pixels += layer.imageData.width * layer.imageData.height; if (budget.pixels > MAX_PSD_EXPANDED_PIXELS) throw new Error('PSD layer pixels exceed the 64-megapixel expanded safety budget.'); }
+    if (layer.children?.length) flattened.push(...flattenPsdLayers(layer.children, `${prefix}${layer.name ?? `Group ${index + 1}`}/`, depth + 1, budget));
+    else flattened.push({ layer, name: `${prefix}${layer.name ?? `Layer ${index + 1}`}` });
+  }
+  return flattened;
 }
 
 function canvasImageData(source: NonNullable<PsdLayer['imageData']>): ImageData {
   return new ImageData(new Uint8ClampedArray(source.data), source.width, source.height);
 }
 
+function aidrawPsdBlendMode(value: PsdLayer['blendMode']): BlendMode {
+  const normalized = String(value ?? 'normal').replace(/ /g, '-');
+  return ['normal', 'multiply', 'screen', 'overlay', 'darken', 'lighten', 'color-dodge', 'color-burn', 'hard-light', 'soft-light', 'difference', 'exclusion'].includes(normalized)
+    ? normalized as BlendMode
+    : 'normal';
+}
+
+function psdColorHex(value: unknown, fallback = '#000000'): string {
+  if (!value || typeof value !== 'object') return fallback;
+  const color = value as { r?: unknown; g?: unknown; b?: unknown; a?: unknown };
+  if (![color.r, color.g, color.b].every((channel) => typeof channel === 'number' && Number.isFinite(channel))) return fallback;
+  const channel = (entry: unknown) => Math.max(0, Math.min(255, Math.round(Number(entry)))).toString(16).padStart(2, '0');
+  const alpha = typeof color.a === 'number' && Number.isFinite(color.a) ? channel(color.a <= 1 ? color.a * 255 : color.a) : '';
+  return `#${channel(color.r)}${channel(color.g)}${channel(color.b)}${alpha}`;
+}
+
+function importedPsdText(layer: PsdLayer, layerId: string, visible: boolean): TextObject | undefined {
+  const source = layer.text; if (!source?.text) return undefined;
+  const base = source.style ?? {}; const ranges: TextStyleRange[] = []; let offset = 0;
+  const runs = source.styleRuns?.length ? source.styleRuns : [{ length: source.text.length, style: {} }];
+  for (const run of runs) {
+    if (offset >= source.text.length) break;
+    const length = Math.max(0, Math.min(source.text.length - offset, Math.trunc(run.length))); if (!length) continue;
+    const style = { ...base, ...run.style }; const fontSize = Math.max(1, Number(style.fontSize ?? 24)); const fontName = String(style.font?.name ?? 'sans-serif');
+    ranges.push({ start: offset, end: offset + length, fontFamily: fontName, fontSize, fontWeight: style.fauxBold || /bold/i.test(fontName) ? 700 : 400, fontStyle: style.fauxItalic || /italic|oblique/i.test(fontName) ? 'italic' : 'normal', color: psdColorHex(style.fillColor), letterSpacing: Number.isFinite(style.tracking) ? Number(style.tracking) / 1_000 * fontSize : 0, underline: Boolean(style.underline) });
+    offset += length;
+  }
+  if (offset < source.text.length) {
+    const fontSize = Math.max(1, Number(base.fontSize ?? 24)); const fontName = String(base.font?.name ?? 'sans-serif');
+    ranges.push({ start: offset, end: source.text.length, fontFamily: fontName, fontSize, fontWeight: base.fauxBold || /bold/i.test(fontName) ? 700 : 400, fontStyle: base.fauxItalic || /italic|oblique/i.test(fontName) ? 'italic' : 'normal', color: psdColorHex(base.fillColor), letterSpacing: Number.isFinite(base.tracking) ? Number(base.tracking) / 1_000 * fontSize : 0, underline: Boolean(base.underline) });
+  }
+  const first = ranges[0]; const transform = source.transform ?? []; const left = Number(layer.left ?? source.left ?? transform[4] ?? 0); const top = Number(layer.top ?? source.top ?? (Number(transform[5] ?? 0) - first.fontSize));
+  const width = Math.max(1, Number((layer.right ?? source.right ?? left + Math.max(first.fontSize, source.text.length * first.fontSize * 0.6)) - left));
+  const height = Math.max(1, Number((layer.bottom ?? source.bottom ?? top + first.fontSize * 1.4) - top));
+  const justification = source.paragraphStyle?.justification;
+  const object: TextObject = { ...entityBase(source.text.slice(0, 32) || layer.name || 'PSD text', layerId), type: 'text', text: source.text, width, height, align: justification === 'center' || justification === 'justify-center' ? 'center' : justification === 'right' || justification === 'justify-right' ? 'right' : justification?.startsWith('justify') ? 'justify' : 'left', lineHeight: Math.max(0.5, Math.min(4, Number(base.leading ?? first.fontSize * 1.2) / first.fontSize)), ranges, visible };
+  object.transform.x = left; object.transform.y = top; return object;
+}
+
+function addPsdRasterObject(document: Extract<AIDrawDocument, { kind: 'illustration' }>, layer: Extract<IllustrationLayer, { type: 'vector' }>, source: NonNullable<PsdLayer['imageData']>, name: string, visible: boolean, left = 0, top = 0): void {
+  const canvas = createCanvas(source.width, source.height); canvas.getContext('2d').putImageData(canvasImageData(source), 0, 0); const png = canvas.toBuffer('image/png');
+  const asset = imageAsset(name, 'image/png', png); document.assets[asset.id] = asset;
+  const object: ImageObject = { ...entityBase(name, layer.id), type: 'image', assetId: asset.id, width: source.width, height: source.height, sourceWidth: source.width, sourceHeight: source.height, filters: [], visible };
+  object.transform.x = left; object.transform.y = top; document.objects[object.id] = object; layer.objectIds.push(object.id);
+}
+
 function importPsd(bytes: Buffer, name: string, pixelMode: boolean): ImportResult {
+  if (bytes.byteLength < 26 || bytes.toString('ascii', 0, 4) !== '8BPS' || ![1, 2].includes(bytes.readUInt16BE(4))) throw new Error('PSD header is corrupt or unsupported.');
+  assertImageDimensions(bytes.readUInt32BE(18), bytes.readUInt32BE(14), 'PSD canvas');
   const psd = readPsd(bytes, { useImageData: true, logMissingFeatures: false });
+  assertImageDimensions(psd.width, psd.height, 'Decoded PSD canvas'); const flattened = flattenPsdLayers(psd.children);
   if (pixelMode) {
     const document = createPixelDocument('project', name);
     document.assetIds = []; document.pixelAssets = {};
-    for (const { layer, name: layerName } of flattenPsdLayers(psd.children)) {
+    for (const { layer, name: layerName } of flattened) {
       if (!layer.imageData) continue;
       const canvas = createCanvas(layer.imageData.width, layer.imageData.height); canvas.getContext('2d').putImageData(canvasImageData(layer.imageData), 0, 0);
       const png = canvas.toBuffer('image/png'); const sprite = createPixelSprite(layerName, layer.imageData.width, layer.imageData.height);
@@ -187,22 +323,44 @@ function importPsd(bytes: Buffer, name: string, pixelMode: boolean): ImportResul
   }
   const document = createIllustrationDocument(name); document.artboard.width = psd.width; document.artboard.height = psd.height; document.artboard.background = null;
   const initialLayers = [...document.layerIds]; for (const id of initialLayers) delete document.layers[id]; document.layerIds = [];
-  for (const { layer, name: layerName } of flattenPsdLayers(psd.children)) {
-    if (!layer.imageData) continue;
-    const timestamp = nowIso();
-    const vectorLayer: IllustrationLayer = { id: createId('layer'), revision: 0, name: layerName, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, visible: !layer.hidden, locked: false, opacity: (layer.opacity ?? 255) / 255, blendMode: 'normal', type: 'vector', objectIds: [] };
-    const canvas = createCanvas(layer.imageData.width, layer.imageData.height); canvas.getContext('2d').putImageData(canvasImageData(layer.imageData), 0, 0); const png = canvas.toBuffer('image/png');
-    const asset = imageAsset(layerName, 'image/png', png); document.assets[asset.id] = asset;
-    const object: ImageObject = { ...entityBase(layerName, vectorLayer.id), type: 'image', assetId: asset.id, width: layer.imageData.width, height: layer.imageData.height, filters: [] };
-    object.transform.x = layer.left ?? 0; object.transform.y = layer.top ?? 0; document.objects[object.id] = object; vectorLayer.objectIds.push(object.id); document.layers[vectorLayer.id] = vectorLayer; document.layerIds.push(vectorLayer.id);
+  const stats = { groups: 0, text: 0, effects: 0, vector: 0, adjustments: 0 };
+  const addLayers = (layers: PsdLayer[] | undefined, parentId?: string) => {
+    for (const [index, source] of (layers ?? []).entries()) {
+      const timestamp = nowIso(); const id = createId('layer'); const layerName = source.name ?? `${source.children?.length ? 'Group' : 'Layer'} ${index + 1}`;
+      if (source.effects) stats.effects += 1; if (source.vectorMask || source.vectorFill || source.vectorStroke) stats.vector += 1; if (source.adjustment) stats.adjustments += 1;
+      if (source.children?.length) {
+        const group: IllustrationLayer = { id, revision: 0, name: layerName, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, parentId, visible: !source.hidden, locked: false, opacity: (source.opacity ?? 255) / 255, blendMode: aidrawPsdBlendMode(source.blendMode), type: 'group', childIds: [] };
+        document.layers[id] = group; stats.groups += 1;
+        if (parentId) { const parent = document.layers[parentId]; if (parent?.type === 'group') parent.childIds.push(id); } else document.layerIds.push(id);
+        addLayers(source.children, id); continue;
+      }
+      const layer: IllustrationLayer = { id, revision: 0, name: layerName, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, parentId, visible: !source.hidden, locked: false, opacity: (source.opacity ?? 255) / 255, blendMode: aidrawPsdBlendMode(source.blendMode), type: 'vector', objectIds: [] };
+      document.layers[id] = layer;
+      if (parentId) { const parent = document.layers[parentId]; if (parent?.type === 'group') parent.childIds.push(id); } else document.layerIds.push(id);
+      if (source.imageData) addPsdRasterObject(document, layer, source.imageData, `${layerName} · raster fallback`, true, source.left ?? 0, source.top ?? 0);
+      const text = importedPsdText(source, id, !source.hidden && !source.imageData); if (text) { document.objects[text.id] = text; layer.objectIds.push(text.id); stats.text += 1; }
+    }
+  };
+  addLayers(psd.children);
+  if (psd.imageData) {
+    const timestamp = nowIso(); const layer: IllustrationLayer = { id: createId('layer'), revision: 0, name: 'PSD composite fallback', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, visible: document.layerIds.length === 0, locked: true, opacity: 1, blendMode: 'normal', type: 'vector', objectIds: [] };
+    addPsdRasterObject(document, layer, psd.imageData, 'PSD composite fallback', true); document.layers[layer.id] = layer; document.layerIds.unshift(layer.id);
   }
-  document.dirty = true;
-  return { documents: [document], warnings: ['PSD layer pixels were preserved. Unsupported effects, advanced text, and color modes are flattened into explicit raster fallbacks.'] };
+  if (!document.layerIds.length) { const fallback = createIllustrationDocument(name); const id = fallback.layerIds.find((candidate) => fallback.layers[candidate].type === 'vector')!; document.layers[id] = fallback.layers[id]; document.layerIds.push(id); }
+  document.dirty = true; const warnings = ['PSD layer hierarchy and raster fallbacks were preserved.'];
+  if (stats.text) warnings.push(`${stats.text} text layer${stats.text === 1 ? '' : 's'} include hidden editable text beside the visible raster fallback when both were available.`);
+  if (stats.effects) warnings.push(`${stats.effects} layer effect stack${stats.effects === 1 ? '' : 's'} remain rasterized.`);
+  if (stats.vector) warnings.push(`${stats.vector} vector-mask/fill/stroke layer${stats.vector === 1 ? '' : 's'} retain raster fallbacks; editable Photoshop vector descriptors are not yet translated.`);
+  if (stats.adjustments) warnings.push(`${stats.adjustments} adjustment layer${stats.adjustments === 1 ? '' : 's'} remain rasterized.`);
+  if (psd.bitsPerChannel !== undefined && psd.bitsPerChannel !== 8) warnings.push(`The ${psd.bitsPerChannel}-bit PSD was decoded into AIDraw's 8-bit sRGB workflow.`);
+  return { documents: [document], warnings };
 }
 
 function tiledProperties(value: any): Record<string, string | number | boolean> {
   if (!value) return {};
-  if (!Array.isArray(value) && typeof value === 'object' && !value.property && !('name' in value)) return value;
+  if (!Array.isArray(value) && typeof value === 'object' && !value.property && !(Object.hasOwn(value, 'name') && Object.hasOwn(value, 'value'))) {
+    const entries = Object.entries(value); if (entries.every(([, entry]) => typeof entry === 'string' || typeof entry === 'number' && Number.isFinite(entry) || typeof entry === 'boolean')) return Object.fromEntries(entries) as Record<string, string | number | boolean>;
+  }
   const result: Record<string, string | number | boolean> = {};
   for (const property of arrayify(value.property ?? value)) {
     const raw = property.value ?? property['#text'] ?? '';
@@ -218,18 +376,34 @@ function tiledObject(source: any): CollisionShape {
   return { id: String(source.id ?? createId('collision')), type: explicitType ?? (polygon ? 'polygon' : polyline ? 'polyline' : source.ellipse ? 'ellipse' : 'rectangle'), x: Number(source.x ?? 0), y: Number(source.y ?? 0), width: Number(source.width ?? 0), height: Number(source.height ?? 0), points: parsePoints(polygon ?? polyline) ?? parsePoints(source.points), properties: { name: String(source.name ?? ''), class: String(source.class ?? (explicitType ? '' : source.type) ?? ''), ...tiledProperties(source.properties) } };
 }
 
+function tiledCellCount(width: number, height: number, label: string): number {
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width < 0 || height < 0 || width > 16_777_216 || height > 16_777_216) throw new Error(`${label} has invalid dimensions.`);
+  const cells = width * height;
+  if (!Number.isSafeInteger(cells) || cells > MAX_TILED_LAYER_CELLS) throw new Error(`${label} exceeds the ${MAX_TILED_LAYER_CELLS.toLocaleString('en-US')}-cell layer limit.`);
+  return cells;
+}
+
+function validateGids(values: number[], expected: number, label: string): number[] {
+  if (values.length > MAX_TILED_LAYER_CELLS || (expected > 0 && values.length !== expected)) throw new Error(`${label} contains ${values.length.toLocaleString('en-US')} cells; expected ${expected.toLocaleString('en-US')}.`);
+  if (values.some((gid) => !Number.isSafeInteger(gid) || gid < 0 || gid > 0xffff_ffff)) throw new Error(`${label} contains an invalid tile GID.`);
+  return values;
+}
+
 function tiledData(source: any, width: number, height: number): number[] {
-  if (Array.isArray(source)) return source.map(Number);
-  if (source?.tile) return arrayify(source.tile).map((tile: any) => Number(tile.gid ?? 0));
+  const expected = tiledCellCount(width, height, 'Tiled layer data');
+  if (Array.isArray(source)) return validateGids(source.map(Number), expected, 'Tiled layer data');
+  if (source?.tile) return validateGids(arrayify(source.tile).map((tile: any) => Number(tile.gid ?? 0)), expected, 'Tiled layer data');
   const text = String(source?.['#text'] ?? source ?? '').trim(); const encoding = source?.encoding;
-  if (!text) return Array<number>(Math.max(0, width * height)).fill(0);
-  if (encoding === 'csv' || text.includes(',')) return text.split(/[\s,]+/).filter(Boolean).map(Number);
+  if (!text) return Array<number>(expected).fill(0);
+  if (encoding === 'csv' || text.includes(',')) return validateGids(text.split(/[\s,]+/).filter(Boolean).map(Number), expected, 'Tiled CSV layer data');
   if (encoding === 'base64') {
-    let payload = Buffer.from(text.replace(/\s+/g, ''), 'base64');
-    if (source.compression === 'zlib') payload = inflateSync(payload); else if (source.compression === 'gzip') payload = gunzipSync(payload); else if (source.compression) throw new Error(`Unsupported Tiled layer compression: ${source.compression}`);
-    const gids: number[] = []; for (let offset = 0; offset + 3 < payload.length; offset += 4) gids.push(payload.readUInt32LE(offset)); return gids;
+    const compact = text.replace(/\s+/g, ''); if (!compact || compact.length % 4 !== 0 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(compact)) throw new Error('Tiled layer data is not canonical base64.');
+    let payload = Buffer.from(compact, 'base64'); const maxOutputLength = Math.max(4, expected * 4);
+    if (source.compression === 'zlib') payload = inflateSync(payload, { maxOutputLength }); else if (source.compression === 'gzip') payload = gunzipSync(payload, { maxOutputLength }); else if (source.compression) throw new Error(`Unsupported Tiled layer compression: ${source.compression}`);
+    if (payload.byteLength !== expected * 4) throw new Error(`Tiled binary layer data decodes to ${payload.byteLength} bytes; expected ${expected * 4}.`);
+    const gids: number[] = []; for (let offset = 0; offset < payload.length; offset += 4) gids.push(payload.readUInt32LE(offset)); return validateGids(gids, expected, 'Tiled binary layer data');
   }
-  return text.split(/\s+/).filter(Boolean).map(Number);
+  return validateGids(text.split(/\s+/).filter(Boolean).map(Number), expected, 'Tiled layer data');
 }
 
 function xmlTileset(source: any): Record<string, any> {
@@ -239,19 +413,88 @@ function xmlTileset(source: any): Record<string, any> {
   return { ...source, type: 'tileset', image: source.image?.source, imagewidth: source.image?.width, imageheight: source.image?.height, tiles, wangsets, properties: tiledProperties(source.properties), transformations: source.transformations };
 }
 
-function xmlLayer(source: any, type: 'tilelayer' | 'objectgroup' | 'group'): Record<string, any> {
-  if (type === 'group') return { ...source, type, layers: [...arrayify(source.layer).map((entry) => xmlLayer(entry, 'tilelayer')), ...arrayify(source.objectgroup).map((entry) => xmlLayer(entry, 'objectgroup')), ...arrayify(source.group).map((entry) => xmlLayer(entry, 'group'))] };
+function xmlLayer(source: any, type: 'tilelayer' | 'objectgroup' | 'group', depth = 0, budget = { layers: 0, cells: 0 }): Record<string, any> {
+  if (depth > MAX_TILED_DEPTH) throw new Error('Tiled group nesting exceeds the 64-level safety limit.');
+  budget.layers += 1; if (budget.layers > MAX_TILED_LAYERS) throw new Error(`Tiled map exceeds the ${MAX_TILED_LAYERS.toLocaleString('en-US')}-layer limit.`);
+  if (type === 'group') return { ...source, type, layers: [...arrayify(source.layer).map((entry) => xmlLayer(entry, 'tilelayer', depth + 1, budget)), ...arrayify(source.objectgroup).map((entry) => xmlLayer(entry, 'objectgroup', depth + 1, budget)), ...arrayify(source.group).map((entry) => xmlLayer(entry, 'group', depth + 1, budget))] };
   if (type === 'objectgroup') return { ...source, type, objects: arrayify(source.object).map(tiledObject) };
   const data = source.data ?? {}; const chunks = arrayify(data.chunk).map((chunk: any) => ({ x: Number(chunk.x), y: Number(chunk.y), width: Number(chunk.width), height: Number(chunk.height), data: tiledData({ ...chunk, encoding: data.encoding, compression: data.compression }, Number(chunk.width), Number(chunk.height)) }));
-  return { ...source, type, ...(chunks.length ? { chunks } : { data: tiledData(data, Number(source.width ?? 0), Number(source.height ?? 0)) }) };
+  const normalizedData = chunks.length ? undefined : tiledData(data, Number(source.width ?? 0), Number(source.height ?? 0)); budget.cells += chunks.length ? chunks.reduce((total, chunk) => total + chunk.data.length, 0) : normalizedData!.length;
+  if (budget.cells > MAX_TILED_TOTAL_CELLS) throw new Error('Tiled layer data exceeds the 16,777,216-cell total import budget.');
+  return { ...source, type, ...(chunks.length ? { chunks } : { data: normalizedData }) };
 }
 
 function parseTiled(bytes: Buffer, extension: string): Record<string, any> {
-  if (extension === '.tmj' || extension === '.tsj' || extension === '.json') return JSON.parse(bytes.toString('utf8')) as Record<string, any>;
-  const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '', parseAttributeValue: true, parseTagValue: false, trimValues: true }); const parsed = parser.parse(bytes.toString('utf8')) as Record<string, any>;
+  if (extension === '.tmj' || extension === '.tsj' || extension === '.json') return safeJson(bytes, 'Tiled document');
+  const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '', parseAttributeValue: true, parseTagValue: false, trimValues: true }); const parsed = parser.parse(assertSafeXml(bytes, 'Tiled XML')) as Record<string, any>;
   if (parsed.tileset) return xmlTileset(parsed.tileset);
   const map = parsed.map; if (!map) throw new Error('Tiled XML contains neither a map nor a tileset.');
-  return { ...map, type: 'map', properties: tiledProperties(map.properties), tilesets: arrayify(map.tileset).map(xmlTileset), layers: [...arrayify(map.layer).map((entry) => xmlLayer(entry, 'tilelayer')), ...arrayify(map.objectgroup).map((entry) => xmlLayer(entry, 'objectgroup')), ...arrayify(map.group).map((entry) => xmlLayer(entry, 'group'))] };
+  const budget = { layers: 0, cells: 0 };
+  return { ...map, type: 'map', properties: tiledProperties(map.properties), tilesets: arrayify(map.tileset).map(xmlTileset), layers: [...arrayify(map.layer).map((entry) => xmlLayer(entry, 'tilelayer', 0, budget)), ...arrayify(map.objectgroup).map((entry) => xmlLayer(entry, 'objectgroup', 0, budget)), ...arrayify(map.group).map((entry) => xmlLayer(entry, 'group', 0, budget))] };
+}
+
+function integerInRange(value: unknown, minimum: number, maximum: number, label: string): number {
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < minimum || number > maximum) throw new Error(`${label} must be an integer from ${minimum} to ${maximum}.`);
+  return number;
+}
+
+function validateObjectPoints(source: any, label: string): void {
+  const points = source?.polygon?.points ?? source?.polygon ?? source?.polyline?.points ?? source?.polyline ?? source?.points;
+  const count = typeof points === 'string' ? points.split(/\s+/).filter(Boolean).length : Array.isArray(points) ? points.length : 0;
+  if (count > 65_536) throw new Error(`${label} exceeds the 65,536-point limit.`);
+}
+
+function validateTilesetStructure(source: any, fallbackTileWidth: number, fallbackTileHeight: number): void {
+  const tileWidth = integerInRange(source.tilewidth ?? fallbackTileWidth, 1, MAX_INLINE_IMAGE_DIMENSION, 'Tileset tile width');
+  const tileHeight = integerInRange(source.tileheight ?? fallbackTileHeight, 1, MAX_INLINE_IMAGE_DIMENSION, 'Tileset tile height');
+  assertImageDimensions(tileWidth, tileHeight, 'Tileset tile');
+  const imageWidth = Number(source.imagewidth ?? 0); const imageHeight = Number(source.imageheight ?? 0);
+  if (imageWidth || imageHeight) assertImageDimensions(imageWidth, imageHeight, 'Tileset image');
+  const imageColumns = imageWidth ? Math.max(1, Math.floor(imageWidth / tileWidth)) : 1; const imageRows = imageHeight ? Math.max(1, Math.floor(imageHeight / tileHeight)) : 1;
+  const tileCount = integerInRange(source.tilecount ?? Math.max(1, imageColumns * imageRows, arrayify(source.tiles ?? source.tile).length), 0, MAX_TILESET_TILES, 'Tileset tile count');
+  const columns = integerInRange(source.columns ?? imageColumns, 1, Math.max(1, MAX_TILESET_TILES), 'Tileset column count');
+  if (tileCount > 0 && columns > tileCount) throw new Error('Tileset columns cannot exceed its tile count.');
+  const tiles = arrayify(source.tiles ?? source.tile); if (tiles.length > MAX_TILESET_TILES) throw new Error('Tileset metadata exceeds the one-million-tile limit.');
+  let animationFrames = 0; let collisionObjects = 0;
+  for (const tile of tiles) {
+    animationFrames += arrayify(tile.animation).length; if (animationFrames > MAX_TILESET_TILES) throw new Error('Tileset animation metadata exceeds the one-million-frame limit.');
+    const collisions = arrayify(tile.objectgroup?.objects ?? tile.objectgroup?.object ?? tile.collisions); collisionObjects += collisions.length; if (collisionObjects > MAX_TILED_OBJECTS) throw new Error('Tileset collision metadata exceeds the 100,000-object limit.');
+    collisions.forEach((object, index) => validateObjectPoints(object, `Tileset collision ${index + 1}`));
+  }
+  const wangSets = arrayify(source.wangsets); if (wangSets.length > 1_024) throw new Error('Tileset exceeds the 1,024-Wang-set limit.');
+  let wangTiles = 0; for (const set of wangSets) { if (arrayify(set.colors ?? set.wangcolors).length > 256) throw new Error('A Wang set exceeds the 256-color limit.'); wangTiles += arrayify(set.wangtiles).length; }
+  if (wangTiles > MAX_TILESET_TILES) throw new Error('Wang terrain metadata exceeds the one-million-tile limit.');
+}
+
+function normalizeTiledMapStructure(tiled: any): void {
+  const infinite = Boolean(tiled.infinite); const mapWidth = integerInRange(tiled.width ?? 0, infinite ? 0 : 1, 16_777_216, 'Tiled map width'); const mapHeight = integerInRange(tiled.height ?? 0, infinite ? 0 : 1, 16_777_216, 'Tiled map height');
+  const tileWidth = integerInRange(tiled.tilewidth ?? 16, 1, MAX_INLINE_IMAGE_DIMENSION, 'Tiled map tile width'); const tileHeight = integerInRange(tiled.tileheight ?? 16, 1, MAX_INLINE_IMAGE_DIMENSION, 'Tiled map tile height'); assertImageDimensions(tileWidth, tileHeight, 'Tiled map tile');
+  if (!infinite) tiledCellCount(mapWidth, mapHeight, 'Tiled map');
+  const tilesets = arrayify(tiled.tilesets); if (tilesets.length > 1_024) throw new Error('Tiled map exceeds the 1,024-tileset limit.');
+  let layerCount = 0; let totalCells = 0; let objectCount = 0;
+  const walk = (source: any, depth: number): void => {
+    if (depth > MAX_TILED_DEPTH) throw new Error('Tiled group nesting exceeds the 64-level safety limit.');
+    layerCount += 1; if (layerCount > MAX_TILED_LAYERS) throw new Error(`Tiled map exceeds the ${MAX_TILED_LAYERS.toLocaleString('en-US')}-layer limit.`);
+    if (source.type === 'group') { for (const child of arrayify(source.layers)) walk(child, depth + 1); return; }
+    if (source.type === 'objectgroup') {
+      const objects = arrayify(source.objects); objectCount += objects.length; if (objectCount > MAX_TILED_OBJECTS) throw new Error('Tiled map exceeds the 100,000-object limit.'); objects.forEach((object, index) => validateObjectPoints(object, `Map object ${index + 1}`)); return;
+    }
+    const chunks = arrayify(source.chunks);
+    if (chunks.length) {
+      if (chunks.length > 65_536) throw new Error('A Tiled layer exceeds the 65,536-chunk limit.');
+      for (const [index, chunk] of chunks.entries()) {
+        integerInRange(chunk.x ?? 0, -16_777_216, 16_777_216, `Tiled chunk ${index + 1} x`); integerInRange(chunk.y ?? 0, -16_777_216, 16_777_216, `Tiled chunk ${index + 1} y`);
+        const width = integerInRange(chunk.width, 1, 16_777_216, `Tiled chunk ${index + 1} width`); const height = integerInRange(chunk.height, 1, 16_777_216, `Tiled chunk ${index + 1} height`);
+        const input = Array.isArray(chunk.data) ? chunk.data : { '#text': chunk.data, encoding: source.encoding, compression: source.compression }; chunk.data = tiledData(input, width, height); totalCells += chunk.data.length; if (totalCells > MAX_TILED_TOTAL_CELLS) throw new Error('Tiled layer data exceeds the 16,777,216-cell total import budget.');
+      }
+    } else {
+      const width = integerInRange(source.width ?? mapWidth, 0, 16_777_216, 'Tiled layer width'); const height = integerInRange(source.height ?? mapHeight, 0, 16_777_216, 'Tiled layer height');
+      const input = Array.isArray(source.data) ? source.data : { '#text': source.data, encoding: source.encoding, compression: source.compression }; source.data = tiledData(input, width, height); totalCells += source.data.length;
+    }
+    if (totalCells > MAX_TILED_TOTAL_CELLS) throw new Error('Tiled layer data exceeds the 16,777,216-cell total import budget.');
+  };
+  for (const layer of arrayify(tiled.layers)) walk(layer, 0);
 }
 
 function wangId(value: unknown): WangSet['tiles'][number]['wangId'] {
@@ -259,20 +502,21 @@ function wangId(value: unknown): WangSet['tiles'][number]['wangId'] {
 }
 
 async function attachTileset(document: ReturnType<typeof createPixelDocument>, sourceReference: any, rootFilePath: string, fallbackTileWidth: number, fallbackTileHeight: number, warnings: string[]) {
-  let source = sourceReference; let baseDirectory = dirname(rootFilePath);
+  let source = sourceReference; let sourceFilePath = rootFilePath;
   if (sourceReference.source) {
-    const externalPath = resolve(baseDirectory, String(sourceReference.source)); const externalBytes = await readFile(externalPath); source = parseTiled(externalBytes, extname(externalPath).toLowerCase()); baseDirectory = dirname(externalPath);
+    const external = await readCompanionFile(rootFilePath, rootFilePath, String(sourceReference.source), MAX_STRUCTURED_IMPORT_BYTES, 'External Tiled tileset'); sourceFilePath = external.path; source = parseTiled(external.bytes, extname(external.path).toLowerCase());
   }
+  if (source.type === 'map') throw new Error('An external Tiled tileset reference resolved to a map.'); validateTilesetStructure(source, fallbackTileWidth, fallbackTileHeight);
   const tileWidth = Number(source.tilewidth ?? fallbackTileWidth); const tileHeight = Number(source.tileheight ?? fallbackTileHeight); let imageWidth = Number(source.imagewidth ?? 0); let imageHeight = Number(source.imageheight ?? 0); let imageBytes: Buffer | undefined; let imagePath: string | undefined;
   if (typeof source.image === 'string') {
-    imagePath = resolve(baseDirectory, source.image);
-    try { imageBytes = await readFile(imagePath); const decoded = nativeImage.createFromBuffer(imageBytes); if (decoded.isEmpty()) throw new Error('image codec is unsupported'); const size = decoded.getSize(); imageWidth ||= size.width; imageHeight ||= size.height; } catch (error) { warnings.push(`Tileset image ${source.image} could not be loaded: ${error instanceof Error ? error.message : String(error)}.`); }
+    const companion = await readCompanionFile(rootFilePath, sourceFilePath, source.image, MAX_BINARY_IMPORT_BYTES, 'Tileset image'); imagePath = companion.path; imageBytes = companion.bytes;
+    try { const header = inspectImageHeader(imageBytes); assertImageDimensions(header.width, header.height, 'Tileset image'); const decoded = nativeImage.createFromBuffer(imageBytes); if (decoded.isEmpty()) throw new Error('image codec is unsupported'); const size = decoded.getSize(); if (size.width !== header.width || size.height !== header.height) throw new Error('decoded dimensions disagree with the file header'); if ((imageWidth && imageWidth !== size.width) || (imageHeight && imageHeight !== size.height)) throw new Error('declared dimensions disagree with the image file'); imageWidth = size.width; imageHeight = size.height; } catch (error) { warnings.push(`Tileset image ${source.image} could not be decoded: ${error instanceof Error ? error.message : String(error)}.`); imageBytes = undefined; imagePath = undefined; }
   }
-  const columns = Math.max(1, Number(source.columns ?? (Math.floor(imageWidth / tileWidth) || 1))); const tileCount = Math.max(1, Number(source.tilecount ?? columns * Math.max(1, Math.floor(imageHeight / tileHeight)))); const rows = Math.max(1, Math.ceil(tileCount / columns)); const sprite = createPixelSprite(String(source.name ?? 'Tileset pixels'), Math.max(tileWidth, imageWidth || columns * tileWidth), Math.max(tileHeight, imageHeight || rows * tileHeight));
+  const columns = Math.max(1, Number(source.columns ?? (Math.floor(imageWidth / tileWidth) || 1))); const tileCount = Math.max(1, Number(source.tilecount ?? columns * Math.max(1, Math.floor(imageHeight / tileHeight)))); const rows = Math.max(1, Math.ceil(tileCount / columns)); const spriteWidth = Math.max(tileWidth, imageWidth || columns * tileWidth); const spriteHeight = Math.max(tileHeight, imageHeight || rows * tileHeight); assertImageDimensions(spriteWidth, spriteHeight, 'Tileset pixel source'); const sprite = createPixelSprite(String(source.name ?? 'Tileset pixels'), spriteWidth, spriteHeight);
   if (imageBytes) { const cel = Object.values(sprite.cels)[0]; writePixels(cel, quantizeToPalette(imageBytes, sprite.width, sprite.height, document.palette)); const embedded = imageAsset(basename(imagePath!), `image/${extname(imagePath!).slice(1).replace('jpg', 'jpeg') || 'png'}`, imageBytes); document.assets[embedded.id] = embedded; document.linkedAssets.push({ id: createId('link'), name: basename(imagePath!), mode: 'linked', relativePath: relative(dirname(rootFilePath), imagePath!).replace(/\\/g, '/'), sha256: embedded.sha256, cachedPreviewAssetId: embedded.id }); }
-  const tileset = createPixelTileset(String(source.name ?? 'Tileset'), sprite.id, tileWidth, tileHeight, columns, rows); tileset.firstGid = Math.max(1, Number(sourceReference.firstgid ?? 1)); const margin = Number(source.margin ?? 0); const spacing = Number(source.spacing ?? 0); const metadata = new Map(arrayify(source.tiles ?? source.tile).map((tile: any) => [Number(tile.id), tile]));
+  const tileset = createPixelTileset(String(source.name ?? 'Tileset'), sprite.id, tileWidth, tileHeight, columns, rows); tileset.firstGid = Math.max(1, Number(sourceReference.firstgid ?? 1)); const margin = Number(source.margin ?? 0); const spacing = Number(source.spacing ?? 0); tileset.margin = margin; tileset.spacing = spacing; const metadata = new Map(arrayify(source.tiles ?? source.tile).map((tile: any) => [Number(tile.id), tile]));
   for (let id = 0; id < tileCount; id += 1) { const tile = metadata.get(id); const definition: TileDefinition = { id, sourceX: margin + id % columns * (tileWidth + spacing), sourceY: margin + Math.floor(id / columns) * (tileHeight + spacing), probability: Number(tile?.probability ?? 1), animation: arrayify(tile?.animation).map((frame: any) => ({ tileId: Number(frame.tileid ?? frame.tileId), durationMs: Number(frame.duration ?? frame.durationMs ?? 100) })), collisions: arrayify(tile?.objectgroup?.objects ?? tile?.collisions).map(tiledObject), properties: tiledProperties(tile?.properties) }; tileset.tiles[id] = definition; }
-  tileset.wangSets = arrayify(source.wangsets).map((set: any): WangSet => ({ id: createId('wang'), name: String(set.name ?? 'Terrain'), type: set.type === 'corner' || set.type === 'edge' ? set.type : 'mixed', colors: arrayify(set.wangcolors).map((color: any, index) => ({ id: index + 1, name: String(color.name ?? `Terrain ${index + 1}`), color: String(color.color ?? '#ff00ff'), tileId: Number(color.tile ?? -1), probability: Number(color.probability ?? 1) })), tiles: arrayify(set.wangtiles).map((tile: any) => ({ tileId: Number(tile.tileid), wangId: wangId(tile.wangid) })) }));
+  tileset.wangSets = arrayify(source.wangsets).map((set: any): WangSet => ({ id: createId('wang'), name: String(set.name ?? 'Terrain'), type: set.type === 'corner' || set.type === 'edge' ? set.type : 'mixed', colors: arrayify(set.colors ?? set.wangcolors).map((color: any, index) => ({ id: index + 1, name: String(color.name ?? `Terrain ${index + 1}`), color: String(color.color ?? '#ff00ff'), tileId: Number(color.tile ?? -1), probability: Number(color.probability ?? 1) })), tiles: arrayify(set.wangtiles).map((tile: any) => ({ tileId: Number(tile.tileid), wangId: wangId(tile.wangid) })) }));
   const transforms = source.transformations; if (transforms) tileset.transformations = { hFlip: transforms.hflip !== false && transforms.hflip !== 0, vFlip: transforms.vflip !== false && transforms.vflip !== 0, rotate: transforms.rotate !== false && transforms.rotate !== 0 };
   document.pixelAssets[sprite.id] = sprite; document.assetIds.push(sprite.id); document.pixelAssets[tileset.id] = tileset; document.assetIds.push(tileset.id); return tileset;
 }
@@ -281,6 +525,7 @@ async function importTiled(bytes: Buffer, name: string, filePath: string): Promi
   const tiled = parseTiled(bytes, extname(filePath).toLowerCase()); const warnings: string[] = [];
   if (tiled.type === 'tileset') { const document = createPixelDocument('project', name); document.assetIds = []; document.pixelAssets = {}; const tileset = await attachTileset(document, tiled, filePath, Number(tiled.tilewidth ?? 16), Number(tiled.tileheight ?? 16), warnings); document.activeAssetId = tileset.id; document.dirty = true; return { documents: [document], warnings }; }
   if (tiled.type !== 'map') throw new Error('Tiled file is neither a map nor a tileset.');
+  normalizeTiledMapStructure(tiled);
   const document = createPixelDocument('tilemap', name); const map = document.pixelAssets[document.activeAssetId]; if (map.type !== 'tilemap') throw new Error('Expected map');
   map.name = String(tiled.name ?? name); map.orientation = tiled.orientation === 'isometric' ? 'isometric' : 'orthogonal'; if (!['orthogonal', 'isometric'].includes(String(tiled.orientation ?? 'orthogonal'))) warnings.push(`Tiled ${tiled.orientation} orientation was converted to orthogonal.`); map.infinite = Boolean(tiled.infinite); map.width = Number(tiled.width ?? 0); map.height = Number(tiled.height ?? 0); map.tileWidth = Number(tiled.tilewidth ?? 16); map.tileHeight = Number(tiled.tileheight ?? 16); map.properties = tiledProperties(tiled.properties); map.layerIds = []; map.layers = {}; map.tilesetIds = [];
   for (const source of arrayify(tiled.tilesets)) { const tileset = await attachTileset(document, source, filePath, map.tileWidth, map.tileHeight, warnings); map.tilesetIds.push(tileset.id); }
@@ -296,29 +541,37 @@ async function importTiled(bytes: Buffer, name: string, filePath: string): Promi
 
 async function importPdf(bytes: Buffer, name: string, pixelMode: boolean): Promise<ImportResult> {
   Object.assign(globalThis, { DOMMatrix, ImageData, Path2D });
-  const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs'); const source = await pdfjs.getDocument({ data: Uint8Array.from(bytes) }).promise; const documents: AIDrawDocument[] = [];
-  for (let pageNumber = 1; pageNumber <= source.numPages; pageNumber += 1) {
-    const page = await source.getPage(pageNumber); const viewport = page.getViewport({ scale: 1 }); const canvas = createCanvas(Math.max(1, Math.ceil(viewport.width)), Math.max(1, Math.ceil(viewport.height)));
-    await page.render({ canvas: null, canvasContext: canvas.getContext('2d') as unknown as CanvasRenderingContext2D, viewport }).promise; const pageName = source.numPages > 1 ? `${name} · Page ${pageNumber}` : name; const imported = importRaster(canvas.toBuffer('image/png'), pageName, 'image/png', pixelMode); const document = imported.documents[0];
-    if (document.kind === 'illustration') {
-      const timestamp = nowIso(); const textLayer: IllustrationLayer = { id: createId('layer'), revision: 0, name: 'Editable PDF text (hidden)', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, visible: false, locked: false, opacity: 1, blendMode: 'normal', type: 'vector', objectIds: [] }; const text = await page.getTextContent();
-      for (const item of text.items) if ('str' in item && item.str) { const fontSize = Math.max(1, Math.hypot(item.transform[0], item.transform[1])); const object: TextObject = { ...entityBase(item.str.slice(0, 32), textLayer.id), type: 'text', text: item.str, width: Math.max(1, item.width), height: Math.max(1, item.height || fontSize), align: 'left', lineHeight: 1.2, ranges: [{ start: 0, end: item.str.length, fontFamily: item.fontName || 'sans-serif', fontSize, fontWeight: 400, fontStyle: 'normal', color: '#000000', letterSpacing: 0 }] }; object.transform.x = item.transform[4]; object.transform.y = viewport.height - item.transform[5] - fontSize; document.objects[object.id] = object; textLayer.objectIds.push(object.id); }
-      if (textLayer.objectIds.length) { document.layers[textLayer.id] = textLayer; document.layerIds.push(textLayer.id); }
+  const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs'); const loadingTask = pdfjs.getDocument({ data: Uint8Array.from(bytes) }); const source = await loadingTask.promise; const documents: AIDrawDocument[] = [];
+  try {
+    if (source.numPages < 1 || source.numPages > MAX_PDF_PAGES) throw new Error(`PDF page count ${source.numPages} exceeds AIDraw's ${MAX_PDF_PAGES}-page import limit.`);
+    let expandedPixels = 0; let extractedTextItems = 0;
+    for (let pageNumber = 1; pageNumber <= source.numPages; pageNumber += 1) {
+      const page = await source.getPage(pageNumber); const viewport = page.getViewport({ scale: 1 }); const pageWidth = Math.max(1, Math.ceil(viewport.width)); const pageHeight = Math.max(1, Math.ceil(viewport.height)); assertImageDimensions(pageWidth, pageHeight, `PDF page ${pageNumber}`); expandedPixels += pageWidth * pageHeight; if (expandedPixels > MAX_PDF_EXPANDED_PIXELS) throw new Error('PDF pages exceed the 64-megapixel expanded import budget.'); const canvas = createCanvas(pageWidth, pageHeight);
+      await page.render({ canvas: null, canvasContext: canvas.getContext('2d') as unknown as CanvasRenderingContext2D, viewport }).promise; const pageName = source.numPages > 1 ? `${name} · Page ${pageNumber}` : name; const imported = importRaster(canvas.toBuffer('image/png'), pageName, 'image/png', pixelMode); const document = imported.documents[0];
+      if (document.kind === 'illustration') {
+        const timestamp = nowIso(); const textLayer: IllustrationLayer = { id: createId('layer'), revision: 0, name: 'Editable PDF text (hidden)', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, visible: false, locked: false, opacity: 1, blendMode: 'normal', type: 'vector', objectIds: [] }; const text = await page.getTextContent(); extractedTextItems += text.items.length; if (extractedTextItems > 250_000) throw new Error('PDF exceeds the 250,000-item editable-text extraction limit.');
+        for (const item of text.items) if ('str' in item && item.str) { const fontSize = Math.max(1, Math.hypot(item.transform[0], item.transform[1])); const object: TextObject = { ...entityBase(item.str.slice(0, 32), textLayer.id), type: 'text', text: item.str, width: Math.max(1, item.width), height: Math.max(1, item.height || fontSize), align: 'left', lineHeight: 1.2, ranges: [{ start: 0, end: item.str.length, fontFamily: item.fontName || 'sans-serif', fontSize, fontWeight: 400, fontStyle: 'normal', color: '#000000', letterSpacing: 0 }] }; object.transform.x = item.transform[4]; object.transform.y = viewport.height - item.transform[5] - fontSize; document.objects[object.id] = object; textLayer.objectIds.push(object.id); }
+        if (textLayer.objectIds.length) { document.layers[textLayer.id] = textLayer; document.layerIds.push(textLayer.id); }
+      }
+      documents.push(document);
     }
-    documents.push(document);
+    return { documents, warnings: ['PDF pages retain a faithful raster fallback. Extracted text is placed on a hidden editable layer; unsupported operators and effects remain rasterized.'] };
+  } finally {
+    await loadingTask.destroy();
   }
-  return { documents, warnings: ['PDF pages retain a faithful raster fallback. Extracted text is placed on a hidden editable layer; unsupported operators and effects remain rasterized.'] };
 }
 
 export async function importDocument(filePath: string, pixelMode = false): Promise<ImportResult> {
-  const bytes = await readFile(filePath); const extension = extname(filePath).toLowerCase(); const name = basename(filePath, extension);
-  if ((extension === '.png' || extension === '.apng') && pixelMode) { const animated = importApng(bytes, name); if (animated) return animated; }
-  if (extension === '.gif' && pixelMode) return importGif(bytes, name);
+  const extension = extname(filePath).toLowerCase(); const name = basename(filePath, extension); const supported = ['.png', '.apng', '.jpg', '.jpeg', '.webp', '.gif', '.svg', '.psd', '.pdf', '.json', '.tmj', '.tmx', '.tsj', '.tsx'];
+  if (!supported.includes(extension)) throw new Error(`Unsupported import format: ${extension}`);
+  const structured = ['.svg', '.json', '.tmj', '.tmx', '.tsj', '.tsx'].includes(extension); const bytes = await readBoundedImportFile(filePath, structured ? MAX_STRUCTURED_IMPORT_BYTES : MAX_BINARY_IMPORT_BYTES);
+  if ((extension === '.png' || extension === '.apng') && pixelMode) { const animated = importApngBytes(bytes, name); if (animated) return animated; }
+  if (extension === '.gif') { inspectGif(bytes); if (pixelMode) return importGifBytes(bytes, name); }
   if (['.png', '.apng', '.jpg', '.jpeg', '.webp', '.gif'].includes(extension)) return importRaster(bytes, name, extension === '.png' || extension === '.apng' ? 'image/png' : extension === '.webp' ? 'image/webp' : extension === '.gif' ? 'image/gif' : 'image/jpeg', pixelMode);
-  if (extension === '.svg') return pixelMode ? importRaster(Buffer.from(nativeImage.createFromBuffer(bytes).toPNG()), name, 'image/png', true) : importSvg(bytes, name);
+  if (extension === '.svg') { if (!pixelMode) return importSvg(bytes, name); importSvg(bytes, name); const rendered = nativeImage.createFromBuffer(bytes); if (rendered.isEmpty()) throw new Error('SVG could not be rasterized safely.'); return importRaster(Buffer.from(rendered.toPNG()), name, 'image/png', true); }
   if (extension === '.psd') return importPsd(bytes, name, pixelMode);
   if (extension === '.pdf') return importPdf(bytes, name, pixelMode);
-  if (extension === '.json' && pixelMode) { const metadata = JSON.parse(bytes.toString('utf8')) as Record<string, unknown>; if (metadata.frames && metadata.meta) return importSpriteSheet(bytes, name, filePath); }
+  if (extension === '.json' && pixelMode) { const metadata = safeJson(bytes, 'JSON import'); if (metadata.frames && metadata.meta) return importSpriteSheet(bytes, name, filePath); }
   if (extension === '.tmj' || extension === '.tmx' || extension === '.tsj' || extension === '.tsx' || extension === '.json') return importTiled(bytes, name, filePath);
   throw new Error(`Unsupported import format: ${extension}`);
 }

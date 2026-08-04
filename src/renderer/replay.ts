@@ -27,6 +27,11 @@ function addPoint(target: Map<string, Set<string>>, id: string, x: number, y: nu
   target.set(id, points);
 }
 
+function addRun(target: Map<string, Set<string>>, id: string, x: number, y: number, length: number): void {
+  if (![x, y, length].every(Number.isFinite) || length < 1) return;
+  for (let offset = 0; offset < length; offset += 1) addPoint(target, id, x + offset, y);
+}
+
 /**
  * A committed transaction is already present in the canonical document. During
  * trace replay these masks conceal its final marks so the progressive overlay
@@ -45,9 +50,14 @@ export function collectReplayMasks(playbacks: ReplaySource[]): ReplayMasks {
     for (const operation of playback.sourceOperations) {
       if (operation.kind === 'pixel.cel.set') {
         for (const change of operation.changes) addPoint(masks.celPixels, operation.celId, change.x, change.y);
+      } else if (operation.kind === 'pixel.cel.region') {
+        for (const run of operation.runs) addRun(masks.celPixels, operation.celId, run.x, run.y, run.length);
       } else if (operation.kind === 'pixel.tilemap.set') {
         const key = replayTileLayerKey(operation.mapId, operation.layerId);
         for (const change of operation.changes) addPoint(masks.tileCells, key, change.x, change.y);
+      } else if (operation.kind === 'pixel.tilemap.region') {
+        const key = replayTileLayerKey(operation.mapId, operation.layerId);
+        for (const run of operation.runs) addRun(masks.tileCells, key, run.x, run.y, run.length);
       } else if (operation.kind === 'illustration.object.add' || operation.kind === 'illustration.object.replace') {
         masks.objectIds.add(operation.object.id);
       } else if (operation.kind === 'illustration.paint.stroke') {

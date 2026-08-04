@@ -1,0 +1,61 @@
+{
+  "type": "tileset",
+  "version": "1.10",
+  "tiledversion": "1.11.2",
+  "name": "Fixture Terrain",
+  "tilewidth": 16,
+  "tileheight": 16,
+  "tilecount": 2,
+  "columns": 2,
+  "transformations": {
+    "hflip": true,
+    "vflip": false,
+    "rotate": true,
+    "preferuntransformed": false
+  },
+  "tiles": [
+    {
+      "id": 0,
+      "probability": 0.25,
+      "properties": [
+        { "name": "walkable", "type": "bool", "value": true },
+        { "name": "cost", "type": "int", "value": 3 }
+      ],
+      "animation": [
+        { "tileid": 1, "duration": 120 }
+      ],
+      "objectgroup": {
+        "objects": [
+          {
+            "id": 9,
+            "name": "Footprint",
+            "type": "solid",
+            "x": 1,
+            "y": 2,
+            "width": 14,
+            "height": 12,
+            "properties": [
+              { "name": "damage", "type": "int", "value": 2 }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 1,
+      "probability": 0.75
+    }
+  ],
+  "wangsets": [
+    {
+      "name": "Track edge",
+      "type": "mixed",
+      "colors": [
+        { "name": "Rail", "color": "#c9953d", "tile": 0, "probability": 1 }
+      ],
+      "wangtiles": [
+        { "tileid": 0, "wangid": [1, 0, 1, 0, 1, 0, 1, 0] }
+      ]
+    }
+  ]
+}

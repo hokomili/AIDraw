@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { Actor, CanvasOperation, Id } from '@aidraw/core';
+import type { Actor, CanvasOperation, Id, OrderedDitherMatrixSize } from '@aidraw/core';
 import { CanvasOperationSchema, HUMAN_ACTOR, createId, nowIso } from '@aidraw/core';
 import type { NewDocumentOptions, WorkspaceSnapshot } from '../common/contracts';
 import type { ReplaySource } from './replay';
@@ -18,14 +18,20 @@ interface EditorState {
   primaryColor: string;
   secondaryColor: string;
   brushSize: number;
-  brushPreset: 'hard-round' | 'soft-round' | 'pencil' | 'marker' | 'airbrush' | 'eraser';
+  brushPreset: string;
   opacity: number;
   zoom: number;
   pixelIndex: number;
-  rightPanel: 'layers' | 'assets' | 'activity' | 'generation';
+  ditherMatrixSize: OrderedDitherMatrixSize;
+  ditherCoverage: number;
+  ditherMixIndex: number;
+  rightPanel: 'layers' | 'assets' | 'animation' | 'activity' | 'generation';
   selectedEntityId?: Id;
   selectedEntityIds: Id[];
+  canvasViewport?: { x: number; y: number; width: number; height: number };
+  canvasAnimation?: { activeAssetId?: Id; activeFrameId?: Id; activeTagId?: Id; illustrationTimeMs?: number; playing: boolean; onionSkin: boolean; direction: 'forward' | 'reverse' | 'ping-pong' };
   revealRequest?: { id: Id; documentId: Id; objectId: Id };
+  reportPulse: number;
   playbacks: Record<Id, ReplaySource & { documentId: Id; actor: Actor; progress: number; operations: CanvasOperation[]; lane: number }>;
   toast?: { id: string; tone: ToastTone; message: string };
   initialize(): Promise<void>;
@@ -38,10 +44,15 @@ interface EditorState {
   setOpacity(value: number): void;
   setZoom(value: number): void;
   setPixelIndex(value: number): void;
+  setDitherMatrixSize(value: OrderedDitherMatrixSize): void;
+  setDitherCoverage(value: number): void;
+  setDitherMixIndex(value: number): void;
   setRightPanel(panel: EditorState['rightPanel']): void;
   setSelectedEntity(id?: Id): void;
   setSelectedEntities(ids: Id[]): void;
   toggleSelectedEntity(id: Id): void;
+  setCanvasViewport(viewport?: EditorState['canvasViewport']): void;
+  setCanvasAnimation(animation?: EditorState['canvasAnimation']): void;
   revealEntity(id: Id): void;
   notify(message: string, tone?: ToastTone): void;
   newDocument(options: NewDocumentOptions): Promise<void>;
@@ -73,8 +84,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   opacity: 1,
   zoom: 1,
   pixelIndex: 1,
+  ditherMatrixSize: 4,
+  ditherCoverage: 0.5,
+  ditherMixIndex: 0,
   rightPanel: 'layers',
   playbacks: {},
+  reportPulse: 0,
   selectedEntityIds: [],
 
   initialize: async () => {
@@ -102,6 +117,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         else delete playbacks[event.transactionId];
         return { playbacks };
       });
+      else if (event.type === 'interchange-report') set((state) => ({ reportPulse: state.reportPulse + 1 }));
     });
   },
   setSnapshot: (snapshot) => set({ snapshot }),
@@ -113,10 +129,15 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   setOpacity: (opacity) => set({ opacity: Math.max(0.01, Math.min(1, opacity)) }),
   setZoom: (zoom) => set({ zoom: Math.max(0.05, Math.min(64, zoom)) }),
   setPixelIndex: (pixelIndex) => set({ pixelIndex }),
+  setDitherMatrixSize: (ditherMatrixSize) => set({ ditherMatrixSize }),
+  setDitherCoverage: (ditherCoverage) => set({ ditherCoverage: Math.max(0, Math.min(1, ditherCoverage)) }),
+  setDitherMixIndex: (ditherMixIndex) => set({ ditherMixIndex: Math.max(0, Math.min(255, Math.trunc(ditherMixIndex))) }),
   setRightPanel: (rightPanel) => set({ rightPanel }),
   setSelectedEntity: (selectedEntityId) => set({ selectedEntityId, selectedEntityIds: selectedEntityId ? [selectedEntityId] : [] }),
   setSelectedEntities: (selectedEntityIds) => set({ selectedEntityIds, selectedEntityId: selectedEntityIds.at(-1) }),
   toggleSelectedEntity: (id) => set((state) => { const selectedEntityIds = state.selectedEntityIds.includes(id) ? state.selectedEntityIds.filter((entry) => entry !== id) : [...state.selectedEntityIds, id]; return { selectedEntityIds, selectedEntityId: selectedEntityIds.at(-1) }; }),
+  setCanvasViewport: (canvasViewport) => set({ canvasViewport }),
+  setCanvasAnimation: (canvasAnimation) => set({ canvasAnimation }),
   revealEntity: (objectId) => set((state) => {
     const documentId = state.snapshot?.activeDocumentId;
     if (!documentId) return state;
@@ -136,11 +157,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
   newDocument: async (options) => {
     const snapshot = await window.aidraw.newDocument(options);
-    set({ snapshot, zoom: 1, brushSize: snapshot.activeDocument?.kind === 'pixel' ? 1 : 12, selectedEntityId: undefined, selectedEntityIds: [], selectedTool: snapshot.activeDocument?.kind === 'pixel' ? 'pencil' : 'select' });
+    set({ snapshot, zoom: 1, brushSize: snapshot.activeDocument?.kind === 'pixel' ? 1 : 12, selectedEntityId: undefined, selectedEntityIds: [], selectedTool: snapshot.activeDocument?.kind === 'pixel' ? 'pencil' : 'select', canvasViewport: undefined, canvasAnimation: undefined });
   },
   activate: async (documentId) => {
     const snapshot = await window.aidraw.activateDocument(documentId);
-    set({ snapshot, brushSize: snapshot.activeDocument?.kind === 'pixel' ? 1 : get().brushSize, selectedEntityId: undefined, selectedEntityIds: [], selectedTool: snapshot.activeDocument?.kind === 'pixel' ? 'pencil' : 'select' });
+    set({ snapshot, brushSize: snapshot.activeDocument?.kind === 'pixel' ? 1 : get().brushSize, selectedEntityId: undefined, selectedEntityIds: [], selectedTool: snapshot.activeDocument?.kind === 'pixel' ? 'pencil' : 'select', canvasViewport: undefined, canvasAnimation: undefined });
   },
   apply: async (label, operations) => {
     const document = get().snapshot?.activeDocument;

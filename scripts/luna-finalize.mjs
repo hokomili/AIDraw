@@ -59,7 +59,7 @@ const traceEntries = traceText.split(/\r?\n/).filter(Boolean).map((line) => JSON
 const snapshot = toolValue((await rpc(connection.url, headers, 'tools/call', { name: 'canvas_observe', arguments: { documentId: pending.documentId, includePng: false } })).body, 'canvas_observe');
 const sprite = snapshot.document.pixelAssets[snapshot.document.activeAssetId];
 const report = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   test: 'AIDraw packaged public-MCP headless pixel-animation acceptance',
   verdict: 'blocked-editor-attachment',
   executable: executable,

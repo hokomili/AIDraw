@@ -2,8 +2,12 @@ import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPoi
 import {
   HUMAN_ACTOR,
   IDENTITY_TRANSFORM,
+  BUILT_IN_RASTER_BRUSH_PRESETS,
   createId,
+  illustrationKeyframesForObject,
   nowIso,
+  rasterBrushDynamics,
+  resolveRasterBrushPreset,
   type IllustrationDocument,
   type IllustrationObject,
   type PaintStyle,
@@ -17,8 +21,26 @@ import {
 } from '@aidraw/core';
 import { useEditorStore } from '../store';
 import { collectReplayMasks } from '../replay';
-import { canvasFont } from '../../common/canvas-font';
+import { EntryDialog } from '../components/EditorDialog';
+import { colorWithOpacity } from '../../common/color';
+import { paintTileCachePlan } from '../../common/paint-tile-cache';
+import { renderRasterStroke } from '../../common/raster-brush';
+import { renderStyledText } from '../../common/text-layout';
+import { snapObjectTransform } from '../../common/snapping';
+import { combineSelection, lassoSelectsBounds, type SelectionCombination } from '../../common/lasso';
 import { approximateLocalObjectBounds } from '../../common/illustration-geometry';
+import { cropImageObject, normalizedDisplayCrop } from '../../common/image-crop';
+import {
+  hitSelectionHandle,
+  objectWorldBounds,
+  rotateSelection,
+  scaleSelection,
+  selectionHandlePoints,
+  selectionWorldBounds,
+  type ScaleHandle,
+  type WorldBounds,
+} from '../../common/selection-transform';
+import { convertPathNode, deletePathNode, inspectPathNodes, insertPathNode, movePathPoint, nearestPathLocation, type PathPointKind } from '../../common/path-nodes';
 import { outlinePath, pressureOutline } from './geometry';
 
 interface ViewTransform {
@@ -28,18 +50,25 @@ interface ViewTransform {
 }
 
 interface Gesture {
-  kind: 'stroke' | 'shape' | 'move' | 'pan' | 'lasso' | 'gradient' | 'crop' | 'node';
+  kind: 'stroke' | 'shape' | 'move' | 'scale' | 'rotate' | 'pan' | 'lasso' | 'gradient' | 'crop' | 'node' | 'guide';
   start: PointSample;
   points: PointSample[];
   end: PointSample;
   object?: IllustrationObject;
-  originalTransform?: IllustrationObject['transform'];
+  originalObjects?: IllustrationObject[];
+  selectionBounds?: WorldBounds;
+  scaleHandle?: ScaleHandle;
+  constrain?: boolean;
   lockPromise?: Promise<{ acquired: boolean; lockId?: string }>;
   panOrigin?: { x: number; y: number };
   arrow?: boolean;
   radial?: boolean;
   pathObject?: PathObject;
   pathNodeIndex?: number;
+  pathPointKind?: PathPointKind;
+  guideId?: string;
+  selectionCombination?: SelectionCombination;
+  containment?: boolean;
 }
 
 const noPaint: PaintStyle = { kind: 'none' };
@@ -76,7 +105,7 @@ function paintValue(style: PaintStyle, context: CanvasRenderingContext2D): strin
   const gradient = style.kind === 'linear-gradient'
     ? context.createLinearGradient(style.x1, style.y1, style.x2, style.y2)
     : context.createRadialGradient(style.x1, style.y1, 0, style.x2, style.y2, Math.hypot(style.x2 - style.x1, style.y2 - style.y1));
-  for (const stop of style.stops) gradient.addColorStop(stop.offset, stop.color);
+  for (const stop of style.stops) gradient.addColorStop(stop.offset, colorWithOpacity(stop.color, stop.opacity));
   return gradient;
 }
 
@@ -115,14 +144,14 @@ function transformedObjectPath(object: IllustrationObject): Path2D | undefined {
 }
 function worldToLocal(object: IllustrationObject, point: PointSample): { x: number; y: number } { const value = objectMatrix(object); const local = new DOMMatrix([value.a!, value.b!, value.c!, value.d!, value.e!, value.f!]).inverse().transformPoint(new DOMPoint(point.x, point.y)); return { x: local.x, y: local.y }; }
 
-function imageFilter(object: Extract<IllustrationObject, { type: 'image' }>): string {
-  return object.filters.map((filter) => filter.type === 'brightness' ? `brightness(${Math.max(0, 1 + filter.value)})` : filter.type === 'contrast' ? `contrast(${Math.max(0, 1 + filter.value)})` : filter.type === 'saturation' ? `saturate(${Math.max(0, 1 + filter.value)})` : filter.type === 'hue' ? `hue-rotate(${filter.value}deg)` : `blur(${Math.max(0, filter.value)}px)`).join(' ');
+function adjustmentFilter(filters: IllustrationObject['filters']): string {
+  return (filters ?? []).map((filter) => filter.type === 'brightness' ? `brightness(${Math.max(0, 1 + filter.value)})` : filter.type === 'contrast' ? `contrast(${Math.max(0, 1 + filter.value)})` : filter.type === 'saturation' ? `saturate(${Math.max(0, 1 + filter.value)})` : filter.type === 'hue' ? `hue-rotate(${filter.value}deg)` : `blur(${Math.max(0, filter.value)}px)`).join(' ');
 }
 
 function objectFilter(object: IllustrationObject): string {
   const filters: string[] = [];
   if ((object.blur ?? 0) > 0) filters.push(`blur(${Math.max(0, object.blur ?? 0)}px)`);
-  if (object.type === 'image') { const imageFilters = imageFilter(object); if (imageFilters) filters.push(imageFilters); }
+  const adjustments = adjustmentFilter(object.filters); if (adjustments) filters.push(adjustments);
   return filters.join(' ') || 'none';
 }
 
@@ -184,9 +213,7 @@ function drawObject(context: CanvasRenderingContext2D, object: IllustrationObjec
     const stroke = paintValue(object.stroke.paint, context);
     if (stroke) { context.strokeStyle = stroke; context.lineWidth = object.stroke.width; context.stroke(path); }
   } else if (object.type === 'text') {
-    context.textBaseline = 'top'; const ranges = object.ranges.length ? object.ranges : [{ start: 0, end: object.text.length, fontFamily: 'sans-serif', fontSize: 48, fontWeight: 500, fontStyle: 'normal' as const, color: '#27213c', letterSpacing: 0 }];
-    const measurements = ranges.map((range) => { context.font = canvasFont(range); const text = object.text.slice(range.start, range.end); return context.measureText(text).width + Math.max(0, text.length - 1) * range.letterSpacing; }); const total = measurements.reduce((sum, value) => sum + value, 0); let cursorX = object.align === 'center' ? (object.width - total) / 2 : object.align === 'right' ? object.width - total : 0;
-    ranges.forEach((range, rangeIndex) => { const text = object.text.slice(range.start, range.end); context.font = canvasFont(range); context.fillStyle = range.color; for (const character of text) { context.fillText(character, cursorX, 0); const width = context.measureText(character).width; if (range.underline) context.fillRect(cursorX, range.fontSize * 1.05, width, Math.max(1, range.fontSize / 18)); cursorX += width + range.letterSpacing; } cursorX += measurements[rangeIndex] - (text.split('').reduce((sum, character) => sum + context.measureText(character).width, 0) + Math.max(0, text.length - 1) * range.letterSpacing); });
+    renderStyledText(context, object);
   } else if (object.type === 'image') {
     const image = imageCache?.get(object.assetId);
     if (image?.complete && object.crop) context.drawImage(image, object.crop.x, object.crop.y, object.crop.width, object.crop.height, 0, 0, object.width, object.height);
@@ -216,28 +243,72 @@ function approximateBounds(object: IllustrationObject): { x: number; y: number; 
   return approximateLocalObjectBounds(object);
 }
 
-function hitTest(document: IllustrationDocument, point: PointSample): IllustrationObject | undefined {
-  const objects = Object.values(document.objects).reverse();
-  return objects.find((object) => {
+function hitTestAll(document: IllustrationDocument, point: PointSample, context?: CanvasRenderingContext2D, viewScale = 1): IllustrationObject[] {
+  return Object.values(document.objects).reverse().filter((object) => {
     if (!object.visible || object.locked) return false;
-    const bounds = approximateBounds(object);
-    const x = point.x - object.transform.x;
-    const y = point.y - object.transform.y;
-    return x >= bounds.x - 8 && y >= bounds.y - 8 && x <= bounds.x + bounds.width + 8 && y <= bounds.y + bounds.height + 8;
+    const localPath = localObjectPath(object);
+    if (context && localPath) {
+      try {
+        const local = worldToLocal(object, point); context.save(); context.setTransform(1, 0, 0, 1, 0, 0);
+        const tolerance = 8 / Math.max(0.05, viewScale * Math.max(Math.abs(object.transform.scaleX), Math.abs(object.transform.scaleY), 0.05));
+        let hit = object.type === 'vector-stroke' || object.type === 'text' || object.type === 'image' || ((object.type === 'shape' || object.type === 'path') && object.fill.kind !== 'none') ? context.isPointInPath(localPath, local.x, local.y) : false;
+        if (!hit && (object.type === 'shape' || object.type === 'path')) { context.lineWidth = Math.max(tolerance, object.stroke.width + tolerance); hit = context.isPointInStroke(localPath, local.x, local.y); }
+        context.restore(); if (hit) return true;
+      } catch { /* Approximate bounds remain a safe fallback for unsupported paths. */ }
+    }
+    const bounds = objectWorldBounds(object); const tolerance = 8 / Math.max(0.05, viewScale);
+    return point.x >= bounds.x - tolerance && point.y >= bounds.y - tolerance && point.x <= bounds.x + bounds.width + tolerance && point.y <= bounds.y + bounds.height + tolerance;
   });
 }
 
-function snappedTransform(document: IllustrationDocument, object: IllustrationObject, raw: IllustrationObject['transform']): { transform: IllustrationObject['transform']; guideX?: number; guideY?: number } {
-  const bounds = approximateBounds(object); const threshold = 8;
-  const xTargets = [0, document.artboard.width / 2, document.artboard.width]; const yTargets = [0, document.artboard.height / 2, document.artboard.height];
-  for (const other of Object.values(document.objects)) if (other.id !== object.id && other.visible) {
-    const otherBounds = approximateBounds(other); xTargets.push(other.transform.x + otherBounds.x, other.transform.x + otherBounds.x + otherBounds.width / 2, other.transform.x + otherBounds.x + otherBounds.width); yTargets.push(other.transform.y + otherBounds.y, other.transform.y + otherBounds.y + otherBounds.height / 2, other.transform.y + otherBounds.y + otherBounds.height);
+function hitTest(document: IllustrationDocument, point: PointSample, context?: CanvasRenderingContext2D, viewScale = 1): IllustrationObject | undefined { return hitTestAll(document, point, context, viewScale)[0]; }
+
+function transformedGestureObjects(gesture: Gesture, document: IllustrationDocument): IllustrationObject[] {
+  if (!gesture.originalObjects?.length) return [];
+  if (gesture.kind === 'scale' && gesture.selectionBounds && gesture.scaleHandle) {
+    return scaleSelection(gesture.originalObjects, gesture.selectionBounds, gesture.scaleHandle, gesture.end, Boolean(gesture.constrain));
   }
-  const xOffsets = [bounds.x, bounds.x + bounds.width / 2, bounds.x + bounds.width]; const yOffsets = [bounds.y, bounds.y + bounds.height / 2, bounds.y + bounds.height];
-  let bestX = raw.x; let bestY = raw.y; let guideX: number | undefined; let guideY: number | undefined; let dx = threshold; let dy = threshold;
-  for (const target of xTargets) for (const offset of xOffsets) { const candidate = target - offset; const distance = Math.abs(raw.x - candidate); if (distance < dx) { dx = distance; bestX = candidate; guideX = target; } }
-  for (const target of yTargets) for (const offset of yOffsets) { const candidate = target - offset; const distance = Math.abs(raw.y - candidate); if (distance < dy) { dy = distance; bestY = candidate; guideY = target; } }
-  return { transform: { ...raw, x: bestX, y: bestY }, guideX, guideY };
+  if (gesture.kind === 'rotate' && gesture.selectionBounds) {
+    return rotateSelection(gesture.originalObjects, gesture.selectionBounds, gesture.start, gesture.end, gesture.constrain ? 15 : undefined);
+  }
+  if (gesture.kind !== 'move') return gesture.originalObjects.map((object) => structuredClone(object));
+  const deltaX = gesture.end.x - gesture.start.x;
+  const deltaY = gesture.end.y - gesture.start.y;
+  return gesture.originalObjects.map((source) => {
+    const object = structuredClone(source);
+    const raw = { ...source.transform, x: source.transform.x + deltaX, y: source.transform.y + deltaY };
+    object.transform = gesture.originalObjects?.length === 1 ? snapObjectTransform(document, source, raw).transform : raw;
+    return object;
+  });
+}
+
+function drawSelectionControls(context: CanvasRenderingContext2D, bounds: WorldBounds, viewScale: number): void {
+  const lineWidth = 1.5 / viewScale;
+  const handleSize = 10 / viewScale;
+  const handles = selectionHandlePoints(bounds, viewScale);
+  context.save();
+  context.globalAlpha = 1;
+  context.filter = 'none';
+  context.strokeStyle = '#7454d8';
+  context.fillStyle = '#fff';
+  context.lineWidth = lineWidth;
+  context.setLineDash([6 / viewScale, 4 / viewScale]);
+  context.strokeRect(bounds.x, bounds.y, bounds.width, bounds.height);
+  context.setLineDash([]);
+  context.beginPath();
+  context.moveTo(bounds.x + bounds.width / 2, bounds.y);
+  context.lineTo(handles.rotate.x, handles.rotate.y);
+  context.stroke();
+  for (const handle of ['north-west', 'north-east', 'south-east', 'south-west'] as const) {
+    const point = handles[handle];
+    context.fillRect(point.x - handleSize / 2, point.y - handleSize / 2, handleSize, handleSize);
+    context.strokeRect(point.x - handleSize / 2, point.y - handleSize / 2, handleSize, handleSize);
+  }
+  context.beginPath();
+  context.arc(handles.rotate.x, handles.rotate.y, handleSize / 2, 0, Math.PI * 2);
+  context.fill();
+  context.stroke();
+  context.restore();
 }
 
 function cubicPath(points: PointSample[]): string {
@@ -247,8 +318,7 @@ function cubicPath(points: PointSample[]): string {
   return path;
 }
 
-function pathNumbers(pathData: string): number[] { return [...pathData.matchAll(/-?(?:\d+\.?\d*|\.\d+)(?:e[-+]?\d+)?/gi)].map((match) => Number(match[0])); }
-function replacePathNode(pathData: string, nodeIndex: number, x: number, y: number): string { let numberIndex = 0; return pathData.replace(/-?(?:\d+\.?\d*|\.\d+)(?:e[-+]?\d+)?/gi, (value) => { const current = numberIndex++; if (current === nodeIndex * 2) return String(x); if (current === nodeIndex * 2 + 1) return String(y); return value; }); }
+function safePathNodes(pathData: string) { try { return inspectPathNodes(pathData); } catch { return []; } }
 
 export function IllustrationCanvas({ document }: { document: IllustrationDocument }) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -259,6 +329,7 @@ export function IllustrationCanvas({ document }: { document: IllustrationDocumen
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [gesture, setGesture] = useState<Gesture>();
   const [pathPoints, setPathPoints] = useState<PointSample[]>([]);
+  const [textDialogPoint, setTextDialogPoint] = useState<PointSample>();
   const tool = useEditorStore((state) => state.selectedTool);
   const color = useEditorStore((state) => state.primaryColor);
   const brushSize = useEditorStore((state) => state.brushSize);
@@ -271,6 +342,7 @@ export function IllustrationCanvas({ document }: { document: IllustrationDocumen
   const setSelectedId = useEditorStore((state) => state.setSelectedEntity);
   const setSelectedIds = useEditorStore((state) => state.setSelectedEntities);
   const toggleSelectedId = useEditorStore((state) => state.toggleSelectedEntity);
+  const setCanvasViewport = useEditorStore((state) => state.setCanvasViewport);
   const revealRequest = useEditorStore((state) => state.revealRequest);
   const handledRevealRef = useRef<string | undefined>(undefined);
   const playbackMap = useEditorStore((state) => state.playbacks);
@@ -292,6 +364,10 @@ export function IllustrationCanvas({ document }: { document: IllustrationDocumen
     observer.observe(containerRef.current);
     return () => observer.disconnect();
   }, []);
+
+  useEffect(() => {
+    setCanvasViewport({ x: -view.offsetX / view.scale, y: -view.offsetY / view.scale, width: size.width / view.scale, height: size.height / view.scale });
+  }, [setCanvasViewport, size.height, size.width, view.offsetX, view.offsetY, view.scale]);
 
   useEffect(() => {
     if (!revealRequest || revealRequest.documentId !== document.id || handledRevealRef.current === revealRequest.id) return;
@@ -341,42 +417,55 @@ export function IllustrationCanvas({ document }: { document: IllustrationDocumen
     context.rect(0, 0, document.artboard.width, document.artboard.height);
     context.clip();
     const replayMasks = collectReplayMasks(playbacks);
+    const objectChildren = new Set(Object.values(document.objects).flatMap((object) => object.type === 'group' ? object.childIds : []));
+    const surface = () => { const value = window.document.createElement('canvas'); value.width = document.artboard.width; value.height = document.artboard.height; return value; };
+    const drawObjectEntry = (target: CanvasRenderingContext2D, objectId: string, visiting = new Set<string>()) => {
+      if (visiting.has(objectId) || replayMasks.objectIds.has(objectId)) return;
+      const object = document.objects[objectId]; if (!object?.visible) return;
+      if (object.type !== 'group') {
+        target.save(); const mask = object.maskObjectId ? document.objects[object.maskObjectId] : undefined; const maskPath = mask ? transformedObjectPath(mask) : undefined; if (maskPath) target.clip(maskPath); drawObject(target, object, tool !== 'select' && selectedIds.includes(object.id), imageCacheRef.current); target.restore(); return;
+      }
+      const nextVisiting = new Set(visiting); nextVisiting.add(objectId);
+      const transformed = object.transform.x !== 0 || object.transform.y !== 0 || object.transform.scaleX !== 1 || object.transform.scaleY !== 1 || object.transform.rotation !== 0 || object.transform.skewX !== 0 || object.transform.skewY !== 0;
+      const isolate = transformed || object.opacity !== 1 || object.blendMode !== 'normal' || Boolean(object.blur || object.shadow || object.maskObjectId || object.filters?.length);
+      if (!isolate) { for (const childId of object.childIds) drawObjectEntry(target, childId, nextVisiting); return; }
+      const buffer = surface(); const bufferContext = buffer.getContext('2d'); if (!bufferContext) return;
+      for (const childId of object.childIds) drawObjectEntry(bufferContext, childId, nextVisiting);
+      target.save(); const mask = object.maskObjectId ? document.objects[object.maskObjectId] : undefined; const maskPath = mask ? transformedObjectPath(mask) : undefined; if (maskPath) target.clip(maskPath); applyObjectTransform(target, object); target.filter = objectFilter(object); target.drawImage(buffer, 0, 0); target.restore();
+    };
 
-    const drawLayer = (layerId: string) => {
+    const drawLayer = (layerId: string, target = context) => {
       const layer = document.layers[layerId];
       if (!layer?.visible) return;
-      context.save();
-      context.globalAlpha = layer.opacity;
-      context.globalCompositeOperation = layer.blendMode === 'normal' ? 'source-over' : layer.blendMode;
+      const drawContents = (output: CanvasRenderingContext2D) => {
+        if (layer.type === 'paint') {
+          const plan = paintTileCachePlan(layer, document.assets);
+          const masksCachedStroke = plan ? layer.strokes.slice(0, plan.strokeCount).some((stroke) => replayMasks.strokeIds.has(stroke.id)) : false;
+          const loadedTiles = !masksCachedStroke && plan ? plan.entries.map((entry) => ({ ...entry, image: imageCacheRef.current.get(entry.assetId) })).filter((entry) => entry.image?.complete && entry.image.naturalWidth === layer.tileSize && entry.image.naturalHeight === layer.tileSize) : [];
+          const useCache = Boolean(plan && !masksCachedStroke && loadedTiles.length === plan.entries.length);
+          if (useCache) for (const entry of loadedTiles) output.drawImage(entry.image!, entry.tileX * layer.tileSize, entry.tileY * layer.tileSize);
+          for (const stroke of layer.strokes.slice(useCache ? plan!.strokeCount : 0)) {
+            if (replayMasks.strokeIds.has(stroke.id)) continue;
+            renderRasterStroke(output, stroke);
+          }
+        } else if (layer.type === 'vector') {
+          for (const objectId of layer.objectIds) if (!objectChildren.has(objectId)) drawObjectEntry(output, objectId);
+        } else for (const childId of layer.childIds) drawLayer(childId, output);
+      };
+      const isolated = layer.opacity !== 1 || layer.blendMode !== 'normal' || Boolean(layer.filters?.length);
+      target.save();
       const maskLayer = layer.maskLayerId ? document.layers[layer.maskLayerId] : undefined;
-      if (maskLayer?.type === 'vector') { const maskPath = new Path2D(); for (const objectId of maskLayer.objectIds) { const path = document.objects[objectId] ? transformedObjectPath(document.objects[objectId]) : undefined; if (path) maskPath.addPath(path); } context.clip(maskPath); }
-      if (layer.type === 'paint') {
-        for (const stroke of layer.strokes) {
-          if (replayMasks.strokeIds.has(stroke.id)) continue;
-          context.save();
-          context.globalCompositeOperation = stroke.mode === 'erase' ? 'destination-out' : 'source-over';
-          context.globalAlpha *= stroke.opacity;
-          context.globalAlpha *= stroke.flow;
-          context.strokeStyle = stroke.color;
-          context.lineWidth = stroke.size;
-          context.lineCap = stroke.preset === 'marker' ? 'square' : 'round';
-          context.lineJoin = 'round';
-          context.filter = stroke.preset === 'soft-round' || stroke.preset === 'airbrush' ? `blur(${stroke.size * (stroke.preset === 'airbrush' ? .35 : .18)}px)` : 'none';
-          context.beginPath();
-          stroke.points.forEach((point, index) => index ? context.lineTo(point.x, point.y) : context.moveTo(point.x, point.y));
-          context.stroke();
-          context.restore();
-        }
-      } else if (layer.type === 'vector') {
-        for (const objectId of layer.objectIds) {
-          if (replayMasks.objectIds.has(objectId)) continue;
-          const object = document.objects[objectId];
-          if (object) { context.save(); const mask = object.maskObjectId ? document.objects[object.maskObjectId] : undefined; const maskPath = mask ? transformedObjectPath(mask) : undefined; if (maskPath) context.clip(maskPath); drawObject(context, object, selectedIds.includes(object.id), imageCacheRef.current); context.restore(); }
-        }
-      } else for (const childId of layer.childIds) drawLayer(childId);
-      context.restore();
+      if (maskLayer?.type === 'vector') { const maskPath = new Path2D(); for (const objectId of maskLayer.objectIds) { const path = document.objects[objectId] ? transformedObjectPath(document.objects[objectId]) : undefined; if (path) maskPath.addPath(path); } target.clip(maskPath); }
+      if (isolated) {
+        const buffer = surface(); const bufferContext = buffer.getContext('2d'); if (bufferContext) { drawContents(bufferContext); target.globalAlpha *= layer.opacity; target.globalCompositeOperation = layer.blendMode === 'normal' ? 'source-over' : layer.blendMode; target.filter = adjustmentFilter(layer.filters); target.drawImage(buffer, 0, 0); }
+      } else drawContents(target);
+      target.restore();
     };
     for (const layerId of document.layerIds) drawLayer(layerId);
+
+    context.save(); context.globalAlpha = 0.9; context.lineWidth = 1 / view.scale; context.setLineDash([4 / view.scale, 3 / view.scale]);
+    for (const guide of document.guides ?? []) { const position = gesture?.kind === 'guide' && gesture.guideId === guide.id ? (guide.orientation === 'vertical' ? gesture.end.x : gesture.end.y) : guide.position; context.strokeStyle = guide.color; context.beginPath(); if (guide.orientation === 'vertical') { context.moveTo(position, 0); context.lineTo(position, document.artboard.height); } else { context.moveTo(0, position); context.lineTo(document.artboard.width, position); } context.stroke(); }
+    context.setLineDash([]); context.restore();
 
     for (const playback of playbacks) {
       context.save();
@@ -386,13 +475,7 @@ export function IllustrationCanvas({ document }: { document: IllustrationDocumen
             const stroke = operation.stroke;
             const points = Array.isArray(stroke.points) ? stroke.points.filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y)) : [];
             if (!points.length) continue;
-            context.globalCompositeOperation = stroke.mode === 'erase' ? 'destination-out' : 'source-over';
-            context.globalAlpha = stroke.opacity * stroke.flow;
-            context.strokeStyle = stroke.color;
-            context.lineWidth = stroke.size;
-            context.lineCap = stroke.preset === 'marker' ? 'square' : 'round'; context.lineJoin = 'round'; context.filter = stroke.preset === 'soft-round' || stroke.preset === 'airbrush' ? `blur(${stroke.size * (stroke.preset === 'airbrush' ? .35 : .18)}px)` : 'none'; context.beginPath();
-            points.forEach((point, index) => index ? context.lineTo(point.x, point.y) : context.moveTo(point.x, point.y));
-            context.stroke();
+            renderRasterStroke(context, { ...stroke, points });
           } else if (operation.kind === 'illustration.object.add' || operation.kind === 'illustration.object.replace') {
             drawObject(context, operation.object, false, imageCacheRef.current);
           }
@@ -411,43 +494,65 @@ export function IllustrationCanvas({ document }: { document: IllustrationDocumen
           context.globalAlpha = opacity;
           context.fill(outlinePath(pressureOutline(gesture.points, { size: brushSize, thinning: tool === 'pen' ? 0.62 : 0.12, smoothing: tool === 'pen' ? 0.65 : 0.25, streamline: 0.35, simulatePressure: false })));
         } else {
-          context.globalCompositeOperation = tool === 'eraser' ? 'destination-out' : 'source-over';
-          context.globalAlpha = opacity;
-          context.strokeStyle = color;
-          context.lineWidth = brushSize;
-          context.lineCap = 'round'; context.lineJoin = 'round'; context.beginPath();
-          gesture.points.forEach((point, index) => index ? context.lineTo(point.x, point.y) : context.moveTo(point.x, point.y));
-          context.stroke();
+          const presetId = tool === 'eraser' ? 'eraser' : brushPreset;
+          const preset = resolveRasterBrushPreset(presetId, document.brushPresets ?? []);
+          const builtIn = presetId in BUILT_IN_RASTER_BRUSH_PRESETS;
+          renderRasterStroke(context, {
+            id: 'gesture-preview', actorId: HUMAN_ACTOR.id, points: gesture.points, color, size: brushSize, opacity,
+            hardness: preset.hardness, flow: preset.flow, mode: tool === 'eraser' ? 'erase' : 'paint',
+            preset: tool === 'eraser' ? 'eraser' : builtIn ? presetId as RasterStroke['preset'] : 'custom',
+            brushPresetId: preset.id, dynamics: rasterBrushDynamics(preset, 0),
+          });
         }
       } else if (gesture.kind === 'shape') {
         const shape = gestureToShape(gesture, tool, document, color, brushSize, opacity);
         if (shape) drawShape(context, shape);
-      } else if (gesture.kind === 'move' && gesture.object && gesture.originalTransform) {
-        const preview = structuredClone(gesture.object);
-        const snapped = snappedTransform(document, gesture.object, { ...gesture.originalTransform, x: gesture.originalTransform.x + gesture.end.x - gesture.start.x, y: gesture.originalTransform.y + gesture.end.y - gesture.start.y });
-        preview.transform = snapped.transform;
+      } else if (gesture.kind === 'move' || gesture.kind === 'scale' || gesture.kind === 'rotate') {
+        const previews = transformedGestureObjects(gesture, document);
         context.globalAlpha = 0.72;
-        drawObject(context, preview, true, imageCacheRef.current);
-        context.globalAlpha = 1; context.strokeStyle = '#ef6387'; context.lineWidth = 1 / view.scale; context.setLineDash([5 / view.scale, 4 / view.scale]);
-        if (snapped.guideX !== undefined) { context.beginPath(); context.moveTo(snapped.guideX, 0); context.lineTo(snapped.guideX, document.artboard.height); context.stroke(); }
-        if (snapped.guideY !== undefined) { context.beginPath(); context.moveTo(0, snapped.guideY); context.lineTo(document.artboard.width, snapped.guideY); context.stroke(); }
-        context.setLineDash([]);
+        for (const preview of previews) drawObject(context, preview, false, imageCacheRef.current);
+        if (gesture.kind === 'move' && previews.length === 1 && gesture.originalObjects?.[0]) {
+          const snapped = snapObjectTransform(document, gesture.originalObjects[0], previews[0].transform);
+          context.globalAlpha = 1; context.strokeStyle = '#ef6387'; context.lineWidth = 1 / view.scale; context.setLineDash([5 / view.scale, 4 / view.scale]);
+          if (snapped.guideX !== undefined) { context.beginPath(); context.moveTo(snapped.guideX, 0); context.lineTo(snapped.guideX, document.artboard.height); context.stroke(); }
+          if (snapped.guideY !== undefined) { context.beginPath(); context.moveTo(0, snapped.guideY); context.lineTo(document.artboard.width, snapped.guideY); context.stroke(); }
+          context.setLineDash([]);
+        }
       } else if (gesture.kind === 'lasso') {
-        const x = Math.min(gesture.start.x, gesture.end.x); const y = Math.min(gesture.start.y, gesture.end.y); const width = Math.abs(gesture.end.x - gesture.start.x); const height = Math.abs(gesture.end.y - gesture.start.y);
-        context.fillStyle = 'rgba(130, 104, 221, .08)'; context.fillRect(x, y, width, height); context.strokeStyle = '#7454d8'; context.lineWidth = 1.5 / view.scale; context.setLineDash([6 / view.scale, 4 / view.scale]); context.strokeRect(x, y, width, height); context.setLineDash([]);
+        const polygon = [...gesture.points, gesture.end]; context.fillStyle = 'rgba(130, 104, 221, .08)'; context.strokeStyle = '#7454d8'; context.lineWidth = 1.5 / view.scale; context.setLineDash([6 / view.scale, 4 / view.scale]); context.beginPath(); polygon.forEach((point, index) => index ? context.lineTo(point.x, point.y) : context.moveTo(point.x, point.y)); if (polygon.length > 2) context.closePath(); context.fill(); context.stroke(); context.setLineDash([]);
       } else if (gesture.kind === 'gradient') {
         context.strokeStyle = '#8268dd'; context.lineWidth = 2 / view.scale; context.beginPath(); context.moveTo(gesture.start.x, gesture.start.y); context.lineTo(gesture.end.x, gesture.end.y); context.stroke(); context.fillStyle = '#fff';
         for (const point of [gesture.start, gesture.end]) { context.beginPath(); context.arc(point.x, point.y, 5 / view.scale, 0, Math.PI * 2); context.fill(); context.stroke(); }
       } else if (gesture.kind === 'crop') {
-        const x = Math.min(gesture.start.x, gesture.end.x); const y = Math.min(gesture.start.y, gesture.end.y); const width = Math.abs(gesture.end.x - gesture.start.x); const height = Math.abs(gesture.end.y - gesture.start.y); const shade = new Path2D(); shade.rect(0, 0, document.artboard.width, document.artboard.height); shade.rect(x, y, width, height); context.fillStyle = 'rgba(0,0,0,.25)'; context.fill(shade, 'evenodd'); context.strokeStyle = '#fff'; context.lineWidth = 1 / view.scale; context.strokeRect(x, y, width, height);
-      } else if (gesture.kind === 'node' && gesture.pathObject && gesture.pathNodeIndex !== undefined) {
-        const local = worldToLocal(gesture.pathObject, gesture.end); const preview = { ...gesture.pathObject, pathData: replacePathNode(gesture.pathObject.pathData, gesture.pathNodeIndex, local.x, local.y) }; drawObject(context, preview, true, imageCacheRef.current);
+        if (gesture.object?.type === 'image') {
+          const start = worldToLocal(gesture.object, gesture.start); const end = worldToLocal(gesture.object, gesture.end); const rect = normalizedDisplayCrop(gesture.object, start, end, gesture.constrain ? gesture.object.width / gesture.object.height : undefined); const matrix = objectMatrix(gesture.object);
+          context.save(); context.transform(matrix.a!, matrix.b!, matrix.c!, matrix.d!, matrix.e!, matrix.f!); const shade = new Path2D(); shade.rect(0, 0, gesture.object.width, gesture.object.height); shade.rect(rect.x, rect.y, rect.width, rect.height); context.fillStyle = 'rgba(0,0,0,.32)'; context.fill(shade, 'evenodd'); context.strokeStyle = '#fff'; context.lineWidth = 1.5 / view.scale; context.setLineDash([6 / view.scale, 4 / view.scale]); context.strokeRect(rect.x, rect.y, rect.width, rect.height); context.setLineDash([]); for (const point of [{ x: rect.x, y: rect.y }, { x: rect.x + rect.width, y: rect.y }, { x: rect.x + rect.width, y: rect.y + rect.height }, { x: rect.x, y: rect.y + rect.height }]) { context.fillStyle = '#fff'; context.fillRect(point.x - 4 / view.scale, point.y - 4 / view.scale, 8 / view.scale, 8 / view.scale); context.strokeStyle = '#7454d8'; context.strokeRect(point.x - 4 / view.scale, point.y - 4 / view.scale, 8 / view.scale, 8 / view.scale); } context.restore();
+        }
+      } else if (gesture.kind === 'node' && gesture.pathObject && gesture.pathNodeIndex !== undefined && gesture.pathPointKind) {
+        const local = worldToLocal(gesture.pathObject, gesture.end); const preview = { ...gesture.pathObject, pathData: movePathPoint(gesture.pathObject.pathData, gesture.pathNodeIndex, gesture.pathPointKind, local.x, local.y, Boolean(gesture.constrain) && gesture.pathPointKind !== 'anchor') }; drawObject(context, preview, true, imageCacheRef.current);
       }
       context.restore();
     }
 
     if (pathPoints.length) { context.save(); context.strokeStyle = '#8268dd'; context.lineWidth = 2 / view.scale; const preview = cubicPath(pathPoints); if (preview) context.stroke(new Path2D(preview)); context.fillStyle = '#fff'; for (const point of pathPoints) { context.beginPath(); context.arc(point.x, point.y, 4 / view.scale, 0, Math.PI * 2); context.fill(); context.stroke(); } context.restore(); }
-    if (tool === 'node') for (const id of selectedIds) { const object = document.objects[id]; if (object?.type !== 'path') continue; const values = pathNumbers(object.pathData); const matrix = objectMatrix(object); context.save(); context.transform(matrix.a!, matrix.b!, matrix.c!, matrix.d!, matrix.e!, matrix.f!); context.fillStyle = '#fff'; context.strokeStyle = '#7454d8'; context.lineWidth = 1.5 / view.scale; for (let index = 0; index + 1 < values.length; index += 2) { context.beginPath(); context.arc(values[index], values[index + 1], 4 / view.scale, 0, Math.PI * 2); context.fill(); context.stroke(); } context.restore(); }
+    if (tool === 'node') for (const id of selectedIds) {
+      const object = document.objects[id]; if (object?.type !== 'path') continue; const nodes = safePathNodes(object.pathData); const matrix = objectMatrix(object);
+      context.save(); context.transform(matrix.a!, matrix.b!, matrix.c!, matrix.d!, matrix.e!, matrix.f!); context.fillStyle = '#fff'; context.strokeStyle = '#7454d8'; context.lineWidth = 1.5 / view.scale;
+      for (const node of nodes) {
+        for (const handle of [{ present: node.hasHandleIn, point: node.handleIn }, { present: node.hasHandleOut, point: node.handleOut }]) if (handle.present) { context.beginPath(); context.moveTo(node.anchor.x, node.anchor.y); context.lineTo(handle.point.x, handle.point.y); context.stroke(); context.beginPath(); context.arc(handle.point.x, handle.point.y, 3.5 / view.scale, 0, Math.PI * 2); context.fill(); context.stroke(); }
+        const size = 8 / view.scale; context.fillRect(node.anchor.x - size / 2, node.anchor.y - size / 2, size, size); context.strokeRect(node.anchor.x - size / 2, node.anchor.y - size / 2, size, size);
+      }
+      context.restore();
+    }
+    if (tool === 'crop' && !gesture) for (const id of selectedIds) {
+      const object = document.objects[id]; if (object?.type !== 'image') continue; const matrix = objectMatrix(object); context.save(); context.transform(matrix.a!, matrix.b!, matrix.c!, matrix.d!, matrix.e!, matrix.f!); context.strokeStyle = '#7454d8'; context.lineWidth = 1.5 / view.scale; context.setLineDash([7 / view.scale, 4 / view.scale]); context.strokeRect(0, 0, object.width, object.height); context.setLineDash([]); for (const point of [{ x: 0, y: 0 }, { x: object.width, y: 0 }, { x: object.width, y: object.height }, { x: 0, y: object.height }]) { context.fillStyle = '#fff'; context.fillRect(point.x - 4 / view.scale, point.y - 4 / view.scale, 8 / view.scale, 8 / view.scale); context.strokeStyle = '#7454d8'; context.strokeRect(point.x - 4 / view.scale, point.y - 4 / view.scale, 8 / view.scale, 8 / view.scale); } context.restore();
+    }
+    if (tool === 'select') {
+      const selectedObjects = selectedIds.map((id) => document.objects[id]).filter((object): object is IllustrationObject => Boolean(object?.visible));
+      const displayedObjects = gesture && (gesture.kind === 'move' || gesture.kind === 'scale' || gesture.kind === 'rotate') ? transformedGestureObjects(gesture, document) : selectedObjects;
+      const bounds = selectionWorldBounds(displayedObjects);
+      if (bounds) drawSelectionControls(context, bounds, view.scale);
+    }
 
     context.restore();
     context.lineWidth = 1 / view.scale;
@@ -464,6 +569,8 @@ export function IllustrationCanvas({ document }: { document: IllustrationDocumen
   }), [view]);
 
   const onPointerDown = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    const animationPreview = useEditorStore.getState().canvasAnimation;
+    if (animationPreview?.illustrationTimeMs !== undefined && animationPreview.playing) useEditorStore.getState().setCanvasAnimation({ ...animationPreview, playing: false });
     event.currentTarget.setPointerCapture(event.pointerId);
     const point = toWorld(event);
     if (tool === 'zoom') { setZoom(zoom * (event.shiftKey ? 0.8 : 1.25)); return; }
@@ -479,33 +586,72 @@ export function IllustrationCanvas({ document }: { document: IllustrationDocumen
     }
     if (tool === 'node') {
       const selectedPath = selectedIds.map((id) => document.objects[id]).find((entry): entry is PathObject => entry?.type === 'path');
-      if (selectedPath) { const local = worldToLocal(selectedPath, point); const numbers = pathNumbers(selectedPath.pathData); let bestIndex = -1; let distance = 12 / view.scale; for (let index = 0; index + 1 < numbers.length; index += 2) { const current = Math.hypot(numbers[index] - local.x, numbers[index + 1] - local.y); if (current < distance) { distance = current; bestIndex = index / 2; } } if (bestIndex >= 0) { const lockPromise = window.aidraw.acquireHumanLock({ documentId: document.id, objectIds: [selectedPath.id] }); setGesture({ kind: 'node', start: point, end: point, points: [point], pathObject: selectedPath, pathNodeIndex: bestIndex, lockPromise }); return; } }
-      setSelectedId(hitTest(document, point)?.id); return;
+      if (selectedPath) {
+        const local = worldToLocal(selectedPath, point); const nodes = safePathNodes(selectedPath.pathData); let best: { nodeIndex: number; pointKind: PathPointKind; distance: number; nodeKind: 'corner' | 'smooth' } | undefined; const threshold = 12 / view.scale;
+        for (const node of nodes) for (const candidate of [{ pointKind: 'anchor' as const, point: node.anchor, present: true }, { pointKind: 'in' as const, point: node.handleIn, present: node.hasHandleIn }, { pointKind: 'out' as const, point: node.handleOut, present: node.hasHandleOut }]) {
+          if (!candidate.present) continue; const candidateDistance = Math.hypot(candidate.point.x - local.x, candidate.point.y - local.y);
+          if (candidateDistance < threshold && (!best || candidateDistance < best.distance)) best = { nodeIndex: node.index, pointKind: candidate.pointKind, distance: candidateDistance, nodeKind: node.kind };
+        }
+        if (best) {
+          if (best.pointKind === 'anchor' && (event.ctrlKey || event.metaKey)) {
+            void (async () => { const lock = await window.aidraw.acquireHumanLock({ documentId: document.id, objectIds: [selectedPath.id] }); if (!lock.acquired) return; try { const object = { ...selectedPath, pathData: deletePathNode(selectedPath.pathData, best.nodeIndex) }; await apply('Delete path node', [{ kind: 'illustration.object.replace', object, expectedRevision: selectedPath.revision }]); } catch { /* Minimum-node paths remain unchanged. */ } finally { if (lock.lockId) await window.aidraw.releaseHumanLock(lock.lockId); } })();
+            return;
+          }
+          if (best.pointKind === 'anchor' && event.detail >= 2) {
+            void (async () => { const lock = await window.aidraw.acquireHumanLock({ documentId: document.id, objectIds: [selectedPath.id] }); if (!lock.acquired) return; try { const nodeKind = best.nodeKind === 'smooth' ? 'corner' : 'smooth'; const object = { ...selectedPath, pathData: convertPathNode(selectedPath.pathData, best.nodeIndex, nodeKind) }; await apply(`Convert to ${nodeKind} node`, [{ kind: 'illustration.object.replace', object, expectedRevision: selectedPath.revision }]); } catch { /* Invalid endpoint conversions remain unchanged. */ } finally { if (lock.lockId) await window.aidraw.releaseHumanLock(lock.lockId); } })();
+            return;
+          }
+          const lockPromise = window.aidraw.acquireHumanLock({ documentId: document.id, objectIds: [selectedPath.id] }); setGesture({ kind: 'node', start: point, end: point, points: [point], pathObject: selectedPath, pathNodeIndex: best.nodeIndex, pathPointKind: best.pointKind, lockPromise }); return;
+        }
+        if (event.altKey) {
+          try {
+            const location = nearestPathLocation(selectedPath.pathData, local.x, local.y);
+            if (location.distance < threshold) { void (async () => { const lock = await window.aidraw.acquireHumanLock({ documentId: document.id, objectIds: [selectedPath.id] }); if (!lock.acquired) return; try { const object = { ...selectedPath, pathData: insertPathNode(selectedPath.pathData, location.segmentIndex, location.time) }; await apply('Insert path node', [{ kind: 'illustration.object.replace', object, expectedRevision: selectedPath.revision }]); } finally { if (lock.lockId) await window.aidraw.releaseHumanLock(lock.lockId); } })(); return; }
+          } catch { /* Unsupported path data falls through to object selection. */ }
+        }
+      }
+      setSelectedId(hitTest(document, point, canvasRef.current?.getContext('2d') ?? undefined, view.scale)?.id); return;
     }
-    if (tool === 'gradient') { const object = hitTest(document, point); if (object && (object.type === 'shape' || object.type === 'path')) { setSelectedId(object.id); setGesture({ kind: 'gradient', start: point, end: point, points: [point], object, radial: event.altKey, lockPromise: window.aidraw.acquireHumanLock({ documentId: document.id, objectIds: [object.id] }) }); } return; }
-    if (tool === 'crop') { const object = hitTest(document, point); if (object?.type === 'image') { setSelectedId(object.id); setGesture({ kind: 'crop', start: point, end: point, points: [point], object, lockPromise: window.aidraw.acquireHumanLock({ documentId: document.id, objectIds: [object.id] }) }); } return; }
-    if (tool === 'lasso') { setGesture({ kind: 'lasso', start: point, end: point, points: [point] }); return; }
+    if (tool === 'gradient') { const object = hitTest(document, point, canvasRef.current?.getContext('2d') ?? undefined, view.scale); if (object && (object.type === 'shape' || object.type === 'path')) { setSelectedId(object.id); setGesture({ kind: 'gradient', start: point, end: point, points: [point], object, radial: event.altKey, lockPromise: window.aidraw.acquireHumanLock({ documentId: document.id, objectIds: [object.id] }) }); } return; }
+    if (tool === 'crop') { const object = hitTest(document, point, canvasRef.current?.getContext('2d') ?? undefined, view.scale); if (object?.type === 'image') { setSelectedId(object.id); setGesture({ kind: 'crop', start: point, end: point, points: [point], object, lockPromise: window.aidraw.acquireHumanLock({ documentId: document.id, objectIds: [object.id] }) }); } return; }
+    if (tool === 'lasso') { const selectionCombination: SelectionCombination = event.shiftKey && event.altKey ? 'intersect' : event.shiftKey ? 'add' : event.altKey ? 'subtract' : 'replace'; setGesture({ kind: 'lasso', start: point, end: point, points: [point], selectionCombination, containment: event.ctrlKey || event.metaKey }); return; }
     if (tool === 'select') {
-      const object = hitTest(document, point);
+      const guide = (document.guides ?? []).find((entry) => !entry.locked && Math.abs((entry.orientation === 'vertical' ? point.x : point.y) - entry.position) <= 5 / view.scale);
+      if (guide) { setGesture({ kind: 'guide', start: point, end: point, points: [point], guideId: guide.id }); return; }
+      const selectedObjects = selectedIds
+        .map((id) => document.objects[id])
+        .filter((object): object is IllustrationObject => Boolean(object?.visible && !object.locked));
+      const selectedBounds = selectionWorldBounds(selectedObjects);
+      const handle = selectedBounds ? hitSelectionHandle(point, selectedBounds, view.scale) : undefined;
+      if (handle) {
+        const lockPromise = window.aidraw.acquireHumanLock({ documentId: document.id, objectIds: selectedObjects.map((object) => object.id) });
+        setGesture({
+          kind: handle === 'rotate' ? 'rotate' : 'scale',
+          start: point,
+          end: point,
+          points: [point],
+          originalObjects: selectedObjects.map((object) => structuredClone(object)),
+          selectionBounds: selectedBounds,
+          scaleHandle: handle === 'rotate' ? undefined : handle,
+          constrain: event.shiftKey,
+          lockPromise,
+        });
+        return;
+      }
+      const hits = hitTestAll(document, point, canvasRef.current?.getContext('2d') ?? undefined, view.scale);
+      if (event.altKey && hits.length) { const selectedIndex = hits.findIndex((entry) => selectedIds.includes(entry.id)); const next = hits[(selectedIndex + 1) % hits.length]; setSelectedId(next.id); return; }
+      const object = hits[0];
       if (event.shiftKey && object) { toggleSelectedId(object.id); return; }
       setSelectedId(object?.id);
       if (object) {
-        const lockPromise = window.aidraw.acquireHumanLock({ documentId: document.id, objectIds: [object.id] });
-        setGesture({ kind: 'move', start: point, end: point, points: [point], object, originalTransform: structuredClone(object.transform), lockPromise });
+        const movingObjects = selectedIds.includes(object.id) && selectedObjects.length ? selectedObjects : [object];
+        const lockPromise = window.aidraw.acquireHumanLock({ documentId: document.id, objectIds: movingObjects.map((entry) => entry.id) });
+        setGesture({ kind: 'move', start: point, end: point, points: [point], originalObjects: movingObjects.map((entry) => structuredClone(entry)), lockPromise });
       }
       return;
     }
     if (tool === 'text') {
-      const text = window.prompt('Text', 'A bright idea');
-      const layer = Object.values(document.layers).find((entry) => entry.type === 'vector' && entry.visible && !entry.locked);
-      if (text && layer?.type === 'vector') {
-        const object: TextObject = {
-          ...objectBase(layer.id, 'Text'), type: 'text', text, width: 600, height: 80, align: 'left', lineHeight: 1.2,
-          ranges: [{ start: 0, end: text.length, fontFamily: 'Segoe UI', fontSize: 64, fontWeight: 700, fontStyle: 'normal', color, letterSpacing: 0 }],
-        };
-        object.transform.x = point.x; object.transform.y = point.y;
-        void apply('Add text', [{ kind: 'illustration.object.add', object }]);
-      }
+      setTextDialogPoint(point);
       return;
     }
     if (tool === 'eyedropper') {
@@ -526,37 +672,60 @@ export function IllustrationCanvas({ document }: { document: IllustrationDocumen
     if (gesture.kind === 'pan' && gesture.panOrigin) {
       setPan({ x: gesture.panOrigin.x + event.movementX, y: gesture.panOrigin.y + event.movementY });
       setGesture({ ...gesture, panOrigin: { x: gesture.panOrigin.x + event.movementX, y: gesture.panOrigin.y + event.movementY }, end: point });
-    } else setGesture({ ...gesture, end: point, points: gesture.kind === 'stroke' ? [...gesture.points, point] : gesture.points });
+    } else setGesture({ ...gesture, end: point, constrain: event.shiftKey, points: gesture.kind === 'stroke' || gesture.kind === 'lasso' ? [...gesture.points, point] : gesture.points });
   };
 
   const finishGesture = async () => {
     if (!gesture) return;
     setGesture(undefined);
-    if (gesture.kind === 'move' && gesture.object && gesture.originalTransform) {
+    if (gesture.kind === 'guide' && gesture.guideId) {
+      const guide = (document.guides ?? []).find((entry) => entry.id === gesture.guideId); if (!guide || guide.locked) return;
+      const position = guide.orientation === 'vertical' ? gesture.end.x : gesture.end.y;
+      await apply('Move guide', [{ kind: 'illustration.guides.replace', guides: document.guides.map((entry) => entry.id === guide.id ? { ...entry, position } : entry), expectedRevision: document.revision }]); return;
+    }
+    if ((gesture.kind === 'move' || gesture.kind === 'scale' || gesture.kind === 'rotate') && gesture.originalObjects?.length) {
       const lock = await gesture.lockPromise;
       if (lock?.acquired) {
-        const object = structuredClone(gesture.object);
-        object.transform = snappedTransform(document, gesture.object, { ...gesture.originalTransform, x: gesture.originalTransform.x + gesture.end.x - gesture.start.x, y: gesture.originalTransform.y + gesture.end.y - gesture.start.y }).transform;
-        await apply('Move object', [{ kind: 'illustration.object.replace', object, expectedRevision: gesture.object.revision }]);
-        if (lock.lockId) await window.aidraw.releaseHumanLock(lock.lockId);
+        try {
+          const objects = transformedGestureObjects(gesture, document);
+          const label = gesture.kind === 'move' ? `Move ${objects.length === 1 ? 'object' : `${objects.length} objects`}` : gesture.kind === 'scale' ? `Scale ${objects.length === 1 ? 'object' : `${objects.length} objects`}` : `Rotate ${objects.length === 1 ? 'object' : `${objects.length} objects`}`;
+          const animationTime = useEditorStore.getState().canvasAnimation?.illustrationTimeMs;
+          if (animationTime === undefined) await apply(label, objects.map((object, index) => ({ kind: 'illustration.object.replace' as const, object, expectedRevision: gesture.originalObjects![index].revision })));
+          else {
+            const timestamp = nowIso(); const timeMs = Math.round(animationTime);
+            await apply(`${label} at ${timeMs} ms`, objects.map((object) => {
+              const existing = illustrationKeyframesForObject(document, object.id).find((keyframe) => keyframe.timeMs === timeMs);
+              return {
+                kind: 'illustration.animation.keyframe.upsert' as const,
+                keyframe: {
+                  id: existing?.id ?? createId('keyframe'), revision: existing?.revision ?? 0, name: `${object.name} · ${(timeMs / 1_000).toFixed(2)}s`,
+                  createdAt: existing?.createdAt ?? timestamp, updatedAt: timestamp, createdBy: existing?.createdBy ?? HUMAN_ACTOR.id,
+                  objectId: object.id, timeMs, transform: structuredClone(object.transform), opacity: object.opacity, visible: object.visible, easing: existing?.easing ?? 'ease-in-out' as const,
+                },
+                expectedRevision: existing?.revision,
+              };
+            }));
+          }
+        } finally {
+          if (lock.lockId) await window.aidraw.releaseHumanLock(lock.lockId);
+        }
       }
       return;
     }
     if (gesture.kind === 'lasso') {
-      const x1 = Math.min(gesture.start.x, gesture.end.x); const y1 = Math.min(gesture.start.y, gesture.end.y); const x2 = Math.max(gesture.start.x, gesture.end.x); const y2 = Math.max(gesture.start.y, gesture.end.y);
-      const ids = Object.values(document.objects).filter((object) => { const bounds = approximateBounds(object); const left = object.transform.x + bounds.x; const top = object.transform.y + bounds.y; return object.visible && left <= x2 && top <= y2 && left + bounds.width >= x1 && top + bounds.height >= y1; }).map((object) => object.id);
-      setSelectedIds(ids); return;
+      const polygon = [...gesture.points, gesture.end]; const ids = Object.values(document.objects).filter((object) => object.visible && lassoSelectsBounds(polygon, objectWorldBounds(object), Boolean(gesture.containment))).map((object) => object.id);
+      setSelectedIds(combineSelection(selectedIds, ids, gesture.selectionCombination ?? 'replace')); return;
     }
     if (gesture.kind === 'gradient' && gesture.object && (gesture.object.type === 'shape' || gesture.object.type === 'path')) {
       const lock = await gesture.lockPromise; if (!lock?.acquired) return; const start = worldToLocal(gesture.object, gesture.start); const end = worldToLocal(gesture.object, gesture.end); const object = { ...gesture.object, fill: { kind: gesture.radial ? 'radial-gradient' as const : 'linear-gradient' as const, x1: start.x, y1: start.y, x2: end.x, y2: end.y, stops: [{ offset: 0, color }, { offset: 1, color: useEditorStore.getState().secondaryColor }] } };
       await apply('Edit gradient', [{ kind: 'illustration.object.replace', object, expectedRevision: gesture.object.revision }]); if (lock.lockId) await window.aidraw.releaseHumanLock(lock.lockId); return;
     }
     if (gesture.kind === 'crop' && gesture.object?.type === 'image') {
-      const lock = await gesture.lockPromise; if (!lock?.acquired) return; const start = worldToLocal(gesture.object, gesture.start); const end = worldToLocal(gesture.object, gesture.end); const left = Math.max(0, Math.min(gesture.object.width, Math.min(start.x, end.x))); const top = Math.max(0, Math.min(gesture.object.height, Math.min(start.y, end.y))); const right = Math.max(0, Math.min(gesture.object.width, Math.max(start.x, end.x))); const bottom = Math.max(0, Math.min(gesture.object.height, Math.max(start.y, end.y))); const base = gesture.object.crop ?? { x: 0, y: 0, width: gesture.object.width, height: gesture.object.height }; const object = { ...gesture.object, crop: { x: base.x + left / gesture.object.width * base.width, y: base.y + top / gesture.object.height * base.height, width: (right - left) / gesture.object.width * base.width, height: (bottom - top) / gesture.object.height * base.height } };
-      if (object.crop.width > 0 && object.crop.height > 0) await apply('Crop image', [{ kind: 'illustration.object.replace', object, expectedRevision: gesture.object.revision }]); if (lock.lockId) await window.aidraw.releaseHumanLock(lock.lockId); return;
+      const lock = await gesture.lockPromise; if (!lock?.acquired) return; const start = worldToLocal(gesture.object, gesture.start); const end = worldToLocal(gesture.object, gesture.end); const rect = normalizedDisplayCrop(gesture.object, start, end, gesture.constrain ? gesture.object.width / gesture.object.height : undefined);
+      if (rect.width > 0 && rect.height > 0) await apply('Crop image', [{ kind: 'illustration.object.replace', object: cropImageObject(gesture.object, rect), expectedRevision: gesture.object.revision }]); if (lock.lockId) await window.aidraw.releaseHumanLock(lock.lockId); return;
     }
-    if (gesture.kind === 'node' && gesture.pathObject && gesture.pathNodeIndex !== undefined) {
-      const lock = await gesture.lockPromise; if (!lock?.acquired) return; const local = worldToLocal(gesture.pathObject, gesture.end); const object = { ...gesture.pathObject, pathData: replacePathNode(gesture.pathObject.pathData, gesture.pathNodeIndex, local.x, local.y) }; await apply('Move path node', [{ kind: 'illustration.object.replace', object, expectedRevision: gesture.pathObject.revision }]); if (lock.lockId) await window.aidraw.releaseHumanLock(lock.lockId); return;
+    if (gesture.kind === 'node' && gesture.pathObject && gesture.pathNodeIndex !== undefined && gesture.pathPointKind) {
+      const lock = await gesture.lockPromise; if (!lock?.acquired) return; const local = worldToLocal(gesture.pathObject, gesture.end); const object = { ...gesture.pathObject, pathData: movePathPoint(gesture.pathObject.pathData, gesture.pathNodeIndex, gesture.pathPointKind, local.x, local.y, Boolean(gesture.constrain) && gesture.pathPointKind !== 'anchor') }; await apply(gesture.pathPointKind === 'anchor' ? 'Move path node' : 'Move path handle', [{ kind: 'illustration.object.replace', object, expectedRevision: gesture.pathObject.revision }]); if (lock.lockId) await window.aidraw.releaseHumanLock(lock.lockId); return;
     }
     if (gesture.kind === 'stroke' && gesture.points.length > 0) {
       if (tool === 'pen' || tool === 'pencil') {
@@ -571,11 +740,14 @@ export function IllustrationCanvas({ document }: { document: IllustrationDocumen
       } else {
         const layer = Object.values(document.layers).find((entry) => entry.type === 'paint' && entry.visible && !entry.locked);
         if (!layer || layer.type !== 'paint') return;
+        const presetId = tool === 'eraser' ? 'eraser' : brushPreset;
+        const preset = resolveRasterBrushPreset(presetId, document.brushPresets ?? []);
+        const builtIn = presetId in BUILT_IN_RASTER_BRUSH_PRESETS;
         const stroke: RasterStroke = {
           id: createId('stroke'), actorId: HUMAN_ACTOR.id, points: gesture.points, color, size: brushSize, opacity,
-          hardness: tool === 'eraser' || brushPreset === 'hard-round' || brushPreset === 'pencil' ? 1 : brushPreset === 'marker' ? .85 : brushPreset === 'soft-round' ? .35 : .15,
-          flow: brushPreset === 'airbrush' ? .35 : brushPreset === 'marker' ? .7 : 1,
-          mode: tool === 'eraser' ? 'erase' : 'paint', preset: tool === 'eraser' ? 'eraser' : brushPreset,
+          hardness: preset.hardness, flow: preset.flow,
+          mode: tool === 'eraser' ? 'erase' : 'paint', preset: tool === 'eraser' ? 'eraser' : builtIn ? presetId as RasterStroke['preset'] : 'custom',
+          brushPresetId: preset.id, dynamics: rasterBrushDynamics(preset, Date.now() >>> 0),
         };
         await apply(tool === 'eraser' ? 'Erase paint' : 'Paint stroke', [{ kind: 'illustration.paint.stroke', layerId: layer.id, stroke, expectedRevision: layer.revision }]);
       }
@@ -590,6 +762,28 @@ export function IllustrationCanvas({ document }: { document: IllustrationDocumen
     else setPan((current) => ({ x: current.x - event.deltaX, y: current.y - event.deltaY }));
   };
 
+  const addTextAtPoint = async (text: string) => {
+    const point = textDialogPoint;
+    const value = text.trim();
+    if (!point || !value) return;
+    const layer = Object.values(document.layers).find((entry) => entry.type === 'vector' && entry.visible && !entry.locked);
+    if (layer?.type !== 'vector') return;
+    const object: TextObject = {
+      ...objectBase(layer.id, 'Text'), type: 'text', text: value, width: 600, height: 80, align: 'left', lineHeight: 1.2,
+      ranges: [{ start: 0, end: value.length, fontFamily: 'Segoe UI', fontSize: 64, fontWeight: 700, fontStyle: 'normal', color, letterSpacing: 0 }],
+    };
+    object.transform.x = point.x;
+    object.transform.y = point.y;
+    if (await apply('Add text', [{ kind: 'illustration.object.add', object }])) setTextDialogPoint(undefined);
+  };
+
+  const cancelGesture = async () => {
+    const pending = gesture;
+    setGesture(undefined);
+    const lock = await pending?.lockPromise;
+    if (lock?.lockId) await window.aidraw.releaseHumanLock(lock.lockId);
+  };
+
   return (
     <div className="canvas-container illustration-canvas-container" ref={containerRef}>
       <canvas
@@ -601,7 +795,7 @@ export function IllustrationCanvas({ document }: { document: IllustrationDocumen
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={() => void finishGesture()}
-        onPointerCancel={() => void finishGesture()}
+        onPointerCancel={() => void cancelGesture()}
         onWheel={onWheel}
       />
       <div className="canvas-ruler horizontal" /><div className="canvas-ruler vertical" />
@@ -609,6 +803,17 @@ export function IllustrationCanvas({ document }: { document: IllustrationDocumen
         const cursor = entry.cursor!;
         return <div key={entry.actor.id} className="agent-cursor" style={{ left: view.offsetX + cursor.x * view.scale, top: view.offsetY + cursor.y * view.scale, '--actor': entry.actor.color } as React.CSSProperties}><span>{entry.actor.name}</span></div>;
       })}
+      {textDialogPoint && <EntryDialog
+        title="Add illustration text"
+        description="Text remains editable as a styled vector object. Typography can be refined in the inspector."
+        label="Text"
+        initialValue="A bright idea"
+        submitLabel="Add text"
+        validate={(value) => value.trim() ? undefined : 'Enter at least one visible character.'}
+        preview={(value) => <><strong>Preview</strong><span className="illustration-text-preview">{value || 'Your text'}</span></>}
+        onSubmit={addTextAtPoint}
+        onClose={() => setTextDialogPoint(undefined)}
+      />}
     </div>
   );
 }

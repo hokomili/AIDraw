@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<map version="1.10" tiledversion="1.11.2" orientation="orthogonal" renderorder="right-down" width="2" height="2" tilewidth="16" tileheight="16" infinite="0">
+  <properties><property name="chapter" type="int" value="7"/></properties>
+  <tileset firstgid="9" source="terrain.tsx"/>
+  <group id="1" name="XML World" opacity="0.6">
+    <layer id="2" name="Ground" width="2" height="2" parallaxx="0.5" parallaxy="0.25">
+      <data encoding="csv">9,10,0,9</data>
+    </layer>
+    <objectgroup id="3" name="Zones">
+      <object id="4" name="Spawn" type="start" x="2" y="3" width="8" height="9">
+        <properties><property name="team" type="string" value="blue"/></properties>
+      </object>
+    </objectgroup>
+  </group>
+</map>

@@ -8,4 +8,6 @@ async function files(directory) { return (await readdir(directory, { withFileTyp
 async function flatten(values) { const result = []; for (const value of values) result.push(...(value instanceof Promise ? await flatten(await value) : Array.isArray(value) ? await flatten(value) : [value])); return result; }
 const artifacts = (await flatten(await files(join(root, 'make')))).sort(); const lines = [];
 for (const path of artifacts) lines.push(`${createHash('sha256').update(await readFile(path)).digest('hex')}  ${relative(root, path).replaceAll('\\', '/')}`);
-await writeFile(join(root, 'SHA256SUMS.txt'), `${lines.join('\n')}\n`, 'utf8');
+const manifestName = process.env.AIDRAW_CHECKSUM_FILE || 'SHA256SUMS.txt';
+if (!/^SHA256SUMS(?:-[a-z0-9-]+)?\.txt$/i.test(manifestName)) throw new Error('Invalid checksum manifest name.');
+await writeFile(join(root, manifestName), `${lines.join('\n')}\n`, 'utf8');

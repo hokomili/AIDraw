@@ -14,9 +14,35 @@ import {
   type PixelSprite,
   type PixelTilemap,
 } from '@aidraw/core';
-import { canvasFont } from '../common/canvas-font';
+import { colorWithOpacity } from '../common/color';
+import { paintTileCachePlan } from '../common/paint-tile-cache';
+import { renderRasterStroke } from '../common/raster-brush';
+import { renderStyledText } from '../common/text-layout';
 
 type Context = ReturnType<Canvas['getContext']>;
+type LoadedImage = Awaited<ReturnType<typeof loadImage>>;
+
+const MAX_PAINT_TILE_IMAGE_CACHE_BYTES = 64 * 1024 * 1024;
+const paintTileImageCache = new Map<string, { bytes: number; promise: Promise<LoadedImage> }>();
+let paintTileImageCacheBytes = 0;
+
+async function cachedPaintTileImage(assetSha256: string, data: string, tileSize: number): Promise<LoadedImage> {
+  const key = `${assetSha256.toLowerCase()}:${tileSize}`;
+  const existing = paintTileImageCache.get(key);
+  if (existing) {
+    paintTileImageCache.delete(key); paintTileImageCache.set(key, existing);
+    return existing.promise;
+  }
+  const bytes = tileSize * tileSize * 4;
+  const promise = loadImage(Buffer.from(data, 'base64'));
+  paintTileImageCache.set(key, { bytes, promise }); paintTileImageCacheBytes += bytes;
+  while (paintTileImageCacheBytes > MAX_PAINT_TILE_IMAGE_CACHE_BYTES && paintTileImageCache.size > 1) {
+    const oldest = paintTileImageCache.entries().next().value as [string, { bytes: number }] | undefined;
+    if (!oldest || oldest[0] === key) break;
+    paintTileImageCache.delete(oldest[0]); paintTileImageCacheBytes -= oldest[1].bytes;
+  }
+  try { return await promise; } catch (error) { const retained = paintTileImageCache.get(key); if (retained?.promise === promise) { paintTileImageCache.delete(key); paintTileImageCacheBytes -= bytes; } throw error; }
+}
 
 function composite(mode: BlendMode): GlobalCompositeOperation {
   return mode === 'normal' ? 'source-over' : mode;
@@ -28,7 +54,7 @@ function paint(context: Context, style: PaintStyle): string | ReturnType<Context
   const gradient = style.kind === 'linear-gradient'
     ? context.createLinearGradient(style.x1, style.y1, style.x2, style.y2)
     : context.createRadialGradient(style.x1, style.y1, 0, style.x2, style.y2, Math.hypot(style.x2 - style.x1, style.y2 - style.y1));
-  for (const stop of style.stops) gradient.addColorStop(stop.offset, stop.color);
+  for (const stop of style.stops) gradient.addColorStop(stop.offset, colorWithOpacity(stop.color, stop.opacity));
   return gradient;
 }
 
@@ -67,12 +93,12 @@ function objectMatrix(object: IllustrationObject) {
 
 function transformedObjectPath(object: IllustrationObject): Path2D | undefined { const local = localObjectPath(object); if (!local) return undefined; const world = new Path2D(); world.addPath(local, objectMatrix(object)); return world; }
 
-function imageFilter(object: Extract<IllustrationObject, { type: 'image' }>): string { return object.filters.map((filter) => filter.type === 'brightness' ? `brightness(${Math.max(0, 1 + filter.value)})` : filter.type === 'contrast' ? `contrast(${Math.max(0, 1 + filter.value)})` : filter.type === 'saturation' ? `saturate(${Math.max(0, 1 + filter.value)})` : filter.type === 'hue' ? `hue-rotate(${filter.value}deg)` : `blur(${Math.max(0, filter.value)}px)`).join(' '); }
+function adjustmentFilter(filters: IllustrationObject['filters']): string { return (filters ?? []).map((filter) => filter.type === 'brightness' ? `brightness(${Math.max(0, 1 + filter.value)})` : filter.type === 'contrast' ? `contrast(${Math.max(0, 1 + filter.value)})` : filter.type === 'saturation' ? `saturate(${Math.max(0, 1 + filter.value)})` : filter.type === 'hue' ? `hue-rotate(${filter.value}deg)` : `blur(${Math.max(0, filter.value)}px)`).join(' '); }
 
 function objectFilter(object: IllustrationObject): string {
   const filters: string[] = [];
   if ((object.blur ?? 0) > 0) filters.push(`blur(${Math.max(0, object.blur ?? 0)}px)`);
-  if (object.type === 'image') { const imageFilters = imageFilter(object); if (imageFilters) filters.push(imageFilters); }
+  const adjustments = adjustmentFilter(object.filters); if (adjustments) filters.push(adjustments);
   return filters.join(' ') || 'none';
 }
 
@@ -122,9 +148,7 @@ async function drawIllustrationObject(context: Context, document: IllustrationDo
     const stroke = paint(context, object.stroke.paint);
     if (stroke && object.stroke.width > 0) { context.strokeStyle = stroke; context.lineWidth = object.stroke.width; context.lineCap = object.stroke.lineCap; context.lineJoin = object.stroke.lineJoin; context.setLineDash(object.stroke.dash); context.stroke(path); }
   } else if (object.type === 'text') {
-    context.textBaseline = 'top'; const ranges = object.ranges.length ? object.ranges : [{ start: 0, end: object.text.length, fontFamily: 'sans-serif', fontSize: 48, fontWeight: 500, fontStyle: 'normal' as const, color: '#27213c', letterSpacing: 0 }];
-    const measurements = ranges.map((range) => { context.font = canvasFont(range); const value = object.text.slice(range.start, range.end); return context.measureText(value).width + Math.max(0, value.length - 1) * range.letterSpacing; }); const total = measurements.reduce((sum, value) => sum + value, 0); let x = object.align === 'center' ? (object.width - total) / 2 : object.align === 'right' ? object.width - total : 0;
-    for (const range of ranges) { context.font = canvasFont(range); context.fillStyle = range.color; for (const character of object.text.slice(range.start, range.end)) { context.fillText(character, x, 0); const width = context.measureText(character).width; if (range.underline) context.fillRect(x, range.fontSize * 1.05, width, Math.max(1, range.fontSize / 18)); x += width + range.letterSpacing; } }
+    renderStyledText(context, object);
   } else if (object.type === 'image') {
     const asset = document.assets[object.assetId];
     if (asset?.data) { const image = await loadImage(Buffer.from(asset.data, 'base64')); if (object.crop) context.drawImage(image, object.crop.x, object.crop.y, object.crop.width, object.crop.height, 0, 0, object.width, object.height); else context.drawImage(image, 0, 0, object.width, object.height); }
@@ -132,26 +156,61 @@ async function drawIllustrationObject(context: Context, document: IllustrationDo
   context.restore();
 }
 
-export async function renderIllustration(document: IllustrationDocument, onlyLayerId?: string): Promise<Canvas> {
+export async function renderIllustration(document: IllustrationDocument, onlyLayerId?: string, includeBackground = true): Promise<Canvas> {
   const canvas = createCanvas(document.artboard.width, document.artboard.height);
   const context = canvas.getContext('2d');
-  if (document.artboard.background) { context.fillStyle = document.artboard.background; context.fillRect(0, 0, canvas.width, canvas.height); }
-  const drawLayer = async (layerId: string): Promise<void> => {
+  const paintTileImages = new Map<string, LoadedImage>();
+  if (includeBackground && document.artboard.background) { context.fillStyle = document.artboard.background; context.fillRect(0, 0, canvas.width, canvas.height); }
+  const objectChildren = new Set(Object.values(document.objects).flatMap((object) => object.type === 'group' ? object.childIds : []));
+  const drawObjectEntry = async (target: Context, objectId: string, visiting = new Set<string>()): Promise<void> => {
+    if (visiting.has(objectId)) return;
+    const object = document.objects[objectId]; if (!object?.visible) return;
+    if (object.type !== 'group') { target.save(); const mask = object.maskObjectId ? document.objects[object.maskObjectId] : undefined; const maskPath = mask ? transformedObjectPath(mask) : undefined; if (maskPath) target.clip(maskPath); await drawIllustrationObject(target, document, object); target.restore(); return; }
+    const nextVisiting = new Set(visiting); nextVisiting.add(objectId);
+    const transformed = object.transform.x !== 0 || object.transform.y !== 0 || object.transform.scaleX !== 1 || object.transform.scaleY !== 1 || object.transform.rotation !== 0 || object.transform.skewX !== 0 || object.transform.skewY !== 0;
+    const isolate = transformed || object.opacity !== 1 || object.blendMode !== 'normal' || Boolean(object.blur || object.shadow || object.maskObjectId || object.filters?.length);
+    if (!isolate) { for (const childId of object.childIds) await drawObjectEntry(target, childId, nextVisiting); return; }
+    const buffer = createCanvas(document.artboard.width, document.artboard.height); const bufferContext = buffer.getContext('2d');
+    for (const childId of object.childIds) await drawObjectEntry(bufferContext, childId, nextVisiting);
+    target.save(); const mask = object.maskObjectId ? document.objects[object.maskObjectId] : undefined; const maskPath = mask ? transformedObjectPath(mask) : undefined; if (maskPath) target.clip(maskPath);
+    target.translate(object.transform.x, object.transform.y); target.rotate(object.transform.rotation * Math.PI / 180); target.transform(object.transform.scaleX, Math.tan(object.transform.skewY * Math.PI / 180), Math.tan(object.transform.skewX * Math.PI / 180), object.transform.scaleY, 0, 0); target.globalAlpha *= object.opacity; target.globalCompositeOperation = composite(object.blendMode); target.filter = objectFilter(object); if (object.shadow) { target.shadowColor = object.shadow.color; target.shadowBlur = object.shadow.blur; target.shadowOffsetX = object.shadow.offsetX; target.shadowOffsetY = object.shadow.offsetY; } target.drawImage(buffer, 0, 0); target.restore();
+  };
+  const drawLayer = async (layerId: string, target: Context = context): Promise<void> => {
     const layer = document.layers[layerId];
     if (!layer?.visible) return;
-    context.save(); context.globalAlpha = layer.opacity; context.globalCompositeOperation = composite(layer.blendMode);
+    const drawContents = async (output: Context) => {
+      if (layer.type === 'paint') {
+        const plan = paintTileCachePlan(layer, document.assets);
+        let cachedTiles: Array<{ image: LoadedImage; tileX: number; tileY: number }> | undefined;
+        if (plan) {
+          try {
+            cachedTiles = [];
+            for (const entry of plan.entries) {
+              let image = paintTileImages.get(entry.assetId);
+              if (!image) {
+                image = await cachedPaintTileImage(entry.asset.sha256, entry.asset.data!, layer.tileSize);
+                if (image.width !== layer.tileSize || image.height !== layer.tileSize) throw new Error('Paint tile dimensions do not match the layer tile size');
+                paintTileImages.set(entry.assetId, image);
+              }
+              cachedTiles.push({ image, tileX: entry.tileX, tileY: entry.tileY });
+            }
+          } catch { cachedTiles = undefined; }
+        }
+        if (cachedTiles && plan) {
+          for (const entry of cachedTiles) output.drawImage(entry.image, entry.tileX * layer.tileSize, entry.tileY * layer.tileSize);
+          for (const stroke of layer.strokes.slice(plan.strokeCount)) renderRasterStroke(output, stroke);
+        } else for (const stroke of layer.strokes) renderRasterStroke(output, stroke);
+      }
+      if (layer.type === 'vector') for (const objectId of layer.objectIds) if (!objectChildren.has(objectId)) await drawObjectEntry(output, objectId);
+      if (layer.type === 'group') for (const childId of layer.childIds) await drawLayer(childId, output);
+    };
+    target.save();
     const maskLayer = layer.maskLayerId ? document.layers[layer.maskLayerId] : undefined;
-    if (maskLayer?.type === 'vector') { const maskPath = new Path2D(); for (const objectId of maskLayer.objectIds) { const path = document.objects[objectId] ? transformedObjectPath(document.objects[objectId]) : undefined; if (path) maskPath.addPath(path); } context.clip(maskPath); }
-    if (layer.type === 'paint') for (const stroke of layer.strokes) {
-      context.save(); context.globalCompositeOperation = stroke.mode === 'erase' ? 'destination-out' : 'source-over'; context.globalAlpha *= stroke.opacity * stroke.flow;
-      context.strokeStyle = stroke.color; context.lineWidth = stroke.size; context.lineCap = stroke.preset === 'marker' ? 'square' : 'round'; context.lineJoin = 'round'; context.filter = stroke.preset === 'soft-round' || stroke.preset === 'airbrush' ? `blur(${stroke.size * (stroke.preset === 'airbrush' ? .35 : .18)}px)` : 'none'; context.beginPath();
-      stroke.points.forEach((point, index) => index ? context.lineTo(point.x, point.y) : context.moveTo(point.x, point.y)); context.stroke(); context.restore();
-    }
-    if (layer.type === 'vector') for (const objectId of layer.objectIds) {
-      const object = document.objects[objectId]; if (object) { context.save(); const mask = object.maskObjectId ? document.objects[object.maskObjectId] : undefined; const maskPath = mask ? transformedObjectPath(mask) : undefined; if (maskPath) context.clip(maskPath); await drawIllustrationObject(context, document, object); context.restore(); }
-    }
-    if (layer.type === 'group') for (const childId of layer.childIds) await drawLayer(childId);
-    context.restore();
+    if (maskLayer?.type === 'vector') { const maskPath = new Path2D(); for (const objectId of maskLayer.objectIds) { const path = document.objects[objectId] ? transformedObjectPath(document.objects[objectId]) : undefined; if (path) maskPath.addPath(path); } target.clip(maskPath); }
+    if (layer.opacity !== 1 || layer.blendMode !== 'normal' || layer.filters?.length) {
+      const buffer = createCanvas(document.artboard.width, document.artboard.height); await drawContents(buffer.getContext('2d')); target.globalAlpha *= layer.opacity; target.globalCompositeOperation = composite(layer.blendMode); target.filter = adjustmentFilter(layer.filters); target.drawImage(buffer, 0, 0);
+    } else await drawContents(target);
+    target.restore();
   };
   if (onlyLayerId) await drawLayer(onlyLayerId); else for (const layerId of document.layerIds) await drawLayer(layerId);
   return canvas;
@@ -182,13 +241,13 @@ export function renderSprite(document: PixelDocument, sprite: PixelSprite, frame
   return canvas;
 }
 
-function renderTilemap(document: PixelDocument, map: PixelTilemap): Canvas {
+export function renderTilemap(document: PixelDocument, map: PixelTilemap, onlyLayerId?: string): Canvas {
   const isometric = map.orientation === 'isometric';
   const width = isometric ? Math.max(1, Math.ceil((map.width + map.height) * map.tileWidth / 2)) : map.width * map.tileWidth;
   const height = isometric ? Math.max(1, Math.ceil((map.width + map.height) * map.tileHeight / 2)) : map.height * map.tileHeight;
   const canvas = createCanvas(width, height); const context = canvas.getContext('2d'); context.imageSmoothingEnabled = false;
   const sources = new Map<string, Canvas>();
-  const visibleLayers: Array<{ layer: PixelTilemap['layers'][string]; opacity: number }> = []; const visit = (id: string, opacity = 1) => { const layer = map.layers[id]; if (!layer?.visible) return; const combined = opacity * layer.opacity; if (layer.type === 'group') for (const childId of layer.childIds ?? []) visit(childId, combined); else visibleLayers.push({ layer, opacity: combined }); }; for (const id of map.layerIds) visit(id);
+  const visibleLayers: Array<{ layer: PixelTilemap['layers'][string]; opacity: number }> = []; const visit = (id: string, opacity = 1) => { const layer = map.layers[id]; if (!layer?.visible) return; const combined = opacity * layer.opacity; if (layer.type === 'group') for (const childId of layer.childIds ?? []) visit(childId, combined); else visibleLayers.push({ layer, opacity: combined }); }; if (onlyLayerId) visit(onlyLayerId); else for (const id of map.layerIds) visit(id);
   for (const entry of visibleLayers) {
     const { layer } = entry; if (layer.type !== 'tile' || !layer.chunks) continue;
     context.globalAlpha = entry.opacity;
@@ -211,14 +270,29 @@ function renderTilemap(document: PixelDocument, map: PixelTilemap): Canvas {
   return canvas;
 }
 
-export async function renderDocument(document: AIDrawDocument): Promise<Canvas> {
-  if (document.kind === 'illustration') return renderIllustration(document);
-  const asset = document.pixelAssets[document.activeAssetId];
-  if (asset?.type === 'sprite') return renderSprite(document, asset);
-  if (asset?.type === 'tilemap') return renderTilemap(document, asset);
+export function renderPixelAsset(document: PixelDocument, assetId = document.activeAssetId, frameId?: string, layerId?: string): Canvas {
+  const asset = document.pixelAssets[assetId];
+  if (asset?.type === 'sprite') return renderSprite(document, asset, frameId ?? asset.frameIds[0], layerId);
+  if (asset?.type === 'tilemap') return renderTilemap(document, asset, layerId);
   if (asset?.type === 'tileset') {
     const sprite = document.pixelAssets[asset.spriteAssetId];
-    if (sprite?.type === 'sprite') return renderSprite(document, sprite);
+    if (sprite?.type === 'sprite') return renderSprite(document, sprite, frameId ?? sprite.frameIds[0], layerId);
   }
   return createCanvas(1, 1);
+}
+
+export async function renderDocument(document: AIDrawDocument): Promise<Canvas> {
+  if (document.kind === 'illustration') return renderIllustration(document);
+  return renderPixelAsset(document);
+}
+
+export function renderDocumentDimensions(document: AIDrawDocument): { width: number; height: number } {
+  if (document.kind === 'illustration') return { width: document.artboard.width, height: document.artboard.height };
+  const active = document.pixelAssets[document.activeAssetId];
+  const asset = active?.type === 'tileset' ? document.pixelAssets[active.spriteAssetId] : active;
+  if (asset?.type === 'sprite') return { width: asset.width, height: asset.height };
+  if (asset?.type === 'tilemap') return asset.orientation === 'isometric'
+    ? { width: Math.max(1, Math.ceil((asset.width + asset.height) * asset.tileWidth / 2)), height: Math.max(1, Math.ceil((asset.width + asset.height) * asset.tileHeight / 2)) }
+    : { width: Math.max(1, asset.width * asset.tileWidth), height: Math.max(1, asset.height * asset.tileHeight) };
+  return { width: 1, height: 1 };
 }

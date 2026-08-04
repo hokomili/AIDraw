@@ -4,6 +4,8 @@ import type { CanvasOperation, CanvasTransaction } from './operations';
 
 const OperationKindSchema = z.enum([
   'document.rename',
+  'illustration.artboard.replace',
+  'illustration.artboard.translate',
   'illustration.layer.add',
   'illustration.layer.replace',
   'illustration.layer.move',
@@ -13,11 +15,22 @@ const OperationKindSchema = z.enum([
   'illustration.object.move',
   'illustration.object.delete',
   'illustration.paint.stroke',
+  'illustration.brush-presets.replace',
+  'illustration.guides.replace',
+  'illustration.snap-settings.replace',
+  'illustration.animation.settings.replace',
+  'illustration.animation.keyframe.upsert',
+  'illustration.animation.keyframe.delete',
   'asset.add',
   'asset.delete',
   'provenance.add',
   'provenance.delete',
   'pixel.palette.replace',
+  'pixel.palette.reorder',
+  'pixel.palette-cycles.replace',
+  'pixel.stamps.replace',
+  'pixel.tile-stamps.replace',
+  'pixel.bitmap-fonts.replace',
   'pixel.conversion.replace',
   'pixel.links.replace',
   'pixel.active-asset.set',
@@ -28,12 +41,36 @@ const OperationKindSchema = z.enum([
   'pixel.asset.replace',
   'pixel.asset.delete',
   'pixel.cel.set',
+  'pixel.cel.region',
   'pixel.tilemap.set',
+  'pixel.tilemap.region',
 ]);
 
 const IdSchema = z.string().min(1);
 const ExpectedRevisionSchema = z.number().int().nonnegative().optional();
 const FiniteNumberSchema = z.number().refine(Number.isFinite, 'Expected a finite number');
+const TransformInputSchema = z.object({
+  x: FiniteNumberSchema.min(-1_000_000).max(1_000_000),
+  y: FiniteNumberSchema.min(-1_000_000).max(1_000_000),
+  scaleX: FiniteNumberSchema.min(-10_000).max(10_000),
+  scaleY: FiniteNumberSchema.min(-10_000).max(10_000),
+  rotation: FiniteNumberSchema.min(-1_000_000).max(1_000_000),
+  skewX: FiniteNumberSchema.min(-89.999).max(89.999),
+  skewY: FiniteNumberSchema.min(-89.999).max(89.999),
+}).strict();
+export const NewDocumentOptionsSchema = z.object({
+  kind: z.enum(['illustration', 'sprite', 'tilemap', 'project']),
+  name: z.string().trim().min(1).max(200).optional(),
+  width: FiniteNumberSchema.int().min(1).max(8_192).optional(),
+  height: FiniteNumberSchema.int().min(1).max(8_192).optional(),
+  background: z.union([z.string().regex(/^#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?$/), z.null()]).optional(),
+  orientation: z.enum(['orthogonal', 'isometric']).optional(),
+  infinite: z.boolean().optional(),
+  tileWidth: FiniteNumberSchema.int().min(1).max(1_024).optional(),
+  tileHeight: FiniteNumberSchema.int().min(1).max(1_024).optional(),
+}).strict();
+
+export type NewDocumentOptionsInput = z.infer<typeof NewDocumentOptionsSchema>;
 const InlineAssetMimeTypeSchema = z.enum(['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/apng']);
 const DocumentAssetInputSchema = z.object({
   id: IdSchema,
@@ -44,6 +81,19 @@ const DocumentAssetInputSchema = z.object({
   source: z.enum(['imported', 'generated', 'embedded', 'rendered']),
   data: z.string().min(4).max(2_000_000).optional(),
 }).strict();
+const LinkedAssetInputSchema = z.object({
+  id: IdSchema,
+  name: z.string().trim().min(1).max(200),
+  mode: z.enum(['embedded', 'linked']),
+  relativePath: z.string().min(1).max(2_048).refine((value) => !value.includes('\0') && !value.includes('\\') && !/^(?:[A-Za-z]:|\/)/.test(value), 'Linked asset paths must be portable relative paths using forward slashes').optional(),
+  sha256: z.string().regex(/^[0-9a-fA-F]{64}$/).optional(),
+  cachedPreviewAssetId: IdSchema.optional(),
+}).strict().superRefine((link, context) => {
+  if (!link.sha256) context.addIssue({ code: 'custom', path: ['sha256'], message: 'Linked assets require a content hash' });
+  if (!link.cachedPreviewAssetId) context.addIssue({ code: 'custom', path: ['cachedPreviewAssetId'], message: 'Linked assets require a cached source asset' });
+  if (link.mode === 'linked' && !link.relativePath) context.addIssue({ code: 'custom', path: ['relativePath'], message: 'External links require a relative path' });
+  if (link.mode === 'embedded' && link.relativePath !== undefined) context.addIssue({ code: 'custom', path: ['relativePath'], message: 'Embedded links cannot retain an external path' });
+});
 const ProvenanceInputSchema = z.object({
   id: IdSchema,
   assetId: IdSchema,
@@ -65,17 +115,87 @@ const EntityBaseInputShape = {
   updatedAt: z.string().min(1),
   createdBy: IdSchema,
 };
+const IllustrationKeyframeInputSchema = z.object({
+  ...EntityBaseInputShape,
+  objectId: IdSchema,
+  timeMs: FiniteNumberSchema.int().min(0).max(600_000),
+  transform: TransformInputSchema,
+  opacity: FiniteNumberSchema.min(0).max(1),
+  visible: z.boolean(),
+  easing: z.enum(['linear', 'hold', 'ease-in-out']),
+}).strict();
+const IllustrationAnimationInputSchema = z.object({
+  durationMs: FiniteNumberSchema.int().min(1).max(600_000),
+  framesPerSecond: FiniteNumberSchema.int().min(1).max(120),
+  playback: z.enum(['once', 'loop', 'ping-pong']),
+  keyframeIds: z.array(IdSchema).max(10_000),
+  keyframes: z.record(z.string(), IllustrationKeyframeInputSchema),
+}).strict().superRefine((animation, context) => {
+  if (new Set(animation.keyframeIds).size !== animation.keyframeIds.length) context.addIssue({ code: 'custom', path: ['keyframeIds'], message: 'Animation keyframe IDs must be unique' });
+  if (Object.keys(animation.keyframes).length > 10_000) context.addIssue({ code: 'custom', path: ['keyframes'], message: 'Illustration animations are limited to 10,000 keyframes' });
+  for (const [id, keyframe] of Object.entries(animation.keyframes)) {
+    if (keyframe.id !== id) context.addIssue({ code: 'custom', path: ['keyframes', id, 'id'], message: 'Animation keyframe record keys must match entity IDs' });
+    if (keyframe.timeMs > animation.durationMs) context.addIssue({ code: 'custom', path: ['keyframes', id, 'timeMs'], message: 'Animation keyframe time exceeds the animation duration' });
+  }
+  for (const id of animation.keyframeIds) if (!animation.keyframes[id]) context.addIssue({ code: 'custom', path: ['keyframeIds'], message: `Animation keyframe ${id} is missing` });
+  for (const id of Object.keys(animation.keyframes)) if (!animation.keyframeIds.includes(id)) context.addIssue({ code: 'custom', path: ['keyframes', id], message: `Animation keyframe ${id} is not ordered` });
+});
 const PixelChangeSchema = z.object({
-  x: FiniteNumberSchema.int(),
-  y: FiniteNumberSchema.int(),
+  x: FiniteNumberSchema.int().min(-16_777_216).max(16_777_216),
+  y: FiniteNumberSchema.int().min(-16_777_216).max(16_777_216),
   index: FiniteNumberSchema.int().min(0).max(255),
 });
 const TileChangeSchema = z.object({
-  x: FiniteNumberSchema.int(),
-  y: FiniteNumberSchema.int(),
+  x: FiniteNumberSchema.int().min(-16_777_216).max(16_777_216),
+  y: FiniteNumberSchema.int().min(-16_777_216).max(16_777_216),
   gid: FiniteNumberSchema.int().min(0).max(0xffff_ffff),
 });
+const RunPositionShape = {
+  x: FiniteNumberSchema.int().min(-16_777_216).max(16_777_216),
+  y: FiniteNumberSchema.int().min(-16_777_216).max(16_777_216),
+  length: FiniteNumberSchema.int().min(1).max(65_536),
+};
+const PixelIndexRunSchema = z.object({ ...RunPositionShape, index: FiniteNumberSchema.int().min(0).max(255) }).strict();
+const TileGidRunSchema = z.object({ ...RunPositionShape, gid: FiniteNumberSchema.int().min(0).max(0xffff_ffff) }).strict();
+
+function validateRuns(runs: Array<{ x: number; y: number; length: number }>, context: z.RefinementCtx): void {
+  const total = runs.reduce((sum, run) => Math.min(1_000_001, sum + run.length), 0);
+  if (total > 1_000_000) context.addIssue({ code: 'custom', path: ['runs'], message: 'Region operations are limited to one million cells' });
+  const ordered = runs.map((run, index) => ({ ...run, index })).sort((left, right) => left.y - right.y || left.x - right.x);
+  for (let index = 1; index < ordered.length; index += 1) {
+    const previous = ordered[index - 1]; const current = ordered[index];
+    if (previous.y === current.y && previous.x + previous.length > current.x) {
+      context.addIssue({ code: 'custom', path: ['runs', current.index], message: 'Runs in one operation may not overlap' });
+    }
+  }
+}
 const PointSchema = z.object({ x: FiniteNumberSchema, y: FiniteNumberSchema }).loose();
+const RasterBrushDynamicsSchema = z.object({
+  tip: z.enum(['round', 'flat', 'chalk', 'watercolor']),
+  spacing: FiniteNumberSchema.min(0.01).max(4),
+  stabilization: FiniteNumberSchema.min(0).max(1),
+  scatter: FiniteNumberSchema.min(0).max(2),
+  sizeJitter: FiniteNumberSchema.min(0).max(1),
+  opacityJitter: FiniteNumberSchema.min(0).max(1),
+  angle: FiniteNumberSchema.min(-180).max(180),
+  roundness: FiniteNumberSchema.min(0.05).max(1),
+  wetness: FiniteNumberSchema.min(0).max(1),
+  granulation: FiniteNumberSchema.min(0).max(1),
+  seed: FiniteNumberSchema.int().min(0).max(0xffff_ffff),
+}).strict();
+const RasterBrushPresetInputSchema = z.object({
+  id: IdSchema,
+  name: z.string().trim().min(1).max(200),
+  size: FiniteNumberSchema.min(1).max(500),
+  opacity: FiniteNumberSchema.min(0.01).max(1),
+  hardness: FiniteNumberSchema.min(0).max(1),
+  flow: FiniteNumberSchema.min(0.01).max(1),
+  dynamics: RasterBrushDynamicsSchema.omit({ seed: true }),
+}).strict();
+const BitmapGlyphInputSchema = z.object({ width: FiniteNumberSchema.int().min(1).max(64), advance: FiniteNumberSchema.int().min(1).max(128), rows: z.array(z.string().regex(/^[.#]{1,64}$/)).min(1).max(64) }).strict().superRefine((glyph, context) => { glyph.rows.forEach((row, index) => { if (row.length !== glyph.width) context.addIssue({ code: 'custom', path: ['rows', index], message: 'Every bitmap glyph row must match its width' }); }); });
+const BitmapFontInputSchema = z.object({ id: IdSchema, name: z.string().trim().min(1).max(200), lineHeight: FiniteNumberSchema.int().min(1).max(128), glyphs: z.record(z.string().min(1).max(4), BitmapGlyphInputSchema) }).strict();
+const IllustrationGuideInputSchema = z.object({ id: IdSchema, orientation: z.enum(['horizontal', 'vertical']), position: FiniteNumberSchema.min(-1_000_000).max(1_000_000), color: z.string().regex(/^#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?$/), locked: z.boolean() }).strict();
+const IllustrationSnapSettingsInputSchema = z.object({ artboard: z.boolean(), objects: z.boolean(), guides: z.boolean(), grid: z.boolean(), pixel: z.boolean(), gridSize: FiniteNumberSchema.min(1).max(4_096), tolerance: FiniteNumberSchema.min(0).max(128) }).strict();
 const FrameInputSchema = z.object({
   ...EntityBaseInputShape,
   durationMs: FiniteNumberSchema.int().min(1).max(60_000),
@@ -94,6 +214,55 @@ const CelInputSchema = z.object({
   chunks: z.record(z.string(), PixelChunkInputSchema),
   linkedToCelId: IdSchema.optional(),
 }).loose();
+const PaletteEntryInputSchema = z.object({
+  id: IdSchema,
+  name: z.string().min(1).max(200),
+  color: z.string().regex(/^#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?$/),
+}).strict();
+const AnimationTagInputSchema = z.object({
+  id: IdSchema,
+  name: z.string().trim().min(1).max(200),
+  fromFrameId: IdSchema,
+  toFrameId: IdSchema,
+  direction: z.enum(['forward', 'reverse', 'ping-pong']),
+  color: z.string().regex(/^#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?$/),
+}).strict();
+const PixelStampInputSchema = z.object({
+  id: IdSchema,
+  name: z.string().trim().min(1).max(200),
+  width: FiniteNumberSchema.int().min(1).max(8_192),
+  height: FiniteNumberSchema.int().min(1).max(8_192),
+  anchorX: FiniteNumberSchema.int().nonnegative(),
+  anchorY: FiniteNumberSchema.int().nonnegative(),
+  cells: z.array(z.object({ x: FiniteNumberSchema.int().nonnegative(), y: FiniteNumberSchema.int().nonnegative(), index: FiniteNumberSchema.int().min(0).max(255) }).strict()).min(1).max(65_536),
+}).strict().superRefine((stamp, context) => {
+  if (stamp.anchorX >= stamp.width || stamp.anchorY >= stamp.height) context.addIssue({ code: 'custom', path: ['anchorX'], message: 'Stamp anchor must fit inside its bounds' });
+  const seen = new Set<string>();
+  stamp.cells.forEach((cell, index) => {
+    if (cell.x >= stamp.width || cell.y >= stamp.height) context.addIssue({ code: 'custom', path: ['cells', index], message: 'Stamp cell must fit inside its bounds' });
+    const key = `${cell.x},${cell.y}`; if (seen.has(key)) context.addIssue({ code: 'custom', path: ['cells', index], message: 'Stamp cells may not overlap' }); seen.add(key);
+  });
+});
+const PaletteCycleInputSchema = z.object({
+  id: IdSchema,
+  name: z.string().trim().min(1).max(200),
+  fromIndex: FiniteNumberSchema.int().min(1).max(255),
+  toIndex: FiniteNumberSchema.int().min(1).max(255),
+  direction: z.enum(['forward', 'reverse']),
+  stepMs: FiniteNumberSchema.int().min(16).max(60_000),
+}).strict().refine((cycle) => cycle.toIndex >= cycle.fromIndex, { path: ['toIndex'], message: 'Cycle end index must be at or after its start' });
+const TileStampInputSchema = z.object({
+  id: IdSchema,
+  name: z.string().trim().min(1).max(200),
+  width: FiniteNumberSchema.int().min(1).max(8_192),
+  height: FiniteNumberSchema.int().min(1).max(8_192),
+  anchorX: FiniteNumberSchema.int().nonnegative(),
+  anchorY: FiniteNumberSchema.int().nonnegative(),
+  cells: z.array(z.object({ x: FiniteNumberSchema.int().nonnegative(), y: FiniteNumberSchema.int().nonnegative(), gid: FiniteNumberSchema.int().min(0).max(0xffff_ffff) }).strict()).min(1).max(65_536),
+}).strict().superRefine((stamp, context) => {
+  if (stamp.anchorX >= stamp.width || stamp.anchorY >= stamp.height) context.addIssue({ code: 'custom', path: ['anchorX'], message: 'Stamp anchor must fit inside its bounds' });
+  const seen = new Set<string>(); stamp.cells.forEach((cell, index) => { if (cell.x >= stamp.width || cell.y >= stamp.height) context.addIssue({ code: 'custom', path: ['cells', index], message: 'Stamp cell must fit inside its bounds' }); const key = cell.x + ',' + cell.y; if (seen.has(key)) context.addIssue({ code: 'custom', path: ['cells', index], message: 'Stamp cells may not overlap' }); seen.add(key); });
+});
 const PixelLayerInputSchema = z.object({
   ...EntityBaseInputShape,
   type: z.enum(['pixel', 'group']),
@@ -125,6 +294,8 @@ const PixelAssetInputSchema = z.object({
       ['layers', z.record(z.string(), PixelLayerInputSchema), asset.layers],
       ['frames', z.record(z.string(), FrameInputSchema), asset.frames],
       ['cels', z.record(z.string(), CelInputSchema), asset.cels],
+      ['tags', z.array(AnimationTagInputSchema).max(10_000), asset.tags],
+      ['paletteOverrides', z.record(z.string(), z.array(PaletteEntryInputSchema).min(1).max(256)), asset.paletteOverrides],
     ] as const;
     const parsed = new Map<string, unknown>();
     for (const [field, schema, value] of nested) {
@@ -135,12 +306,26 @@ const PixelAssetInputSchema = z.object({
     const layers = parsed.get('layers') as Record<string, z.infer<typeof PixelLayerInputSchema>> | undefined;
     const frames = parsed.get('frames') as Record<string, z.infer<typeof FrameInputSchema>> | undefined;
     const cels = parsed.get('cels') as Record<string, z.infer<typeof CelInputSchema>> | undefined;
+    const tags = parsed.get('tags') as Array<z.infer<typeof AnimationTagInputSchema>> | undefined;
+    const paletteOverrides = parsed.get('paletteOverrides') as Record<string, Array<z.infer<typeof PaletteEntryInputSchema>>> | undefined;
     if (layers && Array.isArray(asset.layerIds)) for (const id of asset.layerIds) requireField(typeof id === 'string' && Boolean(layers[id]), 'layerIds', `Sprite layer ${String(id)} is missing`);
     if (frames && Array.isArray(asset.frameIds)) for (const id of asset.frameIds) requireField(typeof id === 'string' && Boolean(frames[id]), 'frameIds', `Sprite frame ${String(id)} is missing`);
     if (layers && frames && cels) for (const cel of Object.values(cels)) {
       requireField(Boolean(layers[cel.layerId]), 'cels', `Cel ${cel.id} references missing layer ${cel.layerId}`);
       requireField(Boolean(frames[cel.frameId]), 'cels', `Cel ${cel.id} references missing frame ${cel.frameId}`);
+      if (cel.linkedToCelId) requireField(Boolean(cels[cel.linkedToCelId]), 'cels', `Cel ${cel.id} references missing linked cel ${cel.linkedToCelId}`);
+      const visited = new Set<string>(); let cursor: typeof cel | undefined = cel;
+      while (cursor?.linkedToCelId && cels[cursor.linkedToCelId]) {
+        if (visited.has(cursor.id)) { requireField(false, 'cels', `Cel ${cel.id} has a cyclic link`); break; }
+        visited.add(cursor.id); cursor = cels[cursor.linkedToCelId];
+      }
     }
+    if (frames && tags) for (const tag of tags) {
+      const from = Array.isArray(asset.frameIds) ? asset.frameIds.indexOf(tag.fromFrameId) : -1;
+      const to = Array.isArray(asset.frameIds) ? asset.frameIds.indexOf(tag.toFrameId) : -1;
+      requireField(Boolean(frames[tag.fromFrameId]) && Boolean(frames[tag.toFrameId]) && from >= 0 && to >= from, 'tags', `Animation tag ${tag.id} has an invalid frame range`);
+    }
+    if (frames && paletteOverrides) for (const [frameId] of Object.entries(paletteOverrides)) requireField(Boolean(frames[frameId]), 'paletteOverrides', `Palette override references missing frame ${frameId}`);
   } else if (asset.type === 'tileset') {
     requireField(typeof asset.spriteAssetId === 'string' && asset.spriteAssetId.length > 0, 'spriteAssetId', 'Tileset spriteAssetId is required');
     requireField(typeof asset.tiles === 'object' && asset.tiles !== null, 'tiles', 'Tileset tiles must be an object');
@@ -153,6 +338,29 @@ const PixelAssetInputSchema = z.object({
 
 const TargetedOperationSchemas: Partial<Record<z.infer<typeof OperationKindSchema>, z.ZodType>> = {
   'document.rename': z.object({ name: z.string().min(1).max(200) }).loose(),
+  'illustration.artboard.replace': z.object({
+    artboard: z.object({
+      width: FiniteNumberSchema.int().min(1).max(8_192),
+      height: FiniteNumberSchema.int().min(1).max(8_192),
+      background: z.union([z.string().regex(/^#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?$/), z.null()]),
+      colorSpace: z.literal('srgb'),
+      dpi: FiniteNumberSchema.int().min(1).max(1_200),
+    }).strict(),
+    expectedRevision: ExpectedRevisionSchema,
+  }).loose(),
+  'illustration.artboard.translate': z.object({
+    kind: z.literal('illustration.artboard.translate'),
+    artboard: z.object({
+      width: FiniteNumberSchema.int().min(1).max(8_192),
+      height: FiniteNumberSchema.int().min(1).max(8_192),
+      background: z.union([z.string().regex(/^#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?$/), z.null()]),
+      colorSpace: z.literal('srgb'),
+      dpi: FiniteNumberSchema.int().min(1).max(1_200),
+    }).strict(),
+    offsetX: FiniteNumberSchema.int().min(-8_192).max(8_192),
+    offsetY: FiniteNumberSchema.int().min(-8_192).max(8_192),
+    expectedRevision: ExpectedRevisionSchema,
+  }).strict(),
   'asset.add': z.object({ asset: DocumentAssetInputSchema }).loose(),
   'asset.delete': z.object({ assetId: IdSchema }).loose(),
   'provenance.add': z.object({ provenance: ProvenanceInputSchema }).loose(),
@@ -167,10 +375,58 @@ const TargetedOperationSchemas: Partial<Record<z.infer<typeof OperationKindSchem
   }).loose(),
   'illustration.paint.stroke': z.object({
     layerId: IdSchema,
-    stroke: z.object({ points: z.array(PointSchema).max(1_000_000) }).loose(),
+    stroke: z.object({
+      id: IdSchema,
+      actorId: IdSchema,
+      points: z.array(PointSchema).min(1).max(1_000_000),
+      color: z.string().regex(/^#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?$/),
+      size: FiniteNumberSchema.min(1).max(500),
+      opacity: FiniteNumberSchema.min(0.01).max(1),
+      hardness: FiniteNumberSchema.min(0).max(1),
+      flow: FiniteNumberSchema.min(0.01).max(1),
+      mode: z.enum(['paint', 'erase']),
+      preset: z.enum(['hard-round', 'soft-round', 'pencil', 'marker', 'airbrush', 'eraser', 'watercolor', 'custom']),
+      brushPresetId: IdSchema.optional(),
+      dynamics: RasterBrushDynamicsSchema.optional(),
+    }).strict(),
     expectedRevision: ExpectedRevisionSchema,
   }).loose(),
+  'illustration.brush-presets.replace': z.object({ kind: z.literal('illustration.brush-presets.replace'), presets: z.array(RasterBrushPresetInputSchema).max(256) }).strict().superRefine((operation, context) => {
+    const seen = new Set<string>();
+    operation.presets.forEach((preset, index) => { if (seen.has(preset.id)) context.addIssue({ code: 'custom', path: ['presets', index, 'id'], message: 'Brush preset IDs must be unique' }); seen.add(preset.id); });
+  }),
+  'illustration.guides.replace': z.object({ kind: z.literal('illustration.guides.replace'), guides: z.array(IllustrationGuideInputSchema).max(1_024), expectedRevision: ExpectedRevisionSchema }).strict().superRefine((operation, context) => { const ids = new Set<string>(); operation.guides.forEach((guide, index) => { if (ids.has(guide.id)) context.addIssue({ code: 'custom', path: ['guides', index, 'id'], message: 'Guide IDs must be unique' }); ids.add(guide.id); }); }),
+  'illustration.snap-settings.replace': z.object({ kind: z.literal('illustration.snap-settings.replace'), settings: IllustrationSnapSettingsInputSchema, expectedRevision: ExpectedRevisionSchema }).strict(),
+  'illustration.animation.settings.replace': z.object({
+    kind: z.literal('illustration.animation.settings.replace'),
+    settings: z.object({
+      durationMs: FiniteNumberSchema.int().min(1).max(600_000),
+      framesPerSecond: FiniteNumberSchema.int().min(1).max(120),
+      playback: z.enum(['once', 'loop', 'ping-pong']),
+    }).strict(),
+    expectedRevision: ExpectedRevisionSchema,
+  }).strict(),
+  'illustration.animation.keyframe.upsert': z.object({
+    kind: z.literal('illustration.animation.keyframe.upsert'),
+    keyframe: IllustrationKeyframeInputSchema,
+    index: FiniteNumberSchema.int().nonnegative().max(10_000).optional(),
+    expectedRevision: ExpectedRevisionSchema,
+  }).strict(),
+  'illustration.animation.keyframe.delete': z.object({
+    kind: z.literal('illustration.animation.keyframe.delete'),
+    keyframeId: IdSchema,
+    expectedRevision: ExpectedRevisionSchema,
+  }).strict(),
   'pixel.active-asset.set': z.object({ assetId: IdSchema }).loose(),
+  'pixel.palette.replace': z.object({ palette: z.array(PaletteEntryInputSchema).min(1).max(256) }).loose().superRefine(({ palette }, context) => {
+    if (!palette[0]?.color.toLowerCase().endsWith('00') || palette[0].color.length !== 9) context.addIssue({ code: 'custom', path: ['palette', 0, 'color'], message: 'Palette index 0 must be transparent RGBA' });
+    const ids = new Set<string>(); palette.forEach((entry, index) => { if (ids.has(entry.id)) context.addIssue({ code: 'custom', path: ['palette', index, 'id'], message: 'Palette entry IDs must be unique' }); ids.add(entry.id); });
+  }),
+  'pixel.palette.reorder': z.object({ kind: z.literal('pixel.palette.reorder'), entryIds: z.array(IdSchema).min(1).max(256), expectedRevision: ExpectedRevisionSchema }).strict().superRefine(({ entryIds }, context) => { if (new Set(entryIds).size !== entryIds.length) context.addIssue({ code: 'custom', path: ['entryIds'], message: 'Palette reorder IDs must be unique' }); }),
+  'pixel.stamps.replace': z.object({ stamps: z.array(PixelStampInputSchema).max(1_024) }).loose(),
+  'pixel.tile-stamps.replace': z.object({ stamps: z.array(TileStampInputSchema).max(1_024) }).loose(),
+  'pixel.bitmap-fonts.replace': z.object({ fonts: z.array(BitmapFontInputSchema).min(1).max(64) }).loose().superRefine(({ fonts }, context) => { const ids = new Set<string>(); fonts.forEach((font, index) => { if (ids.has(font.id)) context.addIssue({ code: 'custom', path: ['fonts', index, 'id'], message: 'Bitmap font IDs must be unique' }); ids.add(font.id); }); }),
+  'pixel.palette-cycles.replace': z.object({ cycles: z.array(PaletteCycleInputSchema).max(256) }).loose(),
   'pixel.conversion.replace': z.object({
     conversionDefaults: z.object({
       resample: z.literal('area'),
@@ -179,6 +435,9 @@ const TargetedOperationSchemas: Partial<Record<z.infer<typeof OperationKindSchem
       alphaThreshold: FiniteNumberSchema.min(0).max(1),
     }).strict(),
   }).loose(),
+  'pixel.links.replace': z.object({ kind: z.literal('pixel.links.replace'), linkedAssets: z.array(LinkedAssetInputSchema).max(1_024), expectedRevision: ExpectedRevisionSchema }).strict().superRefine((operation, context) => {
+    const ids = new Set<string>(); operation.linkedAssets.forEach((link, index) => { if (ids.has(link.id)) context.addIssue({ code: 'custom', path: ['linkedAssets', index, 'id'], message: 'Linked asset IDs must be unique' }); ids.add(link.id); });
+  }),
   'pixel.frame.add': z.object({
     spriteId: IdSchema,
     frame: FrameInputSchema,
@@ -197,12 +456,33 @@ const TargetedOperationSchemas: Partial<Record<z.infer<typeof OperationKindSchem
     changes: z.array(PixelChangeSchema).max(1_000_000),
     expectedRevision: ExpectedRevisionSchema,
   }).loose(),
+  'pixel.cel.region': z.object({
+    spriteId: IdSchema,
+    celId: IdSchema,
+    runs: z.array(PixelIndexRunSchema).min(1).max(65_536),
+    expectedRevision: ExpectedRevisionSchema,
+    conversion: z.object({
+      sourceAssetId: IdSchema,
+      resample: z.literal('area'),
+      paletteMetric: z.literal('oklab'),
+      dithering: z.enum(['none', 'bayer-4x4', 'floyd-steinberg']),
+      alphaThreshold: FiniteNumberSchema.min(0).max(1),
+      width: FiniteNumberSchema.int().positive().max(8_192),
+      height: FiniteNumberSchema.int().positive().max(8_192),
+    }).strict().optional(),
+  }).loose().superRefine(({ runs }, context) => validateRuns(runs, context)),
   'pixel.tilemap.set': z.object({
     mapId: IdSchema,
     layerId: IdSchema,
     changes: z.array(TileChangeSchema).max(1_000_000),
     expectedRevision: ExpectedRevisionSchema,
   }).loose(),
+  'pixel.tilemap.region': z.object({
+    mapId: IdSchema,
+    layerId: IdSchema,
+    runs: z.array(TileGidRunSchema).min(1).max(65_536),
+    expectedRevision: ExpectedRevisionSchema,
+  }).loose().superRefine(({ runs }, context) => validateRuns(runs, context)),
 };
 
 export const ActorSchema = z.object({
@@ -210,6 +490,11 @@ export const ActorSchema = z.object({
   kind: z.enum(['human', 'agent', 'system']),
   name: z.string().min(1).max(80),
   color: z.string().regex(/^#[0-9a-fA-F]{6,8}$/),
+  client: z.object({
+    model: z.string().trim().min(1).max(200).optional(),
+    reasoningEffort: z.enum(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']).optional(),
+    taskId: z.string().trim().min(1).max(200).optional(),
+  }).strict().optional(),
 });
 
 export const CanvasOperationSchema = z
@@ -251,7 +536,7 @@ export const CanvasTransactionSchema = z
 
 export const PersistedDocumentSchema = z
   .object({
-    schemaVersion: z.literal(1),
+    schemaVersion: z.literal(2),
     id: z.string().min(1),
     revision: z.number().int().nonnegative(),
     name: z.string().min(1),
@@ -271,6 +556,24 @@ export function validateDocument(value: unknown): AIDrawDocument {
   if (document.kind === 'illustration') {
     if (!Array.isArray(document.layerIds) || typeof document.layers !== 'object' || typeof document.objects !== 'object') {
       throw new Error('Invalid illustration document structure');
+    }
+    if (!Array.isArray(document.brushPresets)) document.brushPresets = [];
+    if (!Array.isArray(document.guides)) document.guides = [];
+    document.snapSettings ??= { artboard: true, objects: true, guides: true, grid: false, pixel: false, gridSize: 16, tolerance: 8 };
+    document.animation ??= { durationMs: 2_000, framesPerSecond: 12, playback: 'loop', keyframeIds: [], keyframes: {} };
+    const animation = IllustrationAnimationInputSchema.safeParse(document.animation);
+    if (!animation.success) throw new Error(`Invalid illustration animation: ${animation.error.issues.map((issue) => issue.message).join('; ')}`);
+    document.animation = animation.data;
+    for (const [layerId, layer] of Object.entries(document.layers)) {
+      if (!layer || typeof layer !== 'object' || typeof layer.type !== 'string') throw new Error(`Invalid illustration layer ${layerId}`);
+      if (layer.type !== 'paint') continue;
+      if (layer.tileSize !== 256 || !Array.isArray(layer.strokes) || !layer.tileAssetIds || typeof layer.tileAssetIds !== 'object' || Array.isArray(layer.tileAssetIds)) throw new Error(`Invalid paint layer ${layerId}`);
+      const tileEntries = Object.entries(layer.tileAssetIds);
+      if (tileEntries.length > 16_384 || tileEntries.some(([key, assetId]) => !/^-?\d+,-?\d+$/.test(key) || typeof assetId !== 'string' || !assetId)) throw new Error(`Invalid paint tile index on layer ${layerId}`);
+      if (layer.tileCache) {
+        const cache = layer.tileCache;
+        if (cache.version !== 1 || !Number.isInteger(cache.strokeCount) || cache.strokeCount < 0 || cache.strokeCount > layer.strokes.length || !/^[0-9a-f]{64}$/i.test(cache.strokesSha256)) throw new Error(`Invalid paint tile cache on layer ${layerId}`);
+      }
     }
   } else if (!Array.isArray(document.assetIds) || typeof document.pixelAssets !== 'object') {
     throw new Error('Invalid pixel document structure');

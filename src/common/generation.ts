@@ -30,4 +30,7 @@ export interface GeneratedOutput {
 export interface GenerationJobResult {
   request: GenerationRequest;
   outputs: GeneratedOutput[];
+  /** Frozen source/canvas preview captured before the paid request starts. */
+  comparisonSource?: GeneratedOutput;
+  acceptedOutputId?: Id;
 }

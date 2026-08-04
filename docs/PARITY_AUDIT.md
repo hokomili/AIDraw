@@ -1,112 +1,80 @@
-# AIDraw human/agent parity audit
+# Human/agent parity audit
 
-Audited: 2026-08-03. Method: code-level enumeration of the complete human surface (renderer tools, panels, dialogs, native menus, main-process IPC) and the complete agent surface (MCP tools, resources, the operation union, reducer semantics, limits), cross-checked for divergence. [FEATURE_TRACKER.md](FEATURE_TRACKER.md) remains the status source of truth; this file records the parity lens specifically.
+Last audited: 2026-08-04
 
-**Goal context.** AIDraw's objective is an agent-native drawing harness that empowers AI to reach the human ceiling of art skill. The parity question is therefore exact: can an MCP agent reach every document state a human artist can reach in the editor, with comparable feedback and throughput? Section 9 widens the lens to what is missing for the goal itself.
+## Verdict
 
-**Tracker reconciliation.** The actionable findings below are now represented in the release tracker as PAR-01–10 and SEC-01–05, with AGT-11 covering semantic operations and AGT-16 covering model/effort/task provenance. The tracker records status and priority; this audit retains the supporting parity analysis.
+AIDraw now has practical agent parity for the highest-value autonomous drawing loop: an authenticated agent can create a fully configured document, inspect exact state or a targeted raster, observe coarse human occupancy, apply compact revision-checked edits, wait on its own jobs, undo/redo, and start bounded non-mutating trace replay without an editor window.
 
-## 1. Verdict
+Parity is not complete. Durable long-run batching, checkpoint comparison/merge, exact-time illustration-animation observation, and the highest-value semantic drawing kernels are available to agents. The remaining parity gaps are packaged attached-renderer acceptance, cheaper lower-level branch/merge workflows, richer cross-asset graph conveniences, and a small set of UI-only editing affordances. The editor itself also remains pre-v1, so parity does not imply professional feature completeness.
 
-The architectural foundation is genuinely parity-capable, but parity is not yet achieved. Both surfaces converge on a single vocabulary — the 25-kind `CanvasOperation` union (`packages/core/src/operations.ts:17-54`), one zod schema (`packages/core/src/schemas.ts`), one reducer (`packages/core/src/reducer.ts:66-393`) — whether the caller is the React UI (`src/main/main.ts:187`) or MCP `canvas_apply` (`src/main/mcp-host.ts:289-299`). **Zero operation kinds are blocked for agents**, and every model field is agent-writable (blend modes, masks, gradient stops, text ranges, shadows, cel links, Wang sets, collision shapes, palette overrides). The gaps are concentrated in creation-time options, renderer-computed semantics, observation granularity, throughput, and a few hardening asymmetries.
+## Shared canonical boundary
 
-## 2. Gap class 1 — hard gaps (agent cannot do it at all)
+Both renderer IPC and MCP commit through the same application-owned operation schema and reducer. There are 41 canonical operation kinds, including compact pixel/tile regions, atomic artboard replace/translate, palette reordering, and schema-2 illustration-animation settings/keyframes. Generic verified-provenance mutations are intentionally denied to untrusted human/agent transactions; generation provenance is written only through the engine-owned acceptance path.
 
-| Gap | Evidence |
+MCP also accepts a bounded semantic layer that expands into canonical operations:
+
+- pixel flood fill, replace color, atomic replace-and-delete palette remapping, index/luminance adjustment, configurable ordered dithering, deterministic bitmap-font text, embedded-image quantization, integer selection scaling, animation/tags, reusable stamps, typed tilemap objects, per-tile collisions, Wang authoring, deterministic weighted tile variants, and hash-checked pixel-project embed/pack operations;
+- illustration align/distribute, gradients, styled text, image crop, object/layer/group filter stacks, masks, exact path booleans, schema-2 animation settings/keyframes, and the editable polished-gold material recipe;
+- compact RLE cel and tilemap writes.
+
+Human and headless agent path booleans share the exact Paper.js kernel in [`src/common/path-boolean.ts`](../src/common/path-boolean.ts), including transformed inputs and canonical delete/add replacement semantics. Import/export, quantization, observation compositing, and provider generation now run through supervised utility workers; generation cancellation allows provider cleanup before worker replacement. Packaged crash and resource-pressure acceptance remains performance hardening rather than a capability gap.
+
+## Closed parity gaps
+
+| Area | Current contract and evidence |
 | --- | --- |
-| `document_manage:new` accepts only kind/name/width/height. No artboard background, no tilemap orientation/infinite/tile-size at creation; the human New Document dialog has all of these. | `src/main/mcp-host.ts:311` vs `src/common/contracts.ts:23-27` |
-| Artboard resize after creation exists for no one (human or agent). | FEATURE_TRACKER ILL-01 |
-| No clipboard access. Human copy/paste carries SVG + PNG + AIDraw fragments; pasting a foreign image into a pixel document quantizes in main. | `src/main/main.ts:138-170` |
-| Image-to-indexed-pixel quantization is a main-only helper; outside the generation-accept flow an agent must reimplement OKLab quantization itself. | `src/main/quantize.ts`, `src/main/generation-manager.ts:96-152` |
-| Agents cannot acquire, hold, or observe human locks; conflicts surface only as `locked` responses. Human presence/cursor is invisible to agents (humans never enter the presence map). | `src/main/document-service.ts:451-478`, `src/main/mcp-host.ts:260-272` |
-| Agent trace replay is human-only IPC; agents cannot trigger replay. | `src/main/main.ts:279-284` |
+| Creation | One strict `NewDocumentOptionsSchema` covers kind, name, dimensions, background, map orientation, finite/infinite mode, and tile geometry. Direct and MCP isometric creation are compared in contract tests. |
+| Image-to-pixel | `pixel.image.quantize` performs area resize, OKLab palette matching, configured alpha threshold, and optional Bayer/Floyd–Steinberg dithering. Source and conversion metadata remain in the trace. |
+| Human contention | Session inspection and observation return coarse object/region occupancy plus retry guidance. Agents cannot acquire human-priority locks. |
+| Replay | `history_manage:replay` is actor-authorized, one-at-a-time, bounded to one million samples, and does not mutate revision/history. |
+| Checkpoints | `history_manage` creates/lists/restores/deletes attributed editable document checkpoints and selectively merges top-level layer trees or pixel assets; `canvas_observe.checkpointId` returns canonical state or PNG. Restore preserves the abandoned branch automatically. |
+| Visual observation | Asset/frame/layer/region, integer scale, background, named checkpoint, and exact illustration timeline time are selectable. Targets and output size are validated before utility-process rendering and PNG output is byte-capped. The latest commit can be observed as a race-free revision-labelled before/after pair under one shared budget. |
+| Document fragments | `canvas_observe` exports bounded, self-contained editable object/asset graphs and `canvas_apply` imports them through server-attributed canonical operations. Clipboard uses the same versioned contract, while MCP never reads ambient clipboard state. |
+| Attached advisory | The renderer publishes viewport, selection/tool/zoom, active asset/frame/tag, onion-skin, playback, and direction as sanitized non-canonical hints that clear on detach. |
+| Workspace/jobs | Document listing has an explicit active ID. Job list/inspect/wait/cancel are owner-scoped and sanitized; human prompts, results, credentials, and approval details are not leaked. |
+| Throughput | Pixel/tile RLE runs support one million cells, cross 32×32 chunks, exact inverse, progressive reveal/cancel, and sample-based backpressure. Numbered durable batches add progress, idempotent resume, cross-session token rebinding, cancellation, and crash reconciliation from the transaction trace. |
+| Attribution | Actor metadata can declare model, reasoning effort, and task ID. UI labels never synthesize `undefined`; metadata is explicitly client-declared rather than platform-attested. |
+| Project links | Humans and agents share immutable hash/cache transition kernels. MCP semantic operations embed or pack without UI; explicit approved `asset_import.projectLinkId` and `document_export.projectLinkId` requests relink or extract without filesystem enumeration. |
+| Hardening | Entity attribution is server-authored, inline rasters and addressed imports are decoded/parsed under explicit byte and expansion budgets, companion paths are contained, asset references are protected, conversion settings are strict, and verified provenance is engine-only. |
 
-## 3. Gap class 2 — semantic gaps (replicable in theory, unreasonable in practice)
+## Remaining parity backlog
 
-These commit through standard operations, but the computation lives in renderer/main code the agent cannot invoke. The agent must re-derive the geometry and emit raw primitives. This is where the human ceiling is actually lost, and it confirms AGT-11 verbatim:
+| Tracker | Gap | Why it matters |
+| --- | --- | --- |
+| PAR-08 | Attached-renderer advisory acceptance | The complete advisory contract is implemented and sanitized; packaged attach/detach and live-state acceptance remains to graduate it from Working. |
+| PAR-10 | Layer variants and selective merge | Document checkpoints, canonical observation, overlay/side-by-side review, accept/reject, persistence, safety branches, and dependency-aware top-level layer/pixel-asset merge are implemented. Cheap in-place layer forks and lower-level entity merge remain. |
+| AGT-11 | Remaining semantic kernels | Richer cross-asset graph cascades remain; project linking, Wang authoring, deterministic tile variants, and isolated layer/group filters now share semantic or approval-backed agent paths. |
 
-- **Path booleans** (union/subtract/intersect/exclude) — Paper.js in the renderer; agent must reproduce boolean geometry as raw `pathData`. `src/renderer/canvas/path-boolean.ts`
-- **Flood fill, replace color, lighten/darken, ordered dither, pixel-perfect pencil, stamp, bitmap-font rasterization** — renderer-computed pixel sets committed via `pixel.cel.set`. `src/renderer/canvas/PixelCanvas.tsx:101-191`
-- **Align/distribute, snap-move, gradient drag placement, Bézier smoothing, node editing, image crop drag** — renderer geometry, plain operations out. `src/renderer/canvas/IllustrationCanvas.tsx`, `src/common/illustration-geometry.ts`
-- **Material presets** (e.g. polished gold: 9-stop gradient + 5 masked overlay clones) — packaged renderer recipe. `src/common/material-presets.ts`
-- **Sprite layer add/delete cascades, cel-per-frame fabrication, tileset/Wang/collision stubs** — whole-asset `pixel.asset.replace` graphs built UI-side. `src/renderer/App.tsx:2072-2351, 3544-3614`
-- **Coarse-granularity tier**: pixel layers, cel add/delete/relink on existing frames, animation tags, palette overrides, tileset tiles/Wang/transformations, tilemap object layers — reachable only through whole-asset replace, never first-class operations.
-
-## 4. Gap class 3 — observation gaps (agent draws with one eye closed)
-
-`canvas_observe` provides full document JSON, revision diffs (including human operations), the durable trace, and a flattened PNG. Missing:
-
-- PNG granularity: active asset only, **first frame only**, no per-layer PNG, no scale option. `src/main/render-document.ts:160-224`
-- No jobs enumeration — agents can only inspect job IDs they were handed; human-initiated jobs are invisible.
-- `activeDocumentId` stripped from the documents resource; only inferable indirectly.
-- No lock list, no human presence, no selection/tool/zoom/onion-skin/playback state (renderer-only React state).
-
-## 5. Gap class 4 — throughput and boundary asymmetries (mostly by design)
+## Boundary asymmetries that remain by design
 
 | Agent | Human |
 | --- | --- |
-| 256 operations / transaction, 2 MiB body and transaction caps | Uncapped, instant commits |
-| 4 visible playback lanes, 4 queued transactions per actor, 1M-sample global budget, `busy` under load | Direct reducer application |
-| 2-minute approval jobs for file reads/writes outside trust, every overwrite, all generation | Direct file dialogs and generation |
-| No locks; loses every contested region to the human | Lock priority by design |
+| 256 canonical operations, 2 MiB request/transaction, four queued transactions per actor, four visible lanes, one-million-sample playback budget | Pointer previews are local and human commits bypass the agent queue |
+| Explicit addressed paths, approval outside trust, and approval for every overwrite | Native dialogs convey direct user intent |
+| Every generation request waits for human approval | Human-started generation does not ask twice |
+| Sees coarse occupancy/advisory state only | Owns detailed local UI state |
 
-The caps are sane backpressure and the approval boundary is a security requirement; but as-is they make long autonomous runs (e.g. repainting a 512×512 cel through chunked `pixel.cel.set`) materially slower than a human gesture.
+These are security, responsiveness, and privacy boundaries rather than parity defects. Long-run batching must work within them, not remove them.
 
-## 6. Gap class 5 — asymmetries in the agent's favor (hardening debt)
+## Studio-level gaps shared by human and agent
 
-- `asset.add` with inline base64 bypasses import approval entirely (capped only by 2 MiB).
-- `provenance.add` is unrestricted; provenance can be written without any generation.
-- `createdBy`/`createdAt`/`revision` inside add-payloads are cloned verbatim — attribution is forgeable.
-- `asset.delete` has no referential-integrity check (can orphan objects referencing the asset).
-- `pixel.conversion.replace` accepts unvalidated values (no zod constraint).
+The largest capability limits now belong to the editor itself:
 
-## 7. Parity roadmap (priority order)
+- deeper paper/pigment simulation and portable brush-library management beyond the sparse tiled paint/cache path (ILL-06–08, ILL-18);
+- deeper semantic path/text editing, mask/filter depth, and richer illustration property tracks/dope-sheet editing (ILL-09, ILL-13–17, ILL-21);
+- cross-application pixel clipboard behavior, animated interchange fixtures, collision/object-map polish, and external Tiled fixtures (PIX-05/10–14, MAP-02–13);
+- advanced SVG/PDF/PSD portability, editable PDF import, and broader animated/Tiled interchange corpora (IO-02–09);
+- live generation-provider compatibility, broader error/mode matrices and goldens, packaged accessibility/input testing, and interactive performance evidence.
 
-1. **First-class semantic operations** (extends AGT-11): path booleans, align/distribute, flood fill, replace color, gradient placement, region cel/tile writes. Each is already a reducer-level pattern; expose as operations.
-2. **Enrich `document_manage:new`** with background and tilemap geometry options (small, high value).
-3. **Observation upgrades**: lock list, per-layer/per-frame PNG with scale, job list, `activeDocumentId`.
-4. **Agent-callable quantize / import-to-pixel path** outside the generation flow.
-5. **Harden the agent-favored asymmetries** (class 5) before they become attribution bugs.
+## Ordered path from here
 
-## 8. What parity already delivers
-
-Headless authenticated engine with no editor required; durable attributed traces and non-mutating replay; per-actor undo; idempotency and revision conflicts; fair lanes and cancellation with partial commit; shared operation vocabulary with zero agent-blocked kinds; generation pipeline with approval gates and palette conversion; native `.aidraw` persistence with recovery. An agent can already autonomously produce complete, attributed illustration and pixel documents.
-
-## 9. Gaps against the ultimate goal: human-ceiling art skill for AI
-
-Parity with the *current UI* is necessary but not sufficient — the UI itself is a pre-v1 prototype (FEATURE_TRACKER "Current release truth"). Reaching the human ceiling requires closing three further rings of gaps.
-
-### 9.1 Artistic capability missing on both surfaces
-
-The agent can only be as good as the studio. These professional fundamentals are absent or partial for human and agent alike (tracker IDs in parentheses):
-
-- Expressive media: no watercolor/natural-media painting (ILL-07), no custom brush engine or preset management (ILL-08), basic stroke compositing without spacing/stabilization/texture/wet mixing (ILL-06).
-- Core editing depth: no transform handles (scale/rotate/skew/pivot) (ILL-03), no semantic path/node editing (ILL-09), no in-canvas styled-range text editing (ILL-13), incomplete selection workflows in pixel mode (PIX-05, PIX-13), scaffolded stamps (PIX-06).
-- Non-destructive workflows: no reorderable filter stack, filter masks, or export parity (ILL-17); incomplete mask/clipping authoring (ILL-14).
-- Completed animation authoring (PIX-10/11 partial; ILL-21 missing) and map/tileset authoring (MAP-02–06, MAP-10–11).
-- Interchange fidelity: SVG/PDF/PSD round trips are partial (IO-02–05) — ceiling-level work must survive professional pipelines.
-
-### 9.2 Agent-only capability the goal needs beyond UI parity
-
-Human artists do not work blind; they continuously look, compare, and revise. The harness must give agents equivalent loops, not just equivalent mutations:
-
-- **Perceptual feedback**: multi-scale and region observe, per-layer/per-frame rasters, before/after compare (GEN-08 is partial) — enough visual grounding for an agent to critique its own work.
-- **Safe experimentation**: document branching/variants or cheap duplicate-and-compare flows; non-destructive adjustments an agent can revise without inverse-operation archaeology.
-- **Semantic authoring primitives** (section 3) so model capacity goes to composition and taste, not reimplementing geometry kernels.
-- **Long-run autonomy**: utility-process isolation (FND-09), performance budgets (FND-12/QA-07), and throughput that survives multi-hour unattended sessions.
-- **Reliable generation loop**: provider adapters validated against deterministic mock servers (GEN-02–04, QA-05) — generation is the agent's unique amplifier and is currently untested against failure matrices.
-- **Richer provenance** (AGT-16): model/effort/task identity per transaction, so attributed traces become a learning and review signal rather than labels.
-- **Learning from demonstration**: the durable trace store already records human and agent transactions; with AGT-16 metadata and replay, human sessions become training/eval corpora for closing the skill gap measurably (golden-image suite QA-02 can double as the scoring harness).
-
-### 9.3 Ordered path to the goal
-
-1. Close parity sections 2–4 (semantic ops, creation options, observation, quantize path).
-2. Close class-5 hardening debt and AGT-16 provenance.
-3. Build the perception/iteration loop (observe upgrades, compare, branching) and validate providers with mock suites.
-4. Finish daily-driver depth (ILL-03/06/09/13/17, PIX-05/13) — prioritized by what agents exercise most.
-5. Add the bounded natural-media/custom-brush MVP (ILL-07/08) with golden-image tests.
-6. Meet the platform gates (FND-09/12, QA-02/05/07) so ceiling-level output survives scale, then the release gate (REL-01–07).
+1. Finish the remaining daily illustration/pixel/map depth and representative external interchange fixtures.
+2. Complete live-provider compatibility/error matrices and packaged utility crash/cancellation acceptance.
+3. Run packaged attached-editor, accessibility, pointer/frame-pacing, and multi-document regressions with Computer Use.
+4. Prove installer/portable behavior, CI, reproducibility, and the Level 3 release workflow on the exact candidate build.
+5. Stop at the selected Windows-local v1 boundary; remote multi-agent service infrastructure and non-Windows OS support begin only as separately scoped post-v1 programs.
 
 ## Maintenance rule
 
-Same as the feature tracker: any change that alters the human or agent surface must update this audit in the same change set. Facts above cite code; judgments are marked as roadmap items.
+Any change that materially alters the human or agent surface must update this audit and [`FEATURE_TRACKER.md`](FEATURE_TRACKER.md) in the same change set. “Working” means the current workflow is usable; “Verified” requires automated acceptance evidence.

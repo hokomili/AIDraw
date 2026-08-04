@@ -1,12 +1,16 @@
 import { dirname, extname, join } from 'node:path';
 import { createCanvas, type Canvas } from '@napi-rs/canvas';
-import { writePsdBuffer, type Layer as PsdLayer, type Psd } from 'ag-psd';
-import { PDFDocument } from 'pdf-lib';
+import { initializeCanvas as initializePsdCanvas, writePsdBuffer, type Layer as PsdLayer, type Psd } from 'ag-psd';
+import { LineCapStyle, PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from 'pdf-lib';
 import { GIFEncoder, applyPalette, quantize } from 'gifenc';
 import UPNG from 'upng-js';
 import { getStroke } from 'perfect-freehand';
 import {
   decodeTilemapChunk,
+  illustrationAnimationSamples,
+  illustrationAtTime,
+  normalizeTextStyleRanges,
+  pixelAnimationSequence,
   type AIDrawDocument,
   type IllustrationDocument,
   type IllustrationObject,
@@ -16,8 +20,12 @@ import {
   type PixelTilemap,
   type PixelTileset,
 } from '@aidraw/core';
+import { splitColorAlpha } from '../common/color';
+import { layoutStyledText } from '../common/text-layout';
 import type { ExportFormat, ExportOptions } from '../common/contracts';
 import { renderDocument, renderIllustration, renderSprite } from './render-document';
+
+initializePsdCanvas(createCanvas as unknown as (width: number, height: number) => HTMLCanvasElement);
 
 export type { ExportFormat } from '../common/contracts';
 
@@ -104,7 +112,7 @@ function stylePaint(object: IllustrationObject, slot: 'fill' | 'stroke', style: 
 
 function paintDefinition(object: IllustrationObject, slot: 'fill' | 'stroke', style: PaintStyle): string {
   if (style.kind !== 'linear-gradient' && style.kind !== 'radial-gradient') return '';
-  const stops = style.stops.map((stop) => `<stop offset="${stop.offset}" stop-color="${xml(stop.color)}"/>`).join('');
+  const stops = style.stops.map((stop) => { const split = splitColorAlpha(stop.color); const opacity = Math.max(0, Math.min(1, split.opacity * (stop.opacity ?? 1))); return `<stop offset="${stop.offset}" stop-color="${xml(split.color)}"${opacity < 1 ? ` stop-opacity="${opacity}"` : ''}/>`; }).join('');
   if (style.kind === 'linear-gradient') return `<linearGradient id="${paintId(object, slot)}" gradientUnits="userSpaceOnUse" x1="${style.x1}" y1="${style.y1}" x2="${style.x2}" y2="${style.y2}">${stops}</linearGradient>`;
   const radius = Math.hypot(style.x2 - style.x1, style.y2 - style.y1);
   return `<radialGradient id="${paintId(object, slot)}" gradientUnits="userSpaceOnUse" cx="${style.x1}" cy="${style.y1}" r="${radius}">${stops}</radialGradient>`;
@@ -121,16 +129,30 @@ function pressureData(object: Extract<IllustrationObject, { type: 'vector-stroke
   return `${outline.map((point, index) => `${index ? 'L' : 'M'}${point[0].toFixed(2)} ${point[1].toFixed(2)}`).join(' ')} Z`;
 }
 
-function svgObject(document: IllustrationDocument, object: IllustrationObject, geometryOnly = false): string {
+function svgObject(document: IllustrationDocument, object: IllustrationObject, geometryOnly = false, visiting = new Set<string>()): string {
+  if ((!object.visible && !geometryOnly) || visiting.has(object.id)) return '';
   const effect = geometryOnly ? '' : `${(object.blur ?? 0) > 0 ? ` filter="url(#blur-${svgId(object.id)})"` : ''}${object.maskObjectId ? ` clip-path="url(#clip-${svgId(object.id)})"` : ''}`;
   const common = `transform="${transform(object)}"${geometryOnly ? '' : ` opacity="${object.opacity}" style="mix-blend-mode:${object.blendMode}"`}${effect}`;
   if (object.type === 'vector-stroke') return `<path ${common} d="${pressureData(object)}" fill="${xml(object.brush.color)}"/>`;
-  if (object.type === 'path') return `<path ${common} d="${xml(object.pathData)}" fill="${geometryOnly ? '#000' : stylePaint(object, 'fill', object.fill)}" fill-rule="${object.fillRule}" stroke="${geometryOnly ? 'none' : stylePaint(object, 'stroke', object.stroke.paint)}" stroke-width="${geometryOnly ? 0 : object.stroke.width}"/>`;
+  if (object.type === 'group') {
+    const next = new Set(visiting); next.add(object.id);
+    return `<g ${common}>${object.childIds.map((id) => document.objects[id]).filter(Boolean).map((child) => svgObject(document, child, geometryOnly, next)).join('')}</g>`;
+  }
+  const strokeAttributes = (stroke: Extract<IllustrationObject, { type: 'path' | 'shape' }>['stroke']) => geometryOnly
+    ? 'stroke="none" stroke-width="0"'
+    : `stroke="${stylePaint(object, 'stroke', stroke.paint)}" stroke-width="${stroke.width}" stroke-opacity="${stroke.opacity}" stroke-linecap="${stroke.lineCap}" stroke-linejoin="${stroke.lineJoin}"${stroke.dash.length ? ` stroke-dasharray="${stroke.dash.join(' ')}"` : ''}`;
+  if (object.type === 'path') return `<path ${common} d="${xml(object.pathData)}" fill="${geometryOnly ? '#000' : stylePaint(object, 'fill', object.fill)}" fill-rule="${object.fillRule}" ${strokeAttributes(object.stroke)}/>`;
   if (object.type === 'shape') {
-    const style = `fill="${geometryOnly ? '#000' : stylePaint(object, 'fill', object.fill)}" stroke="${geometryOnly ? 'none' : stylePaint(object, 'stroke', object.stroke.paint)}" stroke-width="${geometryOnly ? 0 : object.stroke.width}"`;
+    const style = `fill="${geometryOnly ? '#000' : stylePaint(object, 'fill', object.fill)}" ${strokeAttributes(object.stroke)}`;
     if (object.shape === 'rectangle') return `<rect ${common} ${style} width="${object.width}" height="${object.height}" rx="${object.cornerRadius ?? 0}"/>`;
     if (object.shape === 'ellipse') return `<ellipse ${common} ${style} cx="${object.width / 2}" cy="${object.height / 2}" rx="${Math.abs(object.width / 2)}" ry="${Math.abs(object.height / 2)}"/>`;
-    if (object.shape === 'line' || object.shape === 'arrow') return `<line ${common} ${style} x1="0" y1="0" x2="${object.width}" y2="${object.height}"/>`;
+    if (object.shape === 'line') return `<line ${common} ${style} x1="0" y1="0" x2="${object.width}" y2="${object.height}"/>`;
+    if (object.shape === 'arrow') {
+      const angle = Math.atan2(object.height, object.width); const head = Math.max(10, object.stroke.width * 4);
+      const first = { x: object.width - Math.cos(angle - 0.5) * head, y: object.height - Math.sin(angle - 0.5) * head };
+      const second = { x: object.width - Math.cos(angle + 0.5) * head, y: object.height - Math.sin(angle + 0.5) * head };
+      return `<path ${common} ${style} d="M 0 0 L ${object.width} ${object.height} M ${object.width} ${object.height} L ${first.x} ${first.y} M ${object.width} ${object.height} L ${second.x} ${second.y}"/>`;
+    }
     const count = object.shape === 'star' ? Math.max(3, object.sides ?? 5) * 2 : Math.max(3, object.sides ?? 6);
     const radius = Math.min(Math.abs(object.width), Math.abs(object.height)) / 2;
     const points = Array.from({ length: count }, (_, index) => {
@@ -141,17 +163,22 @@ function svgObject(document: IllustrationDocument, object: IllustrationObject, g
     return `<polygon ${common} ${style} points="${points}"/>`;
   }
   if (object.type === 'text') {
-    const range = object.ranges[0];
-    return `<text ${common} fill="${xml(range?.color ?? '#27213c')}" font-family="${xml(range?.fontFamily ?? 'sans-serif')}" font-size="${range?.fontSize ?? 48}" font-weight="${range?.fontWeight ?? 500}">${xml(object.text)}</text>`;
+    const ranges = object.ranges.length ? object.ranges : [{ start: 0, end: object.text.length, fontFamily: 'sans-serif', fontSize: 48, fontWeight: 500, fontStyle: 'normal' as const, color: '#27213c', letterSpacing: 0 }];
+    const content = ranges.map((range, index) => `<tspan${index === 0 ? ` x="0" y="${range.fontSize}"` : ''} fill="${xml(range.color)}" font-family="${xml(range.fontFamily)}" font-size="${range.fontSize}" font-weight="${range.fontWeight}" font-style="${range.fontStyle}" letter-spacing="${range.letterSpacing}"${range.underline ? ' text-decoration="underline"' : ''}>${xml(object.text.slice(range.start, range.end))}</tspan>`).join('');
+    return `<text ${common} text-anchor="${object.align === 'center' ? 'middle' : object.align === 'right' ? 'end' : 'start'}">${content}</text>`;
   }
   if (object.type === 'image') {
     const asset = document.assets[object.assetId];
-    return asset?.data ? `<image ${common} width="${object.width}" height="${object.height}" href="data:${asset.mimeType};base64,${asset.data}"/>` : '';
+    if (!asset?.data) return '';
+    if (!object.crop) return `<image ${common} width="${object.width}" height="${object.height}" preserveAspectRatio="none" href="data:${asset.mimeType};base64,${asset.data}"/>`;
+    const sourceWidth = object.sourceWidth ?? object.crop.x + object.crop.width; const sourceHeight = object.sourceHeight ?? object.crop.y + object.crop.height;
+    const scaleX = object.width / object.crop.width; const scaleY = object.height / object.crop.height;
+    return `<g ${common}><clipPath id="crop-${svgId(object.id)}"><rect width="${object.width}" height="${object.height}"/></clipPath><image clip-path="url(#crop-${svgId(object.id)})" x="${-object.crop.x * scaleX}" y="${-object.crop.y * scaleY}" width="${sourceWidth * scaleX}" height="${sourceHeight * scaleY}" preserveAspectRatio="none" href="data:${asset.mimeType};base64,${asset.data}"/></g>`;
   }
   return '';
 }
 
-export function illustrationToSvg(document: IllustrationDocument): string {
+export function illustrationToSvg(document: IllustrationDocument, paintLayerFallbacks: Record<string, string> = {}): string {
   const definitions = Object.values(document.objects).flatMap((object) => {
     const entries: string[] = [];
     if (object.type === 'shape' || object.type === 'path') {
@@ -163,16 +190,43 @@ export function illustrationToSvg(document: IllustrationDocument): string {
   }).join('');
   const svgLayer = (id: string): string => {
     const layer = document.layers[id]; if (!layer?.visible) return '';
+    const objectChildren = new Set(Object.values(document.objects).flatMap((object) => object.type === 'group' ? object.childIds : []));
     const content = layer.type === 'vector'
-      ? layer.objectIds.map((id) => document.objects[id]).filter(Boolean).map((object) => svgObject(document, object)).join('')
+      ? layer.objectIds.filter((id) => !objectChildren.has(id)).map((id) => document.objects[id]).filter(Boolean).map((object) => svgObject(document, object)).join('')
       : layer.type === 'paint'
-        ? layer.strokes.map((stroke) => `<polyline fill="none" stroke="${xml(stroke.color)}" stroke-width="${stroke.size}" stroke-linecap="round" stroke-linejoin="round" opacity="${stroke.opacity}" points="${stroke.points.map((point) => `${point.x},${point.y}`).join(' ')}"/>`).join('')
+        ? paintLayerFallbacks[layer.id]
+          ? `<image width="${document.artboard.width}" height="${document.artboard.height}" href="data:image/png;base64,${paintLayerFallbacks[layer.id]}"/>`
+          : layer.strokes.map((stroke) => `<polyline fill="none" stroke="${xml(stroke.color)}" stroke-width="${stroke.size}" stroke-linecap="round" stroke-linejoin="round" opacity="${stroke.opacity}" points="${stroke.points.map((point) => `${point.x},${point.y}`).join(' ')}"/>`).join('')
         : layer.childIds.map(svgLayer).join('');
     return `<g id="${xml(layer.id)}" opacity="${layer.opacity}" style="mix-blend-mode:${layer.blendMode}">${content}</g>`;
   };
   const layers = document.layerIds.map(svgLayer).join('');
   const background = document.artboard.background ? `<rect width="100%" height="100%" fill="${xml(document.artboard.background)}"/>` : '';
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${document.artboard.width}" height="${document.artboard.height}" viewBox="0 0 ${document.artboard.width} ${document.artboard.height}">${definitions ? `<defs>${definitions}</defs>` : ''}${background}${layers}</svg>`;
+}
+
+async function illustrationSvg(document: IllustrationDocument): Promise<ExportArtifact> {
+  const paintLayerFallbacks: Record<string, string> = {};
+  const rasterized: string[] = [];
+  const warnings = new Set<string>();
+  for (const layer of Object.values(document.layers)) {
+    if (layer.type === 'paint' && layer.strokes.length) {
+      const source = structuredClone(document); const sourceLayer = source.layers[layer.id];
+      if (sourceLayer?.type === 'paint') { sourceLayer.opacity = 1; sourceLayer.blendMode = 'normal'; sourceLayer.filters = []; delete sourceLayer.maskLayerId; }
+      paintLayerFallbacks[layer.id] = (await renderIllustration(source, layer.id, false)).toBuffer('image/png').toString('base64');
+      rasterized.push(layer.name);
+    }
+    if (layer.filters?.length) warnings.add(`Layer “${layer.name}” adjustment filters may vary between SVG viewers.`);
+    if (layer.maskLayerId) warnings.add(`Layer mask on “${layer.name}” is not portable in SVG and should be visually checked.`);
+  }
+  for (const object of Object.values(document.objects)) {
+    if (object.filters?.length) warnings.add(`Adjustment filters on “${object.name}” are not encoded in this SVG export.`);
+    if (object.shadow) warnings.add(`Shadow on “${object.name}” is not encoded in this SVG export.`);
+    if (object.type === 'text' && (object.align === 'justify' || object.text.includes('\n'))) warnings.add(`Text box layout for “${object.name}” may reflow in another SVG application.`);
+    if (object.type === 'image' && !document.assets[object.assetId]?.data) warnings.add(`Image “${object.name}” is missing its embedded source and was omitted.`);
+  }
+  if (rasterized.length) warnings.add('Paint layers are embedded as transparent PNG fallbacks so erasing and natural-media brushes remain visually faithful.');
+  return { data: Buffer.from(illustrationToSvg(document, paintLayerFallbacks)), mimeType: 'image/svg+xml', extension: 'svg', report: { warnings: [...warnings], rasterized } };
 }
 
 async function raster(document: AIDrawDocument, format: 'png' | 'jpeg' | 'webp', scale = 1): Promise<ExportArtifact> {
@@ -186,13 +240,232 @@ async function raster(document: AIDrawDocument, format: 'png' | 'jpeg' | 'webp',
   return { data, mimeType: mime, extension: format === 'jpeg' ? 'jpg' : format, report: { warnings: scaleWarnings(scale), rasterized: [] } };
 }
 
+type PdfColor = { color: ReturnType<typeof rgb>; opacity: number };
+
+function pdfColor(value: string): PdfColor | undefined {
+  const split = splitColorAlpha(value);
+  if (!/^#[0-9a-f]{6}$/i.test(split.color)) return undefined;
+  return {
+    color: rgb(
+      Number.parseInt(split.color.slice(1, 3), 16) / 255,
+      Number.parseInt(split.color.slice(3, 5), 16) / 255,
+      Number.parseInt(split.color.slice(5, 7), 16) / 255,
+    ),
+    opacity: split.opacity,
+  };
+}
+
+function pdfObjectHasSimpleTransform(object: IllustrationObject): boolean {
+  const transform = object.transform;
+  return transform.scaleX === 1 && transform.scaleY === 1 && transform.rotation === 0 && transform.skewX === 0 && transform.skewY === 0;
+}
+
+function pdfObjectHasEffects(object: IllustrationObject): boolean {
+  return object.opacity < 0 || object.opacity > 1 || object.type === 'group' && object.opacity !== 1 || object.blendMode !== 'normal' || Boolean(object.blur || object.filters?.length || object.maskObjectId || object.shadow);
+}
+
+function solidPdfPaint(paint: PaintStyle): PdfColor | undefined {
+  return paint.kind === 'solid' ? pdfColor(paint.color) : undefined;
+}
+
+function shapePdfPath(object: Extract<IllustrationObject, { type: 'shape' }>): string {
+  if (object.shape === 'rectangle') {
+    const radius = Math.max(0, Math.min(object.cornerRadius ?? 0, Math.abs(object.width) / 2, Math.abs(object.height) / 2));
+    if (!radius) return `M 0 0 H ${object.width} V ${object.height} H 0 Z`;
+    return `M ${radius} 0 H ${object.width - radius} Q ${object.width} 0 ${object.width} ${radius} V ${object.height - radius} Q ${object.width} ${object.height} ${object.width - radius} ${object.height} H ${radius} Q 0 ${object.height} 0 ${object.height - radius} V ${radius} Q 0 0 ${radius} 0 Z`;
+  }
+  if (object.shape === 'ellipse') return `M ${object.width} ${object.height / 2} A ${Math.abs(object.width / 2)} ${Math.abs(object.height / 2)} 0 1 0 0 ${object.height / 2} A ${Math.abs(object.width / 2)} ${Math.abs(object.height / 2)} 0 1 0 ${object.width} ${object.height / 2} Z`;
+  if (object.shape === 'line') return `M 0 0 L ${object.width} ${object.height}`;
+  if (object.shape === 'arrow') {
+    const angle = Math.atan2(object.height, object.width); const head = Math.max(10, object.stroke.width * 4);
+    const first = { x: object.width - Math.cos(angle - 0.5) * head, y: object.height - Math.sin(angle - 0.5) * head };
+    const second = { x: object.width - Math.cos(angle + 0.5) * head, y: object.height - Math.sin(angle + 0.5) * head };
+    return `M 0 0 L ${object.width} ${object.height} M ${object.width} ${object.height} L ${first.x} ${first.y} M ${object.width} ${object.height} L ${second.x} ${second.y}`;
+  }
+  const count = object.shape === 'star' ? Math.max(3, object.sides ?? 5) * 2 : Math.max(3, object.sides ?? 6);
+  const radius = Math.min(Math.abs(object.width), Math.abs(object.height)) / 2;
+  return `${Array.from({ length: count }, (_, index) => {
+    const pointRadius = object.shape === 'star' && index % 2 ? radius * (object.innerRadius ?? 0.45) : radius;
+    const angle = -Math.PI / 2 + index / count * Math.PI * 2;
+    const x = object.width / 2 + Math.cos(angle) * pointRadius; const y = object.height / 2 + Math.sin(angle) * pointRadius;
+    return `${index ? 'L' : 'M'} ${x} ${y}`;
+  }).join(' ')} Z`;
+}
+
+function pdfPathForObject(object: IllustrationObject): string | undefined {
+  if (object.type === 'vector-stroke') return pressureData(object);
+  if (object.type === 'path') return object.pathData;
+  if (object.type === 'shape') return shapePdfPath(object);
+  return undefined;
+}
+
+function pdfObjectCanRemainNative(document: IllustrationDocument, object: IllustrationObject): boolean {
+  if (!pdfObjectHasSimpleTransform(object) || pdfObjectHasEffects(object)) return false;
+  if (object.type === 'group') return true;
+  if (object.type === 'vector-stroke') return Boolean(pdfColor(object.brush.color));
+  if (object.type === 'path' || object.type === 'shape') {
+    if (object.type === 'path' && object.fillRule === 'evenodd') return false;
+    return (object.fill.kind === 'none' || Boolean(solidPdfPaint(object.fill)))
+      && (object.stroke.paint.kind === 'none' || Boolean(solidPdfPaint(object.stroke.paint)));
+  }
+  if (object.type === 'text') return true;
+  if (object.type === 'image') return Boolean(document.assets[object.assetId]?.data);
+  return false;
+}
+
+function pdfFontName(weight: number, italic: boolean): StandardFonts {
+  if (weight >= 600 && italic) return StandardFonts.HelveticaBoldOblique;
+  if (weight >= 600) return StandardFonts.HelveticaBold;
+  if (italic) return StandardFonts.HelveticaOblique;
+  return StandardFonts.Helvetica;
+}
+
+async function rasterizedPdfObject(document: IllustrationDocument, layerId: string, objectId: string): Promise<Buffer> {
+  const source = structuredClone(document); const layer = source.layers[layerId];
+  if (!layer || layer.type !== 'vector') throw new Error('PDF object fallback requires a vector layer.');
+  const closure = new Set<string>();
+  const visit = (id: string) => {
+    if (closure.has(id)) return; closure.add(id);
+    const object = source.objects[id]; if (!object) return;
+    if (object.maskObjectId) visit(object.maskObjectId);
+    if (object.type === 'group') for (const childId of object.childIds) visit(childId);
+  };
+  visit(objectId);
+  for (const object of Object.values(source.objects)) {
+    object.visible = closure.has(object.id);
+    if (object.type === 'group' && !closure.has(object.id)) object.childIds = object.childIds.filter((id) => !closure.has(id));
+  }
+  layer.objectIds = [objectId];
+  return (await renderIllustration(source, layerId, false)).toBuffer('image/png');
+}
+
+async function drawPdfImage(output: PDFDocument, page: PDFPage, document: IllustrationDocument, object: Extract<IllustrationObject, { type: 'image' }>): Promise<void> {
+  const asset = document.assets[object.assetId]; if (!asset?.data) throw new Error(`Image ${object.name} has no embedded source.`);
+  let bytes: Buffer = Buffer.from(asset.data, 'base64'); let mimeType = asset.mimeType;
+  if (object.crop || !['image/png', 'image/jpeg'].includes(mimeType)) {
+    const source = await import('@napi-rs/canvas').then(({ loadImage }) => loadImage(bytes));
+    const crop = object.crop ?? { x: 0, y: 0, width: source.width, height: source.height };
+    const canvas = createCanvas(Math.max(1, Math.ceil(crop.width)), Math.max(1, Math.ceil(crop.height)));
+    canvas.getContext('2d').drawImage(source, crop.x, crop.y, crop.width, crop.height, 0, 0, canvas.width, canvas.height);
+    bytes = canvas.toBuffer('image/png'); mimeType = 'image/png';
+  }
+  const embedded = mimeType === 'image/jpeg' ? await output.embedJpg(bytes) : await output.embedPng(bytes);
+  page.drawImage(embedded, { x: object.transform.x, y: document.artboard.height - object.transform.y - object.height, width: object.width, height: object.height, opacity: object.opacity });
+}
+
+async function illustrationPdf(document: IllustrationDocument): Promise<ExportArtifact> {
+  const output = await PDFDocument.create(); const page = output.addPage([document.artboard.width, document.artboard.height]);
+  const warnings = new Set<string>(); const rasterized: string[] = []; const fonts = new Map<StandardFonts, PDFFont>();
+  if (document.artboard.background) {
+    const background = pdfColor(document.artboard.background);
+    if (background) page.drawRectangle({ x: 0, y: 0, width: document.artboard.width, height: document.artboard.height, color: background.color, opacity: background.opacity });
+  }
+  const drawFallback = async (name: string, png: Buffer) => {
+    const image = await output.embedPng(png); page.drawImage(image, { x: 0, y: 0, width: document.artboard.width, height: document.artboard.height }); rasterized.push(name);
+  };
+  const drawObject = async (layerId: string, objectId: string, visiting = new Set<string>()): Promise<void> => {
+    if (visiting.has(objectId)) return;
+    const object = document.objects[objectId]; if (!object?.visible) return;
+    if (!pdfObjectCanRemainNative(document, object)) {
+      await drawFallback(object.name, await rasterizedPdfObject(document, layerId, objectId));
+      warnings.add('Unsupported object transforms, gradients, masks, blend modes, and effects are embedded as transparent raster fallbacks.');
+      return;
+    }
+    if (object.type === 'group') {
+      const next = new Set(visiting); next.add(objectId);
+      for (const childId of object.childIds) await drawObject(layerId, childId, next);
+      return;
+    }
+    if (object.type === 'image') { await drawPdfImage(output, page, document, object); return; }
+    if (object.type === 'text') {
+      const ranges = object.ranges.length ? object.ranges : [{ start: 0, end: object.text.length, fontFamily: 'sans-serif', fontSize: 48, fontWeight: 500, fontStyle: 'normal' as const, color: '#27213c', letterSpacing: 0 }];
+      try {
+        const fontFor = async (weight: number, italic: boolean) => { const name = pdfFontName(weight, italic); let font = fonts.get(name); if (!font) { font = await output.embedFont(name); fonts.set(name, font); } return font; };
+        for (const range of ranges) await fontFor(range.fontWeight, range.fontStyle === 'italic');
+        const glyphs = layoutStyledText({ ...object, ranges }, (character, style) => fonts.get(pdfFontName(style.fontWeight, style.fontStyle === 'italic'))!.widthOfTextAtSize(character, style.fontSize));
+        for (const glyph of glyphs) {
+          const fill = pdfColor(glyph.style.color); if (!fill) throw new Error('Unsupported text color.'); const font = fonts.get(pdfFontName(glyph.style.fontWeight, glyph.style.fontStyle === 'italic'))!;
+          page.drawText(glyph.character, { x: object.transform.x + glyph.x, y: document.artboard.height - object.transform.y - glyph.y - glyph.style.fontSize, size: glyph.style.fontSize, font, color: fill.color, opacity: fill.opacity * object.opacity });
+          if (glyph.style.underline) page.drawLine({ start: { x: object.transform.x + glyph.x, y: document.artboard.height - object.transform.y - glyph.y - glyph.style.fontSize * 1.08 }, end: { x: object.transform.x + glyph.x + glyph.width, y: document.artboard.height - object.transform.y - glyph.y - glyph.style.fontSize * 1.08 }, thickness: Math.max(0.5, glyph.style.fontSize / 18), color: fill.color, opacity: fill.opacity * object.opacity });
+        }
+        if (ranges.some((range) => !/^(arial|helvetica|sans-serif)$/i.test(range.fontFamily))) warnings.add('PDF text remains searchable/editable but non-embedded document fonts are substituted with Helvetica.');
+      } catch {
+        await drawFallback(object.name, await rasterizedPdfObject(document, layerId, objectId));
+        warnings.add('Text containing glyphs outside the built-in PDF font was rasterized; the export report names the affected object.');
+      }
+      return;
+    }
+    const path = pdfPathForObject(object); if (!path) return;
+    const fill = object.type === 'vector-stroke' ? pdfColor(object.brush.color) : solidPdfPaint(object.fill);
+    const stroke = object.type === 'vector-stroke' ? undefined : solidPdfPaint(object.stroke.paint);
+    const strokeOpacity = object.type === 'vector-stroke' ? 0 : object.stroke.opacity;
+    const lineCap = object.type === 'vector-stroke' ? undefined : object.stroke.lineCap === 'round' ? LineCapStyle.Round : object.stroke.lineCap === 'square' ? LineCapStyle.Projecting : LineCapStyle.Butt;
+    page.drawSvgPath(path, { x: object.transform.x, y: document.artboard.height - object.transform.y, color: fill?.color, opacity: fill ? fill.opacity * object.opacity : undefined, borderColor: stroke?.color, borderOpacity: stroke ? stroke.opacity * strokeOpacity * object.opacity : undefined, borderWidth: object.type === 'vector-stroke' ? 0 : object.stroke.width, borderDashArray: object.type === 'vector-stroke' ? undefined : object.stroke.dash, borderLineCap: lineCap });
+  };
+  const drawLayer = async (layerId: string): Promise<void> => {
+    const layer = document.layers[layerId]; if (!layer?.visible) return;
+    if (layer.opacity !== 1 || layer.blendMode !== 'normal' || layer.filters?.length || layer.maskLayerId) {
+      await drawFallback(layer.name, (await renderIllustration(document, layerId, false)).toBuffer('image/png'));
+      warnings.add('Layer compositing, adjustment filters, and layer masks are embedded as transparent raster fallbacks.');
+      return;
+    }
+    if (layer.type === 'paint') {
+      if (layer.strokes.length || Object.keys(layer.tileAssetIds).length) { await drawFallback(layer.name, (await renderIllustration(document, layerId, false)).toBuffer('image/png')); warnings.add('Paint layers are embedded as transparent PNG fallbacks.'); }
+      return;
+    }
+    if (layer.type === 'group') { for (const childId of layer.childIds) await drawLayer(childId); return; }
+    const childIds = new Set(Object.values(document.objects).flatMap((object) => object.type === 'group' ? object.childIds : []));
+    for (const objectId of layer.objectIds) if (!childIds.has(objectId)) await drawObject(layerId, objectId);
+  };
+  for (const layerId of document.layerIds) await drawLayer(layerId);
+  return { data: Buffer.from(await output.save()), mimeType: 'application/pdf', extension: 'pdf', report: { warnings: [...warnings], rasterized } };
+}
+
 async function pdf(document: AIDrawDocument, scale = 1): Promise<ExportArtifact> {
-  const canvas = nearestNeighborCanvas(await renderDocument(document), scale);
-  const png = canvas.toBuffer('image/png');
-  const output = await PDFDocument.create();
-  const page = output.addPage([canvas.width, canvas.height]);
+  if (document.kind === 'illustration') return illustrationPdf(document);
+  const canvas = nearestNeighborCanvas(await renderDocument(document), scale); const png = canvas.toBuffer('image/png'); const output = await PDFDocument.create(); const page = output.addPage([canvas.width, canvas.height]);
   page.drawImage(await output.embedPng(png), { x: 0, y: 0, width: canvas.width, height: canvas.height });
-  return { data: Buffer.from(await output.save()), mimeType: 'application/pdf', extension: 'pdf', report: { warnings: [...scaleWarnings(scale), 'PDF export preserves visual appearance; this build rasterizes effect groups and paint while SVG retains editable vectors.'], rasterized: ['composite'] } };
+  return { data: Buffer.from(await output.save()), mimeType: 'application/pdf', extension: 'pdf', report: { warnings: [...scaleWarnings(scale), 'Pixel PDF export embeds nearest-neighbor raster artwork.'], rasterized: ['composite'] } };
+}
+
+function psdBlendMode(value: IllustrationDocument['layers'][string]['blendMode']): PsdLayer['blendMode'] {
+  return value.replace(/-/g, ' ') as PsdLayer['blendMode'];
+}
+
+function psdTextColor(value: string): { r: number; g: number; b: number; a?: number } {
+  const split = splitColorAlpha(value); const normalized = /^#[0-9a-f]{6}$/i.test(split.color) ? split.color : '#000000';
+  return { r: Number.parseInt(normalized.slice(1, 3), 16), g: Number.parseInt(normalized.slice(3, 5), 16), b: Number.parseInt(normalized.slice(5, 7), 16), ...(split.opacity < 1 ? { a: Math.round(split.opacity * 255) } : {}) };
+}
+
+function psdTextLayer(object: Extract<IllustrationObject, { type: 'text' }>): PsdLayer {
+  const ranges = normalizeTextStyleRanges(object.text, object.ranges); const first = ranges[0];
+  const style = (range: typeof first) => ({ font: { name: range.fontFamily || 'ArialMT' }, fontSize: range.fontSize, fauxBold: range.fontWeight >= 600, fauxItalic: range.fontStyle === 'italic', tracking: Math.round(range.letterSpacing / Math.max(1, range.fontSize) * 1_000), underline: Boolean(range.underline), fillColor: psdTextColor(range.color) });
+  return {
+    name: `${object.name} · editable text`, hidden: true, opacity: Math.round(object.opacity * 255), blendMode: psdBlendMode(object.blendMode),
+    left: object.transform.x, top: object.transform.y, right: object.transform.x + object.width, bottom: object.transform.y + object.height,
+    text: {
+      text: object.text, transform: [1, 0, 0, 1, object.transform.x, object.transform.y + first.fontSize], shapeType: 'box', boxBounds: [0, 0, object.width, object.height],
+      style: style(first), styleRuns: ranges.map((range) => ({ length: range.end - range.start, style: style(range) })),
+      paragraphStyle: { justification: object.align === 'justify' ? 'justify-left' : object.align },
+    },
+  };
+}
+
+function textObjectsInLayer(document: IllustrationDocument, layerId: string): Array<Extract<IllustrationObject, { type: 'text' }>> {
+  const layer = document.layers[layerId]; if (!layer || layer.type !== 'vector') return [];
+  const result: Array<Extract<IllustrationObject, { type: 'text' }>> = []; const visited = new Set<string>();
+  const visit = (id: string) => {
+    if (visited.has(id)) return; visited.add(id); const object = document.objects[id]; if (!object) return;
+    if (object.type === 'text') result.push(object); else if (object.type === 'group') for (const childId of object.childIds) visit(childId);
+  };
+  for (const id of layer.objectIds) visit(id); return result;
+}
+
+async function renderPsdLayerFallback(document: IllustrationDocument, layerId: string): Promise<NonNullable<PsdLayer['imageData']>> {
+  const source = structuredClone(document); const layer = source.layers[layerId]; if (!layer) throw new Error(`Layer ${layerId} is missing.`);
+  layer.visible = true; layer.opacity = 1; layer.blendMode = 'normal';
+  const rendered = await renderIllustration(source, layerId, false);
+  return rendered.getContext('2d').getImageData(0, 0, document.artboard.width, document.artboard.height);
 }
 
 async function psd(document: AIDrawDocument): Promise<ExportArtifact> {
@@ -200,13 +473,27 @@ async function psd(document: AIDrawDocument): Promise<ExportArtifact> {
   let width: number; let height: number; const children: PsdLayer[] = [];
   if (document.kind === 'illustration') {
     width = document.artboard.width; height = document.artboard.height;
-    for (const layerId of document.layerIds) {
-      const layer = document.layers[layerId];
-      const rendered = await renderIllustration(document, layerId);
-      children.push({ name: layer.name, opacity: Math.round(layer.opacity * 255), hidden: !layer.visible, imageData: rendered.getContext('2d').getImageData(0, 0, width, height) });
-      if (layer.type === 'vector') report.rasterized.push(layer.name);
-    }
-    report.warnings.push('Editable AIDraw objects are accompanied by visually faithful raster layer fallbacks because ag-psd cannot preserve every vector/text/effect feature.');
+    let editableTextCount = 0;
+    const exportLayer = async (layerId: string): Promise<PsdLayer | undefined> => {
+      const layer = document.layers[layerId]; if (!layer) return undefined;
+      const common = { name: layer.name, opacity: Math.round(layer.opacity * 255), hidden: !layer.visible, blendMode: psdBlendMode(layer.blendMode) };
+      if (layer.type === 'group' && !layer.filters?.length && !layer.maskLayerId) {
+        const nested = (await Promise.all(layer.childIds.map(exportLayer))).filter((entry): entry is PsdLayer => Boolean(entry));
+        return { ...common, children: nested, opened: true };
+      }
+      const imageData = await renderPsdLayerFallback(document, layerId); report.rasterized.push(layer.name);
+      if (layer.type !== 'vector') {
+        if (layer.type === 'group') report.warnings.push(`Layer group “${layer.name}” was flattened because its filter or mask cannot be represented safely in PSD.`);
+        return { ...common, imageData };
+      }
+      const texts = textObjectsInLayer(document, layerId).filter((object) => object.visible);
+      if (!texts.length) return { ...common, imageData };
+      editableTextCount += texts.length;
+      return { ...common, children: [{ name: `${layer.name} · visual fallback`, imageData }, ...texts.map(psdTextLayer)], opened: true };
+    };
+    children.push(...(await Promise.all(document.layerIds.map(exportLayer))).filter((entry): entry is PsdLayer => Boolean(entry)));
+    report.warnings.push('Vector and paint layers include visually faithful raster fallbacks because PSD cannot preserve every AIDraw path, mask, blend, and effect feature.');
+    if (editableTextCount) report.warnings.push(`${editableTextCount} styled text object${editableTextCount === 1 ? '' : 's'} were also written as hidden editable PSD text layers beside their visible fallbacks.`);
   } else {
     const asset = document.pixelAssets[document.activeAssetId];
     if (asset?.type !== 'sprite') throw new Error('PSD export from pixel mode requires an active sprite.');
@@ -223,15 +510,24 @@ async function psd(document: AIDrawDocument): Promise<ExportArtifact> {
   return { data: writePsdBuffer(value, { generateThumbnail: true }), mimeType: 'image/vnd.adobe.photoshop', extension: 'psd', report };
 }
 
+function tiledPropertyJson(properties: Record<string, string | number | boolean>) {
+  return Object.entries(properties).map(([name, value]) => ({ name, value, type: typeof value === 'boolean' ? 'bool' : typeof value === 'number' ? (Number.isInteger(value) ? 'int' : 'float') : 'string' }));
+}
+
+function tiledObjectJson(shape: PixelTileset['tiles'][number]['collisions'][number], index: number) {
+  const { name, class: className, ...properties } = shape.properties;
+  return { id: Number.parseInt(shape.id.replace(/\D/g, ''), 10) || index + 1, name: typeof name === 'string' ? name : '', type: typeof className === 'string' ? className : '', x: shape.x, y: shape.y, width: shape.width ?? 0, height: shape.height ?? 0, ellipse: shape.type === 'ellipse' || undefined, polygon: shape.type === 'polygon' ? shape.points : undefined, polyline: shape.type === 'polyline' ? shape.points : undefined, properties: tiledPropertyJson(properties) };
+}
+
 function tilesetJson(document: PixelDocument, tileset: PixelTileset, image?: string) {
   const sprite = document.pixelAssets[tileset.spriteAssetId];
   return {
-    type: 'tileset', version: '1.10', tiledversion: '1.11.2', name: tileset.name, tilewidth: tileset.tileWidth, tileheight: tileset.tileHeight,
+    type: 'tileset', version: '1.10', tiledversion: '1.11.2', name: tileset.name, tilewidth: tileset.tileWidth, tileheight: tileset.tileHeight, margin: tileset.margin, spacing: tileset.spacing,
     tilecount: tileset.columns * tileset.rows, columns: tileset.columns,
     image, imagewidth: sprite?.type === 'sprite' ? sprite.width : undefined, imageheight: sprite?.type === 'sprite' ? sprite.height : undefined,
     transformations: { hflip: tileset.transformations.hFlip, vflip: tileset.transformations.vFlip, rotate: tileset.transformations.rotate, preferuntransformed: false },
-    tiles: Object.values(tileset.tiles).map((tile) => ({ id: tile.id, probability: tile.probability, animation: tile.animation.map((frame) => ({ tileid: frame.tileId, duration: frame.durationMs })), properties: Object.entries(tile.properties).map(([name, value]) => ({ name, value, type: typeof value })), objectgroup: tile.collisions.length ? { draworder: 'index', objects: tile.collisions.map((shape) => ({ id: Number.parseInt(shape.id.replace(/\D/g, ''), 10) || 1, name: '', type: '', x: shape.x, y: shape.y, width: shape.width, height: shape.height, ellipse: shape.type === 'ellipse', polygon: shape.type === 'polygon' ? shape.points : undefined, polyline: shape.type === 'polyline' ? shape.points : undefined })) } : undefined })),
-    wangsets: tileset.wangSets.map((set) => ({ name: set.name, type: set.type, wangcolors: set.colors.map((color) => ({ name: color.name, color: color.color, tile: color.tileId, probability: color.probability })), wangtiles: set.tiles.map((tile) => ({ tileid: tile.tileId, wangid: tile.wangId })) })),
+    tiles: Object.values(tileset.tiles).map((tile) => ({ id: tile.id, probability: tile.probability, animation: tile.animation.map((frame) => ({ tileid: frame.tileId, duration: frame.durationMs })), properties: tiledPropertyJson(tile.properties), objectgroup: tile.collisions.length ? { draworder: 'index', objects: tile.collisions.map(tiledObjectJson) } : undefined })),
+    wangsets: tileset.wangSets.map((set) => ({ name: set.name, type: set.type, colors: set.colors.map((color) => ({ name: color.name, color: color.color, tile: color.tileId, probability: color.probability })), wangtiles: set.tiles.map((tile) => ({ tileid: tile.tileId, wangid: tile.wangId })) })),
   };
 }
 
@@ -240,7 +536,7 @@ export function tilemapToTiled(document: PixelDocument, map: PixelTilemap, image
   const layerJson = (id: string): Record<string, unknown> => {
     const layer = map.layers[id]; const common = { id: nextLayerId++, name: layer.name, visible: layer.visible, opacity: layer.opacity, parallaxx: layer.parallaxX, parallaxy: layer.parallaxY };
     if (layer.type === 'group') return { ...common, type: 'group', layers: (layer.childIds ?? []).map(layerJson) };
-    if (layer.type === 'object') return { ...common, type: 'objectgroup', objects: (layer.objects ?? []).map((shape, index) => ({ id: Number.parseInt(shape.id.replace(/\D/g, ''), 10) || index + 1, x: shape.x, y: shape.y, width: shape.width ?? 0, height: shape.height ?? 0, ellipse: shape.type === 'ellipse' || undefined, polygon: shape.type === 'polygon' ? shape.points : undefined, polyline: shape.type === 'polyline' ? shape.points : undefined, properties: Object.entries(shape.properties).map(([name, value]) => ({ name, value, type: typeof value })) })) };
+    if (layer.type === 'object') return { ...common, type: 'objectgroup', objects: (layer.objects ?? []).map(tiledObjectJson) };
     const chunks = Object.values(layer.chunks ?? {}).map((chunk) => ({ x: chunk.x, y: chunk.y, width: chunk.width, height: chunk.height, data: Array.from(decodeTilemapChunk(chunk)) })); const data = Array<number>(map.width * map.height).fill(0);
     if (!map.infinite) for (const chunk of chunks) for (let localY = 0; localY < chunk.height; localY += 1) for (let localX = 0; localX < chunk.width; localX += 1) { const x = chunk.x + localX; const y = chunk.y + localY; if (x >= 0 && y >= 0 && x < map.width && y < map.height) data[y * map.width + x] = chunk.data[localY * chunk.width + localX] ?? 0; }
     return { ...common, type: 'tilelayer', ...(map.infinite ? { chunks } : { width: map.width, height: map.height, data }) };
@@ -248,7 +544,7 @@ export function tilemapToTiled(document: PixelDocument, map: PixelTilemap, image
   return {
     type: 'map', version: '1.10', tiledversion: '1.11.2', orientation: map.orientation, renderorder: 'right-down', infinite: map.infinite,
     width: map.width, height: map.height, tilewidth: map.tileWidth, tileheight: map.tileHeight,
-    properties: Object.entries(map.properties).map(([name, value]) => ({ name, value, type: typeof value })),
+    properties: tiledPropertyJson(map.properties),
     tilesets: map.tilesetIds.map((id, index) => {
       const asset = document.pixelAssets[id];
       return asset?.type === 'tileset' ? { firstgid: asset.firstGid || index * 1_000_000 + 1, ...tilesetJson(document, asset, images[id]) } : { firstgid: index * 1_000_000 + 1 };
@@ -263,15 +559,16 @@ function tiledPropertyXml(properties: Record<string, string | number | boolean>)
 }
 
 function collisionXml(shape: PixelTileset['tiles'][number]['collisions'][number], index: number): string {
+  const { name, class: className, ...properties } = shape.properties;
   const geometry = shape.type === 'ellipse' ? '<ellipse/>' : shape.type === 'polygon' || shape.type === 'polyline' ? `<${shape.type} points="${(shape.points ?? []).map((point) => `${point.x},${point.y}`).join(' ')}"/>` : '';
-  return `<object id="${index + 1}" x="${shape.x}" y="${shape.y}" width="${shape.width ?? 0}" height="${shape.height ?? 0}">${geometry}${tiledPropertyXml(shape.properties)}</object>`;
+  return `<object id="${index + 1}" name="${xml(typeof name === 'string' ? name : '')}" type="${xml(typeof className === 'string' ? className : '')}" x="${shape.x}" y="${shape.y}" width="${shape.width ?? 0}" height="${shape.height ?? 0}">${geometry}${tiledPropertyXml(properties)}</object>`;
 }
 
 function tilesetXml(document: PixelDocument, tileset: PixelTileset, image: string): string {
   const sprite = document.pixelAssets[tileset.spriteAssetId];
   const tiles = Object.values(tileset.tiles).filter((tile) => tile.probability !== 1 || tile.animation.length || tile.collisions.length || Object.keys(tile.properties).length).map((tile) => `<tile id="${tile.id}" probability="${tile.probability}">${tiledPropertyXml(tile.properties)}${tile.animation.length ? `<animation>${tile.animation.map((frame) => `<frame tileid="${frame.tileId}" duration="${frame.durationMs}"/>`).join('')}</animation>` : ''}${tile.collisions.length ? `<objectgroup>${tile.collisions.map(collisionXml).join('')}</objectgroup>` : ''}</tile>`).join('');
   const wangsets = tileset.wangSets.length ? `<wangsets>${tileset.wangSets.map((set) => `<wangset name="${xml(set.name)}" type="${set.type}">${set.colors.map((color) => `<wangcolor name="${xml(color.name)}" color="${xml(color.color)}" tile="${color.tileId}" probability="${color.probability}"/>`).join('')}${set.tiles.map((tile) => `<wangtile tileid="${tile.tileId}" wangid="${tile.wangId.join(',')}"/>`).join('')}</wangset>`).join('')}</wangsets>` : '';
-  return `<tileset version="1.10" tiledversion="1.11.2" name="${xml(tileset.name)}" tilewidth="${tileset.tileWidth}" tileheight="${tileset.tileHeight}" tilecount="${tileset.columns * tileset.rows}" columns="${tileset.columns}"><image source="${xml(image)}" width="${sprite?.type === 'sprite' ? sprite.width : tileset.columns * tileset.tileWidth}" height="${sprite?.type === 'sprite' ? sprite.height : tileset.rows * tileset.tileHeight}"/><transformations hflip="${Number(tileset.transformations.hFlip)}" vflip="${Number(tileset.transformations.vFlip)}" rotate="${Number(tileset.transformations.rotate)}" preferuntransformed="0"/>${tiles}${wangsets}</tileset>`;
+  return `<tileset version="1.10" tiledversion="1.11.2" name="${xml(tileset.name)}" tilewidth="${tileset.tileWidth}" tileheight="${tileset.tileHeight}" margin="${tileset.margin}" spacing="${tileset.spacing}" tilecount="${tileset.columns * tileset.rows}" columns="${tileset.columns}"><image source="${xml(image)}" width="${sprite?.type === 'sprite' ? sprite.width : tileset.columns * tileset.tileWidth}" height="${sprite?.type === 'sprite' ? sprite.height : tileset.rows * tileset.tileHeight}"/><transformations hflip="${Number(tileset.transformations.hFlip)}" vflip="${Number(tileset.transformations.vFlip)}" rotate="${Number(tileset.transformations.rotate)}" preferuntransformed="0"/>${tiles}${wangsets}</tileset>`;
 }
 
 function tilemapXml(document: PixelDocument, map: PixelTilemap, images: Record<string, string>): string {
@@ -317,35 +614,75 @@ async function tiled(document: PixelDocument, format: 'tiled-json' | 'tiled-xml'
   return { data: Buffer.from(body), mimeType: format === 'tiled-json' ? 'application/json' : 'application/xml', extension: format === 'tiled-json' ? 'tmj' : 'tmx', companions, report: { warnings: [], rasterized: [] } };
 }
 
-async function spriteSheet(document: PixelDocument, sprite: PixelSprite, scale = 1): Promise<ExportArtifact> {
-  const columns = Math.ceil(Math.sqrt(sprite.frameIds.length)); const rows = Math.ceil(sprite.frameIds.length / columns);
+function animationExportWarnings(sprite: PixelSprite, tagId: string | undefined, scale: number): string[] {
+  const tag = tagId ? sprite.tags.find((entry) => entry.id === tagId) : undefined;
+  return [...scaleWarnings(scale), ...(tag ? [`Exported animation tag “${tag.name}” using ${tag.direction} playback.`] : [])];
+}
+
+async function spriteSheet(document: PixelDocument, sprite: PixelSprite, scale = 1, tagId?: string): Promise<ExportArtifact> {
+  const frameIds = pixelAnimationSequence(sprite, tagId); const columns = Math.ceil(Math.sqrt(frameIds.length)); const rows = Math.ceil(frameIds.length / columns);
   assertScaledDimensions(columns * sprite.width, rows * sprite.height, scale);
   const frameWidth = sprite.width * scale; const frameHeight = sprite.height * scale;
   const canvas = createCanvas(columns * frameWidth, rows * frameHeight); const context = canvas.getContext('2d'); context.imageSmoothingEnabled = false;
   const frames: Record<string, unknown> = {};
-  sprite.frameIds.forEach((frameId, index) => {
+  frameIds.forEach((frameId, index) => {
     const x = index % columns * frameWidth; const y = Math.floor(index / columns) * frameHeight;
     context.drawImage(renderSprite(document, sprite, frameId), x, y, frameWidth, frameHeight);
-    frames[frameId] = { frame: { x, y, w: frameWidth, h: frameHeight }, sourceSize: { w: sprite.width, h: sprite.height }, scale, duration: sprite.frames[frameId]?.durationMs ?? 100 };
+    const key = frames[frameId] ? `${frameId}#${index}` : frameId; frames[key] = { frame: { x, y, w: frameWidth, h: frameHeight }, sourceFrameId: frameId, sourceSize: { w: sprite.width, h: sprite.height }, scale, duration: sprite.frames[frameId]?.durationMs ?? 100 };
   });
-  return { data: canvas.toBuffer('image/png'), mimeType: 'image/png', extension: 'png', companion: { data: Buffer.from(JSON.stringify({ frames, meta: { app: 'AIDraw', image: `${sprite.name}.png`, size: { w: canvas.width, h: canvas.height }, scale, tags: sprite.tags } }, null, 2)), extension: 'json', mimeType: 'application/json' }, report: { warnings: scaleWarnings(scale), rasterized: [] } };
+  return { data: canvas.toBuffer('image/png'), mimeType: 'image/png', extension: 'png', companion: { data: Buffer.from(JSON.stringify({ frames, meta: { app: 'AIDraw', image: `${sprite.name}.png`, size: { w: canvas.width, h: canvas.height }, scale, frameOrder: frameIds, selectedTagId: tagId, tags: sprite.tags } }, null, 2)), extension: 'json', mimeType: 'application/json' }, report: { warnings: animationExportWarnings(sprite, tagId, scale), rasterized: [] } };
 }
 
-async function animatedImage(document: PixelDocument, sprite: PixelSprite, format: 'gif' | 'apng', scale = 1): Promise<ExportArtifact> {
+async function animatedImage(document: PixelDocument, sprite: PixelSprite, format: 'gif' | 'apng', scale = 1, tagId?: string): Promise<ExportArtifact> {
   assertScaledDimensions(sprite.width, sprite.height, scale);
   const width = sprite.width * scale; const height = sprite.height * scale;
-  const frames = sprite.frameIds.map((frameId) => nearestNeighborFrame(renderSprite(document, sprite, frameId).getContext('2d').getImageData(0, 0, sprite.width, sprite.height).data, sprite.width, sprite.height, scale));
-  const delays = sprite.frameIds.map((frameId) => sprite.frames[frameId]?.durationMs ?? 100);
-  if (format === 'apng') return { data: Buffer.from(UPNG.encode(frames.map((frame) => frame.buffer as ArrayBuffer), width, height, 0, delays)), mimeType: 'image/apng', extension: 'apng', report: { warnings: scaleWarnings(scale), rasterized: [] } };
+  const frameIds = pixelAnimationSequence(sprite, tagId); const frames = frameIds.map((frameId) => nearestNeighborFrame(renderSprite(document, sprite, frameId).getContext('2d').getImageData(0, 0, sprite.width, sprite.height).data, sprite.width, sprite.height, scale));
+  const delays = frameIds.map((frameId) => sprite.frames[frameId]?.durationMs ?? 100); const warnings = animationExportWarnings(sprite, tagId, scale);
+  if (format === 'apng') {
+    // upng-js sizes its output buffer from the first raw frame and only adds 100
+    // bytes total, which truncates tiny animations where per-frame chunk overhead
+    // is larger than the pixel payload. A small per-frame reserve on frame zero
+    // grows that allocation without changing the encoded image rectangle.
+    const inputs = frames.map((frame, index) => { if (index) return frame.buffer as ArrayBuffer; const reserved = new Uint8Array(frame.byteLength + 128); reserved.set(frame); for (let offset = frame.byteLength + 3; offset < reserved.length; offset += 4) reserved[offset] = 255; return reserved.buffer; });
+    // The maintained runtime exposes a sixth `forbidPlte` argument, but the
+    // DefinitelyTyped declaration still stops at `delays`.
+    const encodeApng = UPNG.encode as unknown as (images: ArrayBuffer[], frameWidth: number, frameHeight: number, colors: number, frameDelays?: number[], forbidPalette?: boolean) => ArrayBuffer;
+    return { data: Buffer.from(encodeApng(inputs, width, height, 0, delays, true)), mimeType: 'image/apng', extension: 'apng', report: { warnings, rasterized: [] } };
+  }
   const encoder = GIFEncoder(); frames.forEach((frame, index) => { const palette = quantize(frame, 256, { format: 'rgba4444', oneBitAlpha: true, clearAlpha: true }); encoder.writeFrame(applyPalette(frame, palette, 'rgba4444'), width, height, { palette, transparent: true, transparentIndex: 0, delay: delays[index], repeat: 0 }); }); encoder.finish();
-  return { data: Buffer.from(encoder.bytes()), mimeType: 'image/gif', extension: 'gif', report: { warnings: scaleWarnings(scale), rasterized: [] } };
+  return { data: Buffer.from(encoder.bytes()), mimeType: 'image/gif', extension: 'gif', report: { warnings, rasterized: [] } };
+}
+
+const MAX_ANIMATION_EXPANDED_PIXELS = 64 * 1024 * 1024;
+
+async function animatedIllustrationImage(document: IllustrationDocument, format: 'gif' | 'apng'): Promise<ExportArtifact> {
+  if (!document.animation.keyframeIds.length) throw new Error('Illustration animation export requires at least one keyframe.');
+  assertScaledDimensions(document.artboard.width, document.artboard.height, 1);
+  const samples = illustrationAnimationSamples(document.animation, 1_000);
+  if (samples.length * document.artboard.width * document.artboard.height > MAX_ANIMATION_EXPANDED_PIXELS) throw new Error('Illustration animation exceeds the 64-megapixel expanded-frame safety budget. Reduce its dimensions, duration, or frame rate.');
+  const frames: Uint8Array[] = []; const delays: number[] = [];
+  for (const sample of samples) {
+    const canvas = await renderIllustration(illustrationAtTime(document, sample.timeMs));
+    frames.push(Uint8Array.from(canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data));
+    delays.push(Math.max(10, Math.round(sample.delayMs)));
+  }
+  const warnings = [`Rasterized ${frames.length} illustration frames at ${document.animation.framesPerSecond} fps using ${document.animation.playback} playback.`];
+  if (format === 'apng') {
+    const inputs = frames.map((frame, index) => { if (index) return frame.buffer as ArrayBuffer; const reserved = new Uint8Array(frame.byteLength + 128); reserved.set(frame); for (let offset = frame.byteLength + 3; offset < reserved.length; offset += 4) reserved[offset] = 255; return reserved.buffer; });
+    const encodeApng = UPNG.encode as unknown as (images: ArrayBuffer[], frameWidth: number, frameHeight: number, colors: number, frameDelays?: number[], forbidPalette?: boolean) => ArrayBuffer;
+    return { data: Buffer.from(encodeApng(inputs, document.artboard.width, document.artboard.height, 0, delays, true)), mimeType: 'image/apng', extension: 'apng', report: { warnings, rasterized: ['illustration animation frames'] } };
+  }
+  const encoder = GIFEncoder();
+  frames.forEach((frame, index) => { const palette = quantize(frame, 256, { format: 'rgba4444', oneBitAlpha: true, clearAlpha: true }); encoder.writeFrame(applyPalette(frame, palette, 'rgba4444'), document.artboard.width, document.artboard.height, { palette, transparent: true, transparentIndex: 0, delay: delays[index], repeat: index === 0 ? (document.animation.playback === 'once' ? -1 : 0) : undefined }); });
+  encoder.finish();
+  return { data: Buffer.from(encoder.bytes()), mimeType: 'image/gif', extension: 'gif', report: { warnings, rasterized: ['illustration animation frames'] } };
 }
 
 export async function exportDocument(document: AIDrawDocument, format: ExportFormat, options: ExportOptions = {}): Promise<ExportArtifact> {
   const scale = resolveExportScale(document, format, options);
   if (format === 'png' || format === 'jpeg' || format === 'webp') return raster(document, format, scale);
   if (format === 'svg') {
-    if (document.kind === 'illustration') return { data: Buffer.from(illustrationToSvg(document)), mimeType: 'image/svg+xml', extension: 'svg', report: { warnings: [], rasterized: [] } };
+    if (document.kind === 'illustration') return illustrationSvg(document);
     const rasterized = await raster(document, 'png', scale);
     const canvas = nearestNeighborCanvas(await renderDocument(document), scale);
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${canvas.width}" height="${canvas.height}" shape-rendering="crispEdges"><image width="100%" height="100%" image-rendering="pixelated" href="data:image/png;base64,${rasterized.data.toString('base64')}"/></svg>`;
@@ -353,11 +690,14 @@ export async function exportDocument(document: AIDrawDocument, format: ExportFor
   }
   if (format === 'pdf') return pdf(document, scale);
   if (format === 'psd') return psd(document);
-  if (format === 'gif' || format === 'apng') { if (document.kind !== 'pixel') throw new Error('Animated export requires pixel mode.'); const sprite = document.pixelAssets[document.activeAssetId]; if (sprite?.type !== 'sprite') throw new Error('Choose a sprite before exporting animation.'); return animatedImage(document, sprite, format, scale); }
+  if (format === 'gif' || format === 'apng') {
+    if (document.kind === 'illustration') return animatedIllustrationImage(document, format);
+    const sprite = document.pixelAssets[document.activeAssetId]; if (sprite?.type !== 'sprite') throw new Error('Choose a sprite before exporting animation.'); return animatedImage(document, sprite, format, scale, options.animationTagId);
+  }
   if (format === 'sprite-sheet') {
     if (document.kind !== 'pixel') throw new Error('Sprite sheet export requires pixel mode.');
     const sprite = document.pixelAssets[document.activeAssetId]; if (sprite?.type !== 'sprite') throw new Error('Choose a sprite before exporting a sprite sheet.');
-    return spriteSheet(document, sprite, scale);
+    return spriteSheet(document, sprite, scale, options.animationTagId);
   }
   if (format === 'tiled-json' || format === 'tiled-xml') { if (document.kind !== 'pixel') throw new Error('Tiled export requires pixel mode.'); return tiled(document, format); }
   throw new Error(`Unsupported export format: ${format}`);

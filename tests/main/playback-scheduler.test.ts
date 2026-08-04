@@ -83,6 +83,12 @@ describe('playback scheduler payload hardening', () => {
     expect(visibleOperations([operation], Number.NaN)).toEqual([]);
   });
 
+  it('accounts for and progressively reveals compact region cells rather than run count', () => {
+    const operation: CanvasOperation = { kind: 'pixel.cel.region', spriteId: 'sprite-1', celId: 'cel-1', runs: [{ x: 0, y: 2, length: 8, index: 4 }, { x: 10, y: 2, length: 2, index: 6 }] };
+    expect(operationSamples(operation)).toBe(10);
+    expect(visibleOperations([operation], 0.5)).toEqual([{ ...operation, runs: [{ x: 0, y: 2, length: 5, index: 4 }] }]);
+  });
+
   it('uses all four visible lanes and gives the next free lane to a different waiting actor', async () => {
     const service = await serviceFixture();
     const scheduler = new PlaybackScheduler(service);

@@ -4,8 +4,19 @@ import { access, mkdir, open, readFile, rename, unlink } from 'node:fs/promises'
 import { dirname, extname } from 'node:path';
 import { createCanvas } from '@napi-rs/canvas';
 import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate';
-import { migrateDocument, type AIDrawDocument, type DocumentAsset } from '@aidraw/core';
-import type { TransactionTraceEntry } from '../common/contracts';
+import {
+  CURRENT_SCHEMA_VERSION,
+  findDocumentAssetReferences,
+  migrateDocument,
+  type AIDrawDocument,
+  type DocumentAsset,
+  type PaintLayer,
+  type RasterStroke,
+} from '@aidraw/core';
+import type { DocumentCheckpointRecord, TransactionTraceEntry } from '../common/contracts';
+import { paintTileCachePlan, parsePaintTileKey } from '../common/paint-tile-cache';
+import { renderRasterStroke } from '../common/raster-brush';
+import { inspectImageHeader } from './transaction-policy';
 
 const TRANSPARENT_PREVIEW = Uint8Array.from(
   Buffer.from(
@@ -14,9 +25,36 @@ const TRANSPARENT_PREVIEW = Uint8Array.from(
   ),
 );
 
+const MAX_NATIVE_ARCHIVE_BYTES = 512 * 1024 * 1024;
+const MAX_NATIVE_EXPANDED_BYTES = 512 * 1024 * 1024;
+const MAX_NATIVE_ENTRY_BYTES = 128 * 1024 * 1024;
+const MAX_NATIVE_METADATA_BYTES = 64 * 1024 * 1024;
+const MAX_NATIVE_MANIFEST_BYTES = 1024 * 1024;
+const MAX_NATIVE_ENTRIES = 20_000;
+
+function safeArchiveEntryName(name: string): boolean {
+  return Boolean(name) && !name.includes('\\') && !name.includes('\0') && !name.startsWith('/') && !/^[a-z]:/i.test(name) && !name.split('/').some((part) => part === '..' || part === '.');
+}
+
+function unzipNativeArchive(bytes: Uint8Array): ReturnType<typeof unzipSync> {
+  if (bytes.byteLength > MAX_NATIVE_ARCHIVE_BYTES) throw new Error('AIDraw container exceeds the 512 MiB compressed-size limit.');
+  const names = new Set<string>(); let expandedBytes = 0; let entries = 0;
+  return unzipSync(bytes, { filter: (entry) => {
+    entries += 1;
+    if (entries > MAX_NATIVE_ENTRIES) throw new Error(`AIDraw container exceeds the ${MAX_NATIVE_ENTRIES.toLocaleString()}-entry limit.`);
+    if (!safeArchiveEntryName(entry.name)) throw new Error(`AIDraw container contains an unsafe entry path: ${entry.name}`);
+    if (names.has(entry.name)) throw new Error(`AIDraw container contains a duplicate entry: ${entry.name}`); names.add(entry.name);
+    const entryLimit = entry.name === 'manifest.json' ? MAX_NATIVE_MANIFEST_BYTES : entry.name.endsWith('.json') || entry.name.endsWith('.jsonl') ? MAX_NATIVE_METADATA_BYTES : MAX_NATIVE_ENTRY_BYTES;
+    if (!Number.isSafeInteger(entry.originalSize) || entry.originalSize < 0 || entry.originalSize > entryLimit) throw new Error(`AIDraw container entry ${entry.name} exceeds its expanded-size limit.`);
+    expandedBytes += entry.originalSize;
+    if (!Number.isSafeInteger(expandedBytes) || expandedBytes > MAX_NATIVE_EXPANDED_BYTES) throw new Error('AIDraw container exceeds the 512 MiB expanded-size limit.');
+    return true;
+  } });
+}
+
 export interface NativeManifest {
   format: 'AIDraw';
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
   documentId: string;
   documentKind: AIDrawDocument['kind'];
   name: string;
@@ -31,6 +69,7 @@ export interface LoadedNativeDocument {
   document: AIDrawDocument;
   manifest: NativeManifest;
   trace: TransactionTraceEntry[];
+  checkpoints: DocumentCheckpointRecord[];
   warnings: string[];
 }
 
@@ -38,39 +77,152 @@ function normalizePath(filePath: string): string {
   return extname(filePath).toLowerCase() === '.aidraw' ? filePath : `${filePath}.aidraw`;
 }
 
-function materializePaintTiles(document: AIDrawDocument): void {
-  if (document.kind !== 'illustration') return; const tileSize = 256;
-  for (const layer of Object.values(document.layers)) {
-    if (layer.type !== 'paint') continue; for (const assetId of Object.values(layer.tileAssetIds)) if (document.assets[assetId]?.source === 'rendered') delete document.assets[assetId]; layer.tileAssetIds = {};
-    const touched = new Set<string>(); for (const stroke of layer.strokes) for (const point of stroke.points) { const radius = Math.max(1, stroke.size / 2); const left = Math.floor((point.x - radius) / tileSize); const right = Math.floor((point.x + radius) / tileSize); const top = Math.floor((point.y - radius) / tileSize); const bottom = Math.floor((point.y + radius) / tileSize); for (let tileY = top; tileY <= bottom; tileY += 1) for (let tileX = left; tileX <= right; tileX += 1) touched.add(`${tileX},${tileY}`); }
-    for (const key of touched) { const [tileX, tileY] = key.split(',').map(Number); const canvas = createCanvas(tileSize, tileSize); const context = canvas.getContext('2d'); context.translate(-tileX * tileSize, -tileY * tileSize); context.lineCap = 'round'; context.lineJoin = 'round';
-      for (const stroke of layer.strokes) { if (!stroke.points.length) continue; context.save(); context.globalCompositeOperation = stroke.mode === 'erase' ? 'destination-out' : 'source-over'; context.globalAlpha = stroke.opacity; context.strokeStyle = stroke.color; context.lineWidth = stroke.size; if (stroke.preset === 'soft-round' || stroke.preset === 'airbrush') { context.shadowColor = stroke.color; context.shadowBlur = stroke.size * (stroke.preset === 'airbrush' ? 0.9 : 0.45); } context.beginPath(); context.moveTo(stroke.points[0].x, stroke.points[0].y); for (const point of stroke.points.slice(1)) context.lineTo(point.x, point.y); if (stroke.points.length === 1) context.lineTo(stroke.points[0].x + 0.01, stroke.points[0].y); context.stroke(); context.restore(); }
-      const bytes = canvas.toBuffer('image/png'); const sha256 = createHash('sha256').update(bytes).digest('hex'); const id = `paint-tile-${sha256}`; document.assets[id] ??= { id, name: `${layer.name} ${key}`, mimeType: 'image/png', byteLength: bytes.byteLength, sha256, source: 'rendered', data: bytes.toString('base64') }; layer.tileAssetIds[key] = id;
+export function paintStrokePrefixSha256(strokes: RasterStroke[], count = strokes.length): string {
+  return createHash('sha256').update(JSON.stringify(strokes.slice(0, count))).digest('hex');
+}
+
+function strokeTileRadius(stroke: RasterStroke): number {
+  const size = Number.isFinite(stroke.size) ? Math.min(8_192, Math.max(0, Math.abs(stroke.size))) : 0;
+  const scatter = Math.min(4, Math.max(0, Math.abs(stroke.dynamics?.scatter ?? 0)));
+  const sizeJitter = Math.min(4, Math.max(0, Math.abs(stroke.dynamics?.sizeJitter ?? 0)));
+  return Math.max(2, size * (1.25 + scatter + sizeJitter) + 4);
+}
+
+function strokesByTouchedTile(document: Extract<AIDrawDocument, { kind: 'illustration' }>, layer: PaintLayer): Map<string, RasterStroke[]> {
+  const tileSize = layer.tileSize;
+  const columns = Math.ceil(document.artboard.width / tileSize);
+  const rows = Math.ceil(document.artboard.height / tileSize);
+  const result = new Map<string, RasterStroke[]>();
+  const addRange = (keys: Set<string>, from: RasterStroke['points'][number], to: RasterStroke['points'][number], radius: number) => {
+    if (![from.x, from.y, to.x, to.y].every(Number.isFinite)) return;
+    const left = Math.max(0, Math.floor((Math.min(from.x, to.x) - radius) / tileSize));
+    const right = Math.min(columns - 1, Math.floor((Math.max(from.x, to.x) + radius) / tileSize));
+    const top = Math.max(0, Math.floor((Math.min(from.y, to.y) - radius) / tileSize));
+    const bottom = Math.min(rows - 1, Math.floor((Math.max(from.y, to.y) + radius) / tileSize));
+    for (let tileY = top; tileY <= bottom; tileY += 1) for (let tileX = left; tileX <= right; tileX += 1) keys.add(`${tileX},${tileY}`);
+  };
+  for (const stroke of layer.strokes) {
+    if (!stroke.points.length) continue;
+    const keys = new Set<string>();
+    const radius = strokeTileRadius(stroke);
+    addRange(keys, stroke.points[0], stroke.points[0], radius);
+    for (let index = 1; index < stroke.points.length; index += 1) addRange(keys, stroke.points[index - 1], stroke.points[index], radius);
+    for (const key of keys) {
+      const strokes = result.get(key) ?? [];
+      strokes.push(stroke);
+      result.set(key, strokes);
     }
+  }
+  return result;
+}
+
+function pruneUnreferencedPaintTiles(document: AIDrawDocument): void {
+  for (const [assetId, asset] of Object.entries(document.assets)) {
+    if (asset.source === 'rendered' && assetId.startsWith('paint-tile-') && findDocumentAssetReferences(document, assetId).length === 0) delete document.assets[assetId];
   }
 }
 
-function buildArchive(document: AIDrawDocument, appVersion: string, preview?: Uint8Array, trace: TransactionTraceEntry[] = []): Uint8Array {
+export function clearPaintTileCaches(document: AIDrawDocument): void {
+  if (document.kind !== 'illustration') return;
+  for (const layer of Object.values(document.layers)) {
+    if (layer.type !== 'paint') continue;
+    layer.tileAssetIds = {};
+    delete layer.tileCache;
+  }
+  pruneUnreferencedPaintTiles(document);
+}
+
+export function materializePaintTiles(document: AIDrawDocument): void {
+  if (document.kind !== 'illustration') return;
+  for (const layer of Object.values(document.layers)) {
+    if (layer.type !== 'paint') continue;
+    layer.tileAssetIds = {};
+    for (const [key, strokes] of strokesByTouchedTile(document, layer)) {
+      const coordinates = parsePaintTileKey(key);
+      if (!coordinates) continue;
+      const canvas = createCanvas(layer.tileSize, layer.tileSize);
+      const context = canvas.getContext('2d');
+      context.translate(-coordinates.tileX * layer.tileSize, -coordinates.tileY * layer.tileSize);
+      context.lineCap = 'round';
+      context.lineJoin = 'round';
+      for (const stroke of strokes) renderRasterStroke(context, stroke);
+      const bytes = canvas.toBuffer('image/png');
+      const sha256 = createHash('sha256').update(bytes).digest('hex');
+      const id = `paint-tile-${sha256}`;
+      document.assets[id] = { id, name: `${layer.name} ${key}`, mimeType: 'image/png', byteLength: bytes.byteLength, sha256, source: 'rendered', data: bytes.toString('base64') };
+      layer.tileAssetIds[key] = id;
+    }
+    layer.tileCache = { version: 1, strokeCount: layer.strokes.length, strokesSha256: paintStrokePrefixSha256(layer.strokes) };
+  }
+  pruneUnreferencedPaintTiles(document);
+}
+
+function validateLoadedPaintTileCaches(document: AIDrawDocument, warnings: string[]): void {
+  if (document.kind !== 'illustration') return;
+  for (const layer of Object.values(document.layers)) {
+    if (layer.type !== 'paint') continue;
+    if (!layer.tileCache) {
+      layer.tileAssetIds = {};
+      continue;
+    }
+    const plan = paintTileCachePlan(layer, document.assets);
+    let reason: string | undefined;
+    if (!plan) reason = 'its metadata or referenced assets are incomplete';
+    else if (paintStrokePrefixSha256(layer.strokes, plan.strokeCount) !== layer.tileCache.strokesSha256.toLowerCase()) reason = 'its editable stroke digest does not match';
+    else {
+      const columns = Math.ceil(document.artboard.width / layer.tileSize);
+      const rows = Math.ceil(document.artboard.height / layer.tileSize);
+      for (const entry of plan.entries) {
+        if (entry.tileX < 0 || entry.tileY < 0 || entry.tileX >= columns || entry.tileY >= rows) { reason = 'a tile falls outside the artboard'; break; }
+        try {
+          const bytes = Buffer.from(entry.asset.data!, 'base64');
+          const header = inspectImageHeader(bytes);
+          if (header.mimeType !== 'image/png' || header.width !== layer.tileSize || header.height !== layer.tileSize || bytes.byteLength !== entry.asset.byteLength || createHash('sha256').update(bytes).digest('hex') !== entry.asset.sha256.toLowerCase()) reason = 'a tile payload is inconsistent';
+        } catch { reason = 'a tile payload is corrupt'; }
+        if (reason) break;
+      }
+    }
+    if (reason) {
+      layer.tileAssetIds = {};
+      delete layer.tileCache;
+      warnings.push(`Paint cache for “${layer.name}” was ignored because ${reason}. Editable strokes were preserved.`);
+    }
+  }
+  pruneUnreferencedPaintTiles(document);
+}
+
+function buildArchive(document: AIDrawDocument, appVersion: string, preview?: Uint8Array, trace: TransactionTraceEntry[] = [], checkpoints: DocumentCheckpointRecord[] = []): Uint8Array {
   const persisted = structuredClone(document);
   persisted.dirty = false;
   delete persisted.filePath;
   materializePaintTiles(persisted);
   const files: Record<string, Uint8Array> = {};
-  const assetMetadata: Record<string, DocumentAsset> = {};
-
-  for (const asset of Object.values(persisted.assets)) {
-    const metadata = structuredClone(asset);
-    if (metadata.data) {
-      files[`assets/${metadata.sha256}`] = Uint8Array.from(Buffer.from(metadata.data, 'base64'));
-      delete metadata.data;
+  const externalizeAssets = (value: AIDrawDocument) => {
+    const assetMetadata: Record<string, DocumentAsset> = {};
+    for (const asset of Object.values(value.assets)) {
+      const metadata = structuredClone(asset);
+      if (metadata.data) {
+        files[`assets/${metadata.sha256}`] ??= Uint8Array.from(Buffer.from(metadata.data, 'base64'));
+        delete metadata.data;
+      }
+      assetMetadata[metadata.id] = metadata;
     }
-    assetMetadata[metadata.id] = metadata;
-  }
-  persisted.assets = assetMetadata;
+    value.assets = assetMetadata;
+  };
+  externalizeAssets(persisted);
+
+  const persistedCheckpoints = checkpoints.slice(-32).map((checkpoint) => {
+    const copy = structuredClone(checkpoint);
+    copy.document.dirty = false;
+    delete copy.document.filePath;
+    clearPaintTileCaches(copy.document);
+    externalizeAssets(copy.document);
+    return copy;
+  });
 
   const manifest: NativeManifest = {
     format: 'AIDraw',
-    schemaVersion: 1,
+    schemaVersion: CURRENT_SCHEMA_VERSION,
     documentId: persisted.id,
     documentKind: persisted.kind,
     name: persisted.name,
@@ -85,22 +237,28 @@ function buildArchive(document: AIDrawDocument, appVersion: string, preview?: Ui
   files['document.json'] = strToU8(JSON.stringify(persisted));
   files['activity.json'] = strToU8(JSON.stringify(persisted.activity));
   files['trace/transactions.jsonl'] = strToU8(trace.map((entry) => JSON.stringify(entry)).join('\n') + (trace.length ? '\n' : ''));
+  files['checkpoints/index.json'] = strToU8(JSON.stringify(persistedCheckpoints.map((checkpoint) => ({
+    id: checkpoint.id, documentId: checkpoint.documentId, name: checkpoint.name, createdAt: checkpoint.createdAt,
+    createdBy: checkpoint.createdBy, sourceRevision: checkpoint.sourceRevision, kind: checkpoint.kind,
+  }))));
+  for (const checkpoint of persistedCheckpoints) files[`checkpoints/${checkpoint.id}.json`] = strToU8(JSON.stringify(checkpoint));
   files['preview.png'] = preview ?? TRANSPARENT_PREVIEW;
   return zipSync(files, { level: 6 });
 }
 
 export async function readNativeDocument(filePath: string): Promise<LoadedNativeDocument> {
-  const archive = unzipSync(new Uint8Array(await readFile(filePath)));
+  const archive = unzipNativeArchive(new Uint8Array(await readFile(filePath)));
   if (!archive['manifest.json'] || !archive['document.json']) {
     throw new Error('This file is not a valid AIDraw container.');
   }
   const manifest = JSON.parse(strFromU8(archive['manifest.json'])) as NativeManifest;
-  if (manifest.format !== 'AIDraw' || manifest.schemaVersion !== 1) {
+  if (manifest.format !== 'AIDraw' || ![1, CURRENT_SCHEMA_VERSION].includes(manifest.schemaVersion)) {
     throw new Error(`Unsupported AIDraw schema version: ${String(manifest.schemaVersion)}`);
   }
   const document = migrateDocument(JSON.parse(strFromU8(archive['document.json'])));
   const warnings: string[] = [];
   const trace: TransactionTraceEntry[] = [];
+  const checkpoints: DocumentCheckpointRecord[] = [];
   if (archive['trace/transactions.jsonl']) {
     for (const line of strFromU8(archive['trace/transactions.jsonl']).split(/\r?\n/).filter(Boolean)) {
       try {
@@ -115,9 +273,32 @@ export async function readNativeDocument(filePath: string): Promise<LoadedNative
     if (bytes) asset.data = Buffer.from(bytes).toString('base64');
     else if (asset.byteLength > 0) warnings.push(`Embedded data for asset “${asset.name}” is missing.`);
   }
+  validateLoadedPaintTileCaches(document, warnings);
+  if (archive['checkpoints/index.json']) {
+    try {
+      const summaries = JSON.parse(strFromU8(archive['checkpoints/index.json'])) as Array<{ id?: unknown }>;
+      if (!Array.isArray(summaries)) throw new Error('Checkpoint index is not an array.');
+      for (const summary of summaries.slice(-32)) {
+        if (typeof summary?.id !== 'string' || !/^[a-z0-9][a-z0-9._:-]{0,199}$/i.test(summary.id)) { warnings.push('An invalid checkpoint entry was ignored.'); continue; }
+        const bytes = archive[`checkpoints/${summary.id}.json`]; if (!bytes) { warnings.push(`Checkpoint “${summary.id}” is missing.`); continue; }
+        try {
+          const parsed = JSON.parse(strFromU8(bytes)) as DocumentCheckpointRecord;
+          const checkpointDocument = migrateDocument(parsed.document);
+          if (parsed.id !== summary.id || parsed.documentId !== document.id || checkpointDocument.id !== document.id || typeof parsed.name !== 'string' || !parsed.name.trim() || !parsed.createdBy || !Number.isInteger(parsed.sourceRevision)) throw new Error('Checkpoint metadata is inconsistent.');
+          for (const asset of Object.values(checkpointDocument.assets)) {
+            const assetBytes = archive[`assets/${asset.sha256}`];
+            if (assetBytes) asset.data = Buffer.from(assetBytes).toString('base64');
+            else if (asset.byteLength > 0) warnings.push(`Embedded data for checkpoint asset “${asset.name}” is missing.`);
+          }
+          validateLoadedPaintTileCaches(checkpointDocument, warnings);
+          checkpoints.push({ ...parsed, document: checkpointDocument });
+        } catch { warnings.push(`Checkpoint “${summary.id}” is corrupt and was ignored.`); }
+      }
+    } catch { warnings.push('The checkpoint index is corrupt and was ignored.'); }
+  }
   document.filePath = filePath;
   document.dirty = false;
-  return { document, manifest, trace, warnings };
+  return { document, manifest, trace, checkpoints, warnings };
 }
 
 export async function writeNativeDocument(
@@ -126,11 +307,12 @@ export async function writeNativeDocument(
   appVersion: string,
   preview?: Uint8Array,
   trace: TransactionTraceEntry[] = [],
+  checkpoints: DocumentCheckpointRecord[] = [],
 ): Promise<string> {
   const destination = normalizePath(filePath);
   await mkdir(dirname(destination), { recursive: true });
   const temp = `${destination}.${process.pid}.${Date.now()}.tmp`;
-  const bytes = buildArchive(document, appVersion, preview, trace);
+  const bytes = buildArchive(document, appVersion, preview, trace, checkpoints);
   const handle = await open(temp, 'wx');
   try {
     await handle.writeFile(bytes);
