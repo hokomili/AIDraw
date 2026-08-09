@@ -10,6 +10,7 @@ import {
   resolveRasterBrushPreset,
   type IllustrationDocument,
   type IllustrationObject,
+  type CanvasOperation,
   type PaintStyle,
   type PathObject,
   type PointSample,
@@ -329,6 +330,8 @@ export function IllustrationCanvas({ document }: { document: IllustrationDocumen
   const [size, setSize] = useState({ width: 800, height: 600 });
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [gesture, setGesture] = useState<Gesture>();
+  const gestureRef = useRef<Gesture | undefined>(undefined);
+  const mountedRef = useRef(true);
   const [pathPoints, setPathPoints] = useState<PointSample[]>([]);
   const [textDialogPoint, setTextDialogPoint] = useState<PointSample>();
   const tool = useEditorStore((state) => state.selectedTool);
@@ -338,7 +341,8 @@ export function IllustrationCanvas({ document }: { document: IllustrationDocumen
   const opacity = useEditorStore((state) => state.opacity);
   const zoom = useEditorStore((state) => state.zoom);
   const setZoom = useEditorStore((state) => state.setZoom);
-  const apply = useEditorStore((state) => state.apply);
+  const applyToActiveDocument = useEditorStore((state) => state.apply);
+  const apply = useCallback((label: string, operations: CanvasOperation[]) => mountedRef.current ? applyToActiveDocument(label, operations, document.id) : Promise.resolve(false), [applyToActiveDocument, document.id]);
   const selectedIds = useEditorStore((state) => state.selectedEntityIds);
   const setSelectedId = useEditorStore((state) => state.setSelectedEntity);
   const setSelectedIds = useEditorStore((state) => state.setSelectedEntities);
@@ -348,6 +352,19 @@ export function IllustrationCanvas({ document }: { document: IllustrationDocumen
   const handledRevealRef = useRef<string | undefined>(undefined);
   const playbackMap = useEditorStore((state) => state.playbacks);
   const playbacks = Object.values(playbackMap).filter((entry) => entry.documentId === document.id);
+
+  useEffect(() => {
+    gestureRef.current = gesture;
+  }, [gesture]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      const pendingLock = gestureRef.current?.lockPromise;
+      if (pendingLock) void pendingLock.then((lock) => lock.lockId ? window.aidraw.releaseHumanLock(lock.lockId) : undefined).catch(() => undefined);
+    };
+  }, []);
 
   const view: ViewTransform = (() => {
     const fit = Math.min((size.width - 128) / document.artboard.width, (size.height - 112) / document.artboard.height);

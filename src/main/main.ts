@@ -1024,7 +1024,7 @@ async function initializeApplication(): Promise<void> {
   if (explicitTrustedFolders.length > 0) {
     if (startupCommand !== 'headless' || !explicitMcpConnectionFile) throw new Error('--trust-folder requires --headless and --write-mcp-connection.');
     if (explicitTrustedFolders.some((folder) => !folder || !isAbsolute(folder))) throw new Error('--trust-folder values must be non-empty absolute paths.');
-    launchTrustedFolders = mcpHost.grantLaunchFolderTrust(explicitTrustedFolders.map((folder) => resolve(folder)));
+    launchTrustedFolders = await mcpHost.grantLaunchFolderTrust(explicitTrustedFolders.map((folder) => resolve(folder)));
   }
   if (explicitMcpConnectionFile) {
     const connectionPath = resolve(explicitMcpConnectionFile);

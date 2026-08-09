@@ -94,10 +94,10 @@ export class EngineRuntime {
     this.started = false;
     if (this.recoveryTimer) clearInterval(this.recoveryTimer);
     this.recoveryTimer = undefined;
-    await this.service.compactRecovery();
     await this.mcpHost.stop();
     this.rasterUtilities.stop();
     this.generationUtilities.stop();
+    await this.service.compactRecovery();
     this.service.setMcpInfo({ running: false });
   }
 }

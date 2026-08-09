@@ -59,6 +59,7 @@ export function sanitizedMalformedRendererRecoveryEvent(): {
   const event = {
     type: 'workspace',
     snapshot: {
+      workspaceRevision: Number.MAX_SAFE_INTEGER,
       documents: [{ id: documentId, name: 'Sanitized recovery probe', kind: 'illustration', dirty: false, revision: 0 }],
       activeDocumentId: documentId,
       // Intentionally invalid. Rendering an illustration requires artboard dimensions.

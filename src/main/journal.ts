@@ -2,6 +2,20 @@ import { appendFile, mkdir, readFile, readdir, rename, unlink, writeFile } from 
 import { basename, dirname, join } from 'node:path';
 import { CanvasTransactionSchema, applyTransaction, migrateDocument, type AIDrawDocument, type CanvasTransaction } from '@aidraw/core';
 
+const WORKSPACE_FILE = 'workspace.json';
+const WORKSPACE_QUEUE = '@workspace';
+
+interface PersistedWorkspace {
+  version: 1;
+  documentIds: string[];
+  activeDocumentId?: string;
+}
+
+export interface RecoveredWorkspace {
+  documents: AIDrawDocument[];
+  activeDocumentId?: string;
+}
+
 export class RecoveryJournal {
   private readonly writeQueues = new Map<string, Promise<void>>();
 
@@ -36,6 +50,22 @@ export class RecoveryJournal {
     });
   }
 
+  compactWorkspace(documentIds: string[], activeDocumentId?: string): Promise<void> {
+    const orderedIds = [...new Set(documentIds.filter((id) => typeof id === 'string' && id.length > 0))];
+    const workspace: PersistedWorkspace = {
+      version: 1,
+      documentIds: orderedIds,
+      activeDocumentId: activeDocumentId && orderedIds.includes(activeDocumentId) ? activeDocumentId : undefined,
+    };
+    return this.enqueue(WORKSPACE_QUEUE, async () => {
+      await mkdir(this.root, { recursive: true });
+      const path = join(this.root, WORKSPACE_FILE);
+      const temp = `${path}.tmp`;
+      await writeFile(temp, `${JSON.stringify(workspace)}\n`, 'utf8');
+      await rename(temp, path);
+    });
+  }
+
   remove(documentId: string): Promise<void> {
     return this.enqueue(documentId, async () => {
       const path = this.journalPath(documentId);
@@ -49,11 +79,11 @@ export class RecoveryJournal {
     });
   }
 
-  async recover(): Promise<AIDrawDocument[]> {
+  async recoverWorkspace(): Promise<RecoveredWorkspace> {
     let entries: string[];
-    try { entries = await readdir(this.root); } catch { return []; }
-    const recovered: AIDrawDocument[] = [];
-    for (const entry of entries.filter((value) => value.endsWith('.jsonl'))) {
+    try { entries = await readdir(this.root); } catch { return { documents: [] }; }
+    const recovered = new Map<string, AIDrawDocument>();
+    for (const entry of entries.filter((value) => value.endsWith('.jsonl')).sort()) {
       try {
         const records = (await readFile(join(this.root, entry), 'utf8')).split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line) as { type: string; document?: unknown; transaction?: CanvasTransaction });
         const snapshotIndex = records.findLastIndex((record) => record.type === 'snapshot' && record.document);
@@ -64,13 +94,37 @@ export class RecoveryJournal {
           const parsed = CanvasTransactionSchema.safeParse(record.transaction);
           if (parsed.success) document = applyTransaction(document, parsed.data).document;
         }
-        document.dirty = true;
-        if (basename(entry, '.jsonl') === document.id) recovered.push(document);
+        if (basename(entry, '.jsonl') === document.id) recovered.set(document.id, document);
       } catch {
         // A corrupt journal is isolated; the remaining documents can still recover.
       }
     }
-    return recovered;
+    let workspace: PersistedWorkspace | undefined;
+    try {
+      const candidate = JSON.parse(await readFile(join(this.root, WORKSPACE_FILE), 'utf8')) as Partial<PersistedWorkspace>;
+      if (candidate.version === 1 && Array.isArray(candidate.documentIds) && candidate.documentIds.every((id) => typeof id === 'string')) {
+        workspace = {
+          version: 1,
+          documentIds: [...new Set(candidate.documentIds)],
+          activeDocumentId: typeof candidate.activeDocumentId === 'string' ? candidate.activeDocumentId : undefined,
+        };
+      }
+    } catch {
+      // Legacy and crash-interrupted profiles have no trustworthy workspace index.
+    }
+    const orderedIds = [
+      ...(workspace?.documentIds ?? []).filter((id) => recovered.has(id)),
+      ...[...recovered.keys()].filter((id) => !workspace?.documentIds.includes(id)),
+    ];
+    const documents = orderedIds.map((id) => recovered.get(id)!);
+    const activeDocumentId = workspace?.activeDocumentId && recovered.has(workspace.activeDocumentId)
+      ? workspace.activeDocumentId
+      : undefined;
+    return { documents, activeDocumentId };
+  }
+
+  async recover(): Promise<AIDrawDocument[]> {
+    return (await this.recoverWorkspace()).documents;
   }
 
   async read(documentId: string): Promise<string[]> {

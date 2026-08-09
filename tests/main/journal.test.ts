@@ -28,6 +28,17 @@ describe('crash recovery journal', () => {
     expect(recovered).toHaveLength(1); expect(recovered[0].name).toBe('Recovered drawing'); expect(recovered[0].dirty).toBe(true);
   });
 
+  it('preserves a compacted clean snapshot when no later transaction exists', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-recovery-')); temporaryPaths.push(root);
+    const journal = new RecoveryJournal(root); const document = createIllustrationDocument('Clean restart');
+    expect(document.dirty).toBe(false);
+    await journal.compact(document);
+
+    const recovered = await journal.recover();
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0]).toMatchObject({ id: document.id, name: 'Clean restart', dirty: false });
+  });
+
   it('removes both committed and temporary recovery state for an explicit discard', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aidraw-recovery-')); temporaryPaths.push(root);
     const journal = new RecoveryJournal(root); const document = createIllustrationDocument('Discard me');

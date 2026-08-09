@@ -32,6 +32,7 @@ describe('isolated renderer recovery E2E hook', () => {
     expect(probe.event).toEqual({
       type: 'workspace',
       snapshot: {
+        workspaceRevision: Number.MAX_SAFE_INTEGER,
         documents: [{ id: 'ux05-sanitized-malformed-document', name: 'Sanitized recovery probe', kind: 'illustration', dirty: false, revision: 0 }],
         activeDocumentId: 'ux05-sanitized-malformed-document',
         activeDocument: { id: 'ux05-sanitized-malformed-document', name: 'Sanitized recovery probe', kind: 'illustration', dirty: false, revision: 0, artboard: null },

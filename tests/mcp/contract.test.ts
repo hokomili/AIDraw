@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { access, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
@@ -724,6 +724,27 @@ describe('authenticated stateful MCP contract', () => {
     expect(await callTool(started.url, client.headers, 6, 'session_manage', { action: 'inspect' })).toMatchObject({ workspace: { editorAdvisory: { advisory: true, attached: false } } });
   });
 
+  it('keeps MCP active identity and editor advisory atomic when a stale renderer tab update arrives', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-mcp-active-identity-')); temporaryPaths.push(root);
+    const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0'); documents.initialize();
+    const first = documents.snapshot().activeDocument!;
+    const second = documents.create({ kind: 'illustration', name: 'Second renderer tab' }).activeDocument!;
+    documents.setEditorAttached(true);
+    documents.updateEditorAdvisory({ documentId: second.id, tool: 'bezier', selectedEntityIds: ['second-tab-preview'], zoom: 2 });
+    const host = new McpHost(documents, '1.0.0', join(root, 'port.json')); hosts.push(host); const started = await host.start('active-identity-token');
+    const client = await initializeClient(started.url, 'active-identity-token', 'active-identity-client');
+
+    const activated = await callTool(started.url, client.headers, 2, 'document_manage', { action: 'activate', documentId: first.id });
+    expect(activated).toMatchObject({ activeDocumentId: first.id, activeDocument: { id: first.id }, workspaceRevision: expect.any(Number) });
+    documents.updateEditorAdvisory({ documentId: second.id, tool: 'pencil', selectedEntityIds: ['stale-second-preview'], zoom: 4 });
+    const [listed, inspected] = await Promise.all([
+      callTool(started.url, client.headers, 3, 'document_manage', { action: 'list' }),
+      callTool(started.url, client.headers, 4, 'session_manage', { action: 'inspect' }),
+    ]);
+    expect(listed).toMatchObject({ activeDocumentId: first.id });
+    expect(inspected).toMatchObject({ workspace: { activeDocumentId: first.id, editorAdvisory: { attached: true, documentId: first.id, selectedEntityIds: [] } } });
+  });
+
   it('returns exact stale-revision details and a canonical observe-before-retry step', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aidraw-mcp-revision-conflict-')); temporaryPaths.push(root);
     const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0'); documents.initialize();
@@ -908,11 +929,12 @@ describe('authenticated stateful MCP contract', () => {
   });
 
   it('provides structured approval details and honors scoped folder trust without bypassing overwrites', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'aidraw-mcp-'));
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'aidraw-mcp-')));
     temporaryPaths.push(root);
     const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0');
     documents.initialize();
-    const host = new McpHost(documents, '1.0.0', join(root, 'port.json'));
+    let generationCancellationJobId: string | undefined;
+    const host = new McpHost(documents, '1.0.0', join(root, 'port.json'), (jobId) => { generationCancellationJobId = jobId; });
     hosts.push(host);
     const started = await host.start('approval-token');
     const client = await initializeClient(started.url, 'approval-token', 'approval-client');
@@ -940,6 +962,15 @@ describe('authenticated stateful MCP contract', () => {
     expect(second).toMatchObject({ status: 'queued', trust: 'folder' });
 
     await mkdir(folder, { recursive: true });
+    const trustedInput = join(folder, 'trusted-input.png');
+    const trustedInputCanvas = createCanvas(1, 1); trustedInputCanvas.getContext('2d').fillRect(0, 0, 1, 1);
+    await writeFile(trustedInput, trustedInputCanvas.toBuffer('image/png'));
+    const imported = await call(31, 'asset_import', { path: trustedInput });
+    expect(imported).toMatchObject({ status: 'queued', trust: 'folder' });
+    expect(documents.getJob(String(imported.jobId))?.result).toMatchObject({
+      request: { path: trustedInput, overwritePaths: [] }, approvalDecision: 'trusted-folder',
+    });
+
     const existingPath = join(folder, 'existing.png');
     await writeFile(existingPath, 'do not overwrite without approval');
     const existing = await call(4, 'document_export', { documentId, path: existingPath, format: 'png', scale: 1 });
@@ -955,6 +986,40 @@ describe('authenticated stateful MCP contract', () => {
     const throughAlias = await call(5, 'document_export', { documentId, path: join(aliasFolder, 'alias.png'), format: 'png', scale: 1 });
     const aliasJob = documents.getJob(String(throughAlias.jobId))!;
     expect(String(aliasJob.approval?.review?.target).toLowerCase()).toBe(join(realFolder, 'alias.png').toLowerCase());
+
+    expect(await host.grantLaunchFolderTrust([aliasFolder])).toContain(process.platform === 'win32' ? realFolder.toLowerCase() : realFolder);
+    const aliasedInput = join(realFolder, 'aliased-input.png');
+    await writeFile(aliasedInput, trustedInputCanvas.toBuffer('image/png'));
+    const importThroughAlias = await call(32, 'asset_import', { path: join(aliasFolder, 'aliased-input.png') });
+    expect(importThroughAlias).toMatchObject({ status: 'queued', trust: 'folder' });
+    expect(documents.getJob(String(importThroughAlias.jobId))?.result).toMatchObject({
+      request: { path: aliasedInput, overwritePaths: [] }, approvalDecision: 'trusted-folder',
+    });
+
+    const outsideInput = join(root, 'outside-input.png');
+    const escapedInput = join(realFolder, 'escaped-input.png');
+    await writeFile(outsideInput, trustedInputCanvas.toBuffer('image/png'));
+    await symlink(outsideInput, escapedInput, 'file');
+    const importThroughEscape = await call(33, 'asset_import', { path: escapedInput });
+    expect(importThroughEscape).toMatchObject({ status: 'waiting-for-user' });
+    expect(documents.getJob(String(importThroughEscape.jobId))?.approval?.review?.target).toBe(outsideInput);
+    expect(await call(35, 'job_manage', { action: 'cancel', jobId: importThroughEscape.jobId })).toMatchObject({
+      status: 'cancelled', message: 'Cancelled by the originating agent.',
+    });
+    expect(generationCancellationJobId).toBeUndefined();
+
+    documents.upsertJob({
+      ...firstJob,
+      status: 'failed',
+      updatedAt: nowIso(),
+      message: 'The representative import failed safely.',
+      error: { code: 'import_failed', message: 'Malformed representative input.', retryable: false },
+    });
+    expect(await call(34, 'job_manage', { action: 'inspect', jobId: firstJob.id })).toMatchObject({
+      id: firstJob.id,
+      status: 'failed',
+      error: { code: 'import_failed', message: 'Malformed representative input.', retryable: false },
+    });
 
     const sourceCanvas = createCanvas(2, 1); sourceCanvas.getContext('2d').fillStyle = '#ff6b7a'; sourceCanvas.getContext('2d').fillRect(0, 0, 2, 1); const sourceBytes = sourceCanvas.toBuffer('image/png'); const sourceAssetId = 'approval-source';
     expect((await documents.apply({ id: createId('tx'), clientOperationId: 'approval-source-add', documentId, actor: HUMAN_ACTOR, label: 'Add approval source', createdAt: nowIso(), playback: { mode: 'instant', speed: 1 }, operations: [{ kind: 'asset.add', asset: { id: sourceAssetId, name: 'Coral source', mimeType: 'image/png', byteLength: sourceBytes.byteLength, sha256: createHash('sha256').update(sourceBytes).digest('hex'), source: 'imported', data: sourceBytes.toString('base64') } }] })).status).toBe('committed');
@@ -981,7 +1046,7 @@ describe('authenticated stateful MCP contract', () => {
   });
 
   it('keeps denied saves inert and allow-once authority exact and nonpersistent', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'aidraw-mcp-approval-once-'));
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'aidraw-mcp-approval-once-')));
     temporaryPaths.push(root);
     const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0');
     documents.initialize();
@@ -1035,7 +1100,7 @@ describe('authenticated stateful MCP contract', () => {
   });
 
   it('persists explicitly granted folder trust across MCP host restarts', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'aidraw-mcp-'));
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'aidraw-mcp-')));
     temporaryPaths.push(root);
     const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0');
     documents.initialize();
@@ -1053,7 +1118,8 @@ describe('authenticated stateful MCP contract', () => {
     const requested = await call(started.url, firstClient.headers, 2, 'document_export', { documentId, path: join(folder, 'first.png'), format: 'png', scale: 1 });
     const job = documents.getJob(String(requested.jobId))!;
     expect(documents.resolveJob(job.id, 'allow-always')?.status).toBe('queued');
-    await expect.poll(async () => await readFile(join(root, 'trusted-folders.json'), 'utf8').then((text) => (JSON.parse(text) as { folders?: string[] }).folders ?? [], () => [])).toContain(folder.toLowerCase());
+    const persistedFolder = process.platform === 'win32' ? folder.toLowerCase() : folder;
+    await expect.poll(async () => await readFile(join(root, 'trusted-folders.json'), 'utf8').then((text) => (JSON.parse(text) as { folders?: string[] }).folders ?? [], () => [])).toContain(persistedFolder);
 
     await firstHost.stop();
     hosts.splice(hosts.indexOf(firstHost), 1);

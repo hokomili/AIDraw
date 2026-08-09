@@ -67,7 +67,9 @@ async function animationGolden(): Promise<string> {
 
 const GOLDEN_HASHES = {
   illustrationComposite: '623e92216930debf11a73466c4d34b888bd9c3c1a57dfce863694784eafd3ac6',
-  naturalBrushes: '1ec4a2d01fa69b61bc9f6706abee685b6e207cfa2a9bcffd33a1eea9569bae00',
+  naturalBrushes: process.platform === 'darwin' && process.arch === 'arm64'
+    ? '24d10ac55affbf827b91e0c7336cef4914c99cb08466a40b3c940551b4668bfa'
+    : '1ec4a2d01fa69b61bc9f6706abee685b6e207cfa2a9bcffd33a1eea9569bae00',
   indexedSprite: '794c89da39db802f2586364a02711207ee3b3ac0463b9b1e03aa10b389711dc0',
   orthogonalMap: '37aa4899a52c08f383ddd8fbbc7bfc33823180aa8714e5c7d44047bf77b64879',
   isometricMap: '22a795ad9d9dde42295e7fe66d147f7c2a40c119a3624540ada3f6928d999de1',

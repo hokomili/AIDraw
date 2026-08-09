@@ -42,6 +42,27 @@ async function measured<T>(work: () => T | Promise<T>): Promise<{ value: T; dura
   return { value, durationMs: Number((performance.now() - started).toFixed(2)) };
 }
 
+function memorySnapshot(stage: string, baselineRss: number) {
+  const usage = process.memoryUsage();
+  return {
+    stage,
+    rssMiB: Number((usage.rss / 1024 / 1024).toFixed(2)),
+    rssGrowthMiB: Number(((usage.rss - baselineRss) / 1024 / 1024).toFixed(2)),
+    heapUsedMiB: Number((usage.heapUsed / 1024 / 1024).toFixed(2)),
+    externalMiB: Number((usage.external / 1024 / 1024).toFixed(2)),
+    arrayBuffersMiB: Number((usage.arrayBuffers / 1024 / 1024).toFixed(2)),
+    maxRssMiB: Number((process.resourceUsage().maxRSS / 1024).toFixed(2)),
+  };
+}
+
+function releaseMeasuredCanvas(canvas: { width: number; height: number }): void {
+  // Each scenario measures its completed output before this reset. Do not keep
+  // unrelated full-resolution native canvases alive across the rest of the
+  // gate merely because the timing helper returned them.
+  canvas.width = 1;
+  canvas.height = 1;
+}
+
 function vectorFixture() {
   const document = createIllustrationDocument('5,000 vector performance fixture');
   document.artboard = { ...document.artboard, width: 1_280, height: 720, background: '#fffdf7' };
@@ -93,24 +114,39 @@ describe('Windows v1 non-GUI performance gate', () => {
   it('meets the canonical render, persistence, and queue budgets', async () => {
     await renderIllustration(Object.assign(createIllustrationDocument('warmup'), { artboard: { ...createIllustrationDocument().artboard, width: 8, height: 8 } }));
     const startingRss = process.memoryUsage().rss;
+    const memoryProfile = [memorySnapshot('baseline-after-warmup', startingRss)];
     const vector = vectorFixture();
     const vectorRender = await measured(() => renderIllustration(vector));
     const afterVectorRss = process.memoryUsage().rss;
+    memoryProfile.push(memorySnapshot('after-vector-render', startingRss));
+    releaseMeasuredCanvas(vectorRender.value);
     const paint = paintFixture();
     const paintRender = await measured(() => renderIllustration(paint));
+    memoryProfile.push(memorySnapshot('after-editable-paint-render', startingRss));
+    releaseMeasuredCanvas(paintRender.value);
     materializePaintTiles(paint);
+    memoryProfile.push(memorySnapshot('after-paint-tile-materialization', startingRss));
     const coldCachedPaintRender = await measured(() => renderIllustration(paint));
+    memoryProfile.push(memorySnapshot('after-cold-cached-paint-render', startingRss));
+    releaseMeasuredCanvas(coldCachedPaintRender.value);
     const warmCachedPaintRender = await measured(() => renderIllustration(paint));
     const afterPaintRss = process.memoryUsage().rss;
+    memoryProfile.push(memorySnapshot('after-warm-cached-paint-render', startingRss));
+    releaseMeasuredCanvas(warmCachedPaintRender.value);
     const mapFixtureValue = mapFixture();
     const tilemapRender = await measured(() => renderTilemap(mapFixtureValue.document, mapFixtureValue.map));
     const afterMapRss = process.memoryUsage().rss;
+    memoryProfile.push(memorySnapshot('after-tilemap-render', startingRss));
+    releaseMeasuredCanvas(tilemapRender.value);
     const root = await mkdtemp(join(tmpdir(), 'aidraw-performance-')); temporaryPaths.push(root);
     const nativeSave = await measured(() => writeNativeDocument(join(root, 'vectors.aidraw'), vector, 'performance-gate'));
+    memoryProfile.push(memorySnapshot('after-native-save', startingRss));
     const pngExport = await measured(() => exportDocument(vector, 'png'));
+    memoryProfile.push(memorySnapshot('after-png-export', startingRss));
     const runs = Array.from({ length: 10_000 }, (_, index) => ({ x: 0, y: index, length: 100, index: 4 }));
     const transaction: CanvasTransaction = { id: createId('tx'), clientOperationId: createId('op'), documentId: vector.id, actor: HUMAN_ACTOR, label: 'One million samples', createdAt: nowIso(), playback: { mode: 'animated', speed: 1 }, operations: [{ kind: 'pixel.cel.region', spriteId: 'sprite', celId: 'cel', runs } as CanvasOperation] };
     const queueAccounting = await measured(() => ({ samples: transactionSamples(transaction), midpoint: visibleOperations(transaction.operations, 0.5) }));
+    memoryProfile.push(memorySnapshot('after-queue-accounting', startingRss));
     const peakRss = Math.max(afterVectorRss, afterPaintRss, afterMapRss, process.memoryUsage().rss);
     const metrics = {
       vector5000RenderMs: vectorRender.durationMs,
@@ -123,7 +159,7 @@ describe('Windows v1 non-GUI performance gate', () => {
       millionSampleAccountingMs: queueAccounting.durationMs,
       rssGrowthMiB: Number(((peakRss - startingRss) / 1024 / 1024).toFixed(2)),
     };
-    const report = { version: 1, createdAt: new Date().toISOString(), build: process.env.GITHUB_SHA ?? 'local', machine: { hostname: hostname(), platform: platform(), release: release(), arch: process.arch, cpu: cpus()[0]?.model, logicalCpus: cpus().length, totalMemoryMiB: Math.round(totalmem() / 1024 / 1024), freeMemoryMiB: Math.round(freemem() / 1024 / 1024), node: process.version }, coverage: { automated: ['5,000 vector render', 'four 4096×4096 editable paint layers', 'cold and warm four-layer 4096×4096 materialized sparse paint render', '65,536 visible tiles', 'native save', 'PNG export', 'one-million-sample compact accounting', 'RSS growth'], deferredToPackagedComputerUse: ['pointer-to-preview latency', 'requestAnimationFrame pacing', 'human input during four visible agent lanes', '200% display scaling and tablet latency'] }, budgets, metrics };
+    const report = { version: 1, createdAt: new Date().toISOString(), build: process.env.GITHUB_SHA ?? 'local', machine: { hostname: hostname(), platform: platform(), release: release(), arch: process.arch, cpu: cpus()[0]?.model, logicalCpus: cpus().length, totalMemoryMiB: Math.round(totalmem() / 1024 / 1024), freeMemoryMiB: Math.round(freemem() / 1024 / 1024), node: process.version }, coverage: { automated: ['5,000 vector render', 'four 4096×4096 editable paint layers', 'cold and warm four-layer 4096×4096 materialized sparse paint render', '65,536 visible tiles', 'native save', 'PNG export', 'one-million-sample compact accounting', 'RSS growth'], deferredToPackagedComputerUse: ['pointer-to-preview latency', 'requestAnimationFrame pacing', 'human input during four visible agent lanes', '200% display scaling and tablet latency'] }, budgets, metrics, diagnostics: { memoryProfile } };
     const reportPath = process.env.AIDRAW_PERFORMANCE_REPORT ?? join(process.cwd(), 'test-results', 'performance-gate.json');
     await mkdir(dirname(reportPath), { recursive: true }); await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
     expect(queueAccounting.value.samples).toBe(1_000_000); expect((queueAccounting.value.midpoint[0] as Extract<CanvasOperation, { kind: 'pixel.cel.region' }>).runs.reduce((sum, run) => sum + run.length, 0)).toBe(500_000);

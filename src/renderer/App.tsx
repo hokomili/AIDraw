@@ -5699,9 +5699,9 @@ export function App() {
       <ToolRail document={document} />
       <main className="canvas-workspace">
         {canvasDocument?.kind === "illustration" ? (
-          <IllustrationCanvas document={canvasDocument} />
+          <IllustrationCanvas key={canvasDocument.id} document={canvasDocument} />
         ) : (
-          <PixelCanvas document={canvasDocument as PixelDocument} />
+          <PixelCanvas key={canvasDocument?.id} document={canvasDocument as PixelDocument} />
         )}
       </main>
       <RightSidebar document={document} />

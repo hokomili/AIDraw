@@ -10,6 +10,35 @@ import { resolve } from 'node:path';
 import process from 'node:process';
 
 const localElectronZipDirectory = process.env.AIDRAW_ELECTRON_ZIP_DIR;
+const macSigningIdentity = process.env.AIDRAW_MACOS_SIGN_IDENTITY?.trim();
+const macBundleIdentifier = 'com.electron.aidraw';
+
+// Electron's downloaded macOS bundle is ad-hoc signed before Packager renames
+// the app and rewrites Info.plist. Sign the completed bundle again so local
+// unsigned builds still have a valid integrity seal. A release runner can opt
+// into its Developer ID identity without changing this configuration.
+const macSigningOptions = macSigningIdentity
+  ? {
+      identity: macSigningIdentity,
+      identityValidation: true,
+    }
+  : {
+      identity: '-',
+      identityValidation: false,
+      preAutoEntitlements: false,
+      preEmbedProvisioningProfile: false,
+      strictVerify: true,
+      optionsForFile: (filePath: string) => ({
+        hardenedRuntime: false,
+        timestamp: 'none',
+        // A default ad-hoc designated requirement is a changing CDHash. Keep a
+        // stable identifier requirement so a rebuilt development app does not
+        // silently acquire a different Keychain access identity every time.
+        ...(filePath.endsWith('/AIDraw.app')
+          ? { requirements: `=designated => identifier "${macBundleIdentifier}"` }
+          : {}),
+      }),
+    };
 
 const packagedRuntimeRoots = [
   '/.vite',
@@ -28,6 +57,8 @@ const config: ForgeConfig = {
   packagerConfig: {
     asar: { unpack: '**/*.node' },
     prune: false,
+    appBundleId: macBundleIdentifier,
+    osxSign: macSigningOptions,
     ...(localElectronZipDirectory ? { electronZipDir: resolve(localElectronZipDirectory) } : {}),
     // Vite bundles the application graph. Keep the native raster binding,
     // Paper's deliberately externalized geometry runtime, and AJV helpers

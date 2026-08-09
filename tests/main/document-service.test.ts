@@ -39,6 +39,67 @@ describe('document service collaboration semantics', () => {
     await service.compactRecovery();
   });
 
+  it('restores eight documents in tab order with the exact active, dirty, and saved-path state', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-service-workspace-'));
+    temporaryPaths.push(root);
+    const service = new DocumentService(new RecoveryJournal(join(root, 'recovery')), '1.0.0');
+    services.push(service);
+    service.initialize();
+    const original = service.snapshot().activeDocument!;
+    const saved = service.create({ kind: 'illustration', name: 'Saved clean illustration' }).activeDocument!;
+    expect((await service.apply({ id: createId('tx'), clientOperationId: createId('op'), documentId: saved.id, actor: HUMAN_ACTOR, label: 'Prepare saved document', createdAt: nowIso(), operations: [{ kind: 'document.rename', name: 'Saved clean illustration' }] })).status).toBe('committed');
+    const savedPath = await service.save(saved.id, join(root, 'saved-clean.aidraw'));
+    const cleanSprite = service.create({ kind: 'sprite', name: 'Clean sprite' }).activeDocument!;
+    const dirtySprite = service.create({ kind: 'sprite', name: 'Dirty sprite' }).activeDocument!;
+    expect((await service.apply({ id: createId('tx'), clientOperationId: createId('op'), documentId: dirtySprite.id, actor: HUMAN_ACTOR, label: 'Dirty sprite', createdAt: nowIso(), operations: [{ kind: 'document.rename', name: 'Dirty sprite edited' }] })).status).toBe('committed');
+    const cleanTilemap = service.create({ kind: 'tilemap', name: 'Clean tilemap' }).activeDocument!;
+    const dirtyTilemap = service.create({ kind: 'tilemap', name: 'Dirty tilemap' }).activeDocument!;
+    expect((await service.apply({ id: createId('tx'), clientOperationId: createId('op'), documentId: dirtyTilemap.id, actor: HUMAN_ACTOR, label: 'Dirty tilemap', createdAt: nowIso(), operations: [{ kind: 'document.rename', name: 'Dirty tilemap edited' }] })).status).toBe('committed');
+    const cleanProject = service.create({ kind: 'project', name: 'Clean project' }).activeDocument!;
+    const dirtyIllustration = service.create({ kind: 'illustration', name: 'Dirty illustration' }).activeDocument!;
+    expect((await service.apply({ id: createId('tx'), clientOperationId: createId('op'), documentId: dirtyIllustration.id, actor: HUMAN_ACTOR, label: 'Dirty illustration', createdAt: nowIso(), operations: [{ kind: 'document.rename', name: 'Dirty illustration edited' }] })).status).toBe('committed');
+    const expectedOrder = [original.id, saved.id, cleanSprite.id, dirtySprite.id, cleanTilemap.id, dirtyTilemap.id, cleanProject.id, dirtyIllustration.id];
+    service.activate(cleanSprite.id);
+    await service.compactRecovery();
+
+    const restarted = new DocumentService(new RecoveryJournal(join(root, 'recovery')), '1.0.0');
+    services.push(restarted);
+    expect(await restarted.recover()).toBe(8);
+    restarted.initialize();
+    const snapshot = restarted.snapshot();
+    expect(snapshot.documents.map((document) => document.id)).toEqual(expectedOrder);
+    expect(snapshot.activeDocumentId).toBe(cleanSprite.id);
+    expect(snapshot.documents.map(({ id, dirty, filePath }) => ({ id, dirty, filePath }))).toEqual([
+      { id: original.id, dirty: false, filePath: undefined },
+      { id: saved.id, dirty: false, filePath: savedPath },
+      { id: cleanSprite.id, dirty: false, filePath: undefined },
+      { id: dirtySprite.id, dirty: true, filePath: undefined },
+      { id: cleanTilemap.id, dirty: false, filePath: undefined },
+      { id: dirtyTilemap.id, dirty: true, filePath: undefined },
+      { id: cleanProject.id, dirty: false, filePath: undefined },
+      { id: dirtyIllustration.id, dirty: true, filePath: undefined },
+    ]);
+  });
+
+  it('keeps the attached editor advisory on the canonical active document and rejects stale tab updates', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-service-advisory-'));
+    temporaryPaths.push(root);
+    const service = new DocumentService(new RecoveryJournal(root), '1.0.0');
+    services.push(service);
+    service.initialize();
+    const first = service.snapshot().activeDocument!;
+    const second = service.create({ kind: 'illustration', name: 'Second tab' }).activeDocument!;
+    service.setEditorAttached(true);
+    service.activate(first.id);
+    service.updateEditorAdvisory({ documentId: first.id, tool: 'bezier', selectedEntityIds: ['first-preview'], zoom: 2 });
+    expect(service.getEditorAdvisory()).toMatchObject({ attached: true, documentId: first.id, tool: 'bezier', selectedEntityIds: ['first-preview'] });
+
+    service.activate(second.id);
+    expect(service.getEditorAdvisory()).toMatchObject({ attached: true, documentId: second.id, selectedEntityIds: [] });
+    service.updateEditorAdvisory({ documentId: first.id, tool: 'pencil', selectedEntityIds: ['stale-first-preview'], zoom: 4 });
+    expect(service.getEditorAdvisory()).toMatchObject({ attached: true, documentId: second.id, selectedEntityIds: [] });
+  });
+
   it('deduplicates client operation IDs and keeps human history separate', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aidraw-service-'));
     temporaryPaths.push(root);

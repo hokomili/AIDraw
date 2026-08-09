@@ -2,7 +2,7 @@
 
 ## Supported version
 
-AIDraw is currently pre-v1. Security fixes target the latest published prerelease. Windows 11 x64 is the locally verified platform; macOS and Linux remain prerelease targets until their native CI and interaction gates pass. Once v1 ships, the latest stable release becomes the supported line.
+AIDraw is currently pre-v1. Security fixes target the latest published prerelease. Windows 11 x64 remains the release-evidence baseline; Apple Silicon has an exact-artifact independent Level 2 native interaction PASS, while macOS and Linux remain prerelease targets until hosted native, signing/clean-machine, and Level 3 security gates pass. Once v1 ships, the latest stable release becomes the supported line.
 
 ## Reporting a vulnerability
 

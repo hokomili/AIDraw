@@ -49,6 +49,8 @@ jobs:
       - run: node scripts/verify-package.mjs
       - run: npm run test:e2e:only
         if: runner.os == 'Windows'
+        env:
+          AIDRAW_E2E_LAUNCH_CONTEXT: unsandboxed-gui
       - run: npm run checksums
         env:
           AIDRAW_CHECKSUM_FILE: SHA256SUMS-${{ matrix.platform }}.txt

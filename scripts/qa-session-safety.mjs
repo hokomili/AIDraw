@@ -23,6 +23,21 @@ function commandLineHasProfile(commandLine, profile, platform) {
   return false;
 }
 
+export function requiresUnsandboxedGuiLaunch(platform = process.platform) {
+  return platform === 'win32' || platform === 'darwin';
+}
+
+export function processProbeErrorMeansAlive(error) {
+  return Boolean(error && typeof error === 'object' && 'code' in error && error.code === 'EPERM');
+}
+
+export function assertConnectionFileReplaceable(connection, processAlive) {
+  const pid = Number(connection?.pid);
+  if (Number.isSafeInteger(pid) && pid > 0 && processAlive(pid)) {
+    throw new Error(`Refusing to replace a QA connection file while its recorded PID ${pid} is still alive.`);
+  }
+}
+
 export function assertForceStopIdentity({ manifest, connection, currentExeSha256, processIdentity, platform = process.platform }) {
   const pid = Number(manifest.pid);
   if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error('Force-stop identity has an invalid manifest PID.');

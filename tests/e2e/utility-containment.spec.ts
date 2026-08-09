@@ -3,6 +3,10 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { access, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import {
+  resolvePackagedE2eArtifact,
+  spawnPackagedE2e,
+} from '../../scripts/packaged-e2e-runtime.mjs';
 
 const scenarioName = 'FND-09-UTILITY-CONTAINMENT exact package contains crash and cancellation before clean restart';
 const profilePrefix = 'aidraw-e2e-fnd09-utility-containment-';
@@ -18,8 +22,9 @@ const importResultScenarioName = 'FND-09-IMPORT-RESULT exact package rejects inv
 const importResultProfilePrefix = 'aidraw-e2e-fnd09-import-result-';
 const generationResultScenarioName = 'FND-09-GENERATION-RESULT exact package rejects invalid generated output and recovers queued generation work';
 const generationResultProfilePrefix = 'aidraw-e2e-fnd09-generation-result-';
-const packagedExecutable = resolve(process.cwd(), process.env.AIDRAW_E2E_OUT_DIR || 'out', 'AIDraw-win32-x64', 'AIDraw.exe');
-const packagedAsar = join(dirname(packagedExecutable), 'resources', 'app.asar');
+const packagedArtifact = resolvePackagedE2eArtifact();
+const packagedExecutable = packagedArtifact.executable;
+const packagedAsar = packagedArtifact.asar;
 
 interface McpMessage {
   result?: Record<string, unknown>;
@@ -361,7 +366,7 @@ async function waitForExit(child: ChildProcess, label: string, timeoutMs: number
 
 async function quitGracefully(profile: string, child: ChildProcess): Promise<void> {
   if (child.exitCode !== null) return;
-  const signal = spawn(packagedExecutable, [`--user-data-dir=${profile}`, '--quit-engine'], { stdio: 'ignore', windowsHide: true });
+  const signal = spawnPackagedE2e(packagedExecutable, [`--user-data-dir=${profile}`, '--quit-engine'], { stdio: 'ignore' });
   await waitForExit(signal, 'The isolated FND-09 quit signal', 5_000);
   await waitForExit(child, 'The isolated packaged FND-09 engine', 15_000);
 }
@@ -429,7 +434,7 @@ test(scenarioName, async () => {
       AIDRAW_E2E_FND09_UTILITY_NETWORK_SENTINEL_PATH: forbiddenNetworkPath,
     },
     stdio: ['ignore', 'ignore', 'pipe'],
-    windowsHide: true,
+    windowsHide: process.platform === 'win32',
   });
 
   let failure: Error | undefined;
@@ -579,7 +584,7 @@ test(pressureScenarioName, async () => {
       AIDRAW_E2E_FND09_PRESSURE_NETWORK_SENTINEL_PATH: forbiddenNetworkPath,
     },
     stdio: ['ignore', 'ignore', 'pipe'],
-    windowsHide: true,
+    windowsHide: process.platform === 'win32',
   });
 
   let failure: Error | undefined;
@@ -731,7 +736,7 @@ test(observationCodecScenarioName, async () => {
       AIDRAW_E2E_FND09_OBSERVATION_CODEC_NETWORK_SENTINEL_PATH: forbiddenNetworkPath,
     },
     stdio: ['ignore', 'ignore', 'pipe'],
-    windowsHide: true,
+    windowsHide: process.platform === 'win32',
   });
 
   let failure: Error | undefined;
@@ -911,7 +916,7 @@ test(quantizationResultScenarioName, async () => {
       AIDRAW_E2E_FND09_QUANTIZATION_RESULT_NETWORK_SENTINEL_PATH: forbiddenNetworkPath,
     },
     stdio: ['ignore', 'ignore', 'pipe'],
-    windowsHide: true,
+    windowsHide: process.platform === 'win32',
   });
 
   let failure: Error | undefined;
@@ -1089,7 +1094,7 @@ test(exportResultScenarioName, async () => {
       AIDRAW_E2E_FND09_EXPORT_RESULT_NETWORK_SENTINEL_PATH: forbiddenNetworkPath,
     },
     stdio: ['ignore', 'ignore', 'pipe'],
-    windowsHide: true,
+    windowsHide: process.platform === 'win32',
   });
 
   let failure: Error | undefined;
@@ -1282,7 +1287,7 @@ test(importResultScenarioName, async () => {
       AIDRAW_E2E_FND09_IMPORT_RESULT_NETWORK_SENTINEL_PATH: forbiddenNetworkPath,
     },
     stdio: ['ignore', 'ignore', 'pipe'],
-    windowsHide: true,
+    windowsHide: process.platform === 'win32',
   });
 
   let failure: Error | undefined;
@@ -1476,7 +1481,7 @@ test(generationResultScenarioName, async () => {
       AIDRAW_E2E_FND09_GENERATION_RESULT_NETWORK_SENTINEL_PATH: forbiddenNetworkPath,
     },
     stdio: ['ignore', 'ignore', 'pipe'],
-    windowsHide: true,
+    windowsHide: process.platform === 'win32',
   });
 
   let failure: Error | undefined;

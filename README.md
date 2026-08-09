@@ -17,7 +17,7 @@ AIDraw is a desktop, agent-native drawing studio. Its authenticated local engine
 ## Requirements
 
 - Windows 11 x64 is the currently locally verified development target.
-- macOS and Linux support is implemented behind the same Electron model and has native packaging/CI definitions; those targets remain pre-release until their native runners and Computer Use acceptance pass.
+- macOS and Linux support is implemented behind the same Electron model and has native packaging/CI definitions. Apple Silicon now has an exact-artifact independent Level 2 MCP + Computer Use PASS in `docs/MACOS_DEVELOPMENT.md`, but both targets remain pre-release until their hosted native and Level 3 release gates pass.
 - Node.js 24 LTS and npm (the repository pins `24` in `.nvmrc`)
 - Visual C++ runtime required by Electron/native dependencies
 
@@ -48,7 +48,7 @@ npm run test:performance
 
 The gate writes `test-results/performance-gate.json`; packaged pointer/frame-pacing, high-contrast/display-scale, and tablet measurements remain part of the later Computer Use release pass.
 
-Formal QA uses three levels—Smoke, Regression, and Release Exhaustive—and every level combines automated checks, authenticated MCP, and native Windows interaction through Computer Use. Each formal run is performed in a fresh independent `gpt-5.6-luna` / `high` task against one newly packaged executable and isolated profile; PID, executable hash, and the UI/MCP URL must match before mutation. Use `node scripts/npm-node24.mjs run test:level1:auto` for the automated Smoke portion. On Codex desktop, native `qa-session` launch/stop calls must run outside the filesystem sandbox. See [docs/TESTING.md](docs/TESTING.md) for the complete commands, checklists, isolation harness, and report contract.
+Formal QA uses three levels—Smoke, Regression, and Release Exhaustive—and every level combines automated checks, authenticated MCP, and native desktop interaction through Computer Use. Each formal run is performed in a fresh independent `gpt-5.6-luna` / `high` task against one newly packaged executable and isolated profile; PID, executable hash, and the UI/MCP URL must match before mutation. Use `node scripts/npm-node24.mjs run test:level1:auto` for the automated Smoke portion. On Codex desktop, native `qa-session` start/show/status/stop calls must run outside the filesystem sandbox. See [docs/TESTING.md](docs/TESTING.md) for the complete commands, checklists, isolation harness, and report contract.
 
 Build and launch the packaged-app Playwright scenarios:
 
@@ -62,7 +62,7 @@ npm run test:e2e
 npm run release:current
 ```
 
-Run that command on the target OS. Forge writes Squirrel + ZIP on Windows, DMG + ZIP on macOS, and DEB + RPM + ZIP on Linux under `out/make`. `out/SHA256SUMS.txt` covers release files and `out/THIRD_PARTY_LICENSES.*` records dependency licenses. Builds are unsigned by design; verify a downloaded file against the checksum published with its release. The tag workflow builds each OS on a native GitHub runner; a workflow definition is not release evidence until those hosted jobs pass.
+Run that command on the target OS. Forge writes Squirrel + ZIP on Windows, DMG + ZIP on macOS, and DEB + RPM + ZIP on Linux under `out/make`. `out/SHA256SUMS.txt` covers release files and `out/THIRD_PARTY_LICENSES.*` records dependency licenses. Prerelease artifacts do not yet carry a trusted publisher signature; local macOS bundles receive only an ad-hoc integrity signature with a stable app requirement, not Developer ID/notarization/Gatekeeper approval. Verify a downloaded file against the checksum published with its release. The tag workflow builds each OS on a native GitHub runner; a workflow definition is not release evidence until those hosted jobs pass.
 
 The current transitive advisory review and build-only exceptions are documented in [docs/DEPENDENCY_AUDIT.md](docs/DEPENDENCY_AUDIT.md).
 
@@ -125,7 +125,7 @@ The public tools are `session_manage`, `canvas_observe`, `canvas_apply`, `histor
 - Ambiguous chargeable provider requests are never automatically retried and providers are never silently substituted.
 - Addressed imports are parsed in a supervised utility process under byte/dimension/expansion budgets. Sprite-sheet and Tiled companion paths must remain inside the approved root folder after canonical resolution; SVG/Tiled DTD and entity declarations are rejected.
 - Renderer recovery diagnostics are written only to a user-selected local JSON file and deliberately exclude artwork, generation prompts/results, task IDs, MCP secrets, and provider credentials; AIDraw has no telemetry transport.
-- Windows is locally packaged and exercised today. macOS/Linux code paths, makers, and CI are implemented but remain explicitly unverified until native hosted and Computer Use gates pass. Accounts, telemetry, cloud sync, remote multiplayer, CMYK/16-bit, custom autotile scripts, automatic updates, and lossless Photoshop/PDF round-tripping are intentionally outside this release.
+- Windows remains the release-evidence baseline. Apple Silicon has an independent Level 2 exact-package PASS, while macOS/Linux remain explicitly unverified release targets until hosted native, clean-machine/signing, and Level 3 gates pass. Accounts, telemetry, cloud sync, remote multiplayer, CMYK/16-bit, custom autotile scripts, automatic updates, and lossless Photoshop/PDF round-tripping are intentionally outside this release.
 
 ## License
 

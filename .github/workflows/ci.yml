@@ -29,6 +29,8 @@ jobs:
       - run: npm run package
       - run: npm run test:e2e:only
         if: runner.os == 'Windows'
+        env:
+          AIDRAW_E2E_LAUNCH_CONTEXT: unsandboxed-gui
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: failure()
         with:

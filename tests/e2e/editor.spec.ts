@@ -1,11 +1,10 @@
 import { expect, test } from '@playwright/test';
 import { chromium, type Browser, type Page } from 'playwright';
-import { spawn, type ChildProcess } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { access, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
-import { tmpdir } from 'node:os';
 import { createCanvas } from '@napi-rs/canvas';
 import { HUMAN_ACTOR, readPixel, readTileAt, type Actor, type IllustrationDocument, type PixelDocument, type PixelSprite } from '@aidraw/core';
 import { parse } from 'jsonc-parser';
@@ -60,6 +59,16 @@ import {
   UX11_BATCH_E2E_SHARED_DOCUMENT_NAME,
 } from '../../src/main/batch-workflows-e2e';
 import { readNativeDocument } from '../../src/main/persistence';
+import {
+  assertPackagedE2eProfile,
+  canonicalPackagedE2ePath,
+  createPackagedE2eProfile,
+  packagedE2ePrimaryModifier,
+  packagedE2ePrimaryShortcut,
+  resolvePackagedE2eArtifact,
+  spawnPackagedE2e,
+  waitForPackagedE2eReady,
+} from '../../scripts/packaged-e2e-runtime.mjs';
 
 let applicationProcess: ChildProcess | undefined;
 let applicationStderr: Buffer[] = [];
@@ -67,8 +76,9 @@ let browser: Browser | undefined;
 let profilePath: string | undefined;
 let gracefulOnlyCleanup = false;
 let preserveProfileAfterTest = false;
-const packagedExecutable = join(process.cwd(), process.env.AIDRAW_E2E_OUT_DIR || 'out', 'AIDraw-win32-x64', 'AIDraw.exe');
-const packagedAsar = join(dirname(packagedExecutable), 'resources', 'app.asar');
+const packagedArtifact = resolvePackagedE2eArtifact();
+const packagedExecutable = packagedArtifact.executable;
+const packagedAsar = packagedArtifact.asar;
 
 test.afterEach(async () => {
   const child = applicationProcess;
@@ -79,11 +89,18 @@ test.afterEach(async () => {
       catch (error) { cleanupError = error instanceof Error ? error : new Error('The owned packaged process did not exit through graceful-only cleanup.'); }
       if (child.exitCode === null && !cleanupError) cleanupError = new Error('The owned packaged process was still running after graceful-only cleanup; refusing force termination.');
     } else {
-      child.kill();
-      await new Promise<void>((resolve) => { child.once('exit', () => resolve()); setTimeout(resolve, 5_000); });
+      try { await quitIsolatedEngineGracefully(); }
+      catch (error) {
+        cleanupError = error instanceof Error ? error : new Error('The owned packaged process did not exit through graceful cleanup.');
+        if (child.exitCode === null) {
+          child.kill();
+          await new Promise<void>((resolveWait) => { child.once('exit', () => resolveWait()); setTimeout(resolveWait, 5_000); });
+        }
+      }
+      if (child.exitCode === null && !cleanupError) cleanupError = new Error('The owned packaged process was still running after graceful cleanup.');
     }
   }
-  if (gracefulOnlyCleanup && profilePath && child?.exitCode !== null) {
+  if (profilePath && child?.exitCode !== null) {
     try { await redactOwnedConnection(join(profilePath, 'mcp-connection.json')); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT' && !cleanupError) cleanupError = error instanceof Error ? error : new Error('The owned MCP connection could not be redacted.');
@@ -115,23 +132,29 @@ interface LaunchOptions {
 }
 
 async function launch(existingProfile?: string, options: LaunchOptions = {}): Promise<Page> {
-  profilePath = existingProfile ?? await mkdtemp(join(tmpdir(), 'aidraw-e2e-'));
+  profilePath = existingProfile
+    ? assertPackagedE2eProfile(existingProfile)
+    : await createPackagedE2eProfile(process.cwd(), 'editor');
   const port = await reservePort();
   applicationStderr = [];
-  applicationProcess = spawn(packagedExecutable, [
+  applicationProcess = spawnPackagedE2e(packagedExecutable, [
     `--remote-debugging-port=${port}`,
     '--remote-debugging-address=127.0.0.1',
     `--user-data-dir=${profilePath}`,
     ...(options.extraArguments ?? []),
-  ], { env: { ...process.env, ...options.environment }, stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+  ], { env: options.environment, stdio: ['ignore', 'ignore', 'pipe'] });
   applicationProcess.stderr?.on('data', (chunk: Buffer) => applicationStderr.push(chunk));
   const endpoint = `http://127.0.0.1:${port}`;
-  const deadline = Date.now() + 15_000;
-  while (!browser && Date.now() < deadline) {
-    if (applicationProcess.exitCode !== null) break;
-    try { browser = await chromium.connectOverCDP(endpoint); } catch { await new Promise((resolve) => setTimeout(resolve, 100)); }
-  }
-  if (!browser) throw new Error(`AIDraw DevTools endpoint did not start. ${Buffer.concat(applicationStderr).toString('utf8')}`);
+  browser = await waitForPackagedE2eReady({
+    child: applicationProcess,
+    label: 'The AIDraw DevTools endpoint',
+    stderr: () => Buffer.concat(applicationStderr).toString('utf8'),
+    attempt: async () => {
+      try { return await chromium.connectOverCDP(endpoint); }
+      catch { return undefined; }
+    },
+  });
+  const deadline = Date.now() + (process.platform === 'darwin' ? 30_000 : 15_000);
   const context = browser.contexts()[0];
   while (Date.now() < deadline) {
     const page = context?.pages().find((candidate) => candidate.url().startsWith('aidraw://app/'));
@@ -167,12 +190,12 @@ async function waitForMcpConnection(path: string): Promise<{ url: string; token:
   throw new Error('The headless AIDraw MCP connection file was not written.');
 }
 
-function parseMcpPayload(text: string): { result?: { content?: Array<{ type: string; text?: string }> }; error?: unknown } {
+function parseMcpPayload(text: string): { result?: { content?: Array<{ type: string; text?: string }>; isError?: boolean }; error?: unknown } {
   const trimmed = text.trim();
-  if (trimmed.startsWith('{')) return JSON.parse(trimmed) as { result?: { content?: Array<{ type: string; text?: string }> }; error?: unknown };
+  if (trimmed.startsWith('{')) return JSON.parse(trimmed) as { result?: { content?: Array<{ type: string; text?: string }>; isError?: boolean }; error?: unknown };
   const data = trimmed.split(/\r?\n/).filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trim());
   if (!data.length) throw new Error(`MCP returned an unrecognized response: ${trimmed.slice(0, 200)}`);
-  return JSON.parse(data.at(-1)!) as { result?: { content?: Array<{ type: string; text?: string }> }; error?: unknown };
+  return JSON.parse(data.at(-1)!) as { result?: { content?: Array<{ type: string; text?: string }>; isError?: boolean }; error?: unknown };
 }
 
 async function callMcpTool(url: string, headers: Record<string, string>, id: number, name: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -181,6 +204,7 @@ async function callMcpTool(url: string, headers: Record<string, string>, id: num
   if (!response.ok || payload.error) throw new Error(`${name} failed: ${JSON.stringify(payload.error ?? payload)}`);
   const text = payload.result?.content?.find((entry) => entry.type === 'text')?.text;
   if (!text) throw new Error(`${name} did not return structured JSON text.`);
+  if (payload.result?.isError) throw new Error(`${name} failed: ${text}`);
   return JSON.parse(text) as Record<string, unknown>;
 }
 
@@ -212,7 +236,7 @@ async function waitForRendererPage(): Promise<Page> {
 
 async function signalExistingEngine(...args: string[]): Promise<void> {
   if (!profilePath) throw new Error('No AIDraw test profile is active.');
-  const child = spawn(packagedExecutable, [`--user-data-dir=${profilePath}`, ...args], { stdio: 'ignore', windowsHide: true });
+  const child = spawnPackagedE2e(packagedExecutable, [`--user-data-dir=${profilePath}`, ...args], { stdio: 'ignore' });
   await waitForOwnedProcessExit(child, 'The isolated engine signal', 5_000);
 }
 
@@ -252,7 +276,7 @@ async function waitForOwnedProcessExit(child: ChildProcess, label: string, timeo
 async function quitIsolatedEngineGracefully(): Promise<void> {
   if (!profilePath || !applicationProcess || applicationProcess.exitCode !== null) return;
   const engine = applicationProcess;
-  const signal = spawn(packagedExecutable, [`--user-data-dir=${profilePath}`, '--quit-engine'], { stdio: 'ignore', windowsHide: true });
+  const signal = spawnPackagedE2e(packagedExecutable, [`--user-data-dir=${profilePath}`, '--quit-engine'], { stdio: 'ignore' });
   await waitForOwnedProcessExit(signal, 'The isolated quit signal', 5_000);
   await waitForOwnedProcessExit(engine, 'The isolated AIDraw engine', 15_000);
 }
@@ -267,10 +291,10 @@ async function redactOwnedConnection(path: string): Promise<void> {
   await writeFile(path, `${JSON.stringify({ ...connection, credentialStatus: 'redacted-after-graceful-stop' }, null, 2)}\n`, 'utf8');
 }
 
-test('opens the configurable New Document dialog from Ctrl+N without creating first', async () => {
+test('opens the configurable New Document dialog from the native shortcut without creating first', async () => {
   const page = await launch();
   const before = await page.evaluate(async () => (await window.aidraw.bootstrap()).documents.length);
-  await page.keyboard.press('Control+N');
+  await page.keyboard.press(packagedE2ePrimaryShortcut('N'));
   const dialog = page.getByRole('dialog', { name: 'New document' });
   await expect(dialog).toBeVisible();
   await expect(dialog.getByLabel('Document width')).toHaveValue('1920');
@@ -282,7 +306,7 @@ test('opens the configurable New Document dialog from Ctrl+N without creating fi
 });
 
 test('writes the stable OpenCode MCP shape through the packaged onboarding UI', async () => {
-  const isolatedProfile = await mkdtemp(join(tmpdir(), 'aidraw-e2e-opencode-'));
+  const isolatedProfile = await createPackagedE2eProfile(process.cwd(), 'opencode');
   const configPath = join(isolatedProfile, 'opencode.jsonc');
   const connectionPath = join(isolatedProfile, 'mcp-connection.json');
   await writeFile(configPath, '{\n  // preserve this user setting\n  "theme": "system",\n  "mcp": { "servers": { "aidraw": { "type": "remote", "url": "http://127.0.0.1:1/mcp", "codemode": false } } }\n}\n', 'utf8');
@@ -395,7 +419,7 @@ test('keeps a live object outliner synchronized with agent edits and human organ
   }, initial)).toEqual(['outliner-star', 'outliner-rectangle']);
 
   await rectangle.locator('.object-main').click();
-  await renamedStar.locator('.object-main').click({ modifiers: ['Control'] });
+  await renamedStar.locator('.object-main').click({ modifiers: [packagedE2ePrimaryModifier()] });
   await page.locator('.object-inspector').getByRole('button', { name: 'Group' }).click();
   await expect.poll(async () => page.evaluate(async () => {
     const document = (await window.aidraw.bootstrap()).activeDocument;
@@ -565,7 +589,7 @@ test('publishes and clears attached editor advisory state through MCP', async ()
 });
 
 test('contains a sanitized malformed renderer event and reloads canonical engine state', async () => {
-  const isolatedProfile = await mkdtemp(join(tmpdir(), 'aidraw-e2e-recovery-'));
+  const isolatedProfile = await createPackagedE2eProfile(process.cwd(), 'recovery');
   const connectionPath = join(isolatedProfile, 'mcp-connection.json');
   const diagnosticPath = join(isolatedProfile, 'renderer-recovery-diagnostic.json');
   const artworkSentinel = 'UX05_PRIVATE_ARTWORK_7d13';
@@ -1652,7 +1676,7 @@ test('lands the pixel pencil on the visible cell at low zoom', async () => {
   }).toBe(1);
 });
 
-test('does not restore an untitled document that was explicitly discarded', async () => {
+test('isolates rapid tab state and restores an exact mixed workspace after graceful restart', async () => {
   const page = await launch();
   await page.getByTitle('New document').click();
   const dialog = page.getByRole('dialog', { name: 'New document' });
@@ -1672,6 +1696,132 @@ test('does not restore an untitled document that was explicitly discarded', asyn
   expect(await page.evaluate((documentId) => window.aidraw.closeDocument(documentId, true), discardedId)).toEqual({ closed: true });
   await expect.poll(async () => (await page.evaluate(async () => window.aidraw.bootstrap())).documents.map(({ id }) => id)).not.toContain(discardedId);
 
+  const setup = await page.evaluate(async () => {
+    const original = (await window.aidraw.bootstrap()).activeDocument;
+    if (!original) throw new Error('The original clean document is unavailable.');
+    const create = async (options: { kind: 'illustration' | 'sprite' | 'tilemap' | 'project'; name: string }, dirty: boolean) => {
+      const snapshot = await window.aidraw.newDocument(options);
+      const document = snapshot.activeDocument;
+      if (!document) throw new Error(`Could not create ${options.name}.`);
+      let revision = document.revision;
+      if (dirty) {
+        const response = await window.aidraw.applyTransaction({
+          id: `tx-${document.id}`, clientOperationId: `op-${document.id}`, documentId: document.id,
+          actor: { id: 'human', kind: 'human', name: 'Human', color: '#27213c' }, label: `Edit ${options.name}`, createdAt: new Date().toISOString(),
+          operations: [{ kind: 'document.rename', name: `${options.name} · edited` }], playback: { mode: 'instant', speed: 1 },
+        });
+        if (response.status !== 'committed') throw new Error(`Could not dirty ${options.name}.`);
+        if (typeof response.revision !== 'number') throw new Error(`Missing revision for ${options.name}.`);
+        revision = response.revision;
+      }
+      return { id: document.id, name: dirty ? `${options.name} · edited` : options.name, dirty, revision };
+    };
+    const source = await create({ kind: 'illustration', name: 'Transient path source' }, false);
+    const target = await create({ kind: 'illustration', name: 'Clean restart target' }, false);
+    const dirtyIllustration = await create({ kind: 'illustration', name: 'Dirty illustration' }, true);
+    const cleanSprite = await create({ kind: 'sprite', name: 'Clean sprite' }, false);
+    const dirtySprite = await create({ kind: 'sprite', name: 'Dirty sprite' }, true);
+    const cleanTilemap = await create({ kind: 'tilemap', name: 'Clean tilemap' }, false);
+    const dirtyProject = await create({ kind: 'project', name: 'Dirty project' }, true);
+    await window.aidraw.activateDocument(target.id);
+    return {
+      source, target, dirtyIllustration, cleanSprite, dirtySprite,
+      expected: [
+        { id: original.id, dirty: false }, source, target, dirtyIllustration, cleanSprite, dirtySprite, cleanTilemap, dirtyProject,
+      ].map(({ id, dirty }) => ({ id, dirty })),
+    };
+  });
+
+  const targetTab = page.locator(`.document-tab[title="${setup.target.name}"]`);
+  await expect(targetTab).toHaveAttribute('aria-selected', 'true');
+  const targetCanvas = page.getByRole('application', { name: `Illustration canvas for ${setup.target.name}` });
+  await expect(targetCanvas).toBeVisible();
+  const cleanCanvasData = await targetCanvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL());
+
+  await page.locator(`.document-tab[title="${setup.source.name}"]`).click();
+  const sourceCanvas = page.getByRole('application', { name: `Illustration canvas for ${setup.source.name}` });
+  await expect(sourceCanvas).toBeVisible();
+  await page.getByTitle('Bézier path').click();
+  const sourceBounds = await sourceCanvas.boundingBox();
+  if (!sourceBounds) throw new Error('The transient-path canvas has no bounds.');
+  await page.mouse.click(sourceBounds.x + sourceBounds.width * 0.38, sourceBounds.y + sourceBounds.height * 0.42);
+  await page.mouse.click(sourceBounds.x + sourceBounds.width * 0.62, sourceBounds.y + sourceBounds.height * 0.58);
+  await expect.poll(() => sourceCanvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL())).not.toBe(cleanCanvasData);
+
+  await page.evaluate(({ sourceName, middleName, targetName }) => {
+    const tabs = [...document.querySelectorAll<HTMLButtonElement>('.document-tab')];
+    for (const name of [sourceName, middleName, targetName]) {
+      const tab = tabs.find((candidate) => candidate.title === name);
+      if (!tab) throw new Error(`Missing rapid-switch tab ${name}.`);
+      tab.click();
+    }
+  }, { sourceName: setup.source.name, middleName: setup.dirtyIllustration.name, targetName: setup.target.name });
+  await expect.poll(async () => (await page.evaluate(async () => window.aidraw.bootstrap())).activeDocumentId).toBe(setup.target.id);
+  await expect(targetTab).toHaveAttribute('aria-selected', 'true');
+  await expect(page).toHaveTitle(`${setup.target.name} — AIDraw`);
+  const isolatedCanvas = page.getByRole('application', { name: `Illustration canvas for ${setup.target.name}` });
+  await expect.poll(() => isolatedCanvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL())).toBe(cleanCanvasData);
+
+  const credentials = await page.evaluate(async () => window.aidraw.getMcpCredentials());
+  if (!credentials.url) throw new Error('The tab-identity MCP endpoint is unavailable.');
+  const identityClient = await connectMcpTestClient(credentials.url, credentials.token, 'tab-identity-e2e', { name: 'Tab identity observer', color: '#4f73d9', documentId: setup.target.id });
+  let identityRequestId = 3;
+  await expect.poll(async () => {
+    const listed = await callMcpTool(credentials.url!, identityClient.headers, identityRequestId++, 'document_manage', { action: 'list' });
+    const inspected = await callMcpTool(credentials.url!, identityClient.headers, identityRequestId++, 'session_manage', { action: 'inspect' });
+    const workspace = inspected.workspace as { activeDocumentId?: string; editorAdvisory?: { documentId?: string; selectedEntityIds?: string[] } };
+    return { listed: listed.activeDocumentId, active: workspace.activeDocumentId, advisory: workspace.editorAdvisory?.documentId, selected: workspace.editorAdvisory?.selectedEntityIds };
+  }).toEqual({ listed: setup.target.id, active: setup.target.id, advisory: setup.target.id, selected: [] });
+
+  await page.locator(`.document-tab[title="${setup.cleanSprite.name}"]`).click();
+  const cleanPixelCanvas = page.getByRole('application', { name: `Pixel-art canvas for ${setup.cleanSprite.name}` });
+  await expect(cleanPixelCanvas).toBeVisible();
+  const cleanPixelCanvasData = await cleanPixelCanvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL());
+  await page.locator(`.document-tab[title="${setup.dirtySprite.name}"]`).click();
+  const dirtyPixelCanvas = page.getByRole('application', { name: `Pixel-art canvas for ${setup.dirtySprite.name}` });
+  await expect(dirtyPixelCanvas).toBeVisible();
+  await page.getByTitle('Pixel-perfect pencil').click();
+  const dirtyPixelBounds = await dirtyPixelCanvas.boundingBox();
+  if (!dirtyPixelBounds) throw new Error('The transient pixel canvas has no bounds.');
+  await page.mouse.move(dirtyPixelBounds.x + dirtyPixelBounds.width * 0.44, dirtyPixelBounds.y + dirtyPixelBounds.height * 0.44);
+  await page.mouse.down();
+  await page.mouse.move(dirtyPixelBounds.x + dirtyPixelBounds.width * 0.56, dirtyPixelBounds.y + dirtyPixelBounds.height * 0.56, { steps: 4 });
+  await expect.poll(() => dirtyPixelCanvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL())).not.toBe(cleanPixelCanvasData);
+  await page.evaluate((name) => {
+    const tab = [...document.querySelectorAll<HTMLButtonElement>('.document-tab')].find((candidate) => candidate.title === name);
+    if (!tab) throw new Error(`Missing pixel isolation tab ${name}.`);
+    tab.click();
+  }, setup.cleanSprite.name);
+  await page.mouse.up();
+  await expect.poll(async () => (await page.evaluate(async () => window.aidraw.bootstrap())).activeDocumentId).toBe(setup.cleanSprite.id);
+  await expect.poll(() => page.getByRole('application', { name: `Pixel-art canvas for ${setup.cleanSprite.name}` }).evaluate((element) => (element as HTMLCanvasElement).toDataURL())).toBe(cleanPixelCanvasData);
+  await expect.poll(async () => {
+    const snapshot = await page.evaluate(async () => window.aidraw.bootstrap());
+    return snapshot.documents.find((document) => document.id === setup.dirtySprite.id)?.revision;
+  }).toBe(setup.dirtySprite.revision);
+  await expect.poll(async () => {
+    const inspected = await callMcpTool(credentials.url!, identityClient.headers, identityRequestId++, 'session_manage', { action: 'inspect', documentId: setup.dirtySprite.id });
+    return (inspected.workspace as { humanOccupancy?: { active?: boolean } }).humanOccupancy?.active;
+  }).toBe(false);
+
+  await page.locator(`.document-tab[title="${setup.dirtySprite.name}"]`).click();
+  await page.getByRole('button', { name: 'Select', exact: true }).click();
+  const selectionCanvas = page.getByRole('application', { name: `Pixel-art canvas for ${setup.dirtySprite.name}` });
+  const selectionBounds = await selectionCanvas.boundingBox();
+  if (!selectionBounds) throw new Error('The pixel selection canvas has no bounds.');
+  await page.mouse.move(selectionBounds.x + selectionBounds.width * 0.43, selectionBounds.y + selectionBounds.height * 0.43);
+  await page.mouse.down();
+  await page.mouse.move(selectionBounds.x + selectionBounds.width * 0.57, selectionBounds.y + selectionBounds.height * 0.57, { steps: 3 });
+  await page.mouse.up();
+  await expect.poll(() => selectionCanvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL())).not.toBe(cleanPixelCanvasData);
+  await page.locator(`.document-tab[title="${setup.cleanSprite.name}"]`).click();
+  await expect.poll(() => page.getByRole('application', { name: `Pixel-art canvas for ${setup.cleanSprite.name}` }).evaluate((element) => (element as HTMLCanvasElement).toDataURL())).toBe(cleanPixelCanvasData);
+
+  await page.locator(`.document-tab[title="${setup.target.name}"]`).click();
+  await expect.poll(async () => (await page.evaluate(async () => window.aidraw.bootstrap())).activeDocumentId).toBe(setup.target.id);
+  await expect(targetTab).toHaveAttribute('aria-selected', 'true');
+  await expect(page).toHaveTitle(`${setup.target.name} — AIDraw`);
+
   const persistentProfile = profilePath!;
   await signalExistingEngine('--quit-engine');
   await expect.poll(() => applicationProcess?.exitCode, { timeout: 8_000 }).not.toBe(null);
@@ -1680,6 +1830,21 @@ test('does not restore an untitled document that was explicitly discarded', asyn
   applicationProcess = undefined;
 
   const restarted = await launch(persistentProfile);
+  const restored = await restarted.evaluate(async () => window.aidraw.bootstrap());
+  expect(restored.documents.map(({ id }) => id)).toEqual(setup.expected.map(({ id }) => id));
+  expect(restored.documents.map(({ id, dirty }) => ({ id, dirty }))).toEqual(setup.expected);
+  expect(restored.documents.every((document) => document.filePath === undefined)).toBe(true);
+  expect(restored.activeDocumentId).toBe(setup.target.id);
+  expect(restored.activeDocument?.id).toBe(setup.target.id);
+  await expect(restarted.locator(`.document-tab[title="${setup.target.name}"]`)).toHaveAttribute('aria-selected', 'true');
+  await expect(restarted).toHaveTitle(`${setup.target.name} — AIDraw`);
+  const restartedCanvas = restarted.getByRole('application', { name: `Illustration canvas for ${setup.target.name}` });
+  await expect.poll(() => restartedCanvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL())).toBe(cleanCanvasData);
+  const restartedCredentials = await restarted.evaluate(async () => window.aidraw.getMcpCredentials());
+  if (!restartedCredentials.url) throw new Error('The restarted identity MCP endpoint is unavailable.');
+  const restartClient = await connectMcpTestClient(restartedCredentials.url, restartedCredentials.token, 'restart-identity-e2e', { name: 'Restart identity observer', color: '#2f9d8f', documentId: setup.target.id });
+  const restartInspect = await callMcpTool(restartedCredentials.url, restartClient.headers, 3, 'session_manage', { action: 'inspect' });
+  expect(restartInspect).toMatchObject({ workspace: { activeDocumentId: setup.target.id, editorAdvisory: { attached: true, documentId: setup.target.id, selectedEntityIds: [] } } });
   await expect.poll(async () => (await restarted.evaluate(async () => window.aidraw.bootstrap())).documents.map(({ id }) => id)).not.toContain(discardedId);
   await expect(restarted.getByText('Discarded forever', { exact: true })).toHaveCount(0);
 });
@@ -2930,12 +3095,13 @@ test('QA-06-INFINITE closes an exact packaged orthogonal sparse-chunk lifecycle'
     }).toEqual([32, 32]);
     const infiniteToggle = mapSettings.locator('.map-infinite-toggle input');
     await expect(infiniteToggle).toHaveCount(1);
-    await infiniteToggle.check();
+    await mapSettings.locator('.map-infinite-toggle').click();
     await expect.poll(async () => {
       const document = await page.evaluate(async () => (await window.aidraw.bootstrap()).activeDocument);
       const map = document?.kind === 'pixel' ? document.pixelAssets[createdAssets.mapId] : undefined;
       return map?.type === 'tilemap' ? [map.infinite, map.orientation, map.width, map.height, map.tileWidth, map.tileHeight] : undefined;
     }).toEqual([true, 'orthogonal', 32, 32, 16, 16]);
+    await expect(infiniteToggle).toBeChecked();
     await mapSettings.getByLabel('Map property name').fill('qa06-scenario');
     await mapSettings.getByLabel('Map property value').fill('orthogonal-sparse-chunks');
     await mapSettings.locator('.tile-property-add').getByRole('button', { name: 'Add', exact: true }).click();
@@ -4597,27 +4763,33 @@ test('UX-11-BATCH closes an exact packaged multi-document Save All, export, and 
 });
 
 test('keeps the authenticated engine working with no editor window and replays its durable trace', async () => {
-  profilePath = await mkdtemp(join(tmpdir(), 'aidraw-e2e-headless-'));
+  profilePath = await createPackagedE2eProfile(process.cwd(), 'headless');
   const debuggingPort = await reservePort();
   const connectionPath = join(profilePath, 'mcp-connection.json');
   const agentOutputPath = join(profilePath, 'agent-output');
-  applicationProcess = spawn(packagedExecutable, [
+  applicationStderr = [];
+  applicationProcess = spawnPackagedE2e(packagedExecutable, [
     `--remote-debugging-port=${debuggingPort}`,
     '--remote-debugging-address=127.0.0.1',
     `--user-data-dir=${profilePath}`,
     `--write-mcp-connection=${connectionPath}`,
     `--trust-folder=${agentOutputPath}`,
     '--headless',
-  ], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+  ], { stdio: ['ignore', 'ignore', 'pipe'] });
+  applicationProcess.stderr?.on('data', (chunk: Buffer) => applicationStderr.push(chunk));
   const endpoint = `http://127.0.0.1:${debuggingPort}`;
-  const deadline = Date.now() + 15_000;
-  while (!browser && Date.now() < deadline) {
-    try { browser = await chromium.connectOverCDP(endpoint); } catch { await new Promise((resolve) => setTimeout(resolve, 100)); }
-  }
-  if (!browser) throw new Error('Could not attach to the headless Electron process.');
+  browser = await waitForPackagedE2eReady({
+    child: applicationProcess,
+    label: 'The headless AIDraw DevTools endpoint',
+    stderr: () => Buffer.concat(applicationStderr).toString('utf8'),
+    attempt: async () => {
+      try { return await chromium.connectOverCDP(endpoint); }
+      catch { return undefined; }
+    },
+  });
   const healthUrl = await waitForHealth(profilePath);
   const credentials = await waitForMcpConnection(connectionPath);
-  expect(credentials.trustedFolders).toContain(agentOutputPath.toLowerCase());
+  expect(credentials.trustedFolders).toContain(await canonicalPackagedE2ePath(agentOutputPath));
   expect(await (await fetch(healthUrl)).json()).toMatchObject({ status: 'ok', uiRequired: false });
   expect(browser.contexts()[0]?.pages().some((page) => page.url().startsWith('aidraw://app/'))).toBe(false);
   await expect.poll(() => applicationProcess?.exitCode).toBe(null);
@@ -4646,7 +4818,7 @@ test('keeps the authenticated engine working with no editor window and replays i
 
   const overwriteJob = await callMcpTool(credentials.url, headers, 8, 'document_export', { documentId: credentials.activeDocumentId, path: pngPath, format: 'png' });
   expect(overwriteJob.status).toBe('waiting-for-user');
-  await callMcpTool(credentials.url, headers, 9, 'job_manage', { action: 'cancel', jobId: overwriteJob.jobId, timeoutMs: 0 });
+  await callMcpTool(credentials.url, headers, 9, 'job_manage', { action: 'cancel', jobId: overwriteJob.jobId });
 
   await signalExistingEngine('--show');
   const reopened = await waitForRendererPage();

@@ -62,6 +62,25 @@ describe('desktop release artifact preflight', () => {
     })).rejects.toMatchObject({ stderr: expect.stringContaining(expectedDirectory) });
   });
 
+  it('rejects build-only advisory dependencies in the packaged runtime archive', async () => {
+    const workspace = await mkdtemp(join(tmpdir(), 'aidraw-package-build-only-audit-'));
+    temporaryDirectories.push(workspace);
+    const source = join(workspace, 'asar-source');
+    const packageDirectory = join(workspace, 'out', 'AIDraw-win32-x64');
+    const archive = join(packageDirectory, 'resources', 'app.asar');
+    await mkdir(join(source, 'node_modules', 'tar'), { recursive: true });
+    await mkdir(join(packageDirectory, 'resources'), { recursive: true });
+    await writeFile(join(packageDirectory, 'AIDraw.exe'), Buffer.alloc(1_000_001, 1));
+    await writeFile(join(source, 'node_modules', 'tar', 'index.js'), Buffer.alloc(4_096, 1));
+    await createPackageWithOptions(source, archive, {});
+
+    const script = resolve('scripts/verify-package.mjs');
+    await expect(execute(process.execPath, [script], {
+      cwd: workspace,
+      env: { ...process.env, AIDRAW_FORGE_OUT_DIR: join(workspace, 'out'), AIDRAW_PACKAGE_PLATFORM: 'win32', AIDRAW_PACKAGE_ARCH: 'x64' },
+    })).rejects.toMatchObject({ stderr: expect.stringContaining('Build-only audit dependencies leaked into the runtime archive') });
+  });
+
   it('rejects a packaged utility importer that still depends on Electron nativeImage', async () => {
     const workspace = await mkdtemp(join(tmpdir(), 'aidraw-package-importer-'));
     temporaryDirectories.push(workspace);

@@ -68,6 +68,7 @@ export class DocumentService extends EventEmitter {
   private readonly acknowledgedAgentActivityCounts = new Map<Id, number>();
   private editorAdvisory: EditorAdvisoryState = { advisory: true, attached: false, updatedAt: nowIso() };
   private activeDocumentId?: Id;
+  private workspaceRevision = 0;
   private mcpInfo: Pick<McpConnectionInfo, 'running' | 'url' | 'port' | 'tokenHint'> = { running: false };
 
   constructor(
@@ -83,16 +84,21 @@ export class DocumentService extends EventEmitter {
   }
 
   async recover(): Promise<number> {
-    const documents = await this.journal.recover();
+    const recovered = await this.journal.recoverWorkspace();
+    const documents = recovered.documents;
     for (const document of documents) {
-      this.documents.set(document.id, document); this.histories.set(document.id, new Map()); this.operationIds.set(document.id, new Map()); this.changes.set(document.id, []); this.checkpoints.set(document.id, new Map()); this.acknowledgedAgentActivityCounts.set(document.id, agentActivityEntries(document).length); this.activeDocumentId = document.id;
+      this.documents.set(document.id, document); this.histories.set(document.id, new Map()); this.operationIds.set(document.id, new Map()); this.changes.set(document.id, []); this.checkpoints.set(document.id, new Map()); this.acknowledgedAgentActivityCounts.set(document.id, agentActivityEntries(document).length);
     }
+    this.activeDocumentId = recovered.activeDocumentId && this.documents.has(recovered.activeDocumentId)
+      ? recovered.activeDocumentId
+      : documents.at(-1)?.id;
     if (documents.length) this.publish();
     return documents.length;
   }
 
   async compactRecovery(): Promise<void> {
     await Promise.all(this.getDocuments().map((document) => this.journal.compact(document)));
+    await this.journal.compactWorkspace([...this.documents.keys()], this.activeDocumentId);
   }
 
   async flushRecovery(): Promise<void> {
@@ -130,13 +136,14 @@ export class DocumentService extends EventEmitter {
 
   setEditorAttached(attached: boolean): void {
     this.editorAdvisory = attached
-      ? { ...this.editorAdvisory, advisory: true, attached: true, updatedAt: nowIso() }
+      ? { advisory: true, attached: true, updatedAt: nowIso(), documentId: this.activeDocumentId, selectedEntityIds: [] }
       : { advisory: true, attached: false, updatedAt: nowIso() };
   }
 
   updateEditorAdvisory(input: EditorAdvisoryInput): void {
     if (!this.editorAdvisory.attached) return;
-    const documentId = typeof input.documentId === 'string' && this.documents.has(input.documentId) ? input.documentId : undefined;
+    if (!this.activeDocumentId || input.documentId !== this.activeDocumentId) return;
+    const documentId = this.activeDocumentId;
     const tool = typeof input.tool === 'string' && /^[a-z0-9-]{1,40}$/i.test(input.tool) ? input.tool : undefined;
     const selectedEntityIds = Array.isArray(input.selectedEntityIds)
       ? [...new Set(input.selectedEntityIds.filter((id): id is string => typeof id === 'string' && id.length > 0 && id.length <= 200))].slice(0, 256)
@@ -163,6 +170,7 @@ export class DocumentService extends EventEmitter {
     if (active) for (const entry of active.activity) if (entry.actor.kind === 'agent') agentActors.set(entry.actor.id, entry.actor);
     for (const entry of this.presence.values()) if (entry.actor.kind === 'agent' && (!active || !entry.documentId || entry.documentId === active.id)) agentActors.set(entry.actor.id, entry.actor);
     return {
+      workspaceRevision: this.workspaceRevision,
       documents: [...this.documents.values()].map((document) => {
         const tab = {
           id: document.id,
@@ -234,8 +242,8 @@ export class DocumentService extends EventEmitter {
     this.checkpoints.set(document.id, new Map());
     this.comparisons.delete(document.id);
     this.acknowledgedAgentActivityCounts.set(document.id, agentActivityEntries(document).length);
-    this.activeDocumentId = document.id;
     void this.journal.compact(document);
+    this.setActiveDocument(document.id);
     this.publish();
     return this.snapshot();
   }
@@ -249,15 +257,15 @@ export class DocumentService extends EventEmitter {
     this.checkpoints.set(document.id, new Map());
     this.comparisons.delete(document.id);
     this.acknowledgedAgentActivityCounts.set(document.id, agentActivityEntries(cloned).length);
-    this.activeDocumentId = document.id;
     void this.journal.compact(document);
+    this.setActiveDocument(document.id);
     this.publish();
     return this.snapshot();
   }
 
   activate(documentId: Id): WorkspaceSnapshot {
     if (!this.documents.has(documentId)) throw new Error('Document is no longer open.');
-    this.activeDocumentId = documentId;
+    this.setActiveDocument(documentId);
     this.publish();
     return this.snapshot();
   }
@@ -521,6 +529,8 @@ export class DocumentService extends EventEmitter {
         warnings.push(`${filePath}: ${error instanceof Error ? error.message : 'Could not open file.'}`);
       }
     }
+    this.resetEditorAdvisory();
+    this.persistWorkspace();
     this.publish();
     return { opened, warnings };
   }
@@ -555,6 +565,8 @@ export class DocumentService extends EventEmitter {
       if (!this.activeDocumentId) this.create({ kind: 'illustration' });
     }
     await this.journal.remove(documentId);
+    this.resetEditorAdvisory();
+    this.persistWorkspace();
     this.publish();
     return { closed: true };
   }
@@ -760,6 +772,7 @@ export class DocumentService extends EventEmitter {
   }
 
   private publish(): void {
+    this.workspaceRevision += 1;
     const active = this.activeDocumentId ? this.documents.get(this.activeDocumentId) : undefined;
     if (active) this.acknowledgedAgentActivityCounts.set(active.id, agentActivityEntries(active).length);
     this.emitEvent({ type: 'workspace', snapshot: this.snapshot() });
@@ -767,5 +780,26 @@ export class DocumentService extends EventEmitter {
 
   private emitEvent(event: WorkspaceEvent): void {
     this.emit('event', event);
+  }
+
+  private setActiveDocument(documentId: Id): void {
+    this.activeDocumentId = documentId;
+    this.resetEditorAdvisory();
+    this.persistWorkspace();
+  }
+
+  private resetEditorAdvisory(): void {
+    if (!this.editorAdvisory.attached) return;
+    this.editorAdvisory = {
+      advisory: true,
+      attached: true,
+      updatedAt: nowIso(),
+      documentId: this.activeDocumentId,
+      selectedEntityIds: [],
+    };
+  }
+
+  private persistWorkspace(): void {
+    void this.journal.compactWorkspace([...this.documents.keys()], this.activeDocumentId).catch((error) => this.emit('recovery-error', error));
   }
 }

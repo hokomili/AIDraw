@@ -48,6 +48,11 @@ describe('source-control and desktop release portability', () => {
     expect(attributes).toContain('*.ps1 text eol=crlf');
     for (const marker of ['/.codex/', '/.tmp/', '/.tmp-e2e-profile/', '*.mobileprovision', '*.p12', '*.dmg', '*.pkg']) expect(ignore).toContain(marker);
     expect(forge).toContain("resetAdHocDarwinSignature: platform === 'darwin' && arch === 'arm64'");
+    expect(forge).toContain('osxSign: macSigningOptions');
+    expect(forge).toContain("identity: '-'");
+    expect(forge).toContain('AIDRAW_MACOS_SIGN_IDENTITY');
+    expect(forge).toContain("appBundleId: macBundleIdentifier");
+    expect(forge).toContain('=designated => identifier');
     expect(ci.match(/node scripts\/check-portability\.mjs/g)).toHaveLength(2);
     expect(release).toContain('node scripts/check-portability.mjs --expect-platform=${{ matrix.node-platform }} --expect-arch=${{ matrix.node-arch }}');
     expect(JSON.parse(packageJson).scripts.verify).toMatch(/^npm run check:portability &&/);

@@ -48,5 +48,8 @@ export interface RedactedConnection {
   credentialsRedacted: true;
 }
 
+export function requiresUnsandboxedGuiLaunch(platform?: NodeJS.Platform): boolean;
+export function processProbeErrorMeansAlive(error: unknown): boolean;
+export function assertConnectionFileReplaceable(connection: { pid?: number | string }, processAlive: (pid: number) => boolean): void;
 export function assertForceStopIdentity(input: ForceStopIdentityInput): ForceStopIdentityEvidence;
 export function buildRedactedConnection(connection: QaSessionConnectionIdentity, manifest: QaSessionManifestIdentity, stoppedAt?: string): RedactedConnection;

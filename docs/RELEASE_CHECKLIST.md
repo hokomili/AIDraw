@@ -18,7 +18,7 @@ This checklist complements `FEATURE_TRACKER.md`; it cannot override a missing or
 - [ ] Level 3 independent Luna/high automated + MCP + Computer Use QA passes on the exact checksummed build.
 - [ ] Install/uninstall/archive behavior passes on clean Windows 11, macOS, and supported Linux VM profiles.
 - [ ] macOS package evidence proves the native canvas binary, Keychain-backed `safeStorage`, hardened fuses, login-item lifecycle, DMG/ZIP contents, and graceful credential cleanup on the exact architecture.
-- [ ] Developer ID signing, hardened-runtime entitlements, notarization, and stapling are either independently verified or the unsigned/Gatekeeper limitation is explicit in every release artifact and note.
+- [ ] Developer ID signing, hardened-runtime entitlements, notarization, and stapling are either independently verified or the ad-hoc/unsigned Gatekeeper limitation is explicit in every release artifact and note.
 - [ ] Reproducibility/dependency/license review is complete.
 - [ ] Repository baseline, owner, remote, CI evidence, signing status, and publication credentials are confirmed.
 - [ ] Replace prerelease metadata with `1.0.0`, finalize the changelog, tag, and publish only after all prior boxes pass.

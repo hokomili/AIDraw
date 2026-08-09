@@ -1,15 +1,21 @@
 import { expect, test } from '@playwright/test';
 import { chromium, type Browser, type Page } from 'playwright';
-import { spawn, type ChildProcess } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { access, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import {
+  resolvePackagedE2eArtifact,
+  spawnPackagedE2e,
+  waitForPackagedE2eReady,
+} from '../../scripts/packaged-e2e-runtime.mjs';
 
 const scenarioName = 'FND-02-PACKAGED-SECURITY exact package preserves the renderer security boundary';
 const profilePrefix = 'aidraw-e2e-fnd02-packaged-security-';
-const packagedExecutable = resolve(process.cwd(), process.env.AIDRAW_E2E_OUT_DIR || 'out', 'AIDraw-win32-x64', 'AIDraw.exe');
-const packagedAsar = join(dirname(packagedExecutable), 'resources', 'app.asar');
+const packagedArtifact = resolvePackagedE2eArtifact();
+const packagedExecutable = packagedArtifact.executable;
+const packagedAsar = packagedArtifact.asar;
 const expectedBridgeKeys = [
   'bootstrap', 'newDocument', 'activateDocument', 'applyTransaction', 'undo', 'redo', 'undoAgent', 'redoAgent',
   'createCheckpoint', 'compareCheckpoint', 'restoreCheckpoint', 'mergeCheckpoint', 'deleteCheckpoint',
@@ -59,7 +65,7 @@ async function waitForExit(child: ChildProcess, label: string, timeoutMs: number
 
 async function quitGracefully(profile: string, child: ChildProcess): Promise<void> {
   if (child.exitCode !== null) return;
-  const signal = spawn(packagedExecutable, [`--user-data-dir=${profile}`, '--quit-engine'], { stdio: 'ignore', windowsHide: true });
+  const signal = spawnPackagedE2e(packagedExecutable, [`--user-data-dir=${profile}`, '--quit-engine'], { stdio: 'ignore' });
   await waitForExit(signal, 'The isolated security-audit quit signal', 5_000);
   await waitForExit(child, 'The isolated packaged security-audit process', 15_000);
 }
@@ -79,13 +85,16 @@ async function waitForConnection(path: string, child: ChildProcess): Promise<Mcp
 
 async function connectRenderer(port: number, child: ChildProcess, stderr: Buffer[]): Promise<{ browser: Browser; page: Page }> {
   const endpoint = `http://127.0.0.1:${port}`;
-  const deadline = Date.now() + 15_000;
-  let browser: Browser | undefined;
-  while (!browser && Date.now() < deadline) {
-    if (child.exitCode !== null) break;
-    try { browser = await chromium.connectOverCDP(endpoint); } catch { await new Promise((resolveWait) => setTimeout(resolveWait, 100)); }
-  }
-  if (!browser) throw new Error(`The packaged security renderer did not expose its loopback DevTools endpoint. ${Buffer.concat(stderr).toString('utf8')}`);
+  const browser = await waitForPackagedE2eReady({
+    child,
+    label: 'The packaged security renderer DevTools endpoint',
+    stderr: () => Buffer.concat(stderr).toString('utf8'),
+    attempt: async () => {
+      try { return await chromium.connectOverCDP(endpoint); }
+      catch { return undefined; }
+    },
+  });
+  const deadline = Date.now() + (process.platform === 'darwin' ? 30_000 : 15_000);
   while (Date.now() < deadline) {
     const page = browser.contexts()[0]?.pages().find((candidate) => candidate.url().startsWith('aidraw://app/'));
     if (page) { await page.waitForLoadState('domcontentloaded'); return { browser, page }; }
@@ -136,7 +145,7 @@ test(scenarioName, async () => {
 
   const debuggingPort = await reservePort();
   const stderr: Buffer[] = [];
-  const child = spawn(packagedExecutable, [
+  const child = spawnPackagedE2e(packagedExecutable, [
     `--remote-debugging-port=${debuggingPort}`,
     '--remote-debugging-address=127.0.0.1',
     '--disable-background-networking',
@@ -146,7 +155,7 @@ test(scenarioName, async () => {
     '--no-pings',
     `--user-data-dir=${profile}`,
     `--write-mcp-connection=${connectionPath}`,
-  ], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+  ], { stdio: ['ignore', 'ignore', 'pipe'] });
   child.stderr?.on('data', (chunk: Buffer) => stderr.push(chunk));
 
   let browser: Browser | undefined;

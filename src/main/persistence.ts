@@ -185,21 +185,24 @@ export function materializePaintTiles(document: AIDrawDocument): void {
   for (const layer of Object.values(document.layers)) {
     if (layer.type !== 'paint') continue;
     layer.tileAssetIds = {};
-    for (const [key, strokes] of strokesByTouchedTile(document, layer)) {
-      const coordinates = parsePaintTileKey(key);
-      if (!coordinates) continue;
-      const canvas = createCanvas(layer.tileSize, layer.tileSize);
-      const context = canvas.getContext('2d');
-      context.translate(-coordinates.tileX * layer.tileSize, -coordinates.tileY * layer.tileSize);
-      context.lineCap = 'round';
-      context.lineJoin = 'round';
-      for (const stroke of strokes) renderRasterStroke(context, stroke);
-      const bytes = canvas.toBuffer('image/png');
-      const sha256 = createHash('sha256').update(bytes).digest('hex');
-      const id = `paint-tile-${sha256}`;
-      document.assets[id] = { id, name: `${layer.name} ${key}`, mimeType: 'image/png', byteLength: bytes.byteLength, sha256, source: 'rendered', data: bytes.toString('base64') };
-      layer.tileAssetIds[key] = id;
-    }
+    const canvas = createCanvas(layer.tileSize, layer.tileSize);
+    try {
+      for (const [key, strokes] of strokesByTouchedTile(document, layer)) {
+        const coordinates = parsePaintTileKey(key);
+        if (!coordinates) continue;
+        const context = canvas.getContext('2d');
+        context.reset();
+        context.translate(-coordinates.tileX * layer.tileSize, -coordinates.tileY * layer.tileSize);
+        context.lineCap = 'round';
+        context.lineJoin = 'round';
+        for (const stroke of strokes) renderRasterStroke(context, stroke);
+        const bytes = canvas.toBuffer('image/png');
+        const sha256 = createHash('sha256').update(bytes).digest('hex');
+        const id = `paint-tile-${sha256}`;
+        document.assets[id] = { id, name: `${layer.name} ${key}`, mimeType: 'image/png', byteLength: bytes.byteLength, sha256, source: 'rendered', data: bytes.toString('base64') };
+        layer.tileAssetIds[key] = id;
+      }
+    } finally { canvas.width = 1; canvas.height = 1; }
     layer.tileCache = { version: 1, strokeCount: layer.strokes.length, strokesSha256: paintStrokePrefixSha256(layer.strokes) };
   }
   pruneUnreferencedPaintTiles(document);

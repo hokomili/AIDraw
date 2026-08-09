@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assertForceStopIdentity, buildRedactedConnection, type ForceStopIdentityInput } from '../../scripts/qa-session-safety.mjs';
+import { assertConnectionFileReplaceable, assertForceStopIdentity, buildRedactedConnection, processProbeErrorMeansAlive, requiresUnsandboxedGuiLaunch, type ForceStopIdentityInput } from '../../scripts/qa-session-safety.mjs';
 
 const baseline: ForceStopIdentityInput = {
   manifest: {
@@ -27,6 +27,19 @@ const baseline: ForceStopIdentityInput = {
 };
 
 describe('QA session force-stop safety', () => {
+  it('requires an explicit unsandboxed native launch context on Windows and macOS', () => {
+    expect(requiresUnsandboxedGuiLaunch('win32')).toBe(true);
+    expect(requiresUnsandboxedGuiLaunch('darwin')).toBe(true);
+    expect(requiresUnsandboxedGuiLaunch('linux')).toBe(false);
+  });
+
+  it('treats a permission-denied PID probe as alive and refuses to replace its connection handoff', () => {
+    expect(processProbeErrorMeansAlive(Object.assign(new Error('not permitted'), { code: 'EPERM' }))).toBe(true);
+    expect(processProbeErrorMeansAlive(Object.assign(new Error('missing'), { code: 'ESRCH' }))).toBe(false);
+    expect(() => assertConnectionFileReplaceable({ pid: 4312 }, (pid) => pid === 4312)).toThrow(/still alive/);
+    expect(() => assertConnectionFileReplaceable({ pid: 4312 }, () => false)).not.toThrow();
+  });
+
   it('accepts only a live process matching PID, URL, hash, executable, and exact profile', () => {
     expect(assertForceStopIdentity(baseline)).toEqual({
       pid: baseline.manifest.pid,
@@ -50,6 +63,17 @@ describe('QA session force-stop safety', () => {
 
   it.each(mismatches)('refuses a mismatched %s before termination', (_label, input, expected) => {
     expect(() => assertForceStopIdentity(input)).toThrow(expected);
+  });
+
+  it('validates an exact macOS bundle executable and isolated profile', () => {
+    const macInput: ForceStopIdentityInput = {
+      manifest: { pid: 8123, exe: '/Applications/AIDraw.app/Contents/MacOS/AIDraw', exeSha256: 'MAC123', profile: '/private/tmp/aidraw qa/profile', mcpUrl: 'http://127.0.0.1:48200/mcp' },
+      connection: { pid: 8123, url: 'http://127.0.0.1:48200/mcp' },
+      currentExeSha256: 'MAC123',
+      processIdentity: { pid: 8123, executablePath: '/Applications/AIDraw.app/Contents/MacOS/AIDraw', commandLine: '/Applications/AIDraw.app/Contents/MacOS/AIDraw --user-data-dir=/private/tmp/aidraw qa/profile --headless' },
+      platform: 'darwin',
+    };
+    expect(assertForceStopIdentity(macInput)).toMatchObject({ pid: 8123, exe: macInput.manifest.exe, profile: macInput.manifest.profile });
   });
 
   it('redacts bearer credentials while preserving non-secret cleanup identity', () => {

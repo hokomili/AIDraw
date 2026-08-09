@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from 'react';
 import {
   decodePixelChunk,
   decodeTiledGid,
@@ -274,12 +274,15 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const [selectionScaleOpen, setSelectionScaleOpen] = useState(false);
   const [clipboardAvailable, setClipboardAvailable] = useState(Boolean(localSelectionClipboard));
   const [mapObjectGesture, setMapObjectGesture] = useState<MapObjectGesture>();
+  const mapObjectGestureRef = useRef<MapObjectGesture | undefined>(undefined);
   const [stampPreview, setStampPreview] = useState<Array<PixelPoint & { index: number }>>([]);
   const [activeStampId, setActiveStampId] = useState<string>();
   const [stampCaptureOpen, setStampCaptureOpen] = useState(false);
   const [tileStampPreview, setTileStampPreview] = useState<Array<PixelPoint & { gid: number }>>([]);
   const [activeTileStampId, setActiveTileStampId] = useState<string>();
   const [lockPromise, setLockPromise] = useState<Promise<{ acquired: boolean; lockId?: string }>>();
+  const lockPromiseRef = useRef<Promise<{ acquired: boolean; lockId?: string }> | undefined>(undefined);
+  const mountedRef = useRef(true);
   const [frameId, setFrameId] = useState(sprite?.frameIds[0]);
   const [playing, setPlaying] = useState(false);
   const [pingPong, setPingPong] = useState(false);
@@ -309,7 +312,8 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const ditherMatrixSize = useEditorStore((state) => state.ditherMatrixSize);
   const ditherCoverage = useEditorStore((state) => state.ditherCoverage);
   const ditherMixIndex = Math.min(document.palette.length - 1, useEditorStore((state) => state.ditherMixIndex));
-  const apply = useEditorStore((state) => state.apply);
+  const applyToActiveDocument = useEditorStore((state) => state.apply);
+  const apply = useCallback((label: string, operations: CanvasOperation[]) => mountedRef.current ? applyToActiveDocument(label, operations, document.id) : Promise.resolve(false), [applyToActiveDocument, document.id]);
   const notify = useEditorStore((state) => state.notify);
   const selectedEntityId = useEditorStore((state) => state.selectedEntityId);
   const setSelectedEntity = useEditorStore((state) => state.setSelectedEntity);
@@ -330,6 +334,20 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const selectedVariantCount = terrainTileset?.type === 'tileset' ? tileVariantCandidates(terrainTileset, selectedTileId).length : 0;
   const variantSeed = tilemap ? Math.trunc(Number(tilemap.properties[TILE_VARIANT_SEED_PROPERTY]) || 0) : 0;
   const hasTimeline = Boolean(sprite && !tileset);
+
+  useEffect(() => {
+    mapObjectGestureRef.current = mapObjectGesture;
+    lockPromiseRef.current = lockPromise;
+  }, [lockPromise, mapObjectGesture]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      const pendingLocks = [lockPromiseRef.current, mapObjectGestureRef.current?.lockPromise].filter((value): value is Promise<{ acquired: boolean; lockId?: string }> => Boolean(value));
+      for (const pendingLock of new Set(pendingLocks)) void pendingLock.then((lock) => lock.lockId ? window.aidraw.releaseHumanLock(lock.lockId) : undefined).catch(() => undefined);
+    };
+  }, []);
 
   useEffect(() => {
     if (!paletteCycling || document.palette.length <= 2) return;

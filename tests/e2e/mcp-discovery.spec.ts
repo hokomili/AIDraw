@@ -1,13 +1,15 @@
 import { expect, test } from '@playwright/test';
-import { spawn, type ChildProcess } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { access, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { resolvePackagedE2eArtifact, spawnPackagedE2e } from '../../scripts/packaged-e2e-runtime.mjs';
 
 const scenarioName = 'MCP-COLD-DISCOVERY exact package teaches a tools-only client without repository context';
 const profilePrefix = 'aidraw-e2e-mcp-discovery-';
-const packagedExecutable = resolve(process.cwd(), process.env.AIDRAW_E2E_OUT_DIR || 'out', 'AIDraw-win32-x64', 'AIDraw.exe');
-const packagedAsar = join(dirname(packagedExecutable), 'resources', 'app.asar');
+const packagedArtifact = resolvePackagedE2eArtifact();
+const packagedExecutable = packagedArtifact.executable;
+const packagedAsar = packagedArtifact.asar;
 
 interface McpMessage {
   result?: Record<string, unknown>;
@@ -98,7 +100,7 @@ async function waitForExit(child: ChildProcess, label: string, timeoutMs: number
 
 async function quitGracefully(profile: string, child: ChildProcess): Promise<void> {
   if (child.exitCode !== null) return;
-  const signal = spawn(packagedExecutable, [`--user-data-dir=${profile}`, '--quit-engine'], { stdio: 'ignore', windowsHide: true });
+  const signal = spawnPackagedE2e(packagedExecutable, [`--user-data-dir=${profile}`, '--quit-engine'], { stdio: 'ignore' });
   await waitForExit(signal, 'The isolated quit signal', 5_000);
   await waitForExit(child, 'The isolated packaged engine', 15_000);
 }
@@ -150,8 +152,8 @@ test(scenarioName, async () => {
     expect(await access(path).then(() => true, () => false), `${path} must be absent before launch`).toBe(false);
   }
 
-  const child = spawn(packagedExecutable, [`--user-data-dir=${profile}`, '--headless', `--write-mcp-connection=${connectionPath}`], {
-    env: { ...process.env }, stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true,
+  const child = spawnPackagedE2e(packagedExecutable, [`--user-data-dir=${profile}`, '--headless', `--write-mcp-connection=${connectionPath}`], {
+    stdio: ['ignore', 'ignore', 'pipe'],
   });
   let connection: McpConnection | undefined;
   let evidence: Record<string, unknown> | undefined;

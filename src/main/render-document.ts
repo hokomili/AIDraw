@@ -25,6 +25,32 @@ type LoadedImage = Awaited<ReturnType<typeof loadImage>>;
 const MAX_PAINT_TILE_IMAGE_CACHE_BYTES = 64 * 1024 * 1024;
 const paintTileImageCache = new Map<string, { bytes: number; promise: Promise<LoadedImage> }>();
 let paintTileImageCacheBytes = 0;
+const MAX_RENDER_SCRATCH_CANVAS_CACHE_BYTES = 64 * 1024 * 1024;
+const renderScratchCanvasCache: Canvas[] = [];
+let renderScratchCanvasCacheBytes = 0;
+
+function acquireScratchCanvas(width: number, height: number): Canvas {
+  const cachedIndex = renderScratchCanvasCache.findIndex((canvas) => canvas.width === width && canvas.height === height);
+  const canvas = cachedIndex >= 0 ? renderScratchCanvasCache.splice(cachedIndex, 1)[0] : createCanvas(width, height);
+  if (cachedIndex >= 0) renderScratchCanvasCacheBytes -= width * height * 4;
+  canvas.getContext('2d').reset();
+  return canvas;
+}
+
+function releaseScratchCanvas(canvas: Canvas): void {
+  // Reuse one bounded full-artboard compositing surface across sequential
+  // layers and renders. Creating a fresh native Skia surface per layer leaves
+  // allocator high-water behind even after its JS wrapper becomes unreachable.
+  const bytes = canvas.width * canvas.height * 4;
+  canvas.getContext('2d').reset();
+  if (bytes <= MAX_RENDER_SCRATCH_CANVAS_CACHE_BYTES && renderScratchCanvasCacheBytes + bytes <= MAX_RENDER_SCRATCH_CANVAS_CACHE_BYTES) {
+    renderScratchCanvasCache.push(canvas);
+    renderScratchCanvasCacheBytes += bytes;
+    return;
+  }
+  canvas.width = 1;
+  canvas.height = 1;
+}
 
 async function cachedPaintTileImage(assetSha256: string, data: string, tileSize: number): Promise<LoadedImage> {
   const key = `${assetSha256.toLowerCase()}:${tileSize}`;
@@ -170,10 +196,12 @@ export async function renderIllustration(document: IllustrationDocument, onlyLay
     const transformed = object.transform.x !== 0 || object.transform.y !== 0 || object.transform.scaleX !== 1 || object.transform.scaleY !== 1 || object.transform.rotation !== 0 || object.transform.skewX !== 0 || object.transform.skewY !== 0;
     const isolate = transformed || object.opacity !== 1 || object.blendMode !== 'normal' || Boolean(object.blur || object.shadow || object.maskObjectId || object.filters?.length);
     if (!isolate) { for (const childId of object.childIds) await drawObjectEntry(target, childId, nextVisiting); return; }
-    const buffer = createCanvas(document.artboard.width, document.artboard.height); const bufferContext = buffer.getContext('2d');
-    for (const childId of object.childIds) await drawObjectEntry(bufferContext, childId, nextVisiting);
-    target.save(); const mask = object.maskObjectId ? document.objects[object.maskObjectId] : undefined; const maskPath = mask ? transformedObjectPath(mask) : undefined; if (maskPath) target.clip(maskPath);
-    target.translate(object.transform.x, object.transform.y); target.rotate(object.transform.rotation * Math.PI / 180); target.transform(object.transform.scaleX, Math.tan(object.transform.skewY * Math.PI / 180), Math.tan(object.transform.skewX * Math.PI / 180), object.transform.scaleY, 0, 0); target.globalAlpha *= object.opacity; target.globalCompositeOperation = composite(object.blendMode); target.filter = objectFilter(object); if (object.shadow) { target.shadowColor = object.shadow.color; target.shadowBlur = object.shadow.blur; target.shadowOffsetX = object.shadow.offsetX; target.shadowOffsetY = object.shadow.offsetY; } target.drawImage(buffer, 0, 0); target.restore();
+    const buffer = acquireScratchCanvas(document.artboard.width, document.artboard.height); const bufferContext = buffer.getContext('2d');
+    try {
+      for (const childId of object.childIds) await drawObjectEntry(bufferContext, childId, nextVisiting);
+      target.save(); const mask = object.maskObjectId ? document.objects[object.maskObjectId] : undefined; const maskPath = mask ? transformedObjectPath(mask) : undefined; if (maskPath) target.clip(maskPath);
+      target.translate(object.transform.x, object.transform.y); target.rotate(object.transform.rotation * Math.PI / 180); target.transform(object.transform.scaleX, Math.tan(object.transform.skewY * Math.PI / 180), Math.tan(object.transform.skewX * Math.PI / 180), object.transform.scaleY, 0, 0); target.globalAlpha *= object.opacity; target.globalCompositeOperation = composite(object.blendMode); target.filter = objectFilter(object); if (object.shadow) { target.shadowColor = object.shadow.color; target.shadowBlur = object.shadow.blur; target.shadowOffsetX = object.shadow.offsetX; target.shadowOffsetY = object.shadow.offsetY; } target.drawImage(buffer, 0, 0); target.restore();
+    } finally { releaseScratchCanvas(buffer); }
   };
   const drawLayer = async (layerId: string, target: Context = context): Promise<void> => {
     const layer = document.layers[layerId];
@@ -208,7 +236,9 @@ export async function renderIllustration(document: IllustrationDocument, onlyLay
     const maskLayer = layer.maskLayerId ? document.layers[layer.maskLayerId] : undefined;
     if (maskLayer?.type === 'vector') { const maskPath = new Path2D(); for (const objectId of maskLayer.objectIds) { const path = document.objects[objectId] ? transformedObjectPath(document.objects[objectId]) : undefined; if (path) maskPath.addPath(path); } target.clip(maskPath); }
     if (layer.opacity !== 1 || layer.blendMode !== 'normal' || layer.filters?.length) {
-      const buffer = createCanvas(document.artboard.width, document.artboard.height); await drawContents(buffer.getContext('2d')); target.globalAlpha *= layer.opacity; target.globalCompositeOperation = composite(layer.blendMode); target.filter = adjustmentFilter(layer.filters); target.drawImage(buffer, 0, 0);
+      const buffer = acquireScratchCanvas(document.artboard.width, document.artboard.height);
+      try { await drawContents(buffer.getContext('2d')); target.globalAlpha *= layer.opacity; target.globalCompositeOperation = composite(layer.blendMode); target.filter = adjustmentFilter(layer.filters); target.drawImage(buffer, 0, 0); }
+      finally { releaseScratchCanvas(buffer); }
     } else await drawContents(target);
     target.restore();
   };

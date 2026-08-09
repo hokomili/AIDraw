@@ -1,10 +1,10 @@
 import { execFile, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { access, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, stat, unlink, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import process from 'node:process';
 import { promisify } from 'node:util';
-import { assertForceStopIdentity, buildRedactedConnection } from './qa-session-safety.mjs';
+import { assertConnectionFileReplaceable, assertForceStopIdentity, buildRedactedConnection, processProbeErrorMeansAlive, requiresUnsandboxedGuiLaunch } from './qa-session-safety.mjs';
 
 const execFileAsync = promisify(execFile);
 const FLAG_ARGUMENTS = new Set(['force-on-timeout']);
@@ -12,7 +12,7 @@ const FLAG_ARGUMENTS = new Set(['force-on-timeout']);
 const HELP = `AIDraw isolated QA session
 
 Usage:
-  node scripts/qa-session.mjs start --exe <AIDraw.exe> --profile <dir> --connection <json> --launch-context unsandboxed-gui [--manifest <json>] [--mode interactive|headless] [--trust-folder <dir> ...]
+  node scripts/qa-session.mjs start --exe <AIDraw executable> --profile <dir> --connection <json> --launch-context unsandboxed-gui [--manifest <json>] [--mode interactive|headless] [--trust-folder <dir> ...]
   node scripts/qa-session.mjs show --manifest <json>
   node scripts/qa-session.mjs status --manifest <json>
   node scripts/qa-session.mjs stop --manifest <json> [--force-on-timeout]
@@ -21,7 +21,7 @@ Usage:
 Interactive mode is the formal UI-test default and opens the editor immediately.
 Headless mode is used for explicit lifecycle scenarios; use show to request its
 editor window after the MCP QA document has a unique name.
-On Windows, start/show/stop must be invoked outside a Codex filesystem sandbox.
+On Windows and macOS, start/show/status/stop must be invoked outside a Codex filesystem sandbox.
 The launch-context acknowledgement prevents accidental sandboxed GUI startup.
 Force-on-timeout is an opt-in last resort. It terminates the recorded PID only
 after the live executable, SHA-256, command-line profile, connection PID, and
@@ -96,8 +96,19 @@ function isProcessAlive(pid) {
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    return processProbeErrorMeansAlive(error);
+  }
+}
+
+async function removeReplaceableConnectionFile(connectionPath) {
+  try {
+    const existing = JSON.parse(await readFile(connectionPath, 'utf8'));
+    assertConnectionFileReplaceable(existing, isProcessAlive);
+    await unlink(connectionPath);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return;
+    throw error;
   }
 }
 
@@ -139,7 +150,6 @@ async function redactConnection(manifest) {
 }
 
 async function readWindowsProcessIdentity(pid) {
-  if (process.platform !== 'win32') throw new Error('--force-on-timeout is currently supported only on Windows.');
   const command = [
     '$OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)',
     `$target = Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}"`,
@@ -153,10 +163,28 @@ async function readWindowsProcessIdentity(pid) {
   return { pid: Number(identity.ProcessId), executablePath: identity.ExecutablePath, commandLine: identity.CommandLine };
 }
 
-async function verifyForceStopIdentity(manifest) {
+async function readDarwinProcessIdentity(pid) {
+  const { stdout: mappedFiles } = await execFileAsync('lsof', ['-a', '-p', String(pid), '-d', 'txt', '-Fn'], {
+    encoding: 'utf8', timeout: 5_000, maxBuffer: 4 * 1024 * 1024,
+  });
+  const executablePath = mappedFiles.split(/\r?\n/).find((line) => line.startsWith('n'))?.slice(1);
+  const { stdout: commandLine } = await execFileAsync('ps', ['-p', String(pid), '-ww', '-o', 'command='], {
+    encoding: 'utf8', timeout: 5_000,
+  });
+  if (!executablePath || !commandLine.trim()) throw new Error(`Could not resolve native process identity for PID ${pid}.`);
+  return { pid, executablePath, commandLine: commandLine.trim() };
+}
+
+async function readNativeProcessIdentity(pid) {
+  if (process.platform === 'win32') return readWindowsProcessIdentity(pid);
+  if (process.platform === 'darwin') return readDarwinProcessIdentity(pid);
+  throw new Error(`Exact QA process identity is not implemented on ${process.platform}.`);
+}
+
+async function verifyProcessIdentity(manifest) {
   const connection = JSON.parse(await readFile(manifest.connection, 'utf8'));
   const currentExeSha256 = await sha256(manifest.exe);
-  const processIdentity = await readWindowsProcessIdentity(Number(manifest.pid));
+  const processIdentity = await readNativeProcessIdentity(Number(manifest.pid));
   return assertForceStopIdentity({ manifest, connection, currentExeSha256, processIdentity });
 }
 
@@ -175,8 +203,8 @@ async function start(values) {
   const manifestPath = resolve(optional(values, 'manifest') ?? join(profile, 'qa-session.json'));
   const mode = optional(values, 'mode') ?? 'interactive';
   const launchContext = optional(values, 'launch-context');
-  if (process.platform === 'win32' && launchContext !== 'unsandboxed-gui') {
-    throw new Error('Refusing to launch native AIDraw from an unknown Windows context. Invoke this command with shell sandbox escalation and --launch-context unsandboxed-gui.');
+  if (requiresUnsandboxedGuiLaunch() && launchContext !== 'unsandboxed-gui') {
+    throw new Error(`Refusing to launch native AIDraw from an unknown ${process.platform === 'darwin' ? 'macOS' : 'Windows'} context. Invoke this command with shell sandbox escalation and --launch-context unsandboxed-gui.`);
   }
   if (!['interactive', 'headless'].includes(mode)) throw new Error('--mode must be interactive or headless.');
   const trustedFolders = (values.get('trust-folder') ?? []).map((folder) => resolve(folder));
@@ -186,6 +214,7 @@ async function start(values) {
   await mkdir(dirname(connection), { recursive: true });
   await mkdir(dirname(manifestPath), { recursive: true });
   for (const folder of trustedFolders) await mkdir(folder, { recursive: true });
+  await removeReplaceableConnectionFile(connection);
 
   const startedAtMs = Date.now();
   const args = [
@@ -249,6 +278,12 @@ async function status(values) {
   let healthResult;
   let healthError;
   try { healthResult = await health(manifest.mcpUrl); } catch (error) { healthError = error instanceof Error ? error.message : String(error); }
+  let processIdentity;
+  let processIdentityError;
+  if (isProcessAlive(Number(manifest.pid)) && ['win32', 'darwin'].includes(process.platform)) {
+    try { processIdentity = await verifyProcessIdentity(manifest); }
+    catch (error) { processIdentityError = error instanceof Error ? error.message : String(error); }
+  }
   const result = {
     manifestPath,
     exe: manifest.exe,
@@ -257,6 +292,9 @@ async function status(values) {
     hashMatches: currentHash === manifest.exeSha256,
     pid: manifest.pid,
     processAlive: isProcessAlive(Number(manifest.pid)),
+    processIdentitySupported: ['win32', 'darwin'].includes(process.platform),
+    processIdentityMatches: Boolean(processIdentity),
+    processIdentity: processIdentity ?? { error: processIdentityError ?? 'Native process identity is not available on this platform.' },
     connectionPid: connection.pid,
     pidMatches: Number(connection.pid) === Number(manifest.pid),
     mcpUrl: manifest.mcpUrl,
@@ -267,7 +305,8 @@ async function status(values) {
     mode: manifest.mode ?? 'headless',
     windowRequested: Boolean(manifest.windowRequested),
   };
-  const okay = result.hashMatches && result.processAlive && result.pidMatches && result.urlMatches && Boolean(healthResult);
+  const okay = result.hashMatches && result.processAlive && result.pidMatches && result.urlMatches && Boolean(healthResult)
+    && (!result.processIdentitySupported || result.processIdentityMatches);
   process.stdout.write(`${JSON.stringify({ okay, ...result }, null, 2)}\n`);
   if (!okay) process.exitCode = 1;
 }
@@ -289,7 +328,7 @@ async function stop(values) {
   if (!stopped && forceOnTimeout) {
     forceAttempted = true;
     try {
-      forceVerification = await verifyForceStopIdentity(manifest);
+      forceVerification = await verifyProcessIdentity(manifest);
       process.kill(pid, 'SIGKILL');
       stopped = await waitForPidExit(pid, 5_000);
       if (!stopped) throw new Error(`Force-stop signal did not terminate verified QA PID ${pid} within 5 seconds.`);

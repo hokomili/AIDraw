@@ -352,7 +352,16 @@ const JobManageOutputSchema = z.object({
   job: z.record(z.string(), z.unknown()).optional().describe('Privacy-redacted batch job summary returned by start/resume.'),
   resumeToken: z.string().optional().describe('Private batch capability returned only to the owning start call; retain it privately.'),
   nextSequence: z.number().int().nonnegative().optional().describe('Exact next durable-batch sequence.'),
-  error: z.string().optional(), message: z.string().optional(), next: NextStepSchema.optional(),
+  error: z.union([
+    z.string(),
+    z.object({
+      code: z.string(),
+      message: z.string(),
+      retryable: z.boolean(),
+      retryAfterMs: z.number().nonnegative().optional(),
+    }).strict(),
+  ]).optional(),
+  message: z.string().optional(), next: NextStepSchema.optional(),
 }).passthrough();
 
 function jobNextStep(job: AsyncJob): NextStep | undefined {
@@ -908,8 +917,8 @@ export class McpHost {
    * user who launched a headless engine. This is intentionally separate from
    * persistent in-app trust and is never written to disk by McpHost.
    */
-  grantLaunchFolderTrust(folders: string[]): string[] {
-    for (const folder of folders) this.launchTrustedFolders.add(this.normalizeFolder(folder));
+  async grantLaunchFolderTrust(folders: string[]): Promise<string[]> {
+    for (const folder of folders) this.launchTrustedFolders.add(await this.canonicalizeFolder(folder));
     return [...this.launchTrustedFolders];
   }
 
@@ -1023,7 +1032,10 @@ export class McpHost {
       const companionPaths = requestedPath && document && kind === 'export' && typeof rawRequest.format === 'string'
         ? plannedExportCompanionPaths(document, rawRequest.format as ExportFormat, requestedPath)
         : [];
-      const targetPaths = requestedPath ? [requestedPath, ...companionPaths] : [];
+      // Existing import sources are inputs, not overwrite targets. Folder trust
+      // may authorize reading them; only save/export destinations (including
+      // companions) must lose automatic trust when an existing file is found.
+      const targetPaths = requestedPath && (kind === 'save' || kind === 'export') ? [requestedPath, ...companionPaths] : [];
       const overwritePaths = (await Promise.all(targetPaths.map(async (target) => await stat(target).then(() => target, () => undefined)))).filter((target): target is string => Boolean(target));
       const request = requestedPath ? { ...rawRequest, path: requestedPath, overwritePaths } : rawRequest;
       const timestamp = nowIso(); const review = approvalReview(kind, title, request, requestedPath, overwritePaths, trustable);
@@ -1393,7 +1405,10 @@ export class McpHost {
           job = await this.batches.cancel(request.jobId, session.actor.id) ?? job;
           const transactionId = this.activeBatchTransactions.get(request.jobId); if (transactionId) this.scheduler.cancelTransaction(transactionId);
         }
-        else this.cancelJob?.(request.jobId); job = this.documents.getJob(request.jobId) ?? job;
+        else {
+          if (job.kind === 'generation') this.cancelJob?.(request.jobId);
+          job = this.documents.getJob(request.jobId) ?? job;
+        }
         if (!['cancelled', 'completed', 'failed'].includes(job.status)) { job = { ...job, status: 'cancelled', updatedAt: nowIso(), message: 'Cancelled by the originating agent.' }; this.documents.upsertJob(job); }
       } else if (request.action === 'wait' && request.timeoutMs > 0) {
         const deadline = Date.now() + request.timeoutMs;
@@ -1425,6 +1440,8 @@ export class McpHost {
 
   private normalizeFolder(folder: string): string { const value = resolve(folder); return process.platform === 'win32' ? value.toLowerCase() : value; }
 
+  private async canonicalizeFolder(folder: string): Promise<string> { return this.normalizeFolder(await canonicalizeRequestedPath(folder)); }
+
   private isWithinFolder(folder: string, filePath: string): boolean { const relativePath = relative(folder, this.normalizeFolder(filePath)); return relativePath === '' || (!relativePath.startsWith('..') && !isAbsolute(relativePath)); }
 
   private isTrustedPath(actorId: string, filePath: string): boolean {
@@ -1433,13 +1450,16 @@ export class McpHost {
 
   private async rememberTrust(job: AsyncJob, decision: ApprovalDecision): Promise<void> {
     if (!['import', 'export', 'save'].includes(job.kind) || (decision !== 'allow-session' && decision !== 'allow-always')) return;
+    // Approval requests already carry the canonical path resolved before the
+    // job was created. Preserve synchronous session-trust installation before
+    // this async handler's first write so the next MCP call cannot race it.
     const result = job.result as { request?: { path?: unknown } } | undefined; if (typeof result?.request?.path !== 'string') return; const folder = this.normalizeFolder(dirname(resolve(result.request.path)));
     if (decision === 'allow-session') { const folders = this.sessionTrustedFolders.get(job.actor.id) ?? new Set<string>(); folders.add(folder); this.sessionTrustedFolders.set(job.actor.id, folders); return; }
     this.persistentTrustedFolders.add(folder); await mkdir(dirname(this.trustSettingsPath()), { recursive: true }); await writeFile(this.trustSettingsPath(), JSON.stringify({ version: 1, folders: [...this.persistentTrustedFolders] } satisfies FolderTrustSettings, null, 2), 'utf8');
   }
 
   private async readFolderTrust(): Promise<void> {
-    try { const settings = JSON.parse(await readFile(this.trustSettingsPath(), 'utf8')) as FolderTrustSettings; if (settings.version === 1) for (const folder of settings.folders) this.persistentTrustedFolders.add(this.normalizeFolder(folder)); } catch { /* No persistent trust has been granted yet. */ }
+    try { const settings = JSON.parse(await readFile(this.trustSettingsPath(), 'utf8')) as FolderTrustSettings; if (settings.version === 1) for (const folder of settings.folders) this.persistentTrustedFolders.add(await this.canonicalizeFolder(folder)); } catch { /* No persistent trust has been granted yet. */ }
   }
 
   private async readPreferredPort(): Promise<number> {

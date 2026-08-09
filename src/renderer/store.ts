@@ -57,7 +57,7 @@ interface EditorState {
   notify(message: string, tone?: ToastTone): void;
   newDocument(options: NewDocumentOptions): Promise<void>;
   activate(documentId: Id): Promise<void>;
-  apply(label: string, operations: CanvasOperation[]): Promise<boolean>;
+  apply(label: string, operations: CanvasOperation[], expectedDocumentId?: Id): Promise<boolean>;
   undo(): Promise<void>;
   redo(): Promise<void>;
   save(saveAs?: boolean): Promise<void>;
@@ -65,6 +65,29 @@ interface EditorState {
 }
 
 let unsubscribe: (() => void) | undefined;
+
+type WorkspaceReconcileState = Pick<EditorState,
+  'snapshot' | 'selectedTool' | 'brushSize' | 'zoom' | 'selectedEntityId' | 'selectedEntityIds' |
+  'canvasViewport' | 'canvasAnimation' | 'revealRequest'
+>;
+
+export function reconcileWorkspaceSnapshot(state: WorkspaceReconcileState, snapshot: WorkspaceSnapshot): Partial<EditorState> {
+  if (!Number.isSafeInteger(snapshot.workspaceRevision) || snapshot.workspaceRevision < 0) return {};
+  if (snapshot.activeDocumentId !== snapshot.activeDocument?.id) return {};
+  if (state.snapshot && snapshot.workspaceRevision < state.snapshot.workspaceRevision) return {};
+  if (state.snapshot?.activeDocumentId === snapshot.activeDocumentId) return { snapshot };
+  return {
+    snapshot,
+    selectedTool: snapshot.activeDocument?.kind === 'pixel' ? 'pencil' : 'select',
+    brushSize: snapshot.activeDocument?.kind === 'pixel' ? 1 : state.brushSize,
+    zoom: 1,
+    selectedEntityId: undefined,
+    selectedEntityIds: [],
+    canvasViewport: undefined,
+    canvasAnimation: undefined,
+    revealRequest: undefined,
+  };
+}
 
 export function safePlaybackOperations(value: unknown): CanvasOperation[] {
   if (!Array.isArray(value)) return [];
@@ -93,11 +116,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   selectedEntityIds: [],
 
   initialize: async () => {
-    const snapshot = await window.aidraw.bootstrap();
-    set({ snapshot, loading: false });
     unsubscribe?.();
     unsubscribe = window.aidraw.onEvent((event) => {
-      if (event.type === 'workspace') set({ snapshot: event.snapshot });
+      if (event.type === 'workspace') set((state) => reconcileWorkspaceSnapshot(state, event.snapshot));
       else if (event.type === 'playback') set((state) => {
         const playbacks = { ...state.playbacks };
         if (event.status === 'playing') {
@@ -120,8 +141,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       });
       else if (event.type === 'interchange-report') set((state) => ({ reportPulse: state.reportPulse + 1 }));
     });
+    const snapshot = await window.aidraw.bootstrap();
+    set((state) => ({ ...reconcileWorkspaceSnapshot(state, snapshot), loading: false }));
   },
-  setSnapshot: (snapshot) => set({ snapshot }),
+  setSnapshot: (snapshot) => set((state) => reconcileWorkspaceSnapshot(state, snapshot)),
   setTool: (selectedTool) => set({ selectedTool }),
   setColor: (primaryColor) => set({ primaryColor }),
   setSecondaryColor: (secondaryColor) => set({ secondaryColor }),
@@ -158,15 +181,15 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
   newDocument: async (options) => {
     const snapshot = await window.aidraw.newDocument(options);
-    set({ snapshot, zoom: 1, brushSize: snapshot.activeDocument?.kind === 'pixel' ? 1 : 12, selectedEntityId: undefined, selectedEntityIds: [], selectedTool: snapshot.activeDocument?.kind === 'pixel' ? 'pencil' : 'select', canvasViewport: undefined, canvasAnimation: undefined });
+    set((state) => reconcileWorkspaceSnapshot({ ...state, brushSize: snapshot.activeDocument?.kind === 'pixel' ? state.brushSize : 12 }, snapshot));
   },
   activate: async (documentId) => {
     const snapshot = await window.aidraw.activateDocument(documentId);
-    set({ snapshot, brushSize: snapshot.activeDocument?.kind === 'pixel' ? 1 : get().brushSize, selectedEntityId: undefined, selectedEntityIds: [], selectedTool: snapshot.activeDocument?.kind === 'pixel' ? 'pencil' : 'select', canvasViewport: undefined, canvasAnimation: undefined });
+    set((state) => reconcileWorkspaceSnapshot(state, snapshot));
   },
-  apply: async (label, operations) => {
+  apply: async (label, operations, expectedDocumentId) => {
     const document = get().snapshot?.activeDocument;
-    if (!document || operations.length === 0) return false;
+    if (!document || operations.length === 0 || (expectedDocumentId && document.id !== expectedDocumentId)) return false;
     const response = await window.aidraw.applyTransaction({
       id: createId('tx'),
       clientOperationId: createId('human-op'),

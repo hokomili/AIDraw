@@ -34,6 +34,7 @@
     "test:watch": "vitest",
     "test:e2e": "npm run package && npm run test:e2e:only",
     "test:e2e:only": "playwright test",
+    "test:e2e:retained": "node scripts/run-packaged-e2e.mjs retained",
     "test:performance": "vitest run --config vitest.performance.config.ts",
     "pretest:level1:auto": "npm run qa:runtime",
     "test:level1:auto": "npm run verify && npm run package",
