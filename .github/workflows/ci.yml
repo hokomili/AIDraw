@@ -23,6 +23,7 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      - run: node scripts/check-portability.mjs
       - run: npm ci --cache .npm-cache
       - run: npm run verify
       - run: npm run package
@@ -47,5 +48,6 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      - run: node scripts/check-portability.mjs
       - run: npm ci --cache .npm-cache
       - run: npm audit --omit=dev --audit-level=high

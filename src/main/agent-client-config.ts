@@ -44,14 +44,15 @@ export function updateCodexToml(existing: string, connection: McpConnectionDetai
   return `${retained.join(eol)}${retained.length ? `${eol}${eol}` : ''}${table.join(eol)}${eol}`;
 }
 
-function assertJsonObject(text: string, configPath: string): void {
-  if (!text.trim()) return;
+function assertJsonObject(text: string, configPath: string): Record<string, unknown> {
+  if (!text.trim()) return {};
   const errors: ParseError[] = [];
   const value = parse(text, errors, { allowTrailingComma: true, disallowComments: false }) as unknown;
   if (errors.length) {
     throw new Error(`${configPath} contains invalid JSON/JSONC (${printParseErrorCode(errors[0].error)} at offset ${errors[0].offset}).`);
   }
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${configPath} must contain a JSON object.`);
+  return value as Record<string, unknown>;
 }
 
 function setJsonValue(text: string, path: (string | number)[], value: unknown): string {
@@ -63,7 +64,7 @@ function setJsonValue(text: string, path: (string | number)[], value: unknown): 
 }
 
 export function updateAgentJson(clientId: Exclude<AgentClientId, 'codex' | 'generic'>, existing: string, configPath: string, connection: McpConnectionDetails): string {
-  assertJsonObject(existing, configPath);
+  const document = assertJsonObject(existing, configPath);
   const authorization = `Bearer ${connection.token}`;
   if (clientId === 'claude-code') {
     return setJsonValue(existing, ['mcpServers', 'aidraw'], {
@@ -75,11 +76,24 @@ export function updateAgentJson(clientId: Exclude<AgentClientId, 'codex' | 'gene
   if (clientId === 'opencode') {
     let updated = existing;
     if (!updated.trim()) updated = setJsonValue(updated, ['$schema'], 'https://opencode.ai/config.json');
-    return setJsonValue(updated, ['mcp', 'servers', 'aidraw'], {
+    const mcp = document.mcp && typeof document.mcp === 'object' && !Array.isArray(document.mcp)
+      ? document.mcp as Record<string, unknown>
+      : undefined;
+    const obsoleteServers = mcp?.servers && typeof mcp.servers === 'object' && !Array.isArray(mcp.servers)
+      ? mcp.servers as Record<string, unknown>
+      : undefined;
+    if (obsoleteServers && Object.hasOwn(obsoleteServers, 'aidraw')) {
+      const siblings = Object.keys(obsoleteServers).filter((name) => name !== 'aidraw');
+      if (siblings.length) {
+        throw new Error(`${configPath} contains non-AIDraw entries under the obsolete mcp.servers wrapper; AIDraw will not migrate unrelated OpenCode settings automatically.`);
+      }
+      updated = setJsonValue(updated, ['mcp', 'servers'], undefined);
+    }
+    return setJsonValue(updated, ['mcp', 'aidraw'], {
       type: 'remote',
       url: connection.url,
+      enabled: true,
       oauth: false,
-      codemode: false,
       headers: { Authorization: authorization },
     });
   }

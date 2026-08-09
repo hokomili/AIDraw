@@ -11,11 +11,14 @@ import { RasterUtilitySupervisor } from './utility-supervisor';
 import { DocumentPresetStore } from './document-preset-store';
 import { InterchangeReportStore } from './interchange-report-store';
 import { renderDocumentDimensions } from './render-document';
+import type { GenerationProviderRunner } from './generation-provider-runner';
 
 export interface EngineRuntimeOptions {
   userDataPath: string;
   appVersion: string;
   runApprovedFileJob?: (job: AsyncJob) => void;
+  generationProviderRunner?: GenerationProviderRunner;
+  approvalTimeoutMs?: number;
 }
 
 /**
@@ -48,12 +51,14 @@ export class EngineRuntime {
     this.generationManager = new GenerationManager(
       this.service,
       this.providerCredentials,
-      (input, control) => this.generationUtilities.generate(input.jobId, input.document, input.request, input.credential, control),
+      options.generationProviderRunner
+        ?? ((input, control) => this.generationUtilities.generate(input.jobId, input.document, input.request, input.credential, control)),
       async (document) => {
         const artifact = await this.rasterUtilities.exportDocument(document, 'png');
         return { data: artifact.data.toString('base64'), ...renderDocumentDimensions(document) };
       },
       (encoded, width, height, palette, alphaThreshold, dithering) => this.rasterUtilities.quantizeImage(encoded, width, height, palette, { alphaThreshold, dithering }),
+      (output) => this.rasterUtilities.normalizeGeneratedOutput(output),
     );
     this.documentPresets = new DocumentPresetStore(join(userDataPath, 'settings', 'document-presets.json'));
     this.interchangeReports = new InterchangeReportStore(join(userDataPath, 'reports', 'interchange.json'));
@@ -65,6 +70,7 @@ export class EngineRuntime {
       options.runApprovedFileJob,
       (encoded, width, height, palette, settings) => this.rasterUtilities.quantizeImage(encoded, width, height, palette, settings),
       (document, request, maxPixels) => this.rasterUtilities.captureObservation(document, request, maxPixels ?? 4_194_304),
+      options.approvalTimeoutMs,
     );
   }
 

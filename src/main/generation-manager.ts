@@ -17,16 +17,25 @@ import {
   type PaletteEntry,
   type Provenance,
 } from '@aidraw/core';
-import type { GeneratedOutput, GenerationJobResult, GenerationRequest } from '../common/generation';
+import type {
+  GeneratedAcceptancePreparation,
+  GeneratedOutput,
+  GenerationAcceptanceResult,
+  GenerationJobResult,
+  GenerationRequest,
+} from '../common/generation';
 import { validateGenerationRequest } from '../common/generation-capabilities';
 import { DocumentService } from './document-service';
 import { ProviderCredentialStore } from './provider-credentials';
+import { normalizeGeneratedOutputForAcceptance } from './normalize-generation-output';
 import { quantizeToPalette } from './quantize';
 import { renderDocument } from './render-document';
 import { runGenerationProvider, type GenerationProviderRunner } from './generation-provider-runner';
+import { validateInlineDocumentAsset } from './transaction-policy';
 
 type ComparisonRenderer = (document: Parameters<typeof renderDocument>[0]) => Promise<{ data: string; width: number; height: number }>;
 type GenerationQuantizer = (encoded: Buffer, width: number, height: number, palette: PaletteEntry[], alphaThreshold: number, dithering: 'none' | 'bayer-4x4' | 'floyd-steinberg') => Promise<Array<{ x: number; y: number; index: number }>>;
+type GenerationAcceptanceNormalizer = (output: GeneratedOutput) => Promise<GeneratedAcceptancePreparation>;
 
 const renderComparisonDirect: ComparisonRenderer = async (document) => {
   const canvas = await renderDocument(document);
@@ -63,6 +72,7 @@ export class GenerationManager {
     private readonly providerRunner: GenerationProviderRunner = runGenerationProvider,
     private readonly comparisonRenderer: ComparisonRenderer = renderComparisonDirect,
     private readonly quantizeGenerated: GenerationQuantizer = quantizeGeneratedDirect,
+    private readonly normalizeGenerated: GenerationAcceptanceNormalizer = normalizeGeneratedOutputForAcceptance,
   ) {}
 
   async startHuman(request: GenerationRequest): Promise<{ jobId: string }> {
@@ -100,19 +110,35 @@ export class GenerationManager {
     return cancelled;
   }
 
-  async accept(jobId: string, outputId: string): Promise<{ accepted: boolean; message?: string }> {
+  async accept(jobId: string, outputId: string): Promise<GenerationAcceptanceResult> {
     const job = this.documents.getJob(jobId) as AsyncJob<GenerationJobResult> | undefined;
     const result = job?.result;
     const output = result?.outputs?.find((entry) => entry.id === outputId);
     if (!job || job.status !== 'completed' || !result || !output) return { accepted: false, message: 'Generated result is not available.' };
     const document = this.documents.getDocument(result.request.documentId);
     if (!document) return { accepted: false, message: 'Target document is no longer open.' };
-    const bytes = Buffer.from(output.data, 'base64');
+    let prepared: GeneratedAcceptancePreparation;
+    try {
+      prepared = await this.normalizeGenerated(structuredClone(output));
+    } catch (error) {
+      const reason = (error instanceof Error ? error.message : String(error)).replace(/^utility_failed:\s*/i, '');
+      return { accepted: false, message: `Acceptance preparation failed; the original provider preview remains available and the document is unchanged. ${reason}` };
+    }
+    if (prepared.status === 'preview-only') {
+      const message = `${prepared.message} ${prepared.guidance}`;
+      this.documents.upsertJob({ ...job, updatedAt: nowIso(), message, result });
+      return { accepted: false, previewOnly: true, message };
+    }
+    const bytes = Buffer.from(prepared.data, 'base64');
     const sha256 = createHash('sha256').update(bytes).digest('hex');
     const asset: DocumentAsset = {
-      id: createId('asset'), name: `Generated ${result.request.provider} image`, mimeType: output.mimeType, byteLength: bytes.byteLength,
-      sha256, source: 'generated', data: output.data,
+      id: createId('asset'), name: `Generated ${result.request.provider} image${prepared.normalization ? ' (normalized for acceptance)' : ''}`, mimeType: prepared.mimeType, byteLength: bytes.byteLength,
+      sha256, source: 'generated', data: prepared.data,
     };
+    try { await validateInlineDocumentAsset(asset); }
+    catch (error) {
+      return { accepted: false, message: `Acceptance validation failed; the original provider preview remains available and the document is unchanged. ${error instanceof Error ? error.message : String(error)}` };
+    }
     const modelOrWorkflow = result.request.provider === 'openai'
       ? 'gpt-image-2'
       : result.request.provider === 'stability'
@@ -122,6 +148,7 @@ export class GenerationManager {
       id: createId('provenance'), assetId: asset.id, provider: result.request.provider, modelOrWorkflow,
       prompt: result.request.prompt, negativePrompt: result.request.negativePrompt, seed: output.seed ?? result.request.seed,
       sourceAssetIds: result.request.sourceAssetIds, maskAssetId: result.request.maskAssetId, createdAt: nowIso(),
+      ...(prepared.normalization ? { conversion: { acceptanceNormalization: prepared.normalization } } : {}),
     };
     const operations: CanvasOperation[] = [{ kind: 'asset.add', asset }, { kind: 'provenance.add', provenance }];
 
@@ -136,7 +163,7 @@ export class GenerationManager {
         outpaintOffsetX = Number.isInteger(requestedLeft) ? Math.max(0, Math.min(widthGrowth, requestedLeft)) : Math.floor(widthGrowth / 2);
         outpaintOffsetY = Number.isInteger(requestedUp) ? Math.max(0, Math.min(heightGrowth, requestedUp)) : Math.floor(heightGrowth / 2);
         operations.push({ kind: 'illustration.artboard.translate', artboard: { ...document.artboard, width: outpaintWidth, height: outpaintHeight }, offsetX: outpaintOffsetX, offsetY: outpaintOffsetY, expectedRevision: document.revision });
-        provenance.conversion = { outpaint: { previousWidth: document.artboard.width, previousHeight: document.artboard.height, width: outpaintWidth, height: outpaintHeight, offsetX: outpaintOffsetX, offsetY: outpaintOffsetY } };
+        provenance.conversion = { ...provenance.conversion, outpaint: { previousWidth: document.artboard.width, previousHeight: document.artboard.height, width: outpaintWidth, height: outpaintHeight, offsetX: outpaintOffsetX, offsetY: outpaintOffsetY } };
       }
       const timestamp = nowIso();
       const layer: IllustrationLayer = { id: createId('layer'), revision: 0, name: 'Generated result', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, visible: true, locked: false, opacity: 1, blendMode: 'normal', type: 'vector', objectIds: [] };
@@ -153,9 +180,9 @@ export class GenerationManager {
       if (source?.type === 'sprite') {
         const sprite = structuredClone(source); const timestamp = nowIso(); const layer: PixelLayer = { id: createId('layer'), revision: 0, name: 'Generated result', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, type: 'pixel', visible: true, locked: false, opacity: 1, blendMode: 'normal' }; sprite.layers[layer.id] = layer; sprite.layerIds.push(layer.id);
         for (const [index, frameId] of sprite.frameIds.entries()) { const celId = createId('cel'); sprite.cels[celId] = { id: celId, revision: 0, name: `${layer.name} · ${sprite.frames[frameId].name}`, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, layerId: layer.id, frameId, chunks: {} }; if (index === 0) writePixels(sprite.cels[celId], await this.quantizeGenerated(bytes, sprite.width, sprite.height, document.palette, document.conversionDefaults.alphaThreshold, document.conversionDefaults.dithering)); }
-        operations.push({ kind: 'pixel.asset.replace', asset: sprite, expectedRevision: source.revision }); provenance.conversion = { resample: document.conversionDefaults.resample, paletteMetric: document.conversionDefaults.paletteMetric, dithering: document.conversionDefaults.dithering, alphaThreshold: document.conversionDefaults.alphaThreshold, width: sprite.width, height: sprite.height };
+        operations.push({ kind: 'pixel.asset.replace', asset: sprite, expectedRevision: source.revision }); provenance.conversion = { ...provenance.conversion, resample: document.conversionDefaults.resample, paletteMetric: document.conversionDefaults.paletteMetric, dithering: document.conversionDefaults.dithering, alphaThreshold: document.conversionDefaults.alphaThreshold, width: sprite.width, height: sprite.height };
       } else {
-        const sprite = createPixelSprite('Generated result', output.width, output.height); writePixels(Object.values(sprite.cels)[0], await this.quantizeGenerated(bytes, sprite.width, sprite.height, document.palette, document.conversionDefaults.alphaThreshold, document.conversionDefaults.dithering)); operations.push({ kind: 'pixel.asset.add', asset: sprite }, { kind: 'pixel.active-asset.set', assetId: sprite.id }); provenance.conversion = { resample: document.conversionDefaults.resample, paletteMetric: document.conversionDefaults.paletteMetric, dithering: document.conversionDefaults.dithering, alphaThreshold: document.conversionDefaults.alphaThreshold, width: sprite.width, height: sprite.height };
+        const sprite = createPixelSprite('Generated result', output.width, output.height); writePixels(Object.values(sprite.cels)[0], await this.quantizeGenerated(bytes, sprite.width, sprite.height, document.palette, document.conversionDefaults.alphaThreshold, document.conversionDefaults.dithering)); operations.push({ kind: 'pixel.asset.add', asset: sprite }, { kind: 'pixel.active-asset.set', assetId: sprite.id }); provenance.conversion = { ...provenance.conversion, resample: document.conversionDefaults.resample, paletteMetric: document.conversionDefaults.paletteMetric, dithering: document.conversionDefaults.dithering, alphaThreshold: document.conversionDefaults.alphaThreshold, width: sprite.width, height: sprite.height };
       }
     }
 
@@ -166,8 +193,12 @@ export class GenerationManager {
     };
     const response = await this.documents.apply(transaction, { trustedProvenance: true });
     if (response.status !== 'committed') return { accepted: false, message: response.message };
-    this.documents.upsertJob({ ...job, updatedAt: nowIso(), message: 'Generated result accepted as a new editable layer/cel.', result: { ...result, acceptedOutputId: outputId } });
-    return { accepted: true };
+    const normalizationMessage = prepared.normalization
+      ? ` Normalized the ${prepared.normalization.sourceMimeType} provider preview from ${prepared.normalization.sourceByteLength} to ${prepared.normalization.acceptedByteLength} bytes as ${prepared.normalization.acceptedMimeType}${prepared.normalization.quality === undefined ? '' : ` at WebP quality ${prepared.normalization.quality}`}; the original preview is retained unchanged.`
+      : '';
+    const message = `Generated result accepted as a new editable layer/cel.${normalizationMessage}`;
+    this.documents.upsertJob({ ...job, updatedAt: nowIso(), message, result: { ...result, acceptedOutputId: outputId, ...(prepared.normalization ? { acceptedNormalization: prepared.normalization } : {}) } });
+    return prepared.normalization ? { accepted: true, message, normalization: prepared.normalization } : { accepted: true };
   }
 
   reject(jobId: string, outputId: string): { rejected: boolean; message?: string } {

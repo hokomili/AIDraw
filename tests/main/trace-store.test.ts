@@ -8,7 +8,13 @@ import { RecoveryJournal } from '@main/journal';
 import { TransactionTraceStore } from '@main/trace-store';
 
 const temporaryPaths: string[] = [];
-afterEach(async () => { await Promise.all(temporaryPaths.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
+const services: DocumentService[] = [];
+afterEach(async () => {
+  const flushResults = await Promise.allSettled(services.splice(0).map((service) => service.flushRecovery()));
+  const cleanupResults = await Promise.allSettled(temporaryPaths.splice(0).map((path) => rm(path, { recursive: true, force: true })));
+  const failures = [...flushResults, ...cleanupResults].filter((result): result is PromiseRejectedResult => result.status === 'rejected').map((result) => result.reason);
+  if (failures.length) throw new AggregateError(failures, 'Trace-store fixture teardown failed.');
+});
 
 describe('durable autonomous transaction traces', () => {
   it('survives recovery compaction and retains the complete attributed transaction', async () => {
@@ -17,6 +23,7 @@ describe('durable autonomous transaction traces', () => {
     const journal = new RecoveryJournal(join(root, 'recovery'));
     const traces = new TransactionTraceStore(join(root, 'traces'));
     const service = new DocumentService(journal, '1.0.0', traces);
+    services.push(service);
     service.initialize();
     await service.compactRecovery();
     const document = service.snapshot().activeDocument!;
@@ -39,6 +46,7 @@ describe('durable autonomous transaction traces', () => {
     expect(Date.parse(committedAt)).toBeGreaterThanOrEqual(Date.parse(proposedAt));
 
     const recovered = new DocumentService(journal, '1.0.0', traces);
+    services.push(recovered);
     expect(await recovered.recover()).toBe(1);
     expect(recovered.getDocument(document.id)?.name).toBe('Made headlessly');
     expect((await recovered.findTrace(document.id, transaction.id))?.transaction.actor.name).toBe('Headless agent');

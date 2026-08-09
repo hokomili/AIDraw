@@ -9,7 +9,13 @@ import { RecoveryJournal } from '../../src/main/journal';
 import { TransactionTraceStore } from '../../src/main/trace-store';
 
 const temporaryPaths: string[] = [];
-afterEach(async () => Promise.all(temporaryPaths.splice(0).map((path) => rm(path, { recursive: true, force: true }))));
+const services: DocumentService[] = [];
+afterEach(async () => {
+  const flushResults = await Promise.allSettled(services.splice(0).map((service) => service.flushRecovery()));
+  const cleanupResults = await Promise.allSettled(temporaryPaths.splice(0).map((path) => rm(path, { recursive: true, force: true })));
+  const failures = [...flushResults, ...cleanupResults].filter((result): result is PromiseRejectedResult => result.status === 'rejected').map((result) => result.reason);
+  if (failures.length) throw new AggregateError(failures, 'Batch-manager fixture teardown failed.');
+});
 
 const firstActor: Actor = { id: 'batch-agent-a', kind: 'agent', name: 'Batch A', color: '#8268dd' };
 const secondActor: Actor = { id: 'batch-agent-b', kind: 'agent', name: 'Batch B', color: '#2fa7a0' };
@@ -17,6 +23,7 @@ const secondActor: Actor = { id: 'batch-agent-b', kind: 'agent', name: 'Batch B'
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'aidraw-batch-')); temporaryPaths.push(root);
   const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0', new TransactionTraceStore(join(root, 'traces')));
+  services.push(documents);
   documents.initialize();
   const manager = new BatchManager(documents, join(root, 'batches.json'));
   await manager.initialize();

@@ -29,8 +29,23 @@ describe('honest release metadata', () => {
       expect(forge).toContain(`@electron-forge/${maker}`);
     }
     for (const runner of ['windows-latest', 'macos-latest', 'ubuntu-latest']) expect(ci).toContain(runner);
+    expect(ci.match(/node scripts\/check-portability\.mjs/g)).toHaveLength(2);
     expect(release).toContain('name: Desktop release');
     expect(release).toContain('SHA256SUMS-${{ matrix.platform }}.txt');
+    expect(release).toContain('node-platform: darwin');
+    expect(release).toContain('node-arch: arm64');
+    expect(release).toContain('node scripts/check-portability.mjs --expect-platform=${{ matrix.node-platform }} --expect-arch=${{ matrix.node-arch }}');
+    expect(forge).toContain("resetAdHocDarwinSignature: platform === 'darwin' && arch === 'arm64'");
+  });
+
+  it('gates verification on deterministic tracked and prospective-path portability checks', async () => {
+    const root = resolve(process.cwd());
+    const packageJson = JSON.parse(await readFile(resolve(root, 'package.json'), 'utf8')) as { scripts?: Record<string, string> };
+    const attributes = await readFile(resolve(root, '.gitattributes'), 'utf8');
+    expect(packageJson.scripts?.['check:portability']).toBe('node scripts/check-portability.mjs --include-untracked');
+    expect(packageJson.scripts?.verify).toMatch(/^npm run check:portability &&/);
+    expect(attributes).toContain('* text=auto eol=lf');
+    expect(attributes).toContain('*.ps1 text eol=crlf');
   });
 
   it('keeps Paper external so its optional jsdom integration stays optional', async () => {

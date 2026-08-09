@@ -20,7 +20,13 @@ import { RecoveryJournal } from '@main/journal';
 import { validateInlineDocumentAsset } from '@main/transaction-policy';
 
 const temporaryPaths: string[] = [];
-afterEach(async () => { await Promise.all(temporaryPaths.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
+const services: DocumentService[] = [];
+afterEach(async () => {
+  const flushResults = await Promise.allSettled(services.splice(0).map((service) => service.flushRecovery()));
+  const cleanupResults = await Promise.allSettled(temporaryPaths.splice(0).map((path) => rm(path, { recursive: true, force: true })));
+  const failures = [...flushResults, ...cleanupResults].filter((result): result is PromiseRejectedResult => result.status === 'rejected').map((result) => result.reason);
+  if (failures.length) throw new AggregateError(failures, 'Transaction-policy fixture teardown failed.');
+});
 
 const AGENT: Actor = { id: 'agent-authenticated', kind: 'agent', name: 'Authenticated agent', color: '#31a6a0' };
 
@@ -42,6 +48,7 @@ async function serviceFixture(): Promise<DocumentService> {
   const root = await mkdtemp(join(tmpdir(), 'aidraw-policy-'));
   temporaryPaths.push(root);
   const service = new DocumentService(new RecoveryJournal(root), '1.0.0');
+  services.push(service);
   service.initialize();
   return service;
 }

@@ -1,13 +1,13 @@
-import { copyFile, mkdtemp, rm } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { readTileAt } from '@aidraw/core';
-
-vi.mock('electron', () => ({ nativeImage: { createFromBuffer: () => ({ isEmpty: () => true }) } }));
+import { afterEach, describe, expect, it } from 'vitest';
+import { createPixelDocument, createPixelSprite, createPixelTilemap, createPixelTileset, readPixel, readTileAt, writePixels, writeTiles, type PixelSprite } from '@aidraw/core';
+import UPNG from 'upng-js';
 
 import { importDocument } from '../../src/main/import-document';
 import { exportDocument } from '../../src/main/export-document';
+import { runImportUtilityRequest } from '../../src/main/utility-import';
 
 const fixture = new URL('../fixtures/tiled/isometric-external.tmj', import.meta.url).pathname.replace(/^\/(?=[A-Za-z]:)/, '');
 const xmlFixtureSource = new URL('../fixtures/tiled/orthogonal-external.tmx', import.meta.url).pathname.replace(/^\/(?=[A-Za-z]:)/, '');
@@ -45,5 +45,125 @@ describe('representative Tiled JSON interchange', () => {
     expect(map).toMatchObject({ orientation: 'orthogonal', width: 2, height: 2, properties: { chapter: 7 } }); const group = map.layers[map.layerIds[0]]; if (group.type !== 'group') throw new Error('Expected group'); expect(group).toMatchObject({ name: 'XML World', opacity: 0.6 });
     const ground = map.layers[group.childIds![0]]; const zones = map.layers[group.childIds![1]]; if (ground.type !== 'tile' || zones.type !== 'object') throw new Error('Expected tile and object layers'); expect(readTileAt(ground.chunks!, 1, 0)).toBe(10); expect(ground).toMatchObject({ parallaxX: 0.5, parallaxY: 0.25 }); expect(zones.objects?.[0]).toMatchObject({ type: 'rectangle', properties: { name: 'Spawn', class: 'start', team: 'blue' } });
     const tileset = document.pixelAssets[map.tilesetIds[0]]; if (tileset.type !== 'tileset') throw new Error('Expected tileset'); expect(tileset).toMatchObject({ firstGid: 9, transformations: { hFlip: true, vFlip: true, rotate: false } }); expect(tileset.tiles[0]).toMatchObject({ probability: 0.4, properties: { friction: 0.75 } }); expect(tileset.tiles[0].collisions[0]).toMatchObject({ type: 'polyline', properties: { name: 'Slope', class: 'ramp', oneWay: true }, points: [{ x: 0, y: 16 }, { x: 8, y: 8 }, { x: 16, y: 0 }] }); expect(tileset.wangSets[0]).toMatchObject({ name: 'XML edge', type: 'edge', colors: [{ name: 'Stone', color: '#8794a8', tileId: 1, probability: 0.5 }] });
+  });
+
+  it('preserves signed orthogonal infinite chunks across external TMJ import and current TMJ export', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'aidraw-infinite-tmj-')); temporaryDirectories.push(directory);
+    const sourcePath = join(directory, 'signed-sparse.tmj');
+    const cells = [
+      { x: -33, y: -1, gid: 1 }, { x: -32, y: -1, gid: 1 }, { x: -31, y: -1, gid: 1 },
+      { x: -1, y: -1, gid: 1 }, { x: 0, y: -1, gid: 1 }, { x: 1, y: -1, gid: 1 },
+      { x: -1, y: 0, gid: 1 }, { x: 0, y: 0, gid: 1 }, { x: 1, y: 0, gid: 1 },
+      { x: 31, y: 0, gid: 1 }, { x: 32, y: 0, gid: 1 }, { x: 33, y: 0, gid: 1 },
+      { x: 31, y: 31, gid: 1 }, { x: 32, y: 32, gid: 1 },
+    ];
+    const origins = [[-64, -32], [-32, -32], [0, -32], [-32, 0], [0, 0], [32, 0], [32, 32]] as const;
+    const chunks = origins.map(([x, y]) => {
+      const data = Array<number>(32 * 32).fill(0);
+      for (const cell of cells) if (cell.x >= x && cell.x < x + 32 && cell.y >= y && cell.y < y + 32) data[(cell.y - y) * 32 + cell.x - x] = cell.gid;
+      return { x, y, width: 32, height: 32, data };
+    });
+    await writeFile(sourcePath, JSON.stringify({
+      type: 'map', version: '1.10', tiledversion: '1.11.2', orientation: 'orthogonal', renderorder: 'right-down', infinite: true,
+      width: 32, height: 32, tilewidth: 16, tileheight: 16,
+      properties: [{ name: 'qa06-scenario', type: 'string', value: 'orthogonal-sparse-chunks' }],
+      tilesets: [{ firstgid: 1, name: 'Signed terrain', type: 'tileset', tilewidth: 16, tileheight: 16, tilecount: 1, columns: 1 }],
+      layers: [{ id: 1, name: 'Ground', type: 'tilelayer', visible: true, opacity: 1, chunks }],
+    }, null, 2));
+
+    const imported = await importDocument(sourcePath, true);
+    expect(imported.warnings).toEqual([]);
+    const document = imported.documents[0]; if (document.kind !== 'pixel') throw new Error('Expected pixel document');
+    const map = document.pixelAssets[document.activeAssetId]; if (map.type !== 'tilemap') throw new Error('Expected tilemap');
+    expect(map).toMatchObject({ orientation: 'orthogonal', infinite: true, width: 32, height: 32, tileWidth: 16, tileHeight: 16, properties: { 'qa06-scenario': 'orthogonal-sparse-chunks' } });
+    const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile' || !layer.chunks) throw new Error('Expected tile layer');
+    expect(Object.values(layer.chunks).map((chunk) => [chunk.x, chunk.y]).sort()).toEqual([...origins].map(([x, y]) => [x, y]).sort());
+    for (const cell of cells) expect(readTileAt(layer.chunks, cell.x, cell.y)).toBe(cell.gid);
+
+    const artifact = await exportDocument(document, 'tiled-json');
+    expect(artifact.report).toEqual({ warnings: [], rasterized: [] });
+    expect(artifact.companions).toEqual([expect.objectContaining({ name: 'Signed terrain.png', extension: 'png', mimeType: 'image/png' })]);
+    const output = JSON.parse(artifact.data.toString()) as {
+      type: string; orientation: string; infinite: boolean; width: number; height: number; tilewidth: number; tileheight: number;
+      properties: Array<{ name: string; type: string; value: unknown }>;
+      tilesets: Array<{ firstgid: number; name: string; image: string }>;
+      layers: Array<{ name: string; type: string; chunks: Array<{ x: number; y: number; width: number; height: number; data: number[] }> }>;
+    };
+    expect(output).toMatchObject({
+      type: 'map', orientation: 'orthogonal', infinite: true, width: 32, height: 32, tilewidth: 16, tileheight: 16,
+      properties: [{ name: 'qa06-scenario', type: 'string', value: 'orthogonal-sparse-chunks' }],
+      tilesets: [{ firstgid: 1, name: 'Signed terrain', image: 'Signed terrain.png' }],
+      layers: [{ name: 'Ground', type: 'tilelayer' }],
+    });
+    expect(output.layers[0].chunks.map((chunk) => [chunk.x, chunk.y]).sort()).toEqual([...origins].map(([x, y]) => [x, y]).sort());
+    const exportedCells = output.layers[0].chunks.flatMap((chunk) => chunk.data.flatMap((gid, index) => gid ? [{ x: chunk.x + index % chunk.width, y: chunk.y + Math.floor(index / chunk.width), gid }] : []));
+    const cellOrder = (left: { x: number; y: number; gid: number }, right: { x: number; y: number; gid: number }) => left.y - right.y || left.x - right.x || left.gid - right.gid;
+    expect(exportedCells.sort(cellOrder)).toEqual([...cells].sort(cellOrder));
+  });
+
+  it('round-trips the supported orthogonal TMJ and PNG companion surface through a second document and distinct re-export', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'aidraw-tiled-roundtrip-')); temporaryDirectories.push(directory);
+    const firstDirectory = join(directory, 'first-export'); const secondDirectory = join(directory, 'second-export');
+    const document = createPixelDocument('project', 'Supported Tiled round trip'); document.assetIds = []; document.pixelAssets = {};
+    const sprite = createPixelSprite('Roundtrip Terrain', 32, 16); const sourceCel = Object.values(sprite.cels)[0];
+    writePixels(sourceCel, [
+      { x: 0, y: 0, index: 2 }, { x: 1, y: 0, index: 4 }, { x: 15, y: 7, index: 7 },
+      { x: 16, y: 0, index: 9 }, { x: 17, y: 0, index: 15 }, { x: 31, y: 15, index: 3 },
+    ]);
+    const tileset = createPixelTileset('Roundtrip Terrain', sprite.id, 16, 16, 2, 1); tileset.firstGid = 1; tileset.transformations = { hFlip: true, vFlip: false, rotate: true };
+    tileset.tiles = {
+      0: { id: 0, sourceX: 0, sourceY: 0, probability: 0.25, animation: [], collisions: [], properties: { walkable: true, cost: 3 } },
+      1: { id: 1, sourceX: 16, sourceY: 0, probability: 0.75, animation: [{ tileId: 0, durationMs: 120 }], collisions: [], properties: { walkable: false, cost: 8 } },
+    };
+    const map = createPixelTilemap('Signed map'); map.infinite = true; map.width = 32; map.height = 32; map.tilesetIds = [tileset.id];
+    map.properties = { 'qa06-scenario': 'orthogonal-companion-roundtrip', seed: 4242, collisionSafe: true };
+    const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile' || !layer.chunks) throw new Error('Expected tile layer');
+    const cells = [
+      { x: -33, y: -1, gid: 1 }, { x: -32, y: -1, gid: 2 }, { x: -31, y: -1, gid: 1 },
+      { x: -1, y: -1, gid: 2 }, { x: 0, y: -1, gid: 1 }, { x: 1, y: -1, gid: 2 },
+      { x: -1, y: 0, gid: 1 }, { x: 0, y: 0, gid: 2 }, { x: 1, y: 0, gid: 1 },
+      { x: 31, y: 0, gid: 2 }, { x: 32, y: 0, gid: 1 }, { x: 33, y: 0, gid: 2 },
+      { x: 31, y: 31, gid: 1 }, { x: 32, y: 32, gid: 2 },
+    ];
+    writeTiles(layer.chunks, cells);
+    document.pixelAssets = { [sprite.id]: sprite, [tileset.id]: tileset, [map.id]: map }; document.assetIds = [sprite.id, tileset.id, map.id]; document.activeAssetId = map.id;
+
+    const persist = async (targetDirectory: string, mapName: string, artifact: Awaited<ReturnType<typeof exportDocument>>) => {
+      await mkdir(targetDirectory); expect(artifact.companions).toHaveLength(1); const companion = artifact.companions![0];
+      const mapPath = join(targetDirectory, mapName); const companionPath = join(targetDirectory, companion.name);
+      await Promise.all([writeFile(mapPath, artifact.data, { flag: 'wx' }), writeFile(companionPath, companion.data, { flag: 'wx' })]);
+      expect((await readdir(targetDirectory)).sort()).toEqual([mapName, companion.name].sort());
+      return { mapPath, companionPath, companion };
+    };
+    const firstArtifact = await exportDocument(document, 'tiled-json'); const first = await persist(firstDirectory, 'first-pass.tmj', firstArtifact);
+    const imported = await runImportUtilityRequest({ id: 'supported-roundtrip-import', kind: 'import-document', filePath: first.mapPath, pixelMode: true }); expect(imported.warnings).toEqual([]); const importedDocument = imported.documents[0]; if (importedDocument.kind !== 'pixel') throw new Error('Expected imported pixel document');
+    const importedMap = importedDocument.pixelAssets[importedDocument.activeAssetId]; if (importedMap.type !== 'tilemap') throw new Error('Expected imported tilemap');
+    expect(importedMap).toMatchObject({ orientation: 'orthogonal', infinite: true, width: 32, height: 32, tileWidth: 16, tileHeight: 16, properties: map.properties });
+    const importedLayer = importedMap.layers[importedMap.layerIds[0]]; if (importedLayer.type !== 'tile' || !importedLayer.chunks) throw new Error('Expected imported tile layer');
+    const cellOrder = (left: { x: number; y: number; gid: number }, right: { x: number; y: number; gid: number }) => left.y - right.y || left.x - right.x || left.gid - right.gid;
+    const importedCells = Object.values(importedLayer.chunks).flatMap((chunk) => Array.from({ length: chunk.width * chunk.height }, (_, index) => ({ x: chunk.x + index % chunk.width, y: chunk.y + Math.floor(index / chunk.width), gid: readTileAt(importedLayer.chunks!, chunk.x + index % chunk.width, chunk.y + Math.floor(index / chunk.width)) })).filter((cell) => cell.gid));
+    expect(importedCells.sort(cellOrder)).toEqual([...cells].sort(cellOrder));
+    const importedTileset = importedDocument.pixelAssets[importedMap.tilesetIds[0]]; if (importedTileset.type !== 'tileset') throw new Error('Expected imported tileset');
+    expect(importedTileset).toMatchObject({ name: tileset.name, firstGid: 1, tileWidth: 16, tileHeight: 16, columns: 2, rows: 1, transformations: tileset.transformations });
+    expect(importedTileset.tiles).toMatchObject({ 0: { probability: 0.25, properties: { walkable: true, cost: 3 } }, 1: { probability: 0.75, animation: [{ tileId: 0, durationMs: 120 }], properties: { walkable: false, cost: 8 } } });
+    const importedSprite = importedDocument.pixelAssets[importedTileset.spriteAssetId]; if (importedSprite.type !== 'sprite') throw new Error('Expected imported tileset pixels');
+    const pixelPlane = (asset: PixelSprite) => { const cel = Object.values(asset.cels)[0]; return Array.from({ length: asset.width * asset.height }, (_, index) => readPixel(cel, index % asset.width, Math.floor(index / asset.width))); };
+    expect(importedSprite).toMatchObject({ width: sprite.width, height: sprite.height }); expect(pixelPlane(importedSprite)).toEqual(pixelPlane(sprite));
+
+    const secondArtifact = await exportDocument(importedDocument, 'tiled-json'); const second = await persist(secondDirectory, 'second-pass.tmj', secondArtifact);
+    expect(second.mapPath).not.toBe(first.mapPath); expect(second.companionPath).not.toBe(first.companionPath); expect((await readdir(directory)).sort()).toEqual(['first-export', 'second-export']);
+    const semantics = (bytes: Buffer) => {
+      const value = JSON.parse(bytes.toString()) as {
+        type: string; orientation: string; infinite: boolean; width: number; height: number; tilewidth: number; tileheight: number;
+        properties: Array<Record<string, unknown>>;
+        tilesets: Array<{ firstgid: number; name: string; tilewidth: number; tileheight: number; margin: number; spacing: number; tilecount: number; columns: number; image: string; imagewidth: number; imageheight: number; transformations: Record<string, unknown>; tiles: Array<Record<string, unknown>> }>;
+        layers: Array<{ name: string; type: string; visible: boolean; opacity: number; parallaxx: number; parallaxy: number; chunks: Array<{ x: number; y: number; width: number; height: number; data: number[] }> }>;
+      };
+      return { type: value.type, orientation: value.orientation, infinite: value.infinite, width: value.width, height: value.height, tilewidth: value.tilewidth, tileheight: value.tileheight, properties: value.properties, tilesets: value.tilesets, layers: value.layers.map((entry) => ({ ...entry, chunks: [...entry.chunks].sort((left, right) => left.y - right.y || left.x - right.x) })) };
+    };
+    expect(semantics(await readFile(second.mapPath))).toEqual(semantics(await readFile(first.mapPath)));
+    const pngPixels = (bytes: Buffer) => { const decoded = UPNG.decode(Uint8Array.from(bytes).buffer); return { width: decoded.width, height: decoded.height, rgba: Buffer.from(UPNG.toRGBA8(decoded)[0]) }; };
+    const firstPng = pngPixels(await readFile(first.companionPath)); const secondPng = pngPixels(await readFile(second.companionPath));
+    expect(firstPng).toMatchObject({ width: 32, height: 16 }); expect(secondPng.width).toBe(firstPng.width); expect(secondPng.height).toBe(firstPng.height); expect(secondPng.rgba.equals(firstPng.rgba)).toBe(true);
   });
 });

@@ -26,6 +26,24 @@ import { agentClientDescriptor, isAgentClientId, type AgentClientId, type AgentC
 import { configureAgentClientFile } from './agent-client-config';
 import { secureStorageStatus } from './secure-storage';
 import { getStartAtLoginStatus, setStartAtLogin, wasOpenedAtLogin } from './start-at-login';
+import { resolveRendererRecoveryE2eConfiguration, sanitizedMalformedRendererRecoveryEvent } from './renderer-recovery-e2e';
+import { createQa06GenerationE2eRunner, installQa06GenerationE2eNetworkBoundary, resolveQa06GenerationE2eConfiguration } from './generation-e2e';
+import { createQa06PixelPaletteE2eRunner, installQa06PixelPaletteE2eNetworkBoundary, resolveQa06PixelPaletteE2eConfiguration } from './pixel-generation-e2e';
+import { BatchDocumentWorkflows, safeBatchFileStem as safeFileStem, type BatchExportFormat } from './batch-document-workflows';
+import { installUx11BatchE2eNetworkBoundary, resolveUx11BatchE2eConfiguration, Ux11BatchE2eController } from './batch-workflows-e2e';
+import { assertTrustedRendererInvocation, isTrustedRendererUrl } from './renderer-security';
+import { installFnd09UtilityContainmentNetworkBoundary, resolveFnd09UtilityContainmentE2eConfiguration, runFnd09UtilityContainmentScenario } from './utility-containment-e2e';
+import { resolveFnd09UtilityPressureE2eConfiguration, runFnd09UtilityPressureScenario } from './utility-pressure-e2e';
+import { resolveFnd09ObservationCodecE2eConfiguration, runFnd09ObservationCodecScenario } from './utility-observation-codec-e2e';
+import { resolveFnd09QuantizationResultE2eConfiguration, runFnd09QuantizationResultScenario } from './utility-quantization-result-e2e';
+import { resolveFnd09ExportResultE2eConfiguration, runFnd09ExportResultScenario } from './utility-export-result-e2e';
+import { resolveFnd09ImportResultE2eConfiguration, runFnd09ImportResultScenario } from './utility-import-result-e2e';
+import { resolveFnd09GenerationResultE2eConfiguration, runFnd09GenerationResultScenario } from './utility-generation-result-e2e';
+import {
+  createFnd09GenerationNormalizationE2eRunner,
+  installFnd09GenerationNormalizationE2eNetworkBoundary,
+  resolveFnd09GenerationNormalizationE2eConfiguration,
+} from './generation-normalization-e2e';
 
 declare const MAIN_WINDOW_VITE_DEV_SERVER_URL: string | undefined;
 declare const MAIN_WINDOW_VITE_NAME: string;
@@ -36,6 +54,7 @@ let service: DocumentService;
 let mcpHost: McpHost;
 let providerCredentials: ProviderCredentialStore;
 let generationManager: GenerationManager;
+let batchDocumentWorkflows: BatchDocumentWorkflows;
 let engineShutdownComplete = false;
 let engineQuitPending = false;
 let engineReadyPromise: Promise<void> | undefined;
@@ -72,19 +91,164 @@ if (explicitUserData) {
 }
 const hasSingleInstanceLock = cliInvocation || app.requestSingleInstanceLock({ command: startupCommand });
 
+const rendererRecoveryE2e = resolveRendererRecoveryE2eConfiguration({
+  nodeEnv: process.env.NODE_ENV,
+  enabled: process.env.AIDRAW_E2E_RENDERER_RECOVERY,
+  userDataPath: explicitUserData,
+  connectionPath: explicitMcpConnectionFile,
+  diagnosticPath: process.env.AIDRAW_E2E_RENDERER_DIAGNOSTIC_PATH,
+});
+const qa06GenerationE2e = resolveQa06GenerationE2eConfiguration({
+  nodeEnv: process.env.NODE_ENV,
+  enabled: process.env.AIDRAW_E2E_QA06_GENERATION_MOCK,
+  declaredProfilePath: process.env.AIDRAW_E2E_QA06_GENERATION_PROFILE,
+  userDataPath: explicitUserData,
+  connectionPath: explicitMcpConnectionFile,
+  outputPath: process.env.AIDRAW_E2E_QA06_GENERATION_MOCK_OUTPUT_PATH,
+  auditPath: process.env.AIDRAW_E2E_QA06_GENERATION_MOCK_AUDIT_PATH,
+  networkSentinelPath: process.env.AIDRAW_E2E_QA06_GENERATION_NETWORK_SENTINEL_PATH,
+});
+const qa06PixelPaletteE2e = resolveQa06PixelPaletteE2eConfiguration({
+  nodeEnv: process.env.NODE_ENV,
+  enabled: process.env.AIDRAW_E2E_QA06_PIXEL_PALETTE_MOCK,
+  declaredProfilePath: process.env.AIDRAW_E2E_QA06_PIXEL_PALETTE_PROFILE,
+  userDataPath: explicitUserData,
+  connectionPath: explicitMcpConnectionFile,
+  outputPath: process.env.AIDRAW_E2E_QA06_PIXEL_PALETTE_MOCK_OUTPUT_PATH,
+  auditPath: process.env.AIDRAW_E2E_QA06_PIXEL_PALETTE_MOCK_AUDIT_PATH,
+  networkSentinelPath: process.env.AIDRAW_E2E_QA06_PIXEL_PALETTE_NETWORK_SENTINEL_PATH,
+});
+const fnd09GenerationNormalizationE2e = resolveFnd09GenerationNormalizationE2eConfiguration({
+  nodeEnv: process.env.NODE_ENV,
+  enabled: process.env.AIDRAW_E2E_GENERATION_NORMALIZATION,
+  workspacePath: process.cwd(),
+  declaredProfilePath: process.env.AIDRAW_E2E_FND09_NORMALIZATION_PROFILE,
+  userDataPath: explicitUserData,
+  connectionPath: explicitMcpConnectionFile,
+  normalizableOutputPath: process.env.AIDRAW_E2E_FND09_NORMALIZATION_NORMALIZABLE_OUTPUT_PATH,
+  previewOnlyOutputPath: process.env.AIDRAW_E2E_FND09_NORMALIZATION_PREVIEW_ONLY_OUTPUT_PATH,
+  auditPath: process.env.AIDRAW_E2E_FND09_NORMALIZATION_AUDIT_PATH,
+  readyProbePath: process.env.AIDRAW_E2E_FND09_NORMALIZATION_READY_PROBE_PATH,
+  previewOnlyProbePath: process.env.AIDRAW_E2E_FND09_NORMALIZATION_PREVIEW_ONLY_PROBE_PATH,
+  networkSentinelPath: process.env.AIDRAW_E2E_FND09_NORMALIZATION_NETWORK_SENTINEL_PATH,
+});
+if ([qa06GenerationE2e, qa06PixelPaletteE2e, fnd09GenerationNormalizationE2e].filter(Boolean).length > 1) throw new Error('Only one isolated generation fixture may be enabled.');
+if (qa06GenerationE2e) installQa06GenerationE2eNetworkBoundary(qa06GenerationE2e);
+if (qa06PixelPaletteE2e) installQa06PixelPaletteE2eNetworkBoundary(qa06PixelPaletteE2e);
+if (fnd09GenerationNormalizationE2e) installFnd09GenerationNormalizationE2eNetworkBoundary(fnd09GenerationNormalizationE2e);
+const ux11BatchE2e = resolveUx11BatchE2eConfiguration({
+  nodeEnv: process.env.NODE_ENV,
+  enabled: process.env.AIDRAW_E2E_UX11_BATCH,
+  workspacePath: process.cwd(),
+  declaredProfilePath: process.env.AIDRAW_E2E_UX11_BATCH_PROFILE,
+  userDataPath: explicitUserData,
+  connectionPath: explicitMcpConnectionFile,
+});
+const ux11BatchE2eController = ux11BatchE2e ? new Ux11BatchE2eController(ux11BatchE2e) : undefined;
+if (ux11BatchE2e) installUx11BatchE2eNetworkBoundary(ux11BatchE2e);
+const fnd09UtilityContainmentE2e = resolveFnd09UtilityContainmentE2eConfiguration({
+  nodeEnv: process.env.NODE_ENV,
+  enabled: process.env.AIDRAW_E2E_UTILITY_CONTAINMENT,
+  workspacePath: process.cwd(),
+  declaredProfilePath: process.env.AIDRAW_E2E_FND09_UTILITY_PROFILE,
+  userDataPath: explicitUserData,
+  connectionPath: explicitMcpConnectionFile,
+  probePath: process.env.AIDRAW_E2E_FND09_UTILITY_PROBE_PATH,
+  networkSentinelPath: process.env.AIDRAW_E2E_FND09_UTILITY_NETWORK_SENTINEL_PATH,
+});
+const fnd09UtilityPressureE2e = resolveFnd09UtilityPressureE2eConfiguration({
+  nodeEnv: process.env.NODE_ENV,
+  enabled: process.env.AIDRAW_E2E_UTILITY_PRESSURE,
+  workspacePath: process.cwd(),
+  declaredProfilePath: process.env.AIDRAW_E2E_FND09_PRESSURE_PROFILE,
+  userDataPath: explicitUserData,
+  connectionPath: explicitMcpConnectionFile,
+  probePath: process.env.AIDRAW_E2E_FND09_PRESSURE_PROBE_PATH,
+  networkSentinelPath: process.env.AIDRAW_E2E_FND09_PRESSURE_NETWORK_SENTINEL_PATH,
+});
+const fnd09ObservationCodecE2e = resolveFnd09ObservationCodecE2eConfiguration({
+  nodeEnv: process.env.NODE_ENV,
+  enabled: process.env.AIDRAW_E2E_UTILITY_OBSERVATION_CODEC,
+  workspacePath: process.cwd(),
+  declaredProfilePath: process.env.AIDRAW_E2E_FND09_OBSERVATION_CODEC_PROFILE,
+  userDataPath: explicitUserData,
+  connectionPath: explicitMcpConnectionFile,
+  probePath: process.env.AIDRAW_E2E_FND09_OBSERVATION_CODEC_PROBE_PATH,
+  networkSentinelPath: process.env.AIDRAW_E2E_FND09_OBSERVATION_CODEC_NETWORK_SENTINEL_PATH,
+});
+const fnd09QuantizationResultE2e = resolveFnd09QuantizationResultE2eConfiguration({
+  nodeEnv: process.env.NODE_ENV,
+  enabled: process.env.AIDRAW_E2E_UTILITY_QUANTIZATION_RESULT,
+  workspacePath: process.cwd(),
+  declaredProfilePath: process.env.AIDRAW_E2E_FND09_QUANTIZATION_RESULT_PROFILE,
+  userDataPath: explicitUserData,
+  connectionPath: explicitMcpConnectionFile,
+  probePath: process.env.AIDRAW_E2E_FND09_QUANTIZATION_RESULT_PROBE_PATH,
+  networkSentinelPath: process.env.AIDRAW_E2E_FND09_QUANTIZATION_RESULT_NETWORK_SENTINEL_PATH,
+});
+const fnd09ExportResultE2e = resolveFnd09ExportResultE2eConfiguration({
+  nodeEnv: process.env.NODE_ENV,
+  enabled: process.env.AIDRAW_E2E_UTILITY_EXPORT_RESULT,
+  workspacePath: process.cwd(),
+  declaredProfilePath: process.env.AIDRAW_E2E_FND09_EXPORT_RESULT_PROFILE,
+  userDataPath: explicitUserData,
+  connectionPath: explicitMcpConnectionFile,
+  probePath: process.env.AIDRAW_E2E_FND09_EXPORT_RESULT_PROBE_PATH,
+  networkSentinelPath: process.env.AIDRAW_E2E_FND09_EXPORT_RESULT_NETWORK_SENTINEL_PATH,
+});
+const fnd09ImportResultE2e = resolveFnd09ImportResultE2eConfiguration({
+  nodeEnv: process.env.NODE_ENV,
+  enabled: process.env.AIDRAW_E2E_UTILITY_IMPORT_RESULT,
+  workspacePath: process.cwd(),
+  declaredProfilePath: process.env.AIDRAW_E2E_FND09_IMPORT_RESULT_PROFILE,
+  userDataPath: explicitUserData,
+  connectionPath: explicitMcpConnectionFile,
+  probePath: process.env.AIDRAW_E2E_FND09_IMPORT_RESULT_PROBE_PATH,
+  networkSentinelPath: process.env.AIDRAW_E2E_FND09_IMPORT_RESULT_NETWORK_SENTINEL_PATH,
+});
+const fnd09GenerationResultE2e = resolveFnd09GenerationResultE2eConfiguration({
+  nodeEnv: process.env.NODE_ENV,
+  enabled: process.env.AIDRAW_E2E_UTILITY_GENERATION_RESULT,
+  workspacePath: process.cwd(),
+  declaredProfilePath: process.env.AIDRAW_E2E_FND09_GENERATION_RESULT_PROFILE,
+  userDataPath: explicitUserData,
+  connectionPath: explicitMcpConnectionFile,
+  probePath: process.env.AIDRAW_E2E_FND09_GENERATION_RESULT_PROBE_PATH,
+  networkSentinelPath: process.env.AIDRAW_E2E_FND09_GENERATION_RESULT_NETWORK_SENTINEL_PATH,
+});
+const fnd09UtilityFixtures = [fnd09UtilityContainmentE2e, fnd09UtilityPressureE2e, fnd09ObservationCodecE2e, fnd09QuantizationResultE2e, fnd09ExportResultE2e, fnd09ImportResultE2e, fnd09GenerationResultE2e].filter(Boolean);
+if (fnd09UtilityFixtures.length > 1) throw new Error('Only one isolated FND-09 utility fixture may be enabled.');
+if (fnd09UtilityFixtures.length && (startupCommand !== 'headless' || rendererRecoveryE2e || qa06GenerationE2e || qa06PixelPaletteE2e || fnd09GenerationNormalizationE2e || ux11BatchE2e)) {
+  throw new Error('The isolated FND-09 utility probe requires its own headless profile and fixture boundary.');
+}
+if (fnd09UtilityContainmentE2e) installFnd09UtilityContainmentNetworkBoundary(fnd09UtilityContainmentE2e);
+if (fnd09UtilityPressureE2e) installFnd09UtilityContainmentNetworkBoundary(fnd09UtilityPressureE2e);
+if (fnd09ObservationCodecE2e) installFnd09UtilityContainmentNetworkBoundary(fnd09ObservationCodecE2e);
+if (fnd09QuantizationResultE2e) installFnd09UtilityContainmentNetworkBoundary(fnd09QuantizationResultE2e);
+if (fnd09ExportResultE2e) installFnd09UtilityContainmentNetworkBoundary(fnd09ExportResultE2e);
+if (fnd09ImportResultE2e) installFnd09UtilityContainmentNetworkBoundary(fnd09ImportResultE2e);
+if (fnd09GenerationResultE2e) installFnd09UtilityContainmentNetworkBoundary(fnd09GenerationResultE2e);
+
+function isIsolatedOpenCodeE2eApproval(clientId: AgentClientId): boolean {
+  if (clientId !== 'opencode' || process.env.NODE_ENV !== 'test' || process.env.AIDRAW_E2E_AUTO_APPROVE_AGENT_CLIENT !== 'opencode') return false;
+  const configPath = process.env.AIDRAW_OPENCODE_CONFIG_PATH;
+  if (!explicitUserData || !explicitMcpConnectionFile || !configPath) return false;
+  const profile = resolve(explicitUserData);
+  if (!basename(profile).toLowerCase().startsWith('aidraw-e2e-')) return false;
+  const isInsideProfile = (path: string) => {
+    const candidate = relative(profile, resolve(path));
+    return candidate.length > 0 && !candidate.startsWith('..') && !isAbsolute(candidate);
+  };
+  return isInsideProfile(explicitMcpConnectionFile) && isInsideProfile(configPath);
+}
+
 protocol.registerSchemesAsPrivileged([{
   scheme: 'aidraw',
   privileges: { standard: true, secure: true, supportFetchAPI: true },
 }]);
 
 function assertTrustedSender(event: IpcMainInvokeEvent): void {
-  if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) {
-    throw new Error('Rejected IPC from an untrusted renderer.');
-  }
-  const url = event.senderFrame.url;
-  if (!url.startsWith('aidraw://app/') && !url.startsWith('http://localhost:') && !url.startsWith('http://127.0.0.1:')) {
-    throw new Error('Rejected IPC from an unexpected origin.');
-  }
+  assertTrustedRendererInvocation(event, mainWindow?.webContents, MAIN_WINDOW_VITE_DEV_SERVER_URL);
 }
 
 async function saveDocument(documentId?: string, saveAs = false) {
@@ -107,77 +271,16 @@ async function saveDocument(documentId?: string, saveAs = false) {
   return { saved: true, filePath: destination };
 }
 
-function safeFileStem(name: string): string {
-  const value = [...name].map((character) => character.charCodeAt(0) < 32 ? '-' : character).join('').replace(/[<>:"/\\|?*]/g, '-').replace(/[. ]+$/g, '').trim();
-  return value || 'Untitled';
-}
-
-async function availableBatchPath(directory: string, stem: string, extension: string, reserved: Set<string>): Promise<string> {
-  for (let suffix = 1; suffix < 10_000; suffix += 1) {
-    const candidate = join(directory, `${stem}${suffix === 1 ? '' : ` (${suffix})`}.${extension}`);
-    const normalized = normalizedAuthorityPath(candidate); if (reserved.has(normalized)) continue;
-    if (!await stat(candidate).then(() => true, () => false)) { reserved.add(normalized); return candidate; }
-  }
-  throw new Error(`Could not allocate a unique ${extension.toUpperCase()} filename for ${stem}.`);
-}
-
 async function saveAllDocuments(): Promise<BatchDocumentResult> {
-  const tabs = service.snapshot().documents; const unsaved = tabs.filter((tab) => !tab.filePath); let directory: string | undefined;
-  if (unsaved.length) {
-    const result = await dialog.showOpenDialog(mainWindow!, { title: `Choose a folder for ${unsaved.length} unsaved drawing${unsaved.length === 1 ? '' : 's'}`, properties: ['openDirectory', 'createDirectory'] });
-    if (result.canceled || !result.filePaths[0]) return { cancelled: true, items: [] };
-    directory = result.filePaths[0];
-  }
-  const reserved = new Set<string>(); const items: BatchDocumentResult['items'] = [];
-  for (const tab of tabs) {
-    try {
-      if (tab.filePath && !tab.dirty) { items.push({ documentId: tab.id, name: tab.name, status: 'skipped', filePath: tab.filePath }); continue; }
-      const target = tab.filePath ?? await availableBatchPath(directory!, safeFileStem(tab.name), 'aidraw', reserved);
-      const filePath = await service.save(tab.id, target); items.push({ documentId: tab.id, name: tab.name, status: 'saved', filePath });
-    } catch (error) { items.push({ documentId: tab.id, name: tab.name, status: 'failed', error: error instanceof Error ? error.message : String(error) }); }
-  }
-  return { items };
+  return batchDocumentWorkflows.saveAllDocuments();
 }
 
-async function batchExportDocuments(format: 'png' | 'jpeg' | 'webp' | 'gif' | 'apng' | 'sprite-sheet', options: ExportOptions = {}): Promise<BatchDocumentResult> {
-  if (!['png', 'jpeg', 'webp', 'gif', 'apng', 'sprite-sheet'].includes(format)) throw new Error('Unsupported batch export format.');
-  const scale = options.scale ?? 1; if (!Number.isInteger(scale) || scale < 1 || scale > 64) throw new Error('Batch export scale must be an integer from 1 to 64.');
-  const animationTagName = options.animationTagName?.trim(); if (animationTagName && animationTagName.length > 120) throw new Error('Batch animation tag names are limited to 120 characters.');
-  const result = await dialog.showOpenDialog(mainWindow!, { title: 'Choose a batch export folder', properties: ['openDirectory', 'createDirectory'] });
-  if (result.canceled || !result.filePaths[0]) return { cancelled: true, items: [] };
-  const directory = result.filePaths[0]; const reserved = new Set<string>(); const items: BatchDocumentResult['items'] = [];
-  for (const tab of service.snapshot().documents) {
-    const document = service.getDocument(tab.id); if (!document) continue;
-    if (format === 'sprite-sheet' && (document.kind !== 'pixel' || document.pixelAssets[document.activeAssetId]?.type !== 'sprite')) { items.push({ documentId: tab.id, name: tab.name, status: 'skipped', warnings: ['SPRITE-SHEET batch export requires an active pixel sprite.'] }); continue; }
-    if (['gif', 'apng'].includes(format) && !((document.kind === 'pixel' && document.pixelAssets[document.activeAssetId]?.type === 'sprite') || (document.kind === 'illustration' && document.animation.keyframeIds.length > 0))) { items.push({ documentId: tab.id, name: tab.name, status: 'skipped', warnings: [`${format.toUpperCase()} batch export requires an active pixel sprite or a keyframed illustration.`] }); continue; }
-    try {
-      const sprite = document.kind === 'pixel' && document.pixelAssets[document.activeAssetId]?.type === 'sprite' ? document.pixelAssets[document.activeAssetId] : undefined; const tag = animationTagName && sprite?.type === 'sprite' ? sprite.tags.find((entry) => entry.id === animationTagName || entry.name.toLocaleLowerCase() === animationTagName.toLocaleLowerCase()) : undefined;
-      if (animationTagName && ['gif', 'apng', 'sprite-sheet'].includes(format) && !tag) { items.push({ documentId: tab.id, name: tab.name, status: 'skipped', warnings: [document.kind === 'illustration' ? 'Named animation tags apply only to pixel sprites; clear the shared tag to export this illustration timeline.' : `Animation tag “${animationTagName}” does not exist in this sprite.`] }); continue; }
-      const artifact = await engineRuntime.rasterUtilities.exportDocument(document, format, { scale: document.kind === 'pixel' ? scale : 1, animationTagId: tag?.id }); const stem = safeFileStem(tab.name) + (document.kind === 'pixel' && scale > 1 ? ` @${scale}x` : '') + (tag ? ` · ${safeFileStem(tag.name)}` : ''); const target = await availableBatchPath(directory, stem, artifact.extension, reserved); await writeApprovedTarget(target, artifact.data, new Set());
-      const companions = [...(artifact.companions ?? []), ...(artifact.companion ? [{ ...artifact.companion, name: artifact.companion.name }] : [])];
-      const companionPaths: string[] = []; for (const companion of companions) { const companionPath = await availableBatchPath(directory, stem, companion.extension, reserved); await writeApprovedTarget(companionPath, companionBytes(companion.data, format, target), new Set()); companionPaths.push(companionPath); }
-      const report = await recordInterchangeReport({ kind: 'export', status: 'completed', actor: HUMAN_ACTOR, documentIds: [document.id], documentNames: [document.name], format, sourcePaths: [], destinationPaths: [target, ...companionPaths], warnings: artifact.report.warnings, rasterized: artifact.report.rasterized });
-      items.push({ documentId: tab.id, name: tab.name, status: 'exported', filePath: target, warnings: artifact.report.warnings, reportId: report.id });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const report = await recordInterchangeReport({ kind: 'export', status: 'failed', actor: HUMAN_ACTOR, documentIds: [document.id], documentNames: [document.name], format, sourcePaths: [], destinationPaths: [], warnings: [], rasterized: [], error: message });
-      items.push({ documentId: tab.id, name: tab.name, status: 'failed', error: message, reportId: report.id });
-    }
-  }
-  return { items };
+async function batchExportDocuments(format: BatchExportFormat, options: ExportOptions = {}): Promise<BatchDocumentResult> {
+  return batchDocumentWorkflows.batchExportDocuments(format, options);
 }
 
 async function closeAllDocuments(): Promise<BatchDocumentResult> {
-  const tabs = service.snapshot().documents; const dirty = tabs.filter((tab) => tab.dirty);
-  if (dirty.length) {
-    const names = dirty.slice(0, 12).map((tab) => `• ${tab.name}`).join('\n'); const overflow = dirty.length > 12 ? `\n…and ${dirty.length - 12} more.` : '';
-    const decision = await dialog.showMessageBox(mainWindow!, { type: 'warning', title: 'Close all drawings', message: `${dirty.length} drawing${dirty.length === 1 ? ' has' : 's have'} unsaved changes.`, detail: `${names}${overflow}`, buttons: ['Save all and close', 'Cancel', 'Discard all'], defaultId: 0, cancelId: 1, noLink: true });
-    if (decision.response === 1) return { cancelled: true, items: [] };
-    if (decision.response === 0) { const saved = await saveAllDocuments(); if (saved.cancelled || saved.items.some((item) => item.status === 'failed')) return saved; }
-  }
-  const items: BatchDocumentResult['items'] = [];
-  for (const tab of tabs) { const closed = await service.close(tab.id, true); items.push({ documentId: tab.id, name: tab.name, status: closed.closed ? 'closed' : 'failed', ...(closed.closed ? {} : { error: closed.reason ?? 'The document could not be closed.' }) }); }
-  return { items };
+  return batchDocumentWorkflows.closeAllDocuments();
 }
 
 async function openDocuments(): Promise<{ opened: string[]; warnings: string[] }> {
@@ -388,7 +491,7 @@ function registerIpc(): void {
   handle(IPC.saveDocument, (_event, id?: string) => saveDocument(id));
   handle(IPC.saveDocumentAs, (_event, id?: string) => saveDocument(id, true));
   handle(IPC.saveAllDocuments, () => saveAllDocuments());
-  handle(IPC.batchExportDocuments, (_event, format: 'png' | 'jpeg' | 'webp' | 'gif' | 'apng', options?: ExportOptions) => batchExportDocuments(format, options));
+  handle(IPC.batchExportDocuments, (_event, format: BatchExportFormat, options?: ExportOptions) => batchExportDocuments(format, options));
   handle(IPC.closeAllDocuments, () => closeAllDocuments());
   handle(IPC.closeDocument, async (_event, id: string, force = false) => {
     const document = service.getDocument(id);
@@ -435,12 +538,22 @@ function registerIpc(): void {
   handle(IPC.generationAccept, (_event, jobId: string, outputId: string) => generationManager.accept(jobId, outputId));
   handle(IPC.generationReject, (_event, jobId: string, outputId: string) => generationManager.reject(jobId, outputId));
   handle(IPC.jobCancel, (_event, jobId: string) => generationManager.cancel(jobId));
+  handle(IPC.rendererRecoveryTestEvent, () => {
+    if (!rendererRecoveryE2e) throw new Error('The renderer recovery test event is unavailable outside its isolated E2E profile.');
+    if (!mainWindow || mainWindow.isDestroyed()) throw new Error('The isolated renderer recovery test window is unavailable.');
+    const probe = sanitizedMalformedRendererRecoveryEvent();
+    mainWindow.webContents.send(IPC.event, probe.event);
+    return { injected: true, byteLength: probe.byteLength };
+  });
   handle(IPC.rendererDiagnosticsExport, async (_event, detail: RendererFailureDetail) => {
     if (!detail || typeof detail !== 'object' || typeof detail.message !== 'string') throw new Error('Renderer diagnostics require an error message.');
-    const result = await dialog.showSaveDialog(mainWindow!, { title: 'Save AIDraw renderer diagnostics', defaultPath: `aidraw-diagnostics-${new Date().toISOString().replace(/[:.]/g, '-')}.json`, filters: [{ name: 'JSON diagnostics', extensions: ['json'] }], properties: ['showOverwriteConfirmation'] });
+    const result = rendererRecoveryE2e
+      ? { canceled: false, filePath: rendererRecoveryE2e.diagnosticPath }
+      : await dialog.showSaveDialog(mainWindow!, { title: 'Save AIDraw renderer diagnostics', defaultPath: `aidraw-diagnostics-${new Date().toISOString().replace(/[:.]/g, '-')}.json`, filters: [{ name: 'JSON diagnostics', extensions: ['json'] }], properties: ['showOverwriteConfirmation'] });
     if (result.canceled || !result.filePath) return { saved: false, cancelled: true };
     const diagnostic = buildRendererDiagnostics({ appVersion: app.getVersion(), platform: process.platform, architecture: process.arch, electronVersion: process.versions.electron, engine: engineStatus(), snapshot: service.snapshot(), detail });
-    await writeApprovedTarget(result.filePath, Buffer.from(`${JSON.stringify(diagnostic, null, 2)}\n`), new Set([normalizedAuthorityPath(result.filePath)]));
+    const approvedOverwrite = rendererRecoveryE2e ? new Set<string>() : new Set([normalizedAuthorityPath(result.filePath)]);
+    await writeApprovedTarget(result.filePath, Buffer.from(`${JSON.stringify(diagnostic, null, 2)}\n`), approvedOverwrite);
     return { saved: true, filePath: result.filePath };
   });
   handle(IPC.importFiles, async (_event, pixelMode = false) => {
@@ -630,23 +743,28 @@ async function configureAgentClient(value: unknown): Promise<AgentClientSetupRes
   }
   if (clientId === 'generic') return configureAgentClientFile(clientId, { url: credentials.url, token: credentials.token });
   const platform = secureStorageStatus(safeStorage).platform;
-  const decision = await dialog.showMessageBox(mainWindow!, {
-    type: 'question',
-    title: `Connect ${descriptor.name} to AIDraw`,
-    message: `Connect ${descriptor.name} and keep the AIDraw Engine available headlessly?`,
-    detail: `AIDraw will back up ${descriptor.configurationDescription}, replace only its aidraw MCP entry, and start the engine at ${platform.label} sign-in. The authenticated engine keeps working when the editor window is closed.`,
-    buttons: ['Connect and Enable Headless Engine', 'Cancel'],
-    defaultId: 0,
-    cancelId: 1,
-    noLink: true,
-  });
-  if (decision.response !== 0) return { ...base, status: 'cancelled', message: `${descriptor.name} configuration was not changed.`, restartRequired: false };
+  const isolatedE2eApproval = isIsolatedOpenCodeE2eApproval(clientId);
+  if (!isolatedE2eApproval) {
+    const decision = await dialog.showMessageBox(mainWindow!, {
+      type: 'question',
+      title: `Connect ${descriptor.name} to AIDraw`,
+      message: `Connect ${descriptor.name} and keep the AIDraw Engine available headlessly?`,
+      detail: `AIDraw will back up ${descriptor.configurationDescription}, replace only its aidraw MCP entry, and start the engine at ${platform.label} sign-in. The authenticated engine keeps working when the editor window is closed.`,
+      buttons: ['Connect and Enable Headless Engine', 'Cancel'],
+      defaultId: 0,
+      cancelId: 1,
+      noLink: true,
+    });
+    if (decision.response !== 0) return { ...base, status: 'cancelled', message: `${descriptor.name} configuration was not changed.`, restartRequired: false };
+  }
   try {
     const result = await configureAgentClientFile(clientId, { url: credentials.url, token: credentials.token });
-    const status = await setEngineStartAtLogin(true);
-    const startup = status.startsAtLogin
-      ? ` The headless engine will start at ${platform.label} sign-in.`
-      : ' Start-at-login becomes available in a packaged desktop build.';
+    const status = isolatedE2eApproval ? engineStatus() : await setEngineStartAtLogin(true);
+    const startup = isolatedE2eApproval
+      ? ' Start-at-login was intentionally unchanged by this isolated packaged validation.'
+      : status.startsAtLogin
+        ? ` The headless engine will start at ${platform.label} sign-in.`
+        : ' Start-at-login becomes available in a packaged desktop build.';
     return { ...result, message: `${result.message}${startup}` };
   } catch (error) {
     return { ...base, status: 'manual', message: `Could not configure ${descriptor.name}: ${error instanceof Error ? error.message : String(error)}`, restartRequired: false };
@@ -800,8 +918,7 @@ async function createWindow(): Promise<void> {
 
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', (event, url) => {
-    const allowed = MAIN_WINDOW_VITE_DEV_SERVER_URL && url.startsWith(MAIN_WINDOW_VITE_DEV_SERVER_URL);
-    if (!allowed && !url.startsWith('aidraw://app/')) event.preventDefault();
+    if (!isTrustedRendererUrl(url, MAIN_WINDOW_VITE_DEV_SERVER_URL)) event.preventDefault();
   });
   window.on('closed', () => {
     if (mainWindow === window) mainWindow = undefined;
@@ -852,11 +969,55 @@ async function initializeApplication(): Promise<void> {
     userDataPath: app.getPath('userData'),
     appVersion: app.getVersion(),
     runApprovedFileJob: (job) => { if (['import', 'export', 'save'].includes(job.kind)) void runApprovedFileJob(job); },
+    generationProviderRunner: qa06GenerationE2e
+      ? createQa06GenerationE2eRunner(qa06GenerationE2e)
+      : qa06PixelPaletteE2e
+        ? createQa06PixelPaletteE2eRunner(qa06PixelPaletteE2e)
+        : fnd09GenerationNormalizationE2e
+          ? createFnd09GenerationNormalizationE2eRunner(fnd09GenerationNormalizationE2e)
+          : undefined,
+    approvalTimeoutMs: qa06GenerationE2e?.approvalTimeoutMs ?? qa06PixelPaletteE2e?.approvalTimeoutMs ?? (fnd09GenerationNormalizationE2e ? 60_000 : undefined),
   });
   service = engineRuntime.service;
   mcpHost = engineRuntime.mcpHost;
   providerCredentials = engineRuntime.providerCredentials;
   generationManager = engineRuntime.generationManager;
+  batchDocumentWorkflows = new BatchDocumentWorkflows({
+    documents: {
+      listTabs: () => service.snapshot().documents,
+      getDocument: (documentId) => service.getDocument(documentId),
+      save: (documentId, filePath) => service.save(documentId, filePath),
+      close: (documentId, force) => service.close(documentId, force),
+    },
+    selectDirectory: async (request) => {
+      if (ux11BatchE2eController) return ux11BatchE2eController.selectDirectory(request);
+      const result = await dialog.showOpenDialog(mainWindow!, {
+        title: request.title,
+        properties: ['openDirectory', 'createDirectory'],
+      });
+      return result.canceled ? undefined : result.filePaths[0];
+    },
+    confirmCloseAll: async (request) => {
+      if (ux11BatchE2eController) return ux11BatchE2eController.confirmCloseAll(request);
+      const decision = await dialog.showMessageBox(mainWindow!, {
+        type: 'warning',
+        ...request,
+        buttons: [...request.buttons],
+        defaultId: 0,
+        cancelId: 1,
+        noLink: true,
+      });
+      return decision.response === 0 ? 'save-all' : decision.response === 2 ? 'discard-all' : 'cancel';
+    },
+    pathExists: (filePath) => stat(filePath).then(() => true, () => false),
+    exportDocument: (document, format, options) => {
+      if (ux11BatchE2eController?.shouldFailExport(document, format)) throw new Error('Isolated UX-11 per-document export failure.');
+      return engineRuntime.rasterUtilities.exportDocument(document, format, options);
+    },
+    writeTarget: (filePath, data) => writeApprovedTarget(filePath, data, new Set()),
+    companionBytes,
+    recordInterchangeReport,
+  });
   mcpHost.scheduler.setVisualPlaybackEnabled(false);
   await engineRuntime.start();
   let launchTrustedFolders: string[] = [];
@@ -871,6 +1032,34 @@ async function initializeApplication(): Promise<void> {
     if (!credentials.url) throw new Error('Cannot write an MCP connection file because the local server did not start.');
     await mkdir(dirname(connectionPath), { recursive: true });
     await writeFile(connectionPath, `${JSON.stringify({ version: 1, url: credentials.url, token: credentials.token, activeDocumentId: service.getActiveDocumentId(), pid: process.pid, trustedFolders: launchTrustedFolders }, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+  }
+  if (fnd09UtilityContainmentE2e) {
+    void runFnd09UtilityContainmentScenario(engineRuntime, fnd09UtilityContainmentE2e)
+      .catch((error) => process.stderr.write(`FND-09 utility containment probe failed: ${error instanceof Error ? error.message : String(error)}\n`));
+  }
+  if (fnd09UtilityPressureE2e) {
+    void runFnd09UtilityPressureScenario(engineRuntime, fnd09UtilityPressureE2e)
+      .catch((error) => process.stderr.write(`FND-09 utility pressure probe failed: ${error instanceof Error ? error.message : String(error)}\n`));
+  }
+  if (fnd09ObservationCodecE2e) {
+    void runFnd09ObservationCodecScenario(engineRuntime, fnd09ObservationCodecE2e)
+      .catch((error) => process.stderr.write(`FND-09 observation codec probe failed: ${error instanceof Error ? error.message : String(error)}\n`));
+  }
+  if (fnd09QuantizationResultE2e) {
+    void runFnd09QuantizationResultScenario(engineRuntime, fnd09QuantizationResultE2e)
+      .catch((error) => process.stderr.write(`FND-09 quantization-result probe failed: ${error instanceof Error ? error.message : String(error)}\n`));
+  }
+  if (fnd09ExportResultE2e) {
+    void runFnd09ExportResultScenario(engineRuntime, fnd09ExportResultE2e)
+      .catch((error) => process.stderr.write(`FND-09 export-result probe failed: ${error instanceof Error ? error.message : String(error)}\n`));
+  }
+  if (fnd09ImportResultE2e) {
+    void runFnd09ImportResultScenario(engineRuntime, fnd09ImportResultE2e)
+      .catch((error) => process.stderr.write(`FND-09 import-result probe failed: ${error instanceof Error ? error.message : String(error)}\n`));
+  }
+  if (fnd09GenerationResultE2e) {
+    void runFnd09GenerationResultScenario(engineRuntime, fnd09GenerationResultE2e)
+      .catch((error) => process.stderr.write(`FND-09 generation-result probe failed: ${error instanceof Error ? error.message : String(error)}\n`));
   }
   registerIpc();
   createMenu();

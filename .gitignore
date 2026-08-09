@@ -2,6 +2,9 @@ node_modules/
 .npm-cache/
 .electron-cache/
 .vite/
+/.codex/
+/.tmp/
+/.tmp-e2e-profile/
 out/
 out-*/
 out-regression/
@@ -25,14 +28,37 @@ autonomous-output/
 
 # OS/editor metadata
 .DS_Store
+._*
+.AppleDouble/
+.LSOverride
+.Spotlight-V100/
+.Trashes/
+.fseventsd/
+$RECYCLE.BIN/
+Desktop.ini
+ehthumbs.db
+Icon?
 Thumbs.db
 .idea/
+DerivedData/
+*.app/
+*.xcarchive/
+*.dmg
+*.dmp
+*.pkg
 
 # Explicit MCP bootstrap handoffs and signing credentials are always local.
 aidraw-connection*.json
+.npmrc
+*.cer
+*.crt
+*.csr
+*.der
 *.pem
 *.key
 *.p12
 *.pfx
 *.jks
 *.keystore
+*.mobileprovision
+*.provisionprofile

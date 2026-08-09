@@ -1,5 +1,6 @@
 import { constants } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { crc32 } from 'node:zlib';
 import { access, mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
 import { dirname, extname } from 'node:path';
 import { createCanvas } from '@napi-rs/canvas';
@@ -36,10 +37,55 @@ function safeArchiveEntryName(name: string): boolean {
   return Boolean(name) && !name.includes('\\') && !name.includes('\0') && !name.startsWith('/') && !/^[a-z]:/i.test(name) && !name.split('/').some((part) => part === '..' || part === '.');
 }
 
+function validateNativeArchiveCrcs(bytes: Uint8Array, archive: ReturnType<typeof unzipSync>): void {
+  const view = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let end = -1;
+  for (let offset = view.length - 22, minimum = Math.max(0, view.length - 22 - 0xffff); offset >= minimum; offset -= 1) {
+    if (view.readUInt32LE(offset) === 0x06054b50 && offset + 22 + view.readUInt16LE(offset + 20) === view.length) { end = offset; break; }
+  }
+  if (end < 0) throw new Error('AIDraw container has no valid ZIP central directory.');
+  if (view.readUInt16LE(end + 4) !== 0 || view.readUInt16LE(end + 6) !== 0) throw new Error('AIDraw container uses unsupported multi-disk ZIP metadata.');
+
+  let entries = view.readUInt16LE(end + 10);
+  let centralSize = view.readUInt32LE(end + 12);
+  let centralOffset = view.readUInt32LE(end + 16);
+  if (entries === 0xffff || centralSize === 0xffffffff || centralOffset === 0xffffffff) {
+    const locator = end - 20;
+    if (locator < 0 || view.readUInt32LE(locator) !== 0x07064b50 || view.readUInt32LE(locator + 4) !== 0 || view.readUInt32LE(locator + 16) !== 1) throw new Error('AIDraw container has invalid ZIP64 metadata.');
+    const zip64Offset = view.readBigUInt64LE(locator + 8);
+    if (zip64Offset > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error('AIDraw container ZIP64 metadata exceeds safe integer bounds.');
+    const zip64 = Number(zip64Offset);
+    if (zip64 + 56 > view.length || view.readUInt32LE(zip64) !== 0x06064b50 || view.readUInt32LE(zip64 + 16) !== 0 || view.readUInt32LE(zip64 + 20) !== 0) throw new Error('AIDraw container has invalid ZIP64 metadata.');
+    const zip64Entries = view.readBigUInt64LE(zip64 + 32);
+    const zip64CentralSize = view.readBigUInt64LE(zip64 + 40);
+    const zip64CentralOffset = view.readBigUInt64LE(zip64 + 48);
+    if ([zip64Entries, zip64CentralSize, zip64CentralOffset].some((value) => value > BigInt(Number.MAX_SAFE_INTEGER))) throw new Error('AIDraw container ZIP64 metadata exceeds safe integer bounds.');
+    entries = Number(zip64Entries); centralSize = Number(zip64CentralSize); centralOffset = Number(zip64CentralOffset);
+  }
+  if (entries > MAX_NATIVE_ENTRIES || centralOffset < 0 || centralSize < 0 || centralOffset + centralSize > view.length) throw new Error('AIDraw container has invalid ZIP central-directory bounds.');
+
+  let cursor = centralOffset;
+  for (let index = 0; index < entries; index += 1) {
+    if (cursor + 46 > centralOffset + centralSize || view.readUInt32LE(cursor) !== 0x02014b50) throw new Error('AIDraw container has an invalid ZIP central-directory entry.');
+    const flags = view.readUInt16LE(cursor + 8);
+    const expected = view.readUInt32LE(cursor + 16);
+    const nameLength = view.readUInt16LE(cursor + 28);
+    const extraLength = view.readUInt16LE(cursor + 30);
+    const commentLength = view.readUInt16LE(cursor + 32);
+    const next = cursor + 46 + nameLength + extraLength + commentLength;
+    if (next > centralOffset + centralSize) throw new Error('AIDraw container has a truncated ZIP central-directory entry.');
+    const name = strFromU8(view.subarray(cursor + 46, cursor + 46 + nameLength), !(flags & 0x0800));
+    const data = archive[name];
+    if (!data) throw new Error(`AIDraw container central directory references a missing entry: ${name}`);
+    if ((crc32(data) >>> 0) !== expected) throw new Error(`AIDraw container CRC-32 mismatch for ${name}.`);
+    cursor = next;
+  }
+}
+
 function unzipNativeArchive(bytes: Uint8Array): ReturnType<typeof unzipSync> {
   if (bytes.byteLength > MAX_NATIVE_ARCHIVE_BYTES) throw new Error('AIDraw container exceeds the 512 MiB compressed-size limit.');
   const names = new Set<string>(); let expandedBytes = 0; let entries = 0;
-  return unzipSync(bytes, { filter: (entry) => {
+  const archive = unzipSync(bytes, { filter: (entry) => {
     entries += 1;
     if (entries > MAX_NATIVE_ENTRIES) throw new Error(`AIDraw container exceeds the ${MAX_NATIVE_ENTRIES.toLocaleString()}-entry limit.`);
     if (!safeArchiveEntryName(entry.name)) throw new Error(`AIDraw container contains an unsafe entry path: ${entry.name}`);
@@ -50,6 +96,8 @@ function unzipNativeArchive(bytes: Uint8Array): ReturnType<typeof unzipSync> {
     if (!Number.isSafeInteger(expandedBytes) || expandedBytes > MAX_NATIVE_EXPANDED_BYTES) throw new Error('AIDraw container exceeds the 512 MiB expanded-size limit.');
     return true;
   } });
+  validateNativeArchiveCrcs(bytes, archive);
+  return archive;
 }
 
 export interface NativeManifest {
@@ -301,6 +349,31 @@ export async function readNativeDocument(filePath: string): Promise<LoadedNative
   return { document, manifest, trace, checkpoints, warnings };
 }
 
+export interface NativeSaveHandle {
+  writeFile(data: Uint8Array): Promise<void>;
+  sync(): Promise<void>;
+  close(): Promise<void>;
+}
+
+export interface NativeSaveFileSystem {
+  openExclusive(filePath: string): Promise<NativeSaveHandle>;
+  replace(source: string, destination: string): Promise<void>;
+  remove(filePath: string): Promise<void>;
+}
+
+export const nativeSaveFileSystem: NativeSaveFileSystem = {
+  openExclusive: async (filePath) => {
+    const handle = await open(filePath, 'wx');
+    return {
+      writeFile: async (data) => { await handle.writeFile(data); },
+      sync: async () => { await handle.sync(); },
+      close: async () => { await handle.close(); },
+    };
+  },
+  replace: rename,
+  remove: unlink,
+};
+
 export async function writeNativeDocument(
   filePath: string,
   document: AIDrawDocument,
@@ -308,24 +381,25 @@ export async function writeNativeDocument(
   preview?: Uint8Array,
   trace: TransactionTraceEntry[] = [],
   checkpoints: DocumentCheckpointRecord[] = [],
+  fileSystem: NativeSaveFileSystem = nativeSaveFileSystem,
 ): Promise<string> {
   const destination = normalizePath(filePath);
   await mkdir(dirname(destination), { recursive: true });
   const temp = `${destination}.${process.pid}.${Date.now()}.tmp`;
   const bytes = buildArchive(document, appVersion, preview, trace, checkpoints);
-  const handle = await open(temp, 'wx');
   try {
-    await handle.writeFile(bytes);
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-
-  try {
+    const handle = await fileSystem.openExclusive(temp);
+    try {
+      await handle.writeFile(bytes);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
     await readNativeDocument(temp);
-    await rename(temp, destination);
+    await fileSystem.replace(temp, destination);
   } catch (error) {
-    await unlink(temp).catch(() => undefined);
+    // Preserve the original failure. An OS-locked temp may remain as an uncommitted sibling, but it is never promoted or used for recovery implicitly.
+    await fileSystem.remove(temp).catch(() => undefined);
     throw error;
   }
   return destination;

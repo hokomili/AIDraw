@@ -120,6 +120,7 @@ import { TILE_VARIANT_GROUP_PROPERTY, tileVariantCandidates } from "../common/ti
 import type {
   BatchDocumentResult,
   CheckpointComparisonResult,
+  DocumentTab,
   DocumentPreset,
   EngineStatus,
   InterchangeReport,
@@ -769,6 +770,36 @@ function BatchExportDialog({ documentCount, onClose }: { documentCount: number; 
   return <EditorDialog title="Batch export" description={`Export all ${documentCount} open documents into one folder with collision-safe filenames.`} className="batch-export-dialog" onClose={onClose}><div className="entry-dialog-body"><label className="dialog-field"><span>Format</span><select autoFocus value={format} onChange={(event) => setFormat(event.target.value as typeof format)}><option value="png">PNG · all documents</option><option value="jpeg">JPEG · all documents</option><option value="webp">WebP · all documents</option><option value="gif">GIF · sprites and keyframed illustrations</option><option value="apng">APNG · sprites and keyframed illustrations</option><option value="sprite-sheet">Sprite sheet + JSON · pixel sprites only</option></select></label><label className="dialog-field"><span>Pixel presentation scale</span><select value={scale} onChange={(event) => setScale(Number(event.target.value))}><option value={1}>1× native</option><option value={2}>2×</option><option value={4}>4×</option><option value={8}>8× presentation</option><option value={12}>12× presentation</option><option value={16}>16×</option></select></label>{["gif", "apng", "sprite-sheet"].includes(format) && <label className="dialog-field"><span>Shared pixel-animation tag (optional)</span><input maxLength={120} value={animationTagName} onChange={(event) => setAnimationTagName(event.target.value)} placeholder="e.g. Walk" /><small>Each pixel sprite resolves this exact tag independently. Leave blank to also export complete illustration timelines.</small></label>}<p className="batch-export-note">Illustrations remain at native size. Unsupported documents are reported as skipped rather than silently converted.</p></div><footer className="modal-footer"><button type="button" className="secondary-modal-button" onClick={onClose}>Cancel</button><button type="button" className="primary-modal-button" disabled={running || documentCount === 0} onClick={() => void run()}><Download size={15} />{running ? "Exporting…" : "Choose folder and export"}</button></footer></EditorDialog>;
 }
 
+function DocumentActivityBadge({ document }: { document: DocumentTab }) {
+  if (!document.activityState || !document.activityActor) return null;
+  const active = document.activityState === "active";
+  const cursor = document.activityCursor;
+  const cursorLabel = cursor
+    ? ` · ${cursor.tool ?? "cursor"} at ${Math.round(cursor.x)}, ${Math.round(cursor.y)}`
+    : "";
+  const label = active
+    ? `${document.activityActor.name} is working in ${document.name}${cursorLabel}`
+    : document.activityState === "complete"
+      ? `${document.activityActor.name} finished work in ${document.name}`
+      : `${document.activityActor.name} needs attention in ${document.name}`;
+  return (
+    <span
+      className={`tab-activity-badge is-${document.activityState}`}
+      data-activity-state={document.activityState}
+      data-actor-id={document.activityActor.id}
+      data-cursor-x={cursor?.x}
+      data-cursor-y={cursor?.y}
+      data-cursor-tool={cursor?.tool}
+      role="status"
+      aria-label={label}
+      title={label}
+      style={{ "--actor": document.activityActor.color } as React.CSSProperties}
+    >
+      <MousePointer2 size={10} strokeWidth={2.5} />
+    </span>
+  );
+}
+
 function DocumentTabs() {
   const snapshot = useEditorStore((state) => state.snapshot);
   const activate = useEditorStore((state) => state.activate);
@@ -914,6 +945,7 @@ function DocumentTabs() {
             {document.dirty && (
               <span className="dirty-dot" aria-label="Unsaved changes" />
             )}
+            <DocumentActivityBadge document={document} />
             <span
               role="button"
               tabIndex={0}
@@ -984,6 +1016,7 @@ function DocumentTabs() {
                   {document.dirty && (
                     <span className="dirty-dot" aria-label="Unsaved changes" />
                   )}
+                  <DocumentActivityBadge document={document} />
                 </button>
               ))}
             </div>
@@ -4913,7 +4946,7 @@ function GenerationPanel({ document }: { document: AIDrawDocument }) {
                           );
                           notify(
                             accepted.accepted
-                              ? "Result added to the document."
+                              ? (accepted.message ?? "Result added to the document.")
                               : (accepted.message ??
                                   "Could not accept result."),
                             accepted.accepted ? "success" : "error",
@@ -4938,7 +4971,7 @@ function GenerationPanel({ document }: { document: AIDrawDocument }) {
         onClose={() => setGenerationComparison(undefined)}
         onAccept={async () => {
           const accepted = await window.aidraw.generationAccept(generationComparison.jobId, generationComparison.output.id);
-          notify(accepted.accepted ? "Result added to the document." : accepted.message ?? "Could not accept result.", accepted.accepted ? "success" : "error");
+          notify(accepted.accepted ? accepted.message ?? "Result added to the document." : accepted.message ?? "Could not accept result.", accepted.accepted ? "success" : "error");
           if (accepted.accepted) setGenerationComparison(undefined);
         }}
         onReject={async () => {

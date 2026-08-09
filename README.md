@@ -9,7 +9,7 @@ AIDraw is a desktop, agent-native drawing studio. Its authenticated local engine
 - Single-artboard illustration documents with editable vector strokes, paths and node editing, shapes, gradients, ranged text, images, sparse raster-paint tiles, masks, clipping, blend modes, filters, shadows, alignment, distribution, path booleans, and object-pose keyframe animation with GIF/APNG export.
 - Pixel sprites and projects with custom and undoably resizable canvases, indexed palettes with JSON/GPL interchange, exact pixel tools, symmetry, configurable ordered dithering, reusable bitmap fonts, selection, stamps, linked cels, animation tags/onion skins, palette overrides, a visual sprite-sheet slicing/trim workflow, GIF/APNG, tilesets, collisions, probabilities, Wang terrain, and finite or 32×32 sparse-infinite orthogonal/isometric maps. Imported project sources can be embedded, extracted, relinked, hash-checked, or packed for sharing.
 - A secure Electron boundary: sandboxed renderer, context isolation, narrow typed preload API, sender checks, restrictive CSP, denied permission/webview/navigation requests, and Electron fuses.
-- An editor-independent, authenticated Streamable HTTP MCP engine on `127.0.0.1`, with presence, named cursors, four fair playback lanes, human locks, revision conflicts, idempotency, per-actor undo, backpressure, cancellation, resources, and explicit jobs.
+- An editor-independent, authenticated Streamable HTTP MCP engine on `127.0.0.1`, with presence, named cursors, four fair actor-colored playback lanes with visible progress, human locks, revision conflicts, idempotency, per-actor undo, backpressure, cancellation, resources, and explicit jobs.
 - Native `.aidraw` ZIP files with a schema-2 manifest/document and tested schema-1 migration, content-addressed assets, editable named checkpoints, generated paint tiles, activity/provenance, a durable transaction trace, recovery journal, preview, and restart-persistent reusable document presets.
 - PNG/JPEG/WebP/SVG/PDF/PSD and clipboard interchange, plus GIF/APNG/spritesheet and Tiled TMJ/TMX/TSJ/TSX interchange with durable actor-attributed fidelity reports that can be inspected or exported as JSON. SVG keeps its supported structure editable; PDF/PSD use explicit hybrid or per-layer raster fallbacks where their richer native features cannot map losslessly.
 - Provider-neutral generation jobs for OpenAI `gpt-image-2`, Stability, and local ComfyUI API workflows, including configurable Comfy node mappings, graceful provider cancellation, a frozen before/result overlay comparison, true masked illustration outpaint with undoable artboard expansion, and explicit unaccepted-result cleanup. Hosted keys and the MCP bearer token use Windows DPAPI, macOS Keychain, or a real Linux secret store; Linux’s insecure `basic_text` fallback is refused. Every agent request is approved in-app before a potentially paid call.
@@ -74,7 +74,7 @@ Open Activity, choose Codex, Claude Code, OpenCode, Antigravity, or **Other MCP 
 | --- | --- |
 | Codex | `~/.codex/config.toml` → `[mcp_servers.aidraw]` |
 | Claude Code | `~/.claude.json` → `mcpServers.aidraw` (`type: "http"`) |
-| OpenCode v2 | `~/.config/opencode/opencode.json(c)` → `mcp.servers.aidraw` (`type: "remote"`) |
+| OpenCode | `~/.config/opencode/opencode.json(c)` → `mcp.aidraw` (`type: "remote"`, `enabled: true`) |
 | Antigravity | `~/.gemini/config/mcp_config.json` → `mcpServers.aidraw` (`serverUrl`) |
 | Other | Streamable HTTP URL plus `Authorization: Bearer …` |
 

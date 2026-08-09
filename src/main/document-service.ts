@@ -50,6 +50,10 @@ interface HumanLock extends HumanLockRequest {
 
 const MAX_REQUEST_BYTES = 2 * 1024 * 1024;
 
+function agentActivityEntries(document: AIDrawDocument) {
+  return document.activity.filter((entry) => entry.actor.kind === 'agent');
+}
+
 export class DocumentService extends EventEmitter {
   private readonly documents = new Map<Id, AIDrawDocument>();
   private readonly histories = new Map<Id, Map<Id, HistoryState>>();
@@ -61,6 +65,7 @@ export class DocumentService extends EventEmitter {
   private readonly jobs = new Map<Id, AsyncJob>();
   private readonly jobTimers = new Map<Id, NodeJS.Timeout>();
   private readonly presence = new Map<Id, AgentPresence>();
+  private readonly acknowledgedAgentActivityCounts = new Map<Id, number>();
   private editorAdvisory: EditorAdvisoryState = { advisory: true, attached: false, updatedAt: nowIso() };
   private activeDocumentId?: Id;
   private mcpInfo: Pick<McpConnectionInfo, 'running' | 'url' | 'port' | 'tokenHint'> = { running: false };
@@ -80,7 +85,7 @@ export class DocumentService extends EventEmitter {
   async recover(): Promise<number> {
     const documents = await this.journal.recover();
     for (const document of documents) {
-      this.documents.set(document.id, document); this.histories.set(document.id, new Map()); this.operationIds.set(document.id, new Map()); this.changes.set(document.id, []); this.checkpoints.set(document.id, new Map()); this.activeDocumentId = document.id;
+      this.documents.set(document.id, document); this.histories.set(document.id, new Map()); this.operationIds.set(document.id, new Map()); this.changes.set(document.id, []); this.checkpoints.set(document.id, new Map()); this.acknowledgedAgentActivityCounts.set(document.id, agentActivityEntries(document).length); this.activeDocumentId = document.id;
     }
     if (documents.length) this.publish();
     return documents.length;
@@ -158,14 +163,34 @@ export class DocumentService extends EventEmitter {
     if (active) for (const entry of active.activity) if (entry.actor.kind === 'agent') agentActors.set(entry.actor.id, entry.actor);
     for (const entry of this.presence.values()) if (entry.actor.kind === 'agent' && (!active || !entry.documentId || entry.documentId === active.id)) agentActors.set(entry.actor.id, entry.actor);
     return {
-      documents: [...this.documents.values()].map((document) => ({
-        id: document.id,
-        name: document.name,
-        kind: document.kind,
-        dirty: document.dirty,
-        revision: document.revision,
-        filePath: document.filePath,
-      })),
+      documents: [...this.documents.values()].map((document) => {
+        const tab = {
+          id: document.id,
+          name: document.name,
+          kind: document.kind,
+          dirty: document.dirty,
+          revision: document.revision,
+          filePath: document.filePath,
+        } as WorkspaceSnapshot['documents'][number];
+        if (document.id === this.activeDocumentId) return tab;
+        const livePresence = [...this.presence.values()]
+          .filter((entry) => entry.actor.kind === 'agent' && entry.documentId === document.id && (entry.status === 'working' || entry.status === 'waiting'))
+          .sort((left, right) => Number(right.status === 'working') - Number(left.status === 'working') || left.actor.id.localeCompare(right.actor.id))[0];
+        if (livePresence) {
+          tab.activityState = 'active';
+          tab.activityActor = structuredClone(livePresence.actor);
+          tab.activityCursor = livePresence.cursor ? structuredClone(livePresence.cursor) : undefined;
+          return tab;
+        }
+        const activities = agentActivityEntries(document);
+        const acknowledged = this.acknowledgedAgentActivityCounts.get(document.id) ?? activities.length;
+        if (activities.length > acknowledged) {
+          const latest = activities.at(-1)!;
+          tab.activityState = latest.status === 'failed' || latest.status === 'cancelled' ? 'conflict' : 'complete';
+          tab.activityActor = structuredClone(latest.actor);
+        }
+        return tab;
+      }),
       activeDocumentId: this.activeDocumentId,
       activeDocument: active ? structuredClone(active) : undefined,
       jobs: [...this.jobs.values()].map((job) => structuredClone(job)),
@@ -208,6 +233,7 @@ export class DocumentService extends EventEmitter {
     this.changes.set(document.id, []);
     this.checkpoints.set(document.id, new Map());
     this.comparisons.delete(document.id);
+    this.acknowledgedAgentActivityCounts.set(document.id, agentActivityEntries(document).length);
     this.activeDocumentId = document.id;
     void this.journal.compact(document);
     this.publish();
@@ -215,12 +241,14 @@ export class DocumentService extends EventEmitter {
   }
 
   addDocument(document: AIDrawDocument): WorkspaceSnapshot {
-    this.documents.set(document.id, structuredClone(document));
+    const cloned = structuredClone(document);
+    this.documents.set(document.id, cloned);
     this.histories.set(document.id, new Map());
     this.operationIds.set(document.id, new Map());
     this.changes.set(document.id, []);
     this.checkpoints.set(document.id, new Map());
     this.comparisons.delete(document.id);
+    this.acknowledgedAgentActivityCounts.set(document.id, agentActivityEntries(cloned).length);
     this.activeDocumentId = document.id;
     void this.journal.compact(document);
     this.publish();
@@ -484,6 +512,7 @@ export class DocumentService extends EventEmitter {
         this.changes.set(loaded.document.id, []);
         this.checkpoints.set(loaded.document.id, new Map(loaded.checkpoints.map((checkpoint) => [checkpoint.id, checkpoint])));
         this.comparisons.delete(loaded.document.id);
+        this.acknowledgedAgentActivityCounts.set(loaded.document.id, agentActivityEntries(loaded.document).length);
         await this.traceStore?.import(loaded.document.id, loaded.trace);
         this.activeDocumentId = loaded.document.id;
         opened.push(filePath);
@@ -519,6 +548,7 @@ export class DocumentService extends EventEmitter {
     this.changes.delete(documentId);
     this.comparisons.delete(documentId);
     this.checkpoints.delete(documentId);
+    this.acknowledgedAgentActivityCounts.delete(documentId);
     for (const [lockId, lock] of this.locks) if (lock.documentId === documentId) this.locks.delete(lockId);
     if (this.activeDocumentId === documentId) {
       this.activeDocumentId = [...this.documents.keys()].at(-1);
@@ -587,9 +617,11 @@ export class DocumentService extends EventEmitter {
     this.jobs.set(job.id, structuredClone(job));
     if (job.status === 'waiting-for-user' && job.approval) {
       const delay = Math.max(0, new Date(job.approval.expiresAt).getTime() - Date.now());
+      const requestedDelay = Math.max(0, new Date(job.approval.expiresAt).getTime() - new Date(job.createdAt).getTime());
+      const timeoutLabel = requestedDelay === 120_000 ? 'two minutes' : `${Math.round(requestedDelay / 1_000)} seconds`;
       const timer = setTimeout(() => {
         const current = this.jobs.get(job.id); if (!current || current.status !== 'waiting-for-user') return;
-        this.upsertJob({ ...current, status: 'cancelled', updatedAt: nowIso(), message: 'Approval timed out after two minutes.', approval: undefined, error: { code: 'approval_timeout', message: 'The in-app approval expired.', retryable: true } });
+        this.upsertJob({ ...current, status: 'cancelled', updatedAt: nowIso(), message: `Approval timed out after ${timeoutLabel}.`, approval: undefined, error: { code: 'approval_timeout', message: 'The in-app approval expired.', retryable: true } });
       }, delay);
       timer.unref(); this.jobTimers.set(job.id, timer);
     }
@@ -728,6 +760,8 @@ export class DocumentService extends EventEmitter {
   }
 
   private publish(): void {
+    const active = this.activeDocumentId ? this.documents.get(this.activeDocumentId) : undefined;
+    if (active) this.acknowledgedAgentActivityCounts.set(active.id, agentActivityEntries(active).length);
     this.emitEvent({ type: 'workspace', snapshot: this.snapshot() });
   }
 

@@ -64,6 +64,11 @@ function orderedIds(value: unknown, available: Record<string, unknown>): string[
   return [...new Set([...listed, ...Object.keys(available)])];
 }
 
+function rootLayerIds<T extends { type: string; childIds?: string[] }>(orderedLayerIds: string[], layers: Record<string, T>): string[] {
+  const nestedLayerIds = new Set(Object.values(layers).flatMap((layer) => layer.type === 'group' ? layer.childIds ?? [] : []).filter((id) => Boolean(layers[id])));
+  return orderedLayerIds.filter((id) => !nestedLayerIds.has(id));
+}
+
 function normalizeSprite(value: Record<string, unknown>, current: PixelSprite | undefined, timestamp: string, actorId: string): PixelSprite {
   const assetBase = entityBase(value, text(value.id, 'recovered-sprite'), 'Recovered sprite', current, timestamp, actorId);
   const layerSource = record(value.layers);
@@ -87,7 +92,8 @@ function normalizeSprite(value: Record<string, unknown>, current: PixelSprite | 
     const id = `${assetBase.id}:layer:recovered`;
     layers[id] = { ...entityBase({}, id, 'Recovered pixels', undefined, timestamp, actorId), type: 'pixel', visible: true, locked: false, opacity: 1, blendMode: 'normal' };
   }
-  const layerIds = orderedIds(value.layerIds, layers);
+  const orderedLayerIds = orderedIds(value.layerIds, layers);
+  const layerIds = rootLayerIds(orderedLayerIds, layers);
 
   const frameSource = record(value.frames);
   const frames: Record<string, PixelFrame> = {};
@@ -119,7 +125,7 @@ function normalizeSprite(value: Record<string, unknown>, current: PixelSprite | 
       ...(typeof candidate.linkedToCelId === 'string' ? { linkedToCelId: candidate.linkedToCelId } : {}),
     };
   }
-  for (const layerId of layerIds) {
+  for (const layerId of orderedLayerIds) {
     if (layers[layerId].type !== 'pixel') continue;
     for (const frameId of frameIds) {
       if (Object.values(cels).some((cel) => cel.layerId === layerId && cel.frameId === frameId)) continue;
@@ -213,7 +219,7 @@ function normalizeTilemap(value: Record<string, unknown>, current: PixelTilemap 
     tileWidth: positiveInteger(value.tileWidth, current?.tileWidth ?? 16),
     tileHeight: positiveInteger(value.tileHeight, current?.tileHeight ?? 16),
     tilesetIds: Array.isArray(value.tilesetIds) ? value.tilesetIds.filter((id): id is string => typeof id === 'string') : [],
-    layerIds: orderedIds(value.layerIds, layers),
+    layerIds: rootLayerIds(orderedIds(value.layerIds, layers), layers),
     layers,
     properties: structuredClone(record(value.properties)) as PixelTilemap['properties'],
   };

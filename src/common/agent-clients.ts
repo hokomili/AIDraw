@@ -31,8 +31,8 @@ export const AGENT_CLIENTS: readonly AgentClientDescriptor[] = [
     name: 'OpenCode',
     configuration: 'jsonc',
     configurationDescription: 'the global OpenCode JSON or JSONC configuration',
-    restartInstruction: 'Restart OpenCode, then run opencode2 mcp list to verify AIDraw.',
-    documentationUrl: 'https://opencode.ai/v2/docs/mcp-servers',
+    restartInstruction: 'Restart OpenCode, then run opencode mcp list to verify AIDraw.',
+    documentationUrl: 'https://opencode.ai/docs/mcp-servers/',
   },
   {
     id: 'antigravity',

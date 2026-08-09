@@ -7,13 +7,20 @@ import { DocumentService } from '@main/document-service';
 import { RecoveryJournal } from '@main/journal';
 
 const temporaryPaths: string[] = [];
-afterEach(async () => { await Promise.all(temporaryPaths.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
+const services: DocumentService[] = [];
+afterEach(async () => {
+  const flushResults = await Promise.allSettled(services.splice(0).map((service) => service.flushRecovery()));
+  const cleanupResults = await Promise.allSettled(temporaryPaths.splice(0).map((path) => rm(path, { recursive: true, force: true })));
+  const failures = [...flushResults, ...cleanupResults].filter((result): result is PromiseRejectedResult => result.status === 'rejected').map((result) => result.reason);
+  if (failures.length) throw new AggregateError(failures, 'Document-service fixture teardown failed.');
+});
 
 describe('document service collaboration semantics', () => {
   it('creates documents with mode-specific dialog settings', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aidraw-service-'));
     temporaryPaths.push(root);
     const service = new DocumentService(new RecoveryJournal(root), '1.0.0');
+    services.push(service);
     service.initialize();
 
     const illustration = service.create({ kind: 'illustration', name: 'Poster', width: 1080, height: 1920, background: null }).activeDocument;
@@ -36,6 +43,7 @@ describe('document service collaboration semantics', () => {
     const root = await mkdtemp(join(tmpdir(), 'aidraw-service-'));
     temporaryPaths.push(root);
     const service = new DocumentService(new RecoveryJournal(root), '1.0.0');
+    services.push(service);
     service.initialize();
     const document = service.snapshot().activeDocument!;
     const transaction: CanvasTransaction = {
@@ -51,10 +59,55 @@ describe('document service collaboration semantics', () => {
     await service.compactRecovery();
   });
 
+  it('publishes live and unread background-agent tab activity until the document is viewed', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-service-'));
+    temporaryPaths.push(root);
+    const service = new DocumentService(new RecoveryJournal(root), '1.0.0');
+    services.push(service);
+    service.initialize();
+    const foreground = service.snapshot().activeDocument!;
+    const background = service.create({ kind: 'illustration', name: 'Background board' }).activeDocument!;
+    service.activate(foreground.id);
+    const agent: Actor = { id: 'agent-background-tab', kind: 'agent', name: 'Background collaborator', color: '#5d67d8' };
+
+    service.updatePresence({
+      actor: agent,
+      documentId: background.id,
+      cursor: { x: 128, y: 96, tool: 'pen' },
+      queueDepth: 0,
+      status: 'working',
+    });
+    const liveSnapshot = service.snapshot();
+    expect(liveSnapshot.activeDocumentId).toBe(foreground.id);
+    expect(liveSnapshot.documents.find((document) => document.id === background.id)).toMatchObject({
+      id: background.id,
+      activityState: 'active',
+      activityActor: { id: agent.id, name: agent.name, color: agent.color },
+      activityCursor: { x: 128, y: 96, tool: 'pen' },
+    });
+
+    expect((await service.apply({
+      id: createId('tx'), clientOperationId: createId('op'), documentId: background.id, actor: agent,
+      label: 'Background edit', createdAt: nowIso(), operations: [{ kind: 'document.rename', name: 'Background result' }],
+    })).status).toBe('committed');
+    service.updatePresence({ actor: agent, documentId: background.id, queueDepth: 0, status: 'idle' });
+    expect(service.snapshot().documents.find((document) => document.id === background.id)).toMatchObject({
+      activityState: 'complete',
+      activityActor: { id: agent.id },
+    });
+
+    service.activate(background.id);
+    expect(service.snapshot().documents.find((document) => document.id === background.id)).not.toHaveProperty('activityState');
+    service.activate(foreground.id);
+    expect(service.snapshot().documents.find((document) => document.id === background.id)).not.toHaveProperty('activityState');
+    await service.compactRecovery();
+  });
+
   it('restores a named editable checkpoint while preserving the abandoned branch automatically', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aidraw-service-'));
     temporaryPaths.push(root);
     const service = new DocumentService(new RecoveryJournal(root), '1.0.0');
+    services.push(service);
     service.initialize();
     const original = service.snapshot().activeDocument!;
     const checkpoint = service.createCheckpoint(original.id, 'Clean composition');
@@ -78,6 +131,7 @@ describe('document service collaboration semantics', () => {
     temporaryPaths.push(root);
     const journal = new RecoveryJournal(root);
     const service = new DocumentService(journal, '1.0.0');
+    services.push(service);
     service.initialize();
     const retainedId = service.snapshot().activeDocument!.id;
     const discarded = service.create({ kind: 'sprite', name: 'Discarded untitled sprite' }).activeDocument!;
@@ -91,6 +145,7 @@ describe('document service collaboration semantics', () => {
     await service.compactRecovery();
 
     const restarted = new DocumentService(new RecoveryJournal(root), '1.0.0');
+    services.push(restarted);
     expect(await restarted.recover()).toBe(1);
     restarted.initialize();
     expect(restarted.getDocument(retainedId)).toBeDefined();
@@ -102,6 +157,7 @@ describe('document service collaboration semantics', () => {
     const root = await mkdtemp(join(tmpdir(), 'aidraw-service-'));
     temporaryPaths.push(root);
     const service = new DocumentService(new RecoveryJournal(root), '1.0.0');
+    services.push(service);
     service.initialize();
     await service.compactRecovery();
     const document = service.snapshot().activeDocument!;
@@ -154,6 +210,7 @@ describe('document service collaboration semantics', () => {
     const root = await mkdtemp(join(tmpdir(), 'aidraw-service-'));
     temporaryPaths.push(root);
     const service = new DocumentService(new RecoveryJournal(root), '1.0.0');
+    services.push(service);
     service.initialize();
     const snapshot = service.create({ kind: 'sprite', name: 'Region lock' });
     await service.compactRecovery();
@@ -177,7 +234,7 @@ describe('document service collaboration semantics', () => {
 
   it('protects a pixel asset replacement while its inspector gesture holds an asset lock', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aidraw-service-')); temporaryPaths.push(root);
-    const service = new DocumentService(new RecoveryJournal(root), '1.0.0'); service.initialize();
+    const service = new DocumentService(new RecoveryJournal(root), '1.0.0'); services.push(service); service.initialize();
     const snapshot = service.create({ kind: 'sprite', name: 'Asset lock' }); const document = snapshot.activeDocument!; if (document.kind !== 'pixel') throw new Error('Expected pixel document'); const sprite = document.pixelAssets[document.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('Expected sprite');
     const lock = service.acquireLock({ documentId: document.id, objectIds: [sprite.id] }); expect(lock.acquired).toBe(true);
     const agent: Actor = { id: 'agent-asset-lock-test', kind: 'agent', name: 'Asset lock agent', color: '#8268dd' };

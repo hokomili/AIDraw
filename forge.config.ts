@@ -9,6 +9,8 @@ import { AutoUnpackNativesPlugin } from '@electron-forge/plugin-auto-unpack-nati
 import { resolve } from 'node:path';
 import process from 'node:process';
 
+const localElectronZipDirectory = process.env.AIDRAW_ELECTRON_ZIP_DIR;
+
 const packagedRuntimeRoots = [
   '/.vite',
   '/node_modules/@napi-rs/canvas',
@@ -26,6 +28,7 @@ const config: ForgeConfig = {
   packagerConfig: {
     asar: { unpack: '**/*.node' },
     prune: false,
+    ...(localElectronZipDirectory ? { electronZipDir: resolve(localElectronZipDirectory) } : {}),
     // Vite bundles the application graph. Keep the native raster binding,
     // Paper's deliberately externalized geometry runtime, and AJV helpers
     // referenced by generated standalone validator functions.
@@ -68,7 +71,7 @@ const config: ForgeConfig = {
     new MakerZIP({}, ['win32', 'darwin', 'linux']),
   ],
   hooks: {
-    packageAfterCopy: async (_forgeConfig, buildPath, _electronVersion, platform) => {
+    packageAfterCopy: async (_forgeConfig, buildPath, _electronVersion, platform, arch) => {
       const { flipFuses, FuseV1Options, FuseVersion } = await import('@electron/fuses');
       const electronBinary = platform === 'win32'
         ? resolve(buildPath, '..', '..', 'electron.exe')
@@ -87,7 +90,7 @@ const config: ForgeConfig = {
         [FuseV1Options.LoadBrowserProcessSpecificV8Snapshot]: false,
         [FuseV1Options.GrantFileProtocolExtraPrivileges]: false,
         [FuseV1Options.WasmTrapHandlers]: true,
-        resetAdHocDarwinSignature: platform === 'darwin' && process.arch === 'arm64',
+        resetAdHocDarwinSignature: platform === 'darwin' && arch === 'arm64',
       });
     },
   },

@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { AIDrawDocument } from './model';
 import type { CanvasOperation, CanvasTransaction } from './operations';
+import { assertAcyclicReferences } from './reference-graph';
 
 const OperationKindSchema = z.enum([
   'document.rename',
@@ -551,6 +552,10 @@ export const PersistedDocumentSchema = z
   .loose()
   .transform((value) => value as unknown as AIDrawDocument);
 
+function assertAcyclicGroupChildren(entries: Record<string, any>, cycleError: string): void {
+  assertAcyclicReferences(entries, (entry) => entry?.type === 'group' && Array.isArray(entry.childIds) ? entry.childIds.filter((id: unknown): id is string => typeof id === 'string') : [], cycleError);
+}
+
 export function validateDocument(value: unknown): AIDrawDocument {
   const document = PersistedDocumentSchema.parse(value);
   if (document.kind === 'illustration') {
@@ -575,8 +580,18 @@ export function validateDocument(value: unknown): AIDrawDocument {
         if (cache.version !== 1 || !Number.isInteger(cache.strokeCount) || cache.strokeCount < 0 || cache.strokeCount > layer.strokes.length || !/^[0-9a-f]{64}$/i.test(cache.strokesSha256)) throw new Error(`Invalid paint tile cache on layer ${layerId}`);
       }
     }
+    assertAcyclicGroupChildren(document.layers, 'Illustration layer hierarchy contains a cycle.');
+    assertAcyclicGroupChildren(document.objects, 'Illustration object hierarchy contains a cycle.');
   } else if (!Array.isArray(document.assetIds) || typeof document.pixelAssets !== 'object') {
     throw new Error('Invalid pixel document structure');
+  } else {
+    for (const asset of Object.values(document.pixelAssets)) {
+      if (asset?.type === 'sprite' && asset.layers && typeof asset.layers === 'object' && !Array.isArray(asset.layers)) {
+        assertAcyclicGroupChildren(asset.layers, 'Pixel sprite layer hierarchy contains a cycle.');
+      } else if (asset?.type === 'tilemap' && asset.layers && typeof asset.layers === 'object' && !Array.isArray(asset.layers)) {
+        assertAcyclicGroupChildren(asset.layers, 'Pixel tilemap layer hierarchy contains a cycle.');
+      }
+    }
   }
   return document;
 }

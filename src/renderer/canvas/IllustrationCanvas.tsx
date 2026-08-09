@@ -22,6 +22,7 @@ import {
 import { useEditorStore } from '../store';
 import { collectReplayMasks } from '../replay';
 import { EntryDialog } from '../components/EditorDialog';
+import { PlaybackLanes } from '../components/PlaybackLanes';
 import { colorWithOpacity } from '../../common/color';
 import { paintTileCachePlan } from '../../common/paint-tile-cache';
 import { renderRasterStroke } from '../../common/raster-brush';
@@ -798,6 +799,7 @@ export function IllustrationCanvas({ document }: { document: IllustrationDocumen
         onPointerCancel={() => void cancelGesture()}
         onWheel={onWheel}
       />
+      <PlaybackLanes playbacks={playbacks} />
       <div className="canvas-ruler horizontal" /><div className="canvas-ruler vertical" />
       {useEditorStore.getState().snapshot?.mcp.sessions.filter((entry) => entry.documentId === document.id && entry.cursor).map((entry) => {
         const cursor = entry.cursor!;

@@ -1,0 +1,28 @@
+# Store portable text as LF without rewriting the existing worktree in bulk.
+* text=auto eol=lf
+
+# Windows-only controller scripts retain their native line ending.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Common binary assets and native/release containers must never be normalized.
+*.aidraw -text
+*.apng -text
+*.dmg -text
+*.gif -text
+*.icns -text
+*.ico -text
+*.jpeg -text
+*.jpg -text
+*.node -text
+*.otf -text
+*.pdf -text
+*.pkg -text
+*.png -text
+*.psd -text
+*.ttf -text
+*.webp -text
+*.woff -text
+*.woff2 -text
+*.zip -text

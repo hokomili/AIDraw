@@ -66,6 +66,7 @@ import { plannedExportCompanionPaths, type ExportFormat } from './export-documen
 import { quantizeImageToPalette } from './quantize-image';
 import { captureObservation, MAX_OBSERVATION_PIXELS, type CaptureObservation } from './capture-observation';
 import { projectLinkFileExtension, verifiedPixelLinkCache } from './pixel-link-files';
+import { AIDRAW_GUIDE_URI, AIDRAW_HELP_TOPICS, AIDRAW_MCP_GUIDE, AIDRAW_SERVER_INSTRUCTIONS, aidrawHelp } from './mcp-guide';
 
 const PORT_START = 48200;
 const PORT_END = 48231;
@@ -229,6 +230,158 @@ const ObservationFragmentSchema = z.object({
   assetId: z.string().min(1).optional(),
 }).strict();
 
+const DocumentIdInputSchema = z.string().min(1).describe('Canonical open document ID returned by document_manage action=list, session_manage, or canvas_observe.');
+const JobIdInputSchema = z.string().min(1).describe('Owner-scoped job ID returned by an approval, generation, or batch-starting tool.');
+const SessionManageInputSchema = z.discriminatedUnion('action', [
+  z.object({
+    action: z.literal('join').describe('Join/update this authenticated agent presence.'),
+    name: z.string().min(1).max(80).optional().describe('Human-readable agent name shown in AIDraw presence and attribution.'),
+    color: z.string().optional().describe('Preferred #RRGGBB actor color; invalid values fall back to the assigned session color.'),
+    documentId: DocumentIdInputSchema.optional().describe('Optional document in which to publish this presence.'),
+    model: z.string().trim().min(1).max(200).optional().describe('Descriptive client model metadata; not platform-attested.'),
+    reasoningEffort: z.enum(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']).optional().describe('Descriptive reasoning-effort metadata.'),
+    taskId: z.string().trim().min(1).max(200).optional().describe('Descriptive external task identifier.'),
+  }).strict().describe('Join and optionally identify the authenticated agent.'),
+  z.object({ action: z.literal('inspect').describe('Read presence, active document, human occupancy, and advisory editor state.'), documentId: DocumentIdInputSchema.optional() }).strict(),
+  z.object({ action: z.literal('leave').describe('Remove this session from live presence without closing documents or the MCP session.') }).strict(),
+]).describe('Action-specific AIDraw session contract.');
+
+const HistoryDocumentIdSchema = DocumentIdInputSchema.optional().describe('Optional target; omitted means the active document.');
+const HistoryManageInputSchema = z.discriminatedUnion('action', [
+  z.object({ action: z.literal('undo'), documentId: HistoryDocumentIdSchema }).strict().describe('Undo this authenticated actor’s latest transaction.'),
+  z.object({ action: z.literal('redo'), documentId: HistoryDocumentIdSchema }).strict().describe('Redo this authenticated actor’s latest undone transaction.'),
+  z.object({ action: z.literal('replay'), documentId: HistoryDocumentIdSchema, transactionId: z.string().min(1).describe('Durable transaction ID obtained from trace/history.') }).strict().describe('Start one bounded, non-mutating trace replay.'),
+  z.object({ action: z.literal('checkpoint-list'), documentId: HistoryDocumentIdSchema }).strict().describe('List named checkpoints for one document.'),
+  z.object({ action: z.literal('checkpoint-create'), documentId: HistoryDocumentIdSchema, name: z.string().trim().min(1).max(80).describe('Human-readable attributed checkpoint name.') }).strict(),
+  z.object({ action: z.literal('checkpoint-restore'), documentId: HistoryDocumentIdSchema, checkpointId: z.string().min(1).describe('Checkpoint ID returned by checkpoint-list/create.') }).strict(),
+  z.object({ action: z.literal('checkpoint-merge'), documentId: HistoryDocumentIdSchema, checkpointId: z.string().min(1).describe('Source checkpoint ID.'), sourceIds: z.array(z.string().min(1)).min(1).max(32).describe('Top-level checkpoint layer-tree or pixel-asset IDs to copy with dependency closure.') }).strict(),
+  z.object({ action: z.literal('checkpoint-delete'), documentId: HistoryDocumentIdSchema, checkpointId: z.string().min(1).describe('Checkpoint ID; agents may delete only checkpoints they created.') }).strict(),
+]).describe('Action-specific actor history, replay, and checkpoint contract.');
+
+const DocumentManageInputSchema = z.discriminatedUnion('action', [
+  z.object({ action: z.literal('list').describe('List open document summaries and activeDocumentId.') }).strict(),
+  z.object({
+    action: z.literal('new').describe('Create and activate a new in-memory document.'),
+    kind: z.enum(['illustration', 'sprite', 'tilemap', 'project']).default('illustration').describe('Document kind; project is the multi-asset pixel-project surface.'),
+    name: z.string().trim().min(1).max(200).optional().describe('Optional document name.'),
+    width: z.number().int().min(1).max(8_192).optional().describe('Illustration/sprite/map width; defaults come from the shared new-document contract.'),
+    height: z.number().int().min(1).max(8_192).optional().describe('Illustration/sprite/map height.'),
+    background: z.union([z.string().regex(/^#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?$/), z.null()]).optional().describe('Illustration background color or null for transparency.'),
+    orientation: z.enum(['orthogonal', 'isometric']).optional().describe('Tilemap orientation; meaningful for tilemap/project creation.'),
+    infinite: z.boolean().optional().describe('Whether a new tilemap uses signed sparse chunks.'),
+    tileWidth: z.number().int().min(1).max(1_024).optional().describe('Tile width in pixels for tilemap creation.'),
+    tileHeight: z.number().int().min(1).max(1_024).optional().describe('Tile height in pixels for tilemap creation.'),
+  }).strict(),
+  z.object({ action: z.literal('activate'), documentId: DocumentIdInputSchema }).strict().describe('Activate an already open document.'),
+  z.object({ action: z.literal('open'), path: z.string().min(1).describe('Exact native .aidraw path to present for human file-read approval.') }).strict(),
+  z.object({ action: z.literal('save'), documentId: DocumentIdInputSchema }).strict().describe('Request overwrite approval for the document’s existing canonical filePath.'),
+  z.object({ action: z.literal('save-as'), documentId: DocumentIdInputSchema, path: z.string().min(1).describe('Exact destination; .aidraw is appended when absent.') }).strict(),
+  z.object({ action: z.literal('close'), documentId: DocumentIdInputSchema }).strict().describe('Close without granting discard authority; dirty/save rules remain enforced.'),
+]).describe('Action-specific AIDraw document lifecycle contract.');
+
+const JobManageInputSchema = z.discriminatedUnion('action', [
+  z.object({ action: z.literal('list').describe('List privacy-redacted jobs owned by this authenticated actor.') }).strict(),
+  z.object({ action: z.literal('inspect'), jobId: JobIdInputSchema }).strict(),
+  z.object({ action: z.literal('wait'), jobId: JobIdInputSchema, timeoutMs: z.number().int().min(0).max(30_000).default(0).describe('Bounded long-poll duration; 0 returns current state immediately.') }).strict(),
+  z.object({ action: z.literal('approve-dependent'), jobId: JobIdInputSchema }).strict().describe('Report a human approval dependency; this action cannot approve.'),
+  z.object({ action: z.literal('cancel'), jobId: JobIdInputSchema }).strict().describe('Cancel owned nonterminal work; committed batch steps remain committed.'),
+  z.object({ action: z.literal('start-batch'), documentId: DocumentIdInputSchema, totalTransactions: z.number().int().min(1).max(10_000).describe('Exact transaction count used for durable progress/sequence validation.'), label: z.string().min(1).max(200).optional() }).strict(),
+  z.object({ action: z.literal('resume-batch'), jobId: JobIdInputSchema, resumeToken: z.string().min(32).max(200).describe('Private opaque token returned only by start-batch; never expose it in logs or public summaries.') }).strict(),
+]).describe('Action-specific owner-scoped async job and durable-batch contract.');
+
+const HelpInputSchema = z.object({ topic: z.enum(AIDRAW_HELP_TOPICS).default('quickstart').describe('Progressive help topic; start with quickstart.') }).strict();
+const NextStepSchema = z.object({
+  tool: z.string().min(1).describe('Tool to call next.'),
+  arguments: z.record(z.string(), z.unknown()).optional().describe('Safe next-call arguments; placeholders are never secrets.'),
+  guidance: z.string().min(1).describe('Why this step is next and any human/retry constraint.'),
+}).strict();
+type NextStep = z.infer<typeof NextStepSchema>;
+const HelpOutputSchema = z.object({
+  topic: z.enum(AIDRAW_HELP_TOPICS),
+  summary: z.string(),
+  steps: z.array(z.string()),
+  invariants: z.array(z.string()),
+  relatedTools: z.array(z.string()),
+  examples: z.array(z.object({ tool: z.string(), arguments: z.record(z.string(), z.unknown()), purpose: z.string() }).strict()),
+  guideUri: z.literal(AIDRAW_GUIDE_URI),
+}).strict();
+const SessionManageOutputSchema = z.object({
+  actor: z.record(z.string(), z.unknown()).describe('Authenticated server-owned actor identity used for presence and attribution.'),
+  presence: z.array(z.record(z.string(), z.unknown())).describe('Current live agent presence summaries.'),
+  workspace: z.record(z.string(), z.unknown()).describe('Active document ID, human occupancy, and advisory editor state.'),
+  next: NextStepSchema.describe('Safe canonical discovery step after session inspection.'),
+}).passthrough();
+const CanvasObserveOutputSchema = z.object({
+  document: z.unknown().optional().describe('Complete canonical document when a full snapshot was requested.'),
+  changes: z.unknown().optional().describe('Canonical changes after sinceRevision when a diff was requested.'),
+  revision: z.number().int().nonnegative().optional().describe('Revision of the returned document or checkpoint view.'),
+  currentRevision: z.number().int().nonnegative().optional().describe('Current open-document revision; may differ from a checkpoint view revision.'),
+  target: z.record(z.string(), z.unknown()).optional().describe('Resolved observation selectors.'),
+  png: z.record(z.string(), z.unknown()).optional().describe('Optional bounded PNG evidence with dimensions, MIME type, and encoded data.'),
+  comparison: z.record(z.string(), z.unknown()).optional().describe('Optional race-free before/after observation for the latest retained transaction.'),
+  error: z.string().optional(), message: z.string().optional(),
+}).passthrough();
+const ApprovalToolOutputSchema = z.object({
+  jobId: z.string().optional().describe('Owner-scoped job ID retained for job_manage.'),
+  status: z.string().optional().describe('Current job or request status.'),
+  expiresAt: z.string().optional().describe('Human-approval expiry when waiting-for-user.'),
+  trust: z.string().optional().describe('Applied non-overwrite file authority, if any.'),
+  error: z.string().optional(),
+  message: z.string().optional(),
+  next: NextStepSchema.optional(),
+}).passthrough();
+const CanvasConflictDetailSchema = z.object({
+  entityId: z.string().optional().describe('Canonical entity whose revision or lock policy prevented the transaction.'),
+  expectedRevision: z.number().int().nonnegative().optional().describe('Revision supplied by the rejected operation.'),
+  actualRevision: z.number().int().nonnegative().optional().describe('Current canonical entity revision to use when re-observing and rebuilding intent.'),
+  retryable: z.boolean().describe('Whether the same logical intent may be retried after re-observing state and honoring locks.'),
+}).strict();
+const CanvasApplyOutputSchema = z.object({
+  status: z.enum(['committed', 'duplicate', 'conflict', 'busy', 'locked', 'cancelled']).describe('Canonical transaction outcome.'),
+  revision: z.number().int().nonnegative().optional().describe('Resulting canonical document revision after commit.'),
+  transactionId: z.string().optional(),
+  message: z.string().optional(),
+  conflict: CanvasConflictDetailSchema.optional().describe('Structured revision or lock conflict details; absent for outcomes without an entity-level conflict.'),
+  next: NextStepSchema.optional(),
+}).passthrough();
+const JobManageOutputSchema = z.object({
+  id: z.string().optional().describe('Owner-scoped job ID for a direct summary.'),
+  kind: z.string().optional().describe('Sanitized lifecycle kind; raw request details remain private.'),
+  status: z.string().optional().describe('Current lifecycle status.'),
+  jobs: z.array(z.record(z.string(), z.unknown())).optional().describe('Privacy-redacted jobs owned by this authenticated actor.'),
+  job: z.record(z.string(), z.unknown()).optional().describe('Privacy-redacted batch job summary returned by start/resume.'),
+  resumeToken: z.string().optional().describe('Private batch capability returned only to the owning start call; retain it privately.'),
+  nextSequence: z.number().int().nonnegative().optional().describe('Exact next durable-batch sequence.'),
+  error: z.string().optional(), message: z.string().optional(), next: NextStepSchema.optional(),
+}).passthrough();
+
+function jobNextStep(job: AsyncJob): NextStep | undefined {
+  if (job.status === 'waiting-for-user') {
+    return {
+      tool: 'job_manage',
+      arguments: { action: 'wait', jobId: job.id, timeoutMs: 1_000 },
+      guidance: 'A human must review this request in AIDraw. Agents cannot approve it; wait, inspect, or cancel the owned job.',
+    };
+  }
+  if (job.status === 'queued' || job.status === 'running') {
+    return {
+      tool: 'job_manage',
+      arguments: { action: 'wait', jobId: job.id, timeoutMs: 1_000 },
+      guidance: 'The job is incomplete. Wait for a terminal owner-scoped summary before observing canonical document state.',
+    };
+  }
+  return undefined;
+}
+
+function canvasRetryNextStep(status: string, documentId: string): NextStep | undefined {
+  if (!['conflict', 'busy', 'locked', 'cancelled'].includes(status)) return undefined;
+  return {
+    tool: 'canvas_observe',
+    arguments: { documentId },
+    guidance: 'Re-observe canonical state, honor human/agent locks and current revisions, then retry the same logical intent with a fresh clientOperationId only when appropriate.',
+  };
+}
+
 function agentJobSummary(job: AsyncJob): Record<string, unknown> {
   const dependency = job.status === 'waiting-for-user' && job.approval
     ? {
@@ -252,6 +405,7 @@ function agentJobSummary(job: AsyncJob): Record<string, unknown> {
       ? structuredClone(job.result as Record<string, unknown>)
       : undefined,
     dependency,
+    next: jobNextStep(job),
   };
 }
 
@@ -651,6 +805,7 @@ function approvalReview(
     add('Potential paid requests', request.resultCount, 'paid');
     add('Size', typeof request.size === 'object' ? JSON.stringify(request.size) : request.size);
     add('Seed', request.seed);
+    add('Provider options', JSON.stringify(request.providerOptions ?? {}));
   } else {
     add('Action', request.action ?? title);
     add('Format', request.format);
@@ -706,6 +861,7 @@ export class McpHost {
     private readonly runApprovedJob?: (job: AsyncJob) => void,
     private readonly quantizeImage: QuantizeImage = quantizeImageToPalette,
     private readonly captureCanvasObservation: CaptureObservation = captureObservation,
+    private readonly approvalTimeoutMs = 120_000,
   ) {
     this.scheduler = new PlaybackScheduler(documents);
     this.batches = new BatchManager(documents, join(dirname(preferredPortPath), 'batches.json'));
@@ -857,6 +1013,7 @@ export class McpHost {
   private buildServer(session: McpSession): McpServer {
     const server = new McpServer({ name: 'aidraw', version: this.appVersion }, {
       capabilities: { resources: { subscribe: true, listChanged: true }, tools: { listChanged: true } },
+      instructions: AIDRAW_SERVER_INSTRUCTIONS,
     });
     const approvalJob = async (kind: AsyncJob['kind'], title: string, description: string, documentId: string | undefined, rawRequest: Record<string, unknown>, trustable = true) => {
       const rawPath = typeof rawRequest.path === 'string' ? resolve(rawRequest.path) : undefined;
@@ -877,15 +1034,19 @@ export class McpHost {
         approval: {
           title,
           description,
-          expiresAt: new Date(Date.now() + 120_000).toISOString(),
+          expiresAt: new Date(Date.now() + this.approvalTimeoutMs).toISOString(),
           options: trustable ? ['allow-once', 'allow-session', 'allow-always', 'deny'] : ['allow-once', 'deny'],
           review,
         },
       };
-      if (trustable && requestedPath && overwritePaths.length === 0 && this.isTrustedPath(session.actor.id, requestedPath)) { const approved = { ...job, status: 'queued' as const, message: 'Approved by trusted folder policy.', approval: undefined, result: { documentId, request, approvalDecision: 'trusted-folder' } }; this.documents.upsertJob(approved); this.runApprovedJob?.(approved); return jsonText({ jobId: approved.id, status: approved.status, trust: 'folder' }); }
+      if (trustable && requestedPath && overwritePaths.length === 0 && this.isTrustedPath(session.actor.id, requestedPath)) { const approved = { ...job, status: 'queued' as const, message: 'Approved by trusted folder policy.', approval: undefined, result: { documentId, request, approvalDecision: 'trusted-folder' } }; this.documents.upsertJob(approved); this.runApprovedJob?.(approved); return jsonText({ jobId: approved.id, status: approved.status, trust: 'folder', next: jobNextStep(approved) }); }
       this.documents.upsertJob(job);
-      return jsonText({ jobId: job.id, status: job.status, expiresAt: job.approval?.expiresAt });
+      return jsonText({ jobId: job.id, status: job.status, expiresAt: job.approval?.expiresAt, next: jobNextStep(job) });
     };
+
+    server.registerResource('AIDraw agent protocol guide', AIDRAW_GUIDE_URI, {
+      title: 'AIDraw agent protocol guide', mimeType: 'text/markdown', description: 'Complete optional MCP workflow and safety reference for clients that support resources.',
+    }, async (uri) => ({ contents: [{ uri: uri.href, mimeType: 'text/markdown', text: AIDRAW_MCP_GUIDE }] }));
 
     server.registerResource('Open AIDraw documents', 'aidraw://documents', {
       title: 'Open AIDraw documents', mimeType: 'application/json', description: 'Open documents and current revisions.',
@@ -915,18 +1076,31 @@ export class McpHost {
       return { contents: [{ uri: uri.href, mimeType: 'application/x-ndjson', text: entries.map((entry) => JSON.stringify(entry)).join('\n') }] };
     });
 
+    server.registerTool('aidraw_help', {
+      title: 'Learn the AIDraw MCP workflow',
+      description: 'Return concise model-callable guidance for one workflow topic. Start with quickstart; use the optional aidraw://guide resource for the complete reference.',
+      inputSchema: HelpInputSchema,
+      outputSchema: HelpOutputSchema,
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    }, async ({ topic }) => jsonText(aidrawHelp(topic)));
+
     server.registerTool('session_manage', {
       title: 'Manage AIDraw agent session',
-      description: 'Join, identify, inspect, or leave the live AIDraw workspace.',
-      inputSchema: z.object({ action: z.enum(['join', 'inspect', 'leave']), name: z.string().min(1).max(80).optional(), color: z.string().optional(), documentId: z.string().optional(), model: z.string().trim().min(1).max(200).optional(), reasoningEffort: z.enum(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']).optional(), taskId: z.string().trim().min(1).max(200).optional() }).strict(),
+      description: 'Join, identify, inspect, or leave the live AIDraw workspace. Each action has its own strict input branch; see aidraw_help topic=quickstart.',
+      inputSchema: SessionManageInputSchema,
+      outputSchema: SessionManageOutputSchema,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    }, async ({ action, name, color, documentId, model, reasoningEffort, taskId }) => {
-      if (action === 'join') {
-        if (name) session.actor.name = name;
-        session.actor.color = normalizeColor(color, session.actor.color);
-        if (model || reasoningEffort || taskId) session.actor.client = { model, reasoningEffort, taskId };
+    }, async (request) => {
+      let documentId: string | undefined;
+      if (request.action === 'join') {
+        documentId = request.documentId;
+        if (request.name) session.actor.name = request.name;
+        session.actor.color = normalizeColor(request.color, session.actor.color);
+        if (request.model || request.reasoningEffort || request.taskId) session.actor.client = { model: request.model, reasoningEffort: request.reasoningEffort, taskId: request.taskId };
         this.documents.updatePresence({ actor: session.actor, documentId, queueDepth: 0, status: 'idle' });
-      } else if (action === 'leave') this.documents.removePresence(session.actor.id);
+      } else if (request.action === 'inspect') {
+        documentId = request.documentId;
+      } else if (request.action === 'leave') this.documents.removePresence(session.actor.id);
       const activeDocumentId = this.documents.getActiveDocumentId();
       const inspectedDocumentId = documentId ?? activeDocumentId;
       return jsonText({
@@ -937,28 +1111,32 @@ export class McpHost {
           humanOccupancy: inspectedDocumentId ? this.documents.getHumanOccupancy(inspectedDocumentId) : undefined,
           editorAdvisory: this.documents.getEditorAdvisory(),
         },
+        next: inspectedDocumentId
+          ? { tool: 'canvas_observe', arguments: { documentId: inspectedDocumentId }, guidance: 'Observe canonical state and current revisions before proposing mutations.' }
+          : { tool: 'document_manage', arguments: { action: 'list' }, guidance: 'List open documents or create a new document before observing a canvas.' },
       });
     });
 
     server.registerTool('canvas_observe', {
       title: 'Observe AIDraw canvas',
-      description: 'Read a structured document snapshot or revision diff and optionally capture a bounded layer/frame/region PNG with nearest-neighbor scaling.',
+      description: 'Read canonical state before mutation: a full snapshot or sinceRevision diff, with optional bounded visual/fragment/path evidence. Explicit documentId is safest for multi-document work; see aidraw_help topic=canvas.',
       inputSchema: z.object({
-        documentId: z.string().optional(),
-        sinceRevision: z.number().int().nonnegative().optional(),
-        includePng: z.boolean().default(false),
-        assetId: z.string().min(1).optional(),
-        frameId: z.string().min(1).optional(),
-        layerId: z.string().min(1).optional(),
-        region: ObservationRegionSchema.optional(),
-        scale: z.number().int().min(1).max(16).default(1),
-        background: ObservationBackgroundSchema.default('document'),
-        compareTransactionId: z.string().min(1).optional(),
-        checkpointId: z.string().min(1).optional(),
-        fragment: ObservationFragmentSchema.optional(),
-        pathObjectId: z.string().min(1).optional(),
-        illustrationTimeMs: z.number().int().min(0).max(600_000).optional(),
+        documentId: DocumentIdInputSchema.optional().describe('Explicit target; omitted means the active document.'),
+        sinceRevision: z.number().int().nonnegative().optional().describe('Return canonical changes after this revision instead of the complete current document.'),
+        includePng: z.boolean().default(false).describe('Include bounded rendered PNG evidence; false keeps observation structured-only.'),
+        assetId: z.string().min(1).optional().describe('Optional pixel asset selector for rendering or fragment work.'),
+        frameId: z.string().min(1).optional().describe('Optional sprite frame selector.'),
+        layerId: z.string().min(1).optional().describe('Optional illustration or pixel layer selector.'),
+        region: ObservationRegionSchema.optional().describe('Optional bounded source-space crop.'),
+        scale: z.number().int().min(1).max(16).default(1).describe('Integer nearest-neighbor PNG scale.'),
+        background: ObservationBackgroundSchema.default('document').describe('PNG compositing background policy.'),
+        compareTransactionId: z.string().min(1).optional().describe('Request retained race-free before/after PNG evidence for the latest matching transaction; requires includePng.'),
+        checkpointId: z.string().min(1).optional().describe('Observe one named checkpoint instead of current canonical state; cannot combine with compareTransactionId.'),
+        fragment: ObservationFragmentSchema.optional().describe('Export one bounded self-contained illustration-object or pixel-asset fragment.'),
+        pathObjectId: z.string().min(1).optional().describe('Inspect normalized path nodes for one illustration path.'),
+        illustrationTimeMs: z.number().int().min(0).max(600_000).optional().describe('Optional illustration animation sample time for PNG rendering.'),
       }).strict().refine((value) => !(value.checkpointId && value.compareTransactionId), 'Checkpoint and transaction comparisons cannot be combined.'),
+      outputSchema: CanvasObserveOutputSchema,
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     }, async ({ documentId, sinceRevision, includePng, assetId, frameId, layerId, region, scale, background, compareTransactionId, checkpointId, fragment, pathObjectId, illustrationTimeMs }) => {
       const id = documentId ?? this.documents.getActiveDocumentId();
@@ -1017,26 +1195,30 @@ export class McpHost {
 
     server.registerTool('canvas_apply', {
       title: 'Apply visible AIDraw transaction',
-      description: 'Submit up to 256 idempotent canvas operations. Agent work plays visibly and respects human locks and entity revisions. Optional durable batch metadata sequences resumable multi-transaction work.',
+      description: 'Submit up to 256 idempotent canvas operations. Observe first, carry expected revisions inside operations, respect human locks, and use a stable clientOperationId only to retry the same logical transaction. See aidraw_help topic=operations.',
       inputSchema: z.object({
-        documentId: z.string(),
-        clientOperationId: z.string().min(1).max(200),
-        label: z.string().min(1).max(200),
-        operations: z.array(z.record(z.string(), z.unknown())).min(1).max(256),
-        playback: z.object({ mode: z.enum(['animated', 'instant']).default('animated'), speed: z.number().min(0.25).max(4).default(1) }).optional(),
-        batch: z.object({ jobId: z.string().min(1), resumeToken: z.string().min(32).max(200), sequence: z.number().int().min(0).max(9_999) }).strict().optional(),
+        documentId: DocumentIdInputSchema,
+        clientOperationId: z.string().min(1).max(200).describe('Caller-stable idempotency key. Reuse only for an exact retry; use a fresh key for a changed intent.'),
+        label: z.string().min(1).max(200).describe('Human-visible transaction label used in playback, history, and attribution.'),
+        operations: z.array(z.record(z.string(), z.unknown())).min(1).max(256).describe('Canonical or semantic operation objects. Read aidraw_help topic=operations and canvas_observe before constructing them.'),
+        playback: z.object({ mode: z.enum(['animated', 'instant']).default('animated'), speed: z.number().min(0.25).max(4).default(1) }).optional().describe('Visible playback policy; instant still uses the canonical scheduler and lock policy.'),
+        batch: z.object({ jobId: JobIdInputSchema, resumeToken: z.string().min(32).max(200).describe('Private batch capability returned by job_manage action=start-batch.'), sequence: z.number().int().min(0).max(9_999).describe('Exact nextSequence returned by start/resume.') }).strict().optional(),
       }).strict(),
+      outputSchema: CanvasApplyOutputSchema,
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     }, async ({ documentId, clientOperationId, label, operations, playback, batch }) => {
       const document = this.documents.getDocument(documentId);
-      if (!document) return jsonText({ status: 'conflict', message: 'Document is not open.' });
+      if (!document) return jsonText({ status: 'conflict', message: 'Document is not open.', next: { tool: 'document_manage', arguments: { action: 'list' }, guidance: 'Refresh the open-document list before choosing a mutation target.' } });
       const parsedOperations: CanvasOperation[] = [];
       for (const operation of operations) parsedOperations.push(...await expandAgentCanvasOperation(document, operation, this.quantizeImage, session.actor));
       if (parsedOperations.length === 0 || parsedOperations.length > 256) return jsonText({ status: 'conflict', message: 'Semantic expansion must produce 1–256 canonical operations.' });
       const transaction: CanvasTransaction = { id: createId('tx'), clientOperationId, documentId, actor: structuredClone(session.actor), label, createdAt: nowIso(), operations: parsedOperations, playback: playback ?? { mode: 'animated', speed: 1 } };
       if (batch) {
         const preparation = await this.batches.prepare(batch, documentId, clientOperationId, session.actor);
-        if (!preparation.accepted) return jsonText({ ...preparation.response, batch: { jobId: batch.jobId, expectedSequence: preparation.expectedSequence, duplicate: preparation.duplicate } });
+        if (!preparation.accepted) {
+          const response = { ...preparation.response, batch: { jobId: batch.jobId, expectedSequence: preparation.expectedSequence, duplicate: preparation.duplicate } };
+          return jsonText({ ...response, next: canvasRetryNextStep(String(response.status), documentId) });
+        }
         this.activeBatchTransactions.set(batch.jobId, transaction.id);
       }
       let result;
@@ -1044,85 +1226,74 @@ export class McpHost {
       catch (error) { result = { status: 'conflict' as const, message: error instanceof Error ? error.message : 'The batch transaction failed.' }; }
       if (batch && this.activeBatchTransactions.get(batch.jobId) === transaction.id) this.activeBatchTransactions.delete(batch.jobId);
       const batchJob = batch ? await this.batches.finish(batch, clientOperationId, result) : undefined;
-      return jsonText({ ...result, batch: batchJob ? { jobId: batchJob.id, progress: batchJob.progress, status: batchJob.status, ...(batchJob.result as Record<string, unknown>) } : undefined });
+      return jsonText({ ...result, batch: batchJob ? { jobId: batchJob.id, progress: batchJob.progress, status: batchJob.status, ...(batchJob.result as Record<string, unknown>) } : undefined, next: canvasRetryNextStep(result.status, documentId) });
     });
 
     server.registerTool('history_manage', {
       title: 'Manage this agent’s AIDraw history',
-      description: 'Undo or redo only this session’s transactions, replay a durable trace, or create/list/restore/delete/selectively merge named document checkpoints.',
-      inputSchema: z.object({ action: z.enum(['undo', 'redo', 'replay', 'checkpoint-list', 'checkpoint-create', 'checkpoint-restore', 'checkpoint-merge', 'checkpoint-delete']), documentId: z.string().optional(), transactionId: z.string().min(1).optional(), checkpointId: z.string().min(1).optional(), sourceIds: z.array(z.string().min(1)).min(1).max(32).optional(), name: z.string().trim().min(1).max(80).optional() }).strict(),
+      description: 'Undo or redo only this actor’s transactions, replay a durable trace, or manage named checkpoints. Each action exposes only its valid required inputs; see aidraw_help topic=history.',
+      inputSchema: HistoryManageInputSchema,
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
-    }, async ({ action, documentId, transactionId, checkpointId, sourceIds, name }) => {
-      if (action === 'undo') return jsonText(await this.documents.undo(documentId, session.actor));
-      if (action === 'redo') return jsonText(await this.documents.redo(documentId, session.actor));
-      const id = documentId ?? this.documents.getActiveDocumentId();
-      if (!id) return action === 'replay' ? jsonText({ replaying: false, reason: 'no_open_document' }) : jsonText({ error: 'no_open_document' });
-      if (action === 'checkpoint-list') return jsonText({ documentId: id, checkpoints: this.documents.listCheckpoints(id) });
-      if (action === 'checkpoint-create') {
-        if (!name) return jsonText({ error: 'checkpoint_name_required' });
-        try { return jsonText({ checkpoint: this.documents.createCheckpoint(id, name, session.actor) }); }
+    }, async (request) => {
+      if (request.action === 'undo') return jsonText(await this.documents.undo(request.documentId, session.actor));
+      if (request.action === 'redo') return jsonText(await this.documents.redo(request.documentId, session.actor));
+      const id = request.documentId ?? this.documents.getActiveDocumentId();
+      if (!id) return request.action === 'replay' ? jsonText({ replaying: false, reason: 'no_open_document' }) : jsonText({ error: 'no_open_document' });
+      if (request.action === 'checkpoint-list') return jsonText({ documentId: id, checkpoints: this.documents.listCheckpoints(id) });
+      if (request.action === 'checkpoint-create') {
+        try { return jsonText({ checkpoint: this.documents.createCheckpoint(id, request.name, session.actor) }); }
         catch (error) { return jsonText({ error: 'checkpoint_create_failed', message: error instanceof Error ? error.message : String(error) }); }
       }
-      if (action === 'checkpoint-restore') {
-        if (!checkpointId) return jsonText({ status: 'conflict', message: 'checkpointId is required.' });
-        return jsonText(await this.documents.restoreCheckpoint(id, checkpointId, session.actor));
+      if (request.action === 'checkpoint-restore') {
+        return jsonText(await this.documents.restoreCheckpoint(id, request.checkpointId, session.actor));
       }
-      if (action === 'checkpoint-merge') {
-        if (!checkpointId || !sourceIds) return jsonText({ status: 'conflict', message: 'checkpointId and sourceIds are required.' });
-        return jsonText(await this.documents.mergeCheckpoint(id, checkpointId, sourceIds, session.actor));
+      if (request.action === 'checkpoint-merge') {
+        return jsonText(await this.documents.mergeCheckpoint(id, request.checkpointId, request.sourceIds, session.actor));
       }
-      if (action === 'checkpoint-delete') {
-        if (!checkpointId) return jsonText({ deleted: false, message: 'checkpointId is required.' });
-        return jsonText(this.documents.deleteCheckpoint(id, checkpointId, session.actor));
+      if (request.action === 'checkpoint-delete') {
+        return jsonText(this.documents.deleteCheckpoint(id, request.checkpointId, session.actor));
       }
-      if (!transactionId) return jsonText({ replaying: false, reason: 'transaction_id_required' });
-      const trace = await this.documents.findTrace(id, transactionId);
+      const trace = await this.documents.findTrace(id, request.transactionId);
       if (!trace) return jsonText({ replaying: false, reason: 'trace_not_found' });
-      return jsonText({ ...this.scheduler.replay(trace.transaction), documentId: id, transactionId });
+      return jsonText({ ...this.scheduler.replay(trace.transaction), documentId: id, transactionId: request.transactionId });
     });
 
     server.registerTool('document_manage', {
       title: 'Manage AIDraw documents',
-      description: 'List, create, activate, open, save, save-as, or close documents. New file paths and overwrites become visible in-app approval jobs.',
-      inputSchema: z.object({
-        action: z.enum(['list', 'new', 'activate', 'open', 'save', 'save-as', 'close']),
-        documentId: z.string().optional(),
-        path: z.string().optional(),
-        kind: z.enum(['illustration', 'sprite', 'tilemap', 'project']).optional(),
-        name: z.string().trim().min(1).max(200).optional(),
-        width: z.number().int().min(1).max(8_192).optional(),
-        height: z.number().int().min(1).max(8_192).optional(),
-        background: z.union([z.string().regex(/^#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?$/), z.null()]).optional(),
-        orientation: z.enum(['orthogonal', 'isometric']).optional(),
-        infinite: z.boolean().optional(),
-        tileWidth: z.number().int().min(1).max(1_024).optional(),
-        tileHeight: z.number().int().min(1).max(1_024).optional(),
-      }).strict(),
+      description: 'List, create, activate, open, save, save-as, or close documents. Action-specific branches show exact required fields; file reads, new paths, and overwrites become human-visible approval jobs. See aidraw_help topic=documents or files.',
+      inputSchema: DocumentManageInputSchema,
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
-    }, async ({ action, documentId, path, kind, name, width, height, background, orientation, infinite, tileWidth, tileHeight }) => {
-      if (action === 'list') {
+    }, async (request) => {
+      if (request.action === 'list') {
         const snapshot = this.documents.snapshot(session.actor.id);
         return jsonText({ activeDocumentId: snapshot.activeDocumentId, documents: snapshot.documents });
       }
-      if (action === 'new') {
-        const options = NewDocumentOptionsSchema.parse({ kind: kind ?? 'illustration', name, width, height, background, orientation, infinite, tileWidth, tileHeight });
+      if (request.action === 'new') {
+        const options = NewDocumentOptionsSchema.parse({ kind: request.kind, name: request.name, width: request.width, height: request.height, background: request.background, orientation: request.orientation, infinite: request.infinite, tileWidth: request.tileWidth, tileHeight: request.tileHeight });
         return jsonText(this.documents.create(options));
       }
-      if (action === 'activate' && documentId) return jsonText(this.documents.activate(documentId));
-      if (action === 'open' && path) return approvalJob('import', 'Open AIDraw document', 'Review the exact path before AIDraw reads this native document.', documentId, { action, path });
-      if (action === 'save' && documentId) {
-        const document = this.documents.getDocument(documentId);
-        if (!document?.filePath) return jsonText({ error: 'approval_required', message: 'Use the AIDraw UI to choose a save path first.' });
-        return approvalJob('save', 'Overwrite AIDraw document', 'Review the existing destination before the agent overwrites it.', documentId, { action, path: document.filePath });
+      if (request.action === 'activate') return jsonText(this.documents.activate(request.documentId));
+      if (request.action === 'open') return approvalJob('import', 'Open AIDraw document', 'Review the exact path before AIDraw reads this native document.', undefined, request);
+      if (request.action === 'save') {
+        const document = this.documents.getDocument(request.documentId);
+        if (!document?.filePath) return jsonText({ error: 'approval_required', message: 'This document has no canonical path. Call save-as with an exact path for human review.', next: { tool: 'document_manage', guidance: 'Call action=save-as with this documentId and an exact new .aidraw destination.' } });
+        return approvalJob('save', 'Overwrite AIDraw document', 'Review the existing destination before the agent overwrites it.', request.documentId, { action: request.action, path: document.filePath });
       }
-      if (action === 'save-as' && documentId && path) return approvalJob('save', 'Save AIDraw document as', 'Review the destination and overwrite impact before AIDraw writes this native document.', documentId, { action, path });
-      if (action === 'close' && documentId) return jsonText(await this.documents.close(documentId, false));
-      return jsonText({ error: 'invalid_arguments' });
+      if (request.action === 'save-as') return approvalJob('save', 'Save AIDraw document as', 'Review the destination and overwrite impact before AIDraw writes this native document.', request.documentId, request);
+      return jsonText(await this.documents.close(request.documentId, false));
     });
 
     server.registerTool('asset_import', {
-      title: 'Import asset', description: 'Import an exact path after in-app review; optional sprite-sheet slicing, indexed palette, and pixel-project relink modes use the same human-visible file authority. This tool never enumerates or deletes files.',
-      inputSchema: z.object({ documentId: z.string().optional(), path: z.string().min(1), pixelMode: z.boolean().default(false), spriteSheet: SpriteSheetImportOptionsSchema.optional(), paletteMode: z.enum(['replace-slots', 'append-unique']).optional(), projectLinkId: z.string().min(1).optional() }).strict(),
+      title: 'Import asset', description: 'Request a read of one exact path after human review. Optional sprite-sheet, indexed-palette, and project-relink modes are mutually exclusive and retain the same file authority; see aidraw_help topic=files. This tool never enumerates or deletes files.',
+      inputSchema: z.object({
+        documentId: DocumentIdInputSchema.optional().describe('Target document; required for palette import and project relink, optional for ordinary raster/native import.'),
+        path: z.string().min(1).describe('Exact local source path shown to the human before any read.'),
+        pixelMode: z.boolean().default(false).describe('Import ordinary raster input into the pixel workflow.'),
+        spriteSheet: SpriteSheetImportOptionsSchema.optional().describe('Sprite-sheet slicing mode; cannot combine with paletteMode or projectLinkId.'),
+        paletteMode: z.enum(['replace-slots', 'append-unique']).optional().describe('Indexed palette import mode; requires documentId and cannot combine with other modes.'),
+        projectLinkId: z.string().min(1).optional().describe('Existing project link to relink; requires a saved pixel document and cannot combine with other modes.'),
+      }).strict(),
+      outputSchema: ApprovalToolOutputSchema,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     }, async ({ documentId, path, pixelMode, spriteSheet, paletteMode, projectLinkId }) => {
       if ([spriteSheet, paletteMode, projectLinkId].filter(Boolean).length > 1) return jsonText({ error: 'invalid_arguments', message: 'Choose spriteSheet, paletteMode, or projectLinkId, not more than one.' });
@@ -1142,8 +1313,16 @@ export class McpHost {
     });
 
     server.registerTool('document_export', {
-      title: 'Export document', description: 'Export a document or extract one cached pixel-project link to an exact path after in-app review, including every overwrite. Pixel presentation exports can use integer nearest-neighbor scaling.',
-      inputSchema: z.object({ documentId: z.string(), path: z.string().min(1), format: z.enum(['png', 'jpeg', 'webp', 'svg', 'pdf', 'psd', 'gif', 'apng', 'sprite-sheet', 'tiled-json', 'tiled-xml']).optional(), scale: z.number().int().min(1).max(64).default(1), animationTagId: z.string().min(1).optional(), projectLinkId: z.string().min(1).optional() }).strict(),
+      title: 'Export document', description: 'Request one exact no-overwrite export target after human review, including companion paths. Supply format for document export, or projectLinkId alone for cached-link extraction; see aidraw_help topic=files.',
+      inputSchema: z.object({
+        documentId: DocumentIdInputSchema,
+        path: z.string().min(1).describe('Exact destination filename including extension; AIDraw reports every existing target to the human.'),
+        format: z.enum(['png', 'jpeg', 'webp', 'svg', 'pdf', 'psd', 'gif', 'apng', 'sprite-sheet', 'tiled-json', 'tiled-xml']).optional().describe('Required for document export; omit when projectLinkId extracts its verified cached source.'),
+        scale: z.number().int().min(1).max(64).default(1).describe('Integer nearest-neighbor presentation scale where supported.'),
+        animationTagId: z.string().min(1).optional().describe('Optional named animation tag limiting animated export.'),
+        projectLinkId: z.string().min(1).optional().describe('Extract exactly one cached project link; cannot combine with format, animationTagId, or non-default scale.'),
+      }).strict(),
+      outputSchema: ApprovalToolOutputSchema,
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     }, async ({ documentId, path, format, scale, animationTagId, projectLinkId }) => {
       if (!extname(path)) return jsonText({ error: 'extension_required', message: 'Provide an exact export filename including its extension.' });
@@ -1163,53 +1342,64 @@ export class McpHost {
     });
 
     server.registerTool('generation_start', {
-      title: 'Generate imagery', description: 'Create a provider-specific generation approval showing prompt, sources, result count, and potential paid requests.',
-      inputSchema: z.object({ documentId: z.string(), provider: z.enum(['openai', 'stability', 'comfyui']), mode: z.enum(['create', 'edit', 'inpaint', 'outpaint', 'variation']), prompt: z.string().min(1), negativePrompt: z.string().optional(), sourceAssetIds: z.array(z.string()).default([]), maskAssetId: z.string().optional(), size: z.union([z.literal('auto'), z.object({ width: z.number().int().positive(), height: z.number().int().positive() })]).default('auto'), aspectIntent: z.enum(['canvas', 'square', 'portrait', 'landscape']).optional(), resultCount: z.number().int().min(1).max(4).default(1), seed: z.number().int().optional(), providerOptions: z.record(z.string(), z.unknown()).default({}) }),
+      title: 'Generate imagery', description: 'Create a human-only provider approval showing actor, prompt, sources, mask, result count, and possible paid requests. No provider call begins before approval; see aidraw_help topic=jobs or safety.',
+      inputSchema: z.object({
+        documentId: DocumentIdInputSchema,
+        provider: z.enum(['openai', 'stability', 'comfyui']).describe('Configured provider presented to the human; the call may be paid after approval.'),
+        mode: z.enum(['create', 'edit', 'inpaint', 'outpaint', 'variation']).describe('Workflow mode; source and mask requirements remain provider/mode validated.'),
+        prompt: z.string().min(1).describe('Private generation prompt shown in the approval, never included in public job summaries.'),
+        negativePrompt: z.string().optional().describe('Optional private negative prompt.'),
+        sourceAssetIds: z.array(z.string()).default([]).describe('Canonical embedded source asset IDs.'),
+        maskAssetId: z.string().optional().describe('Optional canonical embedded mask asset ID where the mode supports it.'),
+        size: z.union([z.literal('auto'), z.object({ width: z.number().int().positive(), height: z.number().int().positive() })]).default('auto').describe('Requested output size or provider-managed automatic sizing.'),
+        aspectIntent: z.enum(['canvas', 'square', 'portrait', 'landscape']).optional(),
+        resultCount: z.number().int().min(1).max(4).default(1).describe('Potential provider request/output count shown before approval.'),
+        seed: z.number().int().optional().describe('Optional deterministic provider seed where supported.'),
+        providerOptions: z.record(z.string(), z.unknown()).default({}).describe('Provider-specific bounded options validated against the selected contract.'),
+      }).strict(),
+      outputSchema: ApprovalToolOutputSchema,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     }, async (request) => { try { validateGenerationRequest(this.documents.getDocument(request.documentId), request as GenerationRequest); return approvalJob('generation', 'Generate imagery', 'Review provider, prompt, sources, mask, result count, and the potentially paid request count.', request.documentId, request, false); } catch (error) { return jsonText({ error: 'unsupported_generation_request', message: error instanceof Error ? error.message : String(error) }); } });
 
     server.registerTool('job_manage', {
       title: 'Inspect or cancel AIDraw jobs',
-      description: 'List this session’s jobs, inspect or briefly wait for one, report a user-approval dependency, cancel owned work, or start/resume a durable transaction batch.',
-      inputSchema: z.object({
-        action: z.enum(['list', 'inspect', 'wait', 'approve-dependent', 'cancel', 'start-batch', 'resume-batch']),
-        jobId: z.string().min(1).optional(),
-        timeoutMs: z.number().int().min(0).max(30_000).default(0),
-        documentId: z.string().min(1).optional(),
-        totalTransactions: z.number().int().min(1).max(10_000).optional(),
-        label: z.string().min(1).max(200).optional(),
-        resumeToken: z.string().min(32).max(200).optional(),
-      }).strict(),
+      description: 'List owner-private redacted jobs, inspect/wait/cancel one, report a human approval dependency, or start/resume a durable transaction batch. Each action exposes only its valid required fields; see aidraw_help topic=jobs.',
+      inputSchema: JobManageInputSchema,
+      outputSchema: JobManageOutputSchema,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    }, async ({ action, jobId, timeoutMs, documentId, totalTransactions, label, resumeToken }) => {
-      if (action === 'start-batch') {
-        if (!documentId || totalTransactions === undefined) return jsonText({ error: 'batch_arguments_required', message: 'documentId and totalTransactions are required.' });
+    }, async (request) => {
+      if (request.action === 'start-batch') {
         try {
-          const started = await this.batches.start(documentId, totalTransactions, label ?? 'Agent batch', session.actor);
-          return jsonText({ job: agentJobSummary(started.job), resumeToken: started.resumeToken, nextSequence: started.nextSequence });
+          const started = await this.batches.start(request.documentId, request.totalTransactions, request.label ?? 'Agent batch', session.actor);
+          return jsonText({
+            job: agentJobSummary(started.job), resumeToken: started.resumeToken, nextSequence: started.nextSequence,
+            next: { tool: 'canvas_apply', guidance: 'Submit the first transaction with batch.jobId, the private resumeToken returned here, and sequence=nextSequence. Retain the token privately.' },
+          });
         } catch (error) { return jsonText({ error: 'batch_start_failed', message: error instanceof Error ? error.message : 'The durable batch could not start.' }); }
       }
-      if (action === 'resume-batch') {
-        if (!jobId || !resumeToken) return jsonText({ error: 'batch_credentials_required', message: 'jobId and resumeToken are required.' });
-        const job = await this.batches.resume(jobId, resumeToken, session.actor);
-        return job ? jsonText({ job: agentJobSummary(job), nextSequence: (job.result as { nextSequence?: number } | undefined)?.nextSequence }) : jsonText({ error: 'job_not_found' });
+      if (request.action === 'resume-batch') {
+        const job = await this.batches.resume(request.jobId, request.resumeToken, session.actor);
+        const nextSequence = (job?.result as { nextSequence?: number } | undefined)?.nextSequence;
+        return job ? jsonText({
+          job: agentJobSummary(job), nextSequence,
+          next: { tool: 'canvas_apply', guidance: 'Continue with the retained private resumeToken and the returned nextSequence; do not replay a different logical transaction under an old clientOperationId.' },
+        }) : jsonText({ error: 'job_not_found' });
       }
-      if (action === 'list') return jsonText({ jobs: this.documents.listJobs(session.actor.id).map(agentJobSummary) });
-      if (!jobId) return jsonText({ error: 'job_id_required' });
-      let job = this.documents.getJob(jobId);
+      if (request.action === 'list') return jsonText({ jobs: this.documents.listJobs(session.actor.id).map(agentJobSummary) });
+      let job = this.documents.getJob(request.jobId);
       if (!job || job.actor.id !== session.actor.id) return jsonText({ error: 'job_not_found' });
-      if (action === 'cancel' && job && !['completed', 'failed', 'cancelled'].includes(job.status)) {
+      if (request.action === 'cancel' && !['completed', 'failed', 'cancelled'].includes(job.status)) {
         if (job.kind === 'batch') {
-          job = await this.batches.cancel(jobId, session.actor.id) ?? job;
-          const transactionId = this.activeBatchTransactions.get(jobId); if (transactionId) this.scheduler.cancelTransaction(transactionId);
+          job = await this.batches.cancel(request.jobId, session.actor.id) ?? job;
+          const transactionId = this.activeBatchTransactions.get(request.jobId); if (transactionId) this.scheduler.cancelTransaction(transactionId);
         }
-        else this.cancelJob?.(jobId); job = this.documents.getJob(jobId) ?? job;
+        else this.cancelJob?.(request.jobId); job = this.documents.getJob(request.jobId) ?? job;
         if (!['cancelled', 'completed', 'failed'].includes(job.status)) { job = { ...job, status: 'cancelled', updatedAt: nowIso(), message: 'Cancelled by the originating agent.' }; this.documents.upsertJob(job); }
-      } else if (action === 'wait' && job && timeoutMs > 0) {
-        const deadline = Date.now() + timeoutMs;
+      } else if (request.action === 'wait' && request.timeoutMs > 0) {
+        const deadline = Date.now() + request.timeoutMs;
         while (Date.now() < deadline && ['queued', 'running', 'waiting-for-user'].includes(job.status)) {
           await new Promise((resolve) => setTimeout(resolve, 100));
-          job = this.documents.getJob(jobId) ?? job;
+          job = this.documents.getJob(request.jobId) ?? job;
         }
       }
       return jsonText(agentJobSummary(job));

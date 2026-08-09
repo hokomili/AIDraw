@@ -55,6 +55,7 @@ const api: AIDrawDesktopAPI = {
   replayTrace: (documentId, transactionId) => ipcRenderer.invoke(IPC.replayTrace, documentId, transactionId),
   updateEditorAdvisory: (state) => ipcRenderer.invoke(IPC.editorAdvisory, state),
   exportRendererDiagnostics: (detail) => ipcRenderer.invoke(IPC.rendererDiagnosticsExport, detail),
+  injectRendererRecoveryTestEvent: () => ipcRenderer.invoke(IPC.rendererRecoveryTestEvent),
   onEvent: (callback) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: WorkspaceEvent) => callback(payload);
     ipcRenderer.on(IPC.event, listener);

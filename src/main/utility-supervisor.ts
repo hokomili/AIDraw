@@ -3,10 +3,55 @@ import { createId, type AIDrawDocument, type PaletteEntry } from '@aidraw/core';
 import type { ExportFormat, ExportOptions } from '../common/contracts';
 import type { ExportArtifact } from './export-document';
 import type { QuantizeImageOptions } from './quantize-image';
-import type { ExportUtilityRequest, QuantizeUtilityRequest, UtilityCancelRequest, UtilityRequest, UtilityResponse } from './utility-contract';
+import {
+  assertExportUtilityResponse,
+  assertNormalizeGenerationAcceptanceInput,
+  assertNormalizeGenerationAcceptanceUtilityResponse,
+  assertGenerationUtilityResponse,
+  isGenerationProgressUtilityResponse,
+  assertObservationUtilityResponse,
+  assertQuantizeUtilityResponse,
+  assertQuantizeUtilityParameters,
+  validateImportUtilityResponse,
+  MAX_QUANTIZE_UTILITY_SOURCE_BYTES,
+  type ExportUtilityRequest,
+  type QuantizeUtilityRequest,
+  type UtilityCancelRequest,
+  type UtilityContainmentProbeRequest,
+  type UtilityRequest,
+  type UtilityResponse,
+} from './utility-contract';
 import type { SpriteSheetSliceOptions } from '../common/sprite-sheet';
 import type { ObservationRequest } from './capture-observation';
-import type { GeneratedOutput, GenerationRequest } from '../common/generation';
+import type { GeneratedAcceptancePreparation, GeneratedOutput, GenerationRequest } from '../common/generation';
+import {
+  FND09_OBSERVATION_CODEC_E2E_MAX_PIXELS,
+  FND09_OBSERVATION_CODEC_E2E_REQUEST,
+  isFnd09ObservationCodecE2eEnabled,
+} from './utility-observation-codec-e2e-contract';
+import {
+  FND09_QUANTIZATION_RESULT_E2E_HEIGHT,
+  FND09_QUANTIZATION_RESULT_E2E_OPTIONS,
+  FND09_QUANTIZATION_RESULT_E2E_PALETTE,
+  FND09_QUANTIZATION_RESULT_E2E_TINY_PNG_BASE64,
+  FND09_QUANTIZATION_RESULT_E2E_WIDTH,
+  isFnd09QuantizationResultE2eEnabled,
+  type Fnd09QuantizationResultFault,
+} from './utility-quantization-result-e2e-contract';
+import {
+  isFnd09ExportResultE2eEnabled,
+  type Fnd09ExportResultFault,
+} from './utility-export-result-e2e-contract';
+import {
+  isFnd09ImportResultE2eEnabled,
+  type Fnd09ImportResultFault,
+} from './utility-import-result-e2e-contract';
+import {
+  FND09_GENERATION_RESULT_E2E_PROMPT,
+  FND09_GENERATION_RESULT_E2E_SEED,
+  isFnd09GenerationResultE2eEnabled,
+  type Fnd09GenerationResultFixture,
+} from './utility-generation-result-e2e-contract';
 
 export interface UtilityProcessLike {
   on(event: 'message', listener: (message: unknown) => void): this;
@@ -17,6 +62,19 @@ export interface UtilityProcessLike {
 }
 
 export type UtilityFork = () => UtilityProcessLike | Promise<UtilityProcessLike>;
+
+/** One active request is separate; this is the maximum retained waiting queue per supervisor lane. */
+export const MAX_QUEUED_UTILITY_TASKS = 32;
+
+export class UtilityBackpressureError extends Error {
+  readonly code = 'utility_queue_full';
+  readonly retryable = true;
+
+  constructor() {
+    super(`Utility queue reached the ${MAX_QUEUED_UTILITY_TASKS}-task waiting limit. Retry after current work completes.`);
+    this.name = 'UtilityBackpressureError';
+  }
+}
 
 interface PendingTask {
   request: UtilityRequest;
@@ -66,6 +124,12 @@ export class RasterUtilitySupervisor {
     options: QuantizeImageOptions,
     control: { signal?: AbortSignal; timeoutMs?: number } = {},
   ): Promise<Array<{ x: number; y: number; index: number }>> {
+    try {
+      if (encoded.byteLength > MAX_QUANTIZE_UTILITY_SOURCE_BYTES) throw new Error('Encoded image exceeds the utility input limit.');
+      assertQuantizeUtilityParameters({ width, height, palette, options });
+    } catch (error) {
+      return Promise.reject(error instanceof Error ? error : new Error(String(error)));
+    }
     const request: QuantizeUtilityRequest = {
       id: createId('utility'),
       kind: 'quantize-image',
@@ -77,6 +141,33 @@ export class RasterUtilitySupervisor {
     };
     return this.enqueue(request, control).then((response) => {
       if (response.kind !== 'quantize-image') throw new Error('Raster utility returned the wrong result kind.');
+      return response.changes;
+    });
+  }
+
+  /** Exercise only the fixed isolated packaged-QA quantization result boundary. */
+  runE2eQuantizationResultProbe(
+    fault: Fnd09QuantizationResultFault,
+    control: { signal?: AbortSignal; timeoutMs?: number } = {},
+  ): Promise<Array<{ x: number; y: number; index: number }>> {
+    if (!isFnd09QuantizationResultE2eEnabled({
+      nodeEnv: process.env.NODE_ENV,
+      enabled: process.env.AIDRAW_E2E_UTILITY_QUANTIZATION_RESULT,
+    })) {
+      return Promise.reject(new Error('The quantization-result probe is unavailable outside isolated packaged QA.'));
+    }
+    const request: QuantizeUtilityRequest = {
+      id: createId('utility'),
+      kind: 'quantize-image',
+      encodedBase64: FND09_QUANTIZATION_RESULT_E2E_TINY_PNG_BASE64,
+      width: FND09_QUANTIZATION_RESULT_E2E_WIDTH,
+      height: FND09_QUANTIZATION_RESULT_E2E_HEIGHT,
+      palette: structuredClone(FND09_QUANTIZATION_RESULT_E2E_PALETTE),
+      options: structuredClone(FND09_QUANTIZATION_RESULT_E2E_OPTIONS),
+      e2eResultFault: fault,
+    };
+    return this.enqueue(request, { ...control, timeoutMs: control.timeoutMs ?? 15_000 }).then((response) => {
+      if (response.kind !== 'quantize-image') throw new Error('Raster utility returned the wrong quantization-result probe kind.');
       return response.changes;
     });
   }
@@ -102,6 +193,40 @@ export class RasterUtilitySupervisor {
     });
   }
 
+  /** Exercise only the fixed isolated packaged-QA export artifact boundary. */
+  runE2eExportResultProbe(
+    document: AIDrawDocument,
+    fault: Fnd09ExportResultFault,
+    control: { signal?: AbortSignal; timeoutMs?: number } = {},
+  ): Promise<ExportArtifact> {
+    if (!isFnd09ExportResultE2eEnabled({
+      nodeEnv: process.env.NODE_ENV,
+      enabled: process.env.AIDRAW_E2E_UTILITY_EXPORT_RESULT,
+    })) {
+      return Promise.reject(new Error('The export-result probe is unavailable outside isolated packaged QA.'));
+    }
+    const request: ExportUtilityRequest = {
+      id: createId('utility'),
+      kind: 'export-document',
+      document: structuredClone(document),
+      format: 'sprite-sheet',
+      options: { scale: 1 },
+      e2eArtifactFault: fault,
+    };
+    return this.enqueue(request, { ...control, timeoutMs: control.timeoutMs ?? 15_000 }).then((response) => {
+      if (response.kind !== 'export-document') throw new Error('Raster utility returned the wrong export-result probe kind.');
+      const artifact = response.artifact;
+      return {
+        data: Buffer.from(artifact.dataBase64, 'base64'),
+        mimeType: artifact.mimeType,
+        extension: artifact.extension,
+        report: artifact.report,
+        companion: artifact.companion ? { data: Buffer.from(artifact.companion.dataBase64, 'base64'), extension: artifact.companion.extension, mimeType: artifact.companion.mimeType, name: artifact.companion.name } : undefined,
+        companions: artifact.companions?.map((companion) => ({ data: Buffer.from(companion.dataBase64, 'base64'), extension: companion.extension, mimeType: companion.mimeType, name: companion.name })),
+      };
+    });
+  }
+
   importDocument(
     filePath: string,
     pixelMode: boolean,
@@ -110,6 +235,31 @@ export class RasterUtilitySupervisor {
     const request: Extract<UtilityRequest, { kind: 'import-document' }> = { id: createId('utility'), kind: 'import-document', filePath, pixelMode };
     return this.enqueue(request, { ...control, timeoutMs: control.timeoutMs ?? 300_000 }).then((response) => {
       if (response.kind !== 'import-document') throw new Error('Raster utility returned the wrong result kind.');
+      return { documents: response.documents, warnings: response.warnings };
+    });
+  }
+
+  /** Exercise only the fixed isolated packaged-QA imported-result boundary. */
+  runE2eImportResultProbe(
+    filePath: string,
+    fault: Fnd09ImportResultFault,
+    control: { signal?: AbortSignal; timeoutMs?: number } = {},
+  ): Promise<{ documents: AIDrawDocument[]; warnings: string[] }> {
+    if (!isFnd09ImportResultE2eEnabled({
+      nodeEnv: process.env.NODE_ENV,
+      enabled: process.env.AIDRAW_E2E_UTILITY_IMPORT_RESULT,
+    })) {
+      return Promise.reject(new Error('The import-result probe is unavailable outside isolated packaged QA.'));
+    }
+    const request: Extract<UtilityRequest, { kind: 'import-document' }> = {
+      id: createId('utility'),
+      kind: 'import-document',
+      filePath,
+      pixelMode: false,
+      e2eResultFault: fault,
+    };
+    return this.enqueue(request, { ...control, timeoutMs: control.timeoutMs ?? 15_000 }).then((response) => {
+      if (response.kind !== 'import-document') throw new Error('Raster utility returned the wrong import-result probe kind.');
       return { documents: response.documents, warnings: response.warnings };
     });
   }
@@ -145,6 +295,31 @@ export class RasterUtilitySupervisor {
     });
   }
 
+  /** Exercise only the fixed isolated packaged-QA observation codec boundary. */
+  runE2eObservationCodecProbe(
+    document: AIDrawDocument,
+    control: { signal?: AbortSignal; timeoutMs?: number } = {},
+  ): Promise<Record<string, unknown>> {
+    if (!isFnd09ObservationCodecE2eEnabled({
+      nodeEnv: process.env.NODE_ENV,
+      enabled: process.env.AIDRAW_E2E_UTILITY_OBSERVATION_CODEC,
+    })) {
+      return Promise.reject(new Error('The observation codec probe is unavailable outside isolated packaged QA.'));
+    }
+    const utilityRequest: Extract<UtilityRequest, { kind: 'capture-observation' }> = {
+      id: createId('utility'),
+      kind: 'capture-observation',
+      document: structuredClone(document),
+      request: structuredClone(FND09_OBSERVATION_CODEC_E2E_REQUEST),
+      maxPixels: FND09_OBSERVATION_CODEC_E2E_MAX_PIXELS,
+      e2eCorruptIdat: true,
+    };
+    return this.enqueue(utilityRequest, { ...control, timeoutMs: control.timeoutMs ?? 15_000 }).then((response) => {
+      if (response.kind !== 'capture-observation') throw new Error('Raster utility returned the wrong observation-codec result kind.');
+      return response.result;
+    });
+  }
+
   generate(
     jobId: string,
     document: AIDrawDocument,
@@ -166,8 +341,81 @@ export class RasterUtilitySupervisor {
     });
   }
 
+  /** Exercise only the fixed provider-free packaged-QA generation-result boundary. */
+  runE2eGenerationResultProbe(
+    document: AIDrawDocument,
+    fixture: Fnd09GenerationResultFixture,
+    control: { signal?: AbortSignal; timeoutMs?: number } = {},
+  ): Promise<GeneratedOutput[]> {
+    if (!isFnd09GenerationResultE2eEnabled({
+      nodeEnv: process.env.NODE_ENV,
+      enabled: process.env.AIDRAW_E2E_UTILITY_GENERATION_RESULT,
+    })) {
+      return Promise.reject(new Error('The generation-result probe is unavailable outside isolated packaged QA.'));
+    }
+    const request: Extract<UtilityRequest, { kind: 'generation-run' }> = {
+      id: createId('utility'),
+      kind: 'generation-run',
+      jobId: 'fnd09-generation-result-local-fixture',
+      document: structuredClone(document),
+      request: {
+        documentId: document.id,
+        provider: 'stability',
+        mode: 'create',
+        prompt: FND09_GENERATION_RESULT_E2E_PROMPT,
+        sourceAssetIds: [],
+        size: { width: 1, height: 1 },
+        resultCount: 1,
+        seed: FND09_GENERATION_RESULT_E2E_SEED,
+        providerOptions: {},
+      },
+      e2eResultFixture: fixture,
+    };
+    return this.enqueue(request, { ...control, timeoutMs: control.timeoutMs ?? 15_000 }).then((response) => {
+      if (response.kind !== 'generation-run') throw new Error('Generation utility returned the wrong generation-result probe kind.');
+      return response.outputs;
+    });
+  }
+
+  normalizeGeneratedOutput(
+    output: GeneratedOutput,
+    control: { signal?: AbortSignal; timeoutMs?: number } = {},
+  ): Promise<GeneratedAcceptancePreparation> {
+    try { assertNormalizeGenerationAcceptanceInput(output); }
+    catch (error) { return Promise.reject(error instanceof Error ? error : new Error(String(error))); }
+    const utilityRequest: Extract<UtilityRequest, { kind: 'normalize-generation-acceptance' }> = {
+      id: createId('utility'),
+      kind: 'normalize-generation-acceptance',
+      output: structuredClone(output),
+    };
+    return this.enqueue(utilityRequest, control).then((response) => {
+      if (response.kind !== 'normalize-generation-acceptance') throw new Error('Raster utility returned the wrong generation-acceptance result kind.');
+      return response.result;
+    });
+  }
+
   status(): { running: boolean; pid?: number; queued: number; activeTaskId?: string } {
     return { running: Boolean(this.worker), pid: this.worker?.pid, queued: this.queue.length, activeTaskId: this.current?.request.id };
+  }
+
+  /** Exercise only the fixed isolated packaged-QA crash/hang boundary. */
+  runE2eContainmentProbe(
+    mode: UtilityContainmentProbeRequest['mode'],
+    control: { signal?: AbortSignal; timeoutMs?: number } = {},
+  ): Promise<void> {
+    const enabled = mode === 'pressure-gate'
+      ? process.env.AIDRAW_E2E_UTILITY_PRESSURE === '1'
+      : process.env.AIDRAW_E2E_UTILITY_CONTAINMENT === '1';
+    if (process.env.NODE_ENV !== 'test' || !enabled) {
+      const message = mode === 'pressure-gate'
+        ? 'The utility pressure probe is unavailable outside isolated packaged QA.'
+        : 'The utility containment probe is unavailable outside isolated packaged QA.';
+      return Promise.reject(new Error(message));
+    }
+    const request: UtilityContainmentProbeRequest = { id: createId('utility'), kind: 'containment-probe', mode };
+    return this.enqueue(request, { ...control, timeoutMs: control.timeoutMs ?? 15_000 }).then((response) => {
+      if (response.kind !== 'containment-probe') throw new Error('Raster utility returned the wrong containment-probe result kind.');
+    });
   }
 
   stop(): void {
@@ -209,9 +457,10 @@ export class RasterUtilitySupervisor {
 
   private enqueue(request: UtilityRequest, control: { signal?: AbortSignal; timeoutMs?: number; onProgress?: (progress: number, message: string) => void }): Promise<Extract<UtilityResponse, { ok: true }>> {
     if (this.stopped) return Promise.reject(new Error('Raster utility supervisor is stopped.'));
+    if (control.signal?.aborted) return Promise.reject(abortError());
+    if (this.queue.length >= MAX_QUEUED_UTILITY_TASKS) return Promise.reject(new UtilityBackpressureError());
     return new Promise((resolve, reject) => {
       const task: PendingTask = { request, timeoutMs: control.timeoutMs ?? 120_000, signal: control.signal, onProgress: control.onProgress, resolve, reject };
-      if (control.signal?.aborted) { reject(abortError()); return; }
       task.onAbort = () => this.cancel(request.id);
       control.signal?.addEventListener('abort', task.onAbort, { once: true });
       this.queue.push(task);
@@ -268,15 +517,47 @@ export class RasterUtilitySupervisor {
     const response = value as UtilityResponse;
     if (this.cancelling?.worker === worker && response.id === this.cancelling.taskId && (!response.ok || response.kind !== 'generation-progress')) { this.finishGracefulGenerationCancel(worker, response.id); return; }
     if (worker !== this.worker || !this.current) return;
-    if (response.id !== this.current.request.id || typeof response.ok !== 'boolean') return;
+    if (response.id !== this.current.request.id) return;
+    if (typeof response.ok !== 'boolean') {
+      this.rejectInvalidResponse(worker, this.current, new Error('Raster utility returned a malformed response envelope.'));
+      return;
+    }
     if (response.ok && response.kind === 'generation-progress') {
-      if (Number.isFinite(response.progress) && response.progress >= 0 && response.progress <= 1 && typeof response.message === 'string') this.current.onProgress?.(response.progress, response.message);
+      if (isGenerationProgressUtilityResponse(this.current.request, response)) this.current.onProgress?.(response.progress, response.message);
       return;
     }
     const task = this.current;
+    if (response.ok) {
+      try {
+        if (response.kind !== task.request.kind) throw new Error('Raster utility returned the wrong result kind.');
+        if (task.request.kind === 'quantize-image') assertQuantizeUtilityResponse(task.request, response);
+        if (task.request.kind === 'export-document') assertExportUtilityResponse(task.request, response);
+        if (task.request.kind === 'capture-observation') assertObservationUtilityResponse(task.request, response);
+        if (task.request.kind === 'generation-run') assertGenerationUtilityResponse(task.request, response);
+        if (task.request.kind === 'normalize-generation-acceptance') assertNormalizeGenerationAcceptanceUtilityResponse(task.request, response);
+        if (task.request.kind === 'import-document') {
+          const imported = validateImportUtilityResponse(task.request, response);
+          Object.assign(response, imported);
+        }
+      } catch (error) {
+        this.rejectInvalidResponse(worker, task, error instanceof Error ? error : new Error(String(error)));
+        return;
+      }
+    } else if (!response.error || typeof response.error.code !== 'string' || typeof response.error.message !== 'string') {
+      this.rejectInvalidResponse(worker, task, new Error('Raster utility returned a malformed error response.'));
+      return;
+    }
     this.current = undefined;
     if (response.ok) this.finish(task, undefined, response);
     else this.finish(task, new Error(`${response.error.code}: ${response.error.message}`));
+    void this.pump();
+  }
+
+  private rejectInvalidResponse(worker: UtilityProcessLike, task: PendingTask, error: Error): void {
+    this.current = undefined;
+    this.finish(task, error);
+    if (this.worker === worker) this.worker = undefined;
+    worker.kill();
     void this.pump();
   }
 

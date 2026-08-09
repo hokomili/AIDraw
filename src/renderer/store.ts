@@ -32,7 +32,7 @@ interface EditorState {
   canvasAnimation?: { activeAssetId?: Id; activeFrameId?: Id; activeTagId?: Id; illustrationTimeMs?: number; playing: boolean; onionSkin: boolean; direction: 'forward' | 'reverse' | 'ping-pong' };
   revealRequest?: { id: Id; documentId: Id; objectId: Id };
   reportPulse: number;
-  playbacks: Record<Id, ReplaySource & { documentId: Id; actor: Actor; progress: number; operations: CanvasOperation[]; lane: number }>;
+  playbacks: Record<Id, ReplaySource & { documentId: Id; actor: Actor; label: string; progress: number; operations: CanvasOperation[]; lane: number }>;
   toast?: { id: string; tone: ToastTone; message: string };
   initialize(): Promise<void>;
   setSnapshot(snapshot: WorkspaceSnapshot): void;
@@ -105,6 +105,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
           playbacks[event.transactionId] = {
             documentId: event.documentId,
             actor: event.actor,
+            label: event.label,
             progress: Number.isFinite(event.progress) ? Math.max(0, Math.min(1, event.progress)) : 0,
             operations: safePlaybackOperations(event.operations),
             lane: event.lane,

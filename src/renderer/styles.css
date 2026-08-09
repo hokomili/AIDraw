@@ -105,6 +105,11 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .mode-dot { display: inline-block; width: 8px; height: 8px; flex: 0 0 auto; border-radius: 3px; background: var(--lavender); }
 .mode-dot.pixel { background: var(--teal); border-radius: 2px; }
 .dirty-dot { width: 6px; height: 6px; background: var(--coral); border-radius: 50%; flex: 0 0 auto; }
+.tab-activity-badge { position: relative; width: 17px; height: 17px; flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; border: 1px solid color-mix(in srgb, var(--actor) 72%, white); border-radius: 6px; background: color-mix(in srgb, var(--actor) 15%, white); color: var(--actor); }
+.tab-activity-badge.is-active::after { content: ""; position: absolute; inset: -3px; border: 1px solid color-mix(in srgb, var(--actor) 50%, transparent); border-radius: 8px; animation: tab-activity-pulse 1.25s ease-in-out infinite; }
+.tab-activity-badge.is-complete { background: color-mix(in srgb, var(--actor) 9%, white); opacity: .82; }
+.tab-activity-badge.is-conflict, .tab-activity-badge.is-approval { border-color: #d65a73; background: #fff0f3; color: #ba405d; }
+@keyframes tab-activity-pulse { 0%, 100% { opacity: .3; transform: scale(.9); } 50% { opacity: .9; transform: scale(1.08); } }
 .tab-close { width: 18px; height: 18px; border-radius: 5px; display: inline-flex; align-items: center; justify-content: center; opacity: .2; }
 .document-tab:hover .tab-close, .document-tab.is-active .tab-close { opacity: .6; }
 .tab-close:hover { background: rgba(77, 62, 90, .12); opacity: 1 !important; }
@@ -199,6 +204,14 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .agent-cursor { position: absolute; pointer-events: none; width: 0; height: 0; z-index: 22; filter: drop-shadow(0 2px 2px rgba(30, 22, 38, .2)); }
 .agent-cursor::before { content: ""; position: absolute; width: 12px; height: 16px; background: var(--actor); clip-path: polygon(0 0, 100% 63%, 55% 70%, 40% 100%); }
 .agent-cursor span { position: absolute; left: 11px; top: 12px; white-space: nowrap; padding: 3px 6px; border-radius: 4px 7px 7px 7px; background: var(--actor); color: #fff; font-size: 9px; font-weight: 700; }
+.playback-lanes { position: absolute; left: 18px; top: 18px; z-index: 23; width: 194px; display: grid; gap: 5px; pointer-events: none; }
+.playback-lane { min-width: 0; height: 30px; display: grid; grid-template-columns: 8px 42px minmax(0, 1fr); grid-template-rows: 16px 4px; align-items: center; column-gap: 6px; padding: 4px 8px; border: 1px solid color-mix(in srgb, var(--actor) 34%, #d4ccd5); border-left: 3px solid var(--actor); border-radius: 8px; background: rgba(255, 253, 250, .93); color: #41384b; box-shadow: 0 4px 13px rgba(54, 45, 63, .1); backdrop-filter: blur(9px); }
+.playback-lane-dot { width: 7px; height: 7px; grid-row: 1; border-radius: 50%; background: var(--actor); box-shadow: 0 0 0 2px color-mix(in srgb, var(--actor) 18%, transparent); }
+.playback-lane strong { grid-row: 1; white-space: nowrap; font-size: 8px; letter-spacing: .02em; text-transform: uppercase; }
+.playback-lane-agent { grid-row: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--actor); font-size: 9px; font-weight: 720; }
+.playback-lane progress { grid-column: 1 / 4; grid-row: 2; width: 100%; height: 3px; overflow: hidden; border: 0; border-radius: 3px; background: #e9e3e8; }
+.playback-lane progress::-webkit-progress-bar { background: #e9e3e8; }
+.playback-lane progress::-webkit-progress-value { background: var(--actor); }
 
 .right-sidebar { grid-area: right; background: var(--panel); border-left: 1px solid var(--border); min-height: 0; display: flex; flex-direction: column; z-index: 20; }
 .panel-tabs { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); height: 43px; border-bottom: 1px solid var(--border); flex: 0 0 auto; }
@@ -317,7 +330,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 }
 
 @media (forced-colors: active) {
-  .brand-mark, .mode-dot, .agent-dot, .tiny-actor, .agent-cursor { forced-color-adjust: none; background: Canvas; color: CanvasText; border: 2px solid CanvasText; }
+  .brand-mark, .mode-dot, .agent-dot, .tiny-actor, .agent-cursor, .playback-lane, .tab-activity-badge { forced-color-adjust: none; background: Canvas; color: CanvasText; border: 2px solid CanvasText; }
   .tool-button.is-active, .panel-tabs button.is-active, .document-tab.is-active, .object-row.is-selected { outline: 2px solid Highlight; outline-offset: -2px; }
   .agent-cursor span { background: Canvas; color: CanvasText; border: 1px solid CanvasText; }
   .job-progress span { background: Highlight; }

@@ -1,9 +1,10 @@
 import { createCanvas, type Canvas } from '@napi-rs/canvas';
 import { illustrationAtTime, type AIDrawDocument } from '@aidraw/core';
 import { renderIllustration, renderPixelAsset } from './render-document';
+import { MAX_OBSERVATION_PNG_BYTES } from './utility-contract';
 
 export const MAX_OBSERVATION_PIXELS = 4_194_304;
-export const MAX_OBSERVATION_PNG_BYTES = 4 * 1024 * 1024;
+export { MAX_OBSERVATION_PNG_BYTES } from './utility-contract';
 
 export interface ObservationRequest {
   assetId?: string;

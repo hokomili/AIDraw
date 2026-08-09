@@ -3,6 +3,7 @@ import { nowIso } from './ids';
 import { validateDocument } from './schemas';
 import type { AIDrawDocument } from './model';
 import { normalizePixelDocument } from './normalize';
+import { assertAcyclicReferences } from './reference-graph';
 
 export const CURRENT_SCHEMA_VERSION = 2 as const;
 
@@ -32,7 +33,12 @@ export function migrateDocument(value: unknown): AIDrawDocument {
   if (version === 1) { migrateV1ToV2(source); version = 2; }
   if (version !== CURRENT_SCHEMA_VERSION) throw new Error(`No migration path exists from AIDraw schema ${version}.`);
   let document = validateDocument(source);
-  if (document.kind === 'pixel') document = normalizePixelDocument(document);
+  if (document.kind === 'pixel') {
+    document = normalizePixelDocument(document);
+    for (const asset of Object.values(document.pixelAssets)) if (asset.type === 'sprite') {
+      assertAcyclicReferences(asset.cels, (cel) => cel.linkedToCelId ? [cel.linkedToCelId] : [], 'Pixel sprite cel links contain a cycle.');
+    }
+  }
   if (document.kind === 'pixel') for (const asset of Object.values(document.pixelAssets)) if (asset.type === 'tileset' && !Number.isFinite(asset.firstGid)) asset.firstGid = 1;
   return document;
 }

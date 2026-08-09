@@ -43,6 +43,7 @@ import {
 } from '@aidraw/core';
 import { ArrowLeft, ArrowRight, ChevronLeft, ChevronRight, ClipboardPaste, Copy, Eraser, Eye, FlipHorizontal2, FlipVertical2, Grid3X3, Link2, Move, Palette, Pause, Play, Repeat2, RotateCw, Scaling, Scissors, Trash2, Unlink2 } from 'lucide-react';
 import { useEditorStore } from '../store';
+import { PlaybackLanes } from '../components/PlaybackLanes';
 import { collectReplayMasks, replayPointKey, replayTileLayerKey } from '../replay';
 import { EditorDialog, EntryDialog } from '../components/EditorDialog';
 import { bresenham, ellipsePixels } from './geometry';
@@ -1087,6 +1088,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
         onPointerLeave={() => !start && setCursor(undefined)}
         onWheel={onWheel}
       />
+      <PlaybackLanes playbacks={playbacks} />
       {tileset && <div className="tileset-canvas-label"><Grid3X3 size={14} /><span><strong>Tileset source</strong><small>{tileset.tileWidth} × {tileset.tileHeight}px cells · metadata in Layers</small></span></div>}
       <div className="pixel-floating-controls">
         {hasTimeline && <button className={onionSkin ? 'is-active' : ''} onClick={() => setOnionSkin((value) => !value)} title="Onion skin"><Eye size={14} /> Onion</button>}

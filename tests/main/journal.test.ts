@@ -9,6 +9,15 @@ const temporaryPaths: string[] = [];
 afterEach(async () => { await Promise.all(temporaryPaths.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
 
 describe('crash recovery journal', () => {
+  it('flushes a scheduled compact before its owner may remove the journal root', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-recovery-')); temporaryPaths.push(root);
+    const journal = new RecoveryJournal(root); const document = createIllustrationDocument('Flush barrier');
+    const compact = journal.compact(document); let flushed = false; const flush = journal.flush().then(() => { flushed = true; });
+    await Promise.resolve(); expect(flushed).toBe(false);
+    await flush; await expect(compact).resolves.toBeUndefined();
+    expect(await journal.read(document.id)).toEqual([expect.stringContaining('"type":"snapshot"')]);
+  });
+
   it('restores the latest snapshot and replays committed transactions', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aidraw-recovery-')); temporaryPaths.push(root);
     const journal = new RecoveryJournal(root); const document = createIllustrationDocument('Before crash');

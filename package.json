@@ -22,6 +22,7 @@
     "start": "electron-forge start",
     "start:engine": "electron-forge start -- --headless",
     "qa:runtime": "node scripts/require-node24.mjs",
+    "check:portability": "node scripts/check-portability.mjs --include-untracked",
     "prepackage": "npm run qa:runtime",
     "package": "electron-forge package",
     "postpackage": "node scripts/verify-package.mjs",
@@ -42,7 +43,7 @@
     "test:level3:auto": "npm run release:windows",
     "checksums": "node scripts/checksums.mjs",
     "licenses": "node scripts/license-report.mjs",
-    "verify": "npm run typecheck && npm run lint && npm run test",
+    "verify": "npm run check:portability && npm run typecheck && npm run lint && npm run test",
     "release:current": "npm run verify && npm run test:performance && npm audit --omit=dev --audit-level=high && npm run make && node scripts/verify-package.mjs && npm run checksums && npm run licenses",
     "release:windows": "npm run release:current && npm run test:e2e:only"
   },

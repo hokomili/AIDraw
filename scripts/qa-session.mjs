@@ -1,8 +1,13 @@
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { access, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import process from 'node:process';
+import { promisify } from 'node:util';
+import { assertForceStopIdentity, buildRedactedConnection } from './qa-session-safety.mjs';
+
+const execFileAsync = promisify(execFile);
+const FLAG_ARGUMENTS = new Set(['force-on-timeout']);
 
 const HELP = `AIDraw isolated QA session
 
@@ -10,7 +15,7 @@ Usage:
   node scripts/qa-session.mjs start --exe <AIDraw.exe> --profile <dir> --connection <json> --launch-context unsandboxed-gui [--manifest <json>] [--mode interactive|headless] [--trust-folder <dir> ...]
   node scripts/qa-session.mjs show --manifest <json>
   node scripts/qa-session.mjs status --manifest <json>
-  node scripts/qa-session.mjs stop --manifest <json>
+  node scripts/qa-session.mjs stop --manifest <json> [--force-on-timeout]
   node scripts/qa-session.mjs redact --manifest <json>
 
 Interactive mode is the formal UI-test default and opens the editor immediately.
@@ -18,6 +23,9 @@ Headless mode is used for explicit lifecycle scenarios; use show to request its
 editor window after the MCP QA document has a unique name.
 On Windows, start/show/stop must be invoked outside a Codex filesystem sandbox.
 The launch-context acknowledgement prevents accidental sandboxed GUI startup.
+Force-on-timeout is an opt-in last resort. It terminates the recorded PID only
+after the live executable, SHA-256, command-line profile, connection PID, and
+loopback MCP URL all match the manifest; normal stop never force-terminates.
 Session files contain local bearer credentials and must stay below ignored
 test-results/.
 `;
@@ -30,7 +38,11 @@ function parseArguments(argv) {
     if (!argument.startsWith('--')) throw new Error(`Unexpected argument: ${argument}`);
     const separator = argument.indexOf('=');
     const key = separator >= 0 ? argument.slice(2, separator) : argument.slice(2);
-    const value = separator >= 0 ? argument.slice(separator + 1) : rest[++index];
+    const value = separator >= 0
+      ? argument.slice(separator + 1)
+      : FLAG_ARGUMENTS.has(key) && (rest[index + 1] === undefined || rest[index + 1].startsWith('--'))
+        ? 'true'
+        : rest[++index];
     if (value === undefined || value.startsWith('--')) throw new Error(`--${key} requires a value.`);
     const existing = values.get(key) ?? [];
     existing.push(value);
@@ -47,6 +59,13 @@ function required(values, key) {
 
 function optional(values, key) {
   return values.get(key)?.at(-1);
+}
+
+function enabledFlag(values, key) {
+  const value = optional(values, key);
+  if (value === undefined) return false;
+  if (!['true', 'false'].includes(value)) throw new Error(`--${key} must be true or false when a value is provided.`);
+  return value === 'true';
 }
 
 async function sha256(path) {
@@ -114,17 +133,39 @@ async function loadManifest(values) {
 async function redactConnection(manifest) {
   if (isProcessAlive(Number(manifest.pid))) throw new Error(`Refusing to redact connection credentials while QA PID ${manifest.pid} is still alive.`);
   const connection = JSON.parse(await readFile(manifest.connection, 'utf8'));
-  const redacted = {
-    version: connection.version ?? 1,
-    url: connection.url ?? manifest.mcpUrl,
-    activeDocumentId: connection.activeDocumentId,
-    pid: connection.pid ?? manifest.pid,
-    trustedFolders: connection.trustedFolders ?? manifest.trustedFolders ?? [],
-    stoppedAt: new Date().toISOString(),
-    credentialsRedacted: true,
-  };
+  const redacted = buildRedactedConnection(connection, manifest);
   await writeFile(manifest.connection, `${JSON.stringify(redacted, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
   return redacted;
+}
+
+async function readWindowsProcessIdentity(pid) {
+  if (process.platform !== 'win32') throw new Error('--force-on-timeout is currently supported only on Windows.');
+  const command = [
+    '$OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)',
+    `$target = Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}"`,
+    'if (-not $target) { exit 3 }',
+    '$target | Select-Object ProcessId,ExecutablePath,CommandLine | ConvertTo-Json -Compress',
+  ].join('; ');
+  const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], {
+    encoding: 'utf8', timeout: 5_000, windowsHide: true,
+  });
+  const identity = JSON.parse(stdout.trim());
+  return { pid: Number(identity.ProcessId), executablePath: identity.ExecutablePath, commandLine: identity.CommandLine };
+}
+
+async function verifyForceStopIdentity(manifest) {
+  const connection = JSON.parse(await readFile(manifest.connection, 'utf8'));
+  const currentExeSha256 = await sha256(manifest.exe);
+  const processIdentity = await readWindowsProcessIdentity(Number(manifest.pid));
+  return assertForceStopIdentity({ manifest, connection, currentExeSha256, processIdentity });
+}
+
+async function waitForPidExit(pid, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline && isProcessAlive(pid)) {
+    await new Promise((resolveWait) => globalThis.setTimeout(resolveWait, 150));
+  }
+  return !isProcessAlive(pid);
 }
 
 async function start(values) {
@@ -233,21 +274,43 @@ async function status(values) {
 
 async function stop(values) {
   const { manifestPath, manifest } = await loadManifest(values);
+  const forceOnTimeout = enabledFlag(values, 'force-on-timeout');
   const child = spawn(manifest.exe, [`--user-data-dir=${manifest.profile}`, '--quit-engine'], {
     detached: false,
     stdio: 'ignore',
     windowsHide: true,
   });
   const signalExitCode = await waitForExit(child);
-  const deadline = Date.now() + 15_000;
-  while (Date.now() < deadline && isProcessAlive(Number(manifest.pid))) {
-    await new Promise((resolveWait) => globalThis.setTimeout(resolveWait, 150));
+  const pid = Number(manifest.pid);
+  let stopped = await waitForPidExit(pid, 15_000);
+  let forceAttempted = false;
+  let forceVerification;
+  let forceRefused;
+  if (!stopped && forceOnTimeout) {
+    forceAttempted = true;
+    try {
+      forceVerification = await verifyForceStopIdentity(manifest);
+      process.kill(pid, 'SIGKILL');
+      stopped = await waitForPidExit(pid, 5_000);
+      if (!stopped) throw new Error(`Force-stop signal did not terminate verified QA PID ${pid} within 5 seconds.`);
+    } catch (error) {
+      forceRefused = error instanceof Error ? error.message : String(error);
+    }
   }
-  const stopped = !isProcessAlive(Number(manifest.pid));
   const redactedConnection = stopped ? await redactConnection(manifest) : undefined;
-  const updated = { ...manifest, stoppedAt: new Date().toISOString(), stopped, connectionCredentialsRedacted: Boolean(redactedConnection) };
+  const updated = {
+    ...manifest,
+    stoppedAt: new Date().toISOString(),
+    stopped,
+    connectionCredentialsRedacted: Boolean(redactedConnection),
+    forceOnTimeout,
+    forceAttempted,
+    forced: Boolean(forceVerification && stopped),
+    forceVerification,
+    forceRefused,
+  };
   await writeFile(manifestPath, `${JSON.stringify(updated, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
-  process.stdout.write(`${JSON.stringify({ manifestPath, signalExitCode, stopped, pid: manifest.pid, connectionCredentialsRedacted: Boolean(redactedConnection) }, null, 2)}\n`);
+  process.stdout.write(`${JSON.stringify({ manifestPath, signalExitCode, stopped, pid: manifest.pid, connectionCredentialsRedacted: Boolean(redactedConnection), forceAttempted, forced: Boolean(forceVerification && stopped), forceVerification, forceRefused }, null, 2)}\n`);
   if (!stopped) process.exitCode = 1;
 }
 

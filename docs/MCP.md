@@ -6,14 +6,23 @@ The editor-independent server is stateful Streamable HTTP at `http://127.0.0.1:<
 
 For unattended first-run provisioning, an explicitly authorized launcher may add `--write-mcp-connection=<absolute-json-path>`. Once the authenticated server starts, AIDraw writes its URL, token, active document ID, and process ID to that exact path without creating a renderer. The output is a password-bearing bootstrap artifact: keep it private to the current OS user, import it into the MCP client, and delete it afterward. Without this explicit flag, the operating-system-protected token is disclosed only through guided in-app setup.
 
+## Discovery and cold start
+
+The initialize result carries compact cross-tool instructions, but clients are not required to display them. Correct use therefore remains learnable from the reliable `tools/list` plus `tools/call` surface: call `aidraw_help` with `topic: "quickstart"`, join or inspect the session, list documents, observe canonical state, and only then apply a revision-aware transaction. `aidraw_help` is progressive (`quickstart`, `documents`, `canvas`, `jobs`, `history`, `files`, `operations`, or `safety`) and returns structured content plus safe examples and the optional guide URI.
+
+The `session_manage`, `document_manage`, `history_manage`, and `job_manage` discovery schemas use strict action-specific branches. Their JSON Schema marks conditionally required fields—such as `path` for `open`, `documentId` plus `path` for `save-as`, `checkpointId` plus `sourceIds` for `checkpoint-merge`, and `jobId` for `wait`—and rejects fields belonging to another action. Important observation, idempotency, revision, file, generation, batch, and output fields carry protocol-visible descriptions.
+
+Incomplete approval or running jobs return a safe `next` call for owner-scoped `job_manage`; waiting results explicitly state that only a human can approve in AIDraw. Retryable canvas conflicts, locks, busy queues, and cancellation point back to canonical observation. These hints never disclose raw job results, prompts, paths, approval internals, tokens, or other private data. Clients that support resources may read the complete progressive reference at `aidraw://guide`; clients that ignore instructions and resources retain the same correctness baseline through tools and results alone.
+
 ## Agent clients
 
-The Activity panel has consent-driven profiles for Codex, Claude Code, OpenCode v2, and Antigravity plus a generic Streamable HTTP profile. Every automatic profile creates a timestamped backup and replaces only the `aidraw` entry while preserving unrelated servers/settings (including OpenCode JSONC comments). All profiles use the same loopback URL and `Authorization: Bearer <token>` header; they do not create a separate compatibility protocol. Client restart/reconnect instructions remain visible in a full result dialog.
+The Activity panel has consent-driven profiles for Codex, Claude Code, OpenCode, and Antigravity plus a generic Streamable HTTP profile. Every automatic profile creates a timestamped backup and replaces only the `aidraw` entry while preserving unrelated servers/settings (including OpenCode JSONC comments). OpenCode receives its current stable shape directly at `mcp.aidraw`, with `type: "remote"`, `enabled: true`, `oauth: false`, the loopback URL, and the authorization header. AIDraw removes its own obsolete `mcp.servers.aidraw` wrapper when that wrapper has no unrelated entries; it refuses to guess how to migrate unrelated V2 entries. All profiles use the same loopback URL and `Authorization: Bearer <token>` header; they do not create a separate compatibility protocol. Client restart/reconnect instructions remain visible in a full result dialog.
 
 The same launcher may repeat `--trust-folder=<absolute-folder-path>` to grant process-lifetime file authority to the headless MCP sessions it starts. AIDraw accepts this flag only when both `--headless` and `--write-mcp-connection` are present, reports the normalized grants in the connection JSON, and does not persist them. Trusted sessions can read addressed files and create new save/export files within those folders without attaching an editor. Existing destinations are always treated as overwrites and still create approval jobs. Generation requests never inherit folder trust.
 
 ## Resources
 
+- `aidraw://guide` — optional complete progressive agent workflow and safety reference
 - `aidraw://documents`
 - `aidraw://documents/{id}/manifest`
 - `aidraw://documents/{id}/snapshot`
@@ -24,6 +33,7 @@ Clients that negotiate subscriptions receive resource-updated notifications afte
 
 ## Tools
 
+- `aidraw_help`: model-callable progressive workflow guidance available to tools-only clients; its structured output names related tools, invariants, safe examples, and the optional guide resource.
 - `session_manage`: join/name/color, optionally declare client model/reasoning-effort/task metadata, inspect presence plus human occupancy/advisory editor state, or leave. Advisory state may include the attached editor's tool, selection, zoom, visible world viewport, and active pixel asset/frame/tag/onion-skin/playback direction. Client metadata is descriptive and is not platform-attested.
 - `canvas_observe`: structured snapshot or diffs, optionally with a targeted base64 PNG. PNG requests may select current or named-checkpoint state, pixel asset/frame/layer or illustration layer, crop to a region, evaluate a schema-2 illustration at exact `illustrationTimeMs`, scale 1–16× with nearest-neighbor output, and choose document, transparent, or explicit solid background. `compareTransactionId` returns a race-free before/after pair for the most recent committed transaction; `checkpointId` observes a persistent editable branch point. Requests are rejected before utility-process rendering above the 4,194,304-pixel budget (split evenly for a pair) and after either PNG exceeds 4 MiB. Its `fragment` selector exports a self-contained editable illustration-object or pixel-asset graph without touching the OS clipboard.
 - `canvas_apply`: up to 256 application-owned operations with an idempotent `clientOperationId`, expected revisions, and instant or visible playback. It also accepts `document.fragment.import`; the 2 MiB fragment is validated, IDs and dependency references are remapped, pixel colors are reconciled with the destination palette, and entity attribution is rewritten to the authenticated session.
@@ -40,7 +50,7 @@ For autonomous runs larger than one transaction, pass the batch `jobId`, `resume
 
 ## Conflict and load responses
 
-Every mutable entity can carry `expectedRevision`. Non-overlapping additions may commit against a newer document revision, while stale replacements return the entity's current revision and retryability. Active human locks return `locked` with coarse occupancy and retry guidance. Full actor queues or the global playback budget return retryable `busy`. Reusing a committed client operation ID returns `duplicate` without applying it again.
+Every mutable entity can carry `expectedRevision`. Non-overlapping additions may commit against a newer document revision, while stale replacements return `status: "conflict"` plus `conflict.entityId`, `expectedRevision`, `actualRevision`, and `retryable`. Retryable conflicts also return a `next` call to `canvas_observe`: re-observe canonical state, rebuild the same logical intent against the current revision, and use a fresh `clientOperationId` because the operation payload changed. Active human locks return `locked` with coarse occupancy and the same observe-first guidance. Full actor queues or the global playback budget return retryable `busy`. Reusing a committed client operation ID returns `duplicate` without applying it again.
 
 Pixel and tile changes can use exact coordinate arrays or compact row runs:
 

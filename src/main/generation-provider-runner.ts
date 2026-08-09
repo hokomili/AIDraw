@@ -4,10 +4,7 @@ import OpenAI, { toFile } from 'openai';
 import { createId, type AIDrawDocument } from '@aidraw/core';
 import type { GeneratedOutput, GenerationRequest } from '../common/generation';
 import { validateGenerationRequest } from '../common/generation-capabilities';
-
-const MAX_GENERATED_BYTES = 32 * 1024 * 1024;
-const MAX_GENERATED_SIDE = 8_192;
-const MAX_GENERATED_PIXELS = 32 * 1024 * 1024;
+import { MAX_GENERATED_OUTPUT_BYTES, MAX_GENERATED_OUTPUT_PIXELS, MAX_GENERATED_OUTPUT_SIDE } from './utility-contract';
 
 export interface GenerationProviderInput {
   jobId: string;
@@ -32,11 +29,11 @@ function extension(mimeType: string): string {
 }
 
 async function imageOutput(bytes: Buffer, mimeType: GeneratedOutput['mimeType'], details: Partial<GeneratedOutput> = {}): Promise<GeneratedOutput> {
-  if (!bytes.length || bytes.byteLength > MAX_GENERATED_BYTES) throw new Error(`A provider returned an image outside AIDraw's ${MAX_GENERATED_BYTES / 1024 / 1024} MiB result limit.`);
+  if (!bytes.length || bytes.byteLength > MAX_GENERATED_OUTPUT_BYTES) throw new Error(`A provider returned an image outside AIDraw's ${MAX_GENERATED_OUTPUT_BYTES / 1024 / 1024} MiB result limit.`);
   let image: Awaited<ReturnType<typeof loadImage>>;
   try { image = await loadImage(bytes); } catch { throw new Error('A provider returned an unreadable image.'); }
   const pixels = image.width * image.height;
-  if (image.width < 1 || image.height < 1 || image.width > MAX_GENERATED_SIDE || image.height > MAX_GENERATED_SIDE || !Number.isSafeInteger(pixels) || pixels > MAX_GENERATED_PIXELS) throw new Error('A provider returned an image outside AIDraw\'s decoded dimension limits.');
+  if (image.width < 1 || image.height < 1 || image.width > MAX_GENERATED_OUTPUT_SIDE || image.height > MAX_GENERATED_OUTPUT_SIDE || !Number.isSafeInteger(pixels) || pixels > MAX_GENERATED_OUTPUT_PIXELS) throw new Error('A provider returned an image outside AIDraw\'s decoded dimension limits.');
   return { id: details.id ?? createId('result'), mimeType, data: bytes.toString('base64'), width: image.width, height: image.height, seed: details.seed, providerMetadata: details.providerMetadata };
 }
 

@@ -3,10 +3,9 @@ import { readFile, realpath, stat } from 'node:fs/promises';
 import { gunzipSync, inflateSync } from 'node:zlib';
 import { basename, dirname, extname, isAbsolute, relative, resolve } from 'node:path';
 import { createCanvas, DOMMatrix, ImageData, Path2D, loadImage } from '@napi-rs/canvas';
-import { readPsd, type Layer as PsdLayer } from 'ag-psd';
+import { initializeCanvas as initializePsdCanvas, readPsd, type Layer as PsdLayer } from 'ag-psd';
 import { decompressFrames, parseGIF } from 'gifuct-js';
 import { XMLParser } from 'fast-xml-parser';
-import { nativeImage } from 'electron';
 import {
   HUMAN_ACTOR,
   IDENTITY_TRANSFORM,
@@ -29,13 +28,15 @@ import {
   type TileDefinition,
   type WangSet,
 } from '@aidraw/core';
-import { quantizeToPalette } from './quantize';
-import { quantizeRgbaToPalette } from './quantize-image';
+import { quantizeImageToPalette, quantizeRgbaToPalette } from './quantize-image';
 import { decodeApng } from './apng';
 import { inspectGif } from './gif';
 import { calculateSpriteSheetLayout, validateSpriteSheetSliceOptions, type SpriteSheetSliceOptions } from '../common/sprite-sheet';
 import { inspectImageHeader, MAX_INLINE_IMAGE_DIMENSION, MAX_INLINE_IMAGE_PIXELS } from './transaction-policy';
 import { importEditableSvg } from './svg-import';
+import { MAX_IMPORT_UTILITY_DOCUMENTS } from './utility-contract';
+
+initializePsdCanvas(createCanvas as unknown as (width: number, height: number) => HTMLCanvasElement);
 
 export interface ImportResult { documents: AIDrawDocument[]; warnings: string[] }
 
@@ -45,7 +46,8 @@ const MAX_SPRITE_SHEET_FRAMES = 4_096;
 const MAX_SPRITE_SHEET_EXPANDED_PIXELS = 64 * 1024 * 1024;
 const MAX_PSD_LAYERS = 2_048;
 const MAX_PSD_EXPANDED_PIXELS = 64 * 1024 * 1024;
-const MAX_PDF_PAGES = 256;
+const MAX_PSD_DECODED_BYTES = (MAX_PSD_EXPANDED_PIXELS + MAX_INLINE_IMAGE_PIXELS) * 4;
+const MAX_PDF_PAGES = MAX_IMPORT_UTILITY_DOCUMENTS;
 const MAX_PDF_EXPANDED_PIXELS = 64 * 1024 * 1024;
 const MAX_TILED_LAYERS = 4_096;
 const MAX_TILED_DEPTH = 64;
@@ -104,12 +106,13 @@ function imageAsset(name: string, mimeType: string, bytes: Buffer, source: Docum
   return { id: createId('asset'), name, mimeType, byteLength: bytes.byteLength, sha256: sha256(bytes), source, data: bytes.toString('base64') };
 }
 
-function importRaster(bytes: Buffer, name: string, mimeType: string, pixelMode: boolean): ImportResult {
+async function importRaster(bytes: Buffer, name: string, mimeType: string, pixelMode: boolean): Promise<ImportResult> {
   const header = inspectImageHeader(bytes);
   assertImageDimensions(header.width, header.height, 'Image');
-  const decoded = nativeImage.createFromBuffer(bytes);
-  if (decoded.isEmpty()) throw new Error('Image is corrupt or uses an unsupported codec.');
-  const size = decoded.getSize();
+  let decoded;
+  try { decoded = await loadImage(bytes); }
+  catch { throw new Error('Image is corrupt or uses an unsupported codec.'); }
+  const size = { width: decoded.width, height: decoded.height };
   if (size.width !== header.width || size.height !== header.height) throw new Error('Decoded image dimensions disagree with its file header.');
   if (pixelMode) {
     const document = createPixelDocument('sprite', name);
@@ -119,7 +122,7 @@ function importRaster(bytes: Buffer, name: string, mimeType: string, pixelMode: 
     const cel = Object.values(sprite.cels)[0];
     const asset = imageAsset(name, mimeType, bytes);
     document.assets[asset.id] = asset;
-    writePixels(cel, quantizeToPalette(bytes, size.width, size.height, document.palette));
+    writePixels(cel, await quantizeImageToPalette(bytes, size.width, size.height, document.palette, { alphaThreshold: document.conversionDefaults.alphaThreshold, dithering: document.conversionDefaults.dithering }));
     document.dirty = true;
     return { documents: [document], warnings: ['Full-color image quantized to the active indexed palette; the source image is embedded for reproducibility.'] };
   }
@@ -174,21 +177,22 @@ async function importSpriteSheet(bytes: Buffer, name: string, filePath: string):
   const metadata = safeJson(bytes, 'Sprite-sheet metadata'); const frameSources = Array.isArray(metadata.frames) ? metadata.frames : Object.entries(metadata.frames ?? {}).map(([filename, frame]) => ({ filename, ...(frame as Record<string, unknown>) }));
   if (!frameSources.length) throw new Error('Sprite-sheet metadata contains no frames.');
   if (frameSources.length > MAX_SPRITE_SHEET_FRAMES) throw new Error(`Sprite-sheet metadata exceeds the ${MAX_SPRITE_SHEET_FRAMES.toLocaleString('en-US')}-frame limit.`);
-  const imageReference = String(metadata.meta?.image ?? `${name}.png`); const companion = await readCompanionFile(filePath, filePath, imageReference, MAX_BINARY_IMPORT_BYTES, 'Sprite-sheet image'); const imagePath = companion.path; const imageBytes = companion.bytes;
-  const imageHeader = inspectImageHeader(imageBytes); assertImageDimensions(imageHeader.width, imageHeader.height, 'Sprite-sheet image');
-  const sourceImage = nativeImage.createFromBuffer(imageBytes); if (sourceImage.isEmpty()) throw new Error(`Sprite-sheet image ${imageReference} is unreadable.`);
-  const sourceSize = sourceImage.getSize(); if (sourceSize.width !== imageHeader.width || sourceSize.height !== imageHeader.height) throw new Error('Decoded sprite-sheet dimensions disagree with its file header.');
   const firstRect = frameSources[0].frame ?? frameSources[0]; const width = Number(firstRect.w ?? firstRect.width); const height = Number(firstRect.h ?? firstRect.height); assertImageDimensions(width, height, 'Sprite frame');
   if (width * height * frameSources.length > MAX_SPRITE_SHEET_EXPANDED_PIXELS) throw new Error('Sprite-sheet frames exceed the 64-megapixel expanded import budget.');
+  const imageReference = String(metadata.meta?.image ?? `${name}.png`); const companion = await readCompanionFile(filePath, filePath, imageReference, MAX_BINARY_IMPORT_BYTES, 'Sprite-sheet image'); const imagePath = companion.path; const imageBytes = companion.bytes;
+  const imageHeader = inspectImageHeader(imageBytes); assertImageDimensions(imageHeader.width, imageHeader.height, 'Sprite-sheet image');
+  let sourceImage;
+  try { sourceImage = await loadImage(imageBytes); } catch { throw new Error(`Sprite-sheet image ${imageReference} is unreadable.`); }
+  const sourceSize = { width: sourceImage.width, height: sourceImage.height }; if (sourceSize.width !== imageHeader.width || sourceSize.height !== imageHeader.height) throw new Error('Decoded sprite-sheet dimensions disagree with its file header.');
   const document = createPixelDocument('sprite', name); const sprite = createPixelSprite(name, width, height); document.pixelAssets = { [sprite.id]: sprite }; document.assetIds = [sprite.id]; document.activeAssetId = sprite.id; const layerId = sprite.layerIds[0]; const importedFrameIds: string[] = [];
   for (let index = 0; index < frameSources.length; index += 1) { const source = frameSources[index]; const rect = source.frame ?? source; let frameId: string; let celId: string;
     const frameX = Number(rect.x ?? 0); const frameY = Number(rect.y ?? 0); const frameWidth = Number(rect.w ?? rect.width ?? width); const frameHeight = Number(rect.h ?? rect.height ?? height); const duration = Number(source.duration ?? 100);
     if (![frameX, frameY, frameWidth, frameHeight].every(Number.isInteger) || frameX < 0 || frameY < 0 || frameWidth < 1 || frameHeight < 1 || frameX + frameWidth > sourceSize.width || frameY + frameHeight > sourceSize.height) throw new Error(`Sprite-sheet frame ${index + 1} has an invalid or out-of-bounds rectangle.`);
     if (!Number.isFinite(duration) || duration < 1 || duration > 60_000) throw new Error(`Sprite-sheet frame ${index + 1} has an invalid duration.`);
-    const png = sourceImage.crop({ x: frameX, y: frameY, width: frameWidth, height: frameHeight }).resize({ width, height, quality: 'best' }).toPNG();
+    const frameCanvas = createCanvas(width, height); const frameContext = frameCanvas.getContext('2d'); frameContext.imageSmoothingEnabled = true; frameContext.imageSmoothingQuality = 'high'; frameContext.drawImage(sourceImage, frameX, frameY, frameWidth, frameHeight, 0, 0, width, height);
     if (index === 0) { frameId = sprite.frameIds[0]; celId = Object.values(sprite.cels)[0].id; sprite.frames[frameId].name = String(source.filename ?? source.name ?? 'Frame 1'); sprite.frames[frameId].durationMs = duration; }
     else { const timestamp = nowIso(); frameId = createId('frame'); celId = createId('cel'); sprite.frameIds.push(frameId); sprite.frames[frameId] = { id: frameId, revision: 0, name: String(source.filename ?? source.name ?? `Frame ${index + 1}`), createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, durationMs: duration }; sprite.cels[celId] = { id: celId, revision: 0, name: `Pixels · Frame ${index + 1}`, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, layerId, frameId, chunks: {} }; }
-    importedFrameIds.push(frameId); writePixels(sprite.cels[celId], quantizeToPalette(png, width, height, document.palette));
+    importedFrameIds.push(frameId); writePixels(sprite.cels[celId], quantizeRgbaToPalette(frameContext.getImageData(0, 0, width, height).data, width, height, document.palette, { alphaThreshold: document.conversionDefaults.alphaThreshold, dithering: document.conversionDefaults.dithering }));
   }
   const tags = arrayify(metadata.meta?.frameTags ?? metadata.meta?.tags); if (tags.length > 1_024) throw new Error('Sprite-sheet metadata exceeds the 1,024-tag limit.'); sprite.tags = tags.map((tag: any) => { const from = typeof tag.from === 'number' ? importedFrameIds[tag.from] : importedFrameIds.includes(tag.fromFrameId) ? tag.fromFrameId : importedFrameIds[0]; const to = typeof tag.to === 'number' ? importedFrameIds[tag.to] : importedFrameIds.includes(tag.toFrameId) ? tag.toFrameId : importedFrameIds.at(-1)!; return { id: createId('tag'), name: String(tag.name ?? 'Animation'), fromFrameId: from, toFrameId: to, direction: tag.direction === 'reverse' || tag.direction === 'ping-pong' || tag.direction === 'pingpong' ? (tag.direction === 'reverse' ? 'reverse' : 'ping-pong') : 'forward', color: String(tag.color ?? '#9b87f5') }; });
   const embedded = imageAsset(basename(imagePath), `image/${extname(imagePath).slice(1).replace('jpg', 'jpeg') || 'png'}`, imageBytes); document.assets[embedded.id] = embedded; document.linkedAssets.push({ id: createId('link'), name: basename(imagePath), mode: 'linked', relativePath: relative(dirname(filePath), imagePath).replace(/\\/g, '/'), sha256: embedded.sha256, cachedPreviewAssetId: embedded.id }); document.dirty = true; return { documents: [document], warnings: [] };
@@ -240,12 +244,41 @@ function importSvg(bytes: Buffer, name: string): ImportResult {
   return { documents: [imported.document], warnings: imported.warnings };
 }
 
+function psdSectionEnd(bytes: Buffer, offset: number, label: string, eightByteLength = false): number {
+  const lengthBytes = eightByteLength ? 8 : 4;
+  if (offset > bytes.byteLength - lengthBytes) throw new Error(`PSD ${label} section length is truncated.`);
+  let length: number;
+  if (eightByteLength) {
+    if (bytes.readUInt32BE(offset) !== 0) throw new Error(`PSD ${label} section exceeds the bounded file size.`);
+    length = bytes.readUInt32BE(offset + 4);
+  } else length = bytes.readUInt32BE(offset);
+  const start = offset + lengthBytes;
+  if (length > bytes.byteLength - start) throw new Error(`PSD ${label} section exceeds the bounded file size.`);
+  return start + length;
+}
+
+function inspectPsdContainer(bytes: Buffer): { version: number; width: number; height: number } {
+  if (bytes.byteLength < 26 || bytes.toString('ascii', 0, 4) !== '8BPS' || ![1, 2].includes(bytes.readUInt16BE(4))) throw new Error('PSD header is corrupt or unsupported.');
+  const version = bytes.readUInt16BE(4); const height = bytes.readUInt32BE(14); const width = bytes.readUInt32BE(18); assertImageDimensions(width, height, 'PSD canvas');
+  let offset = psdSectionEnd(bytes, 26, 'color-mode data');
+  offset = psdSectionEnd(bytes, offset, 'image-resources');
+  offset = psdSectionEnd(bytes, offset, 'layer-and-mask', version === 2);
+  if (offset > bytes.byteLength - 2) throw new Error('PSD composite image data is truncated.');
+  return { version, width, height };
+}
+
+function psdImagePixels(source: NonNullable<PsdLayer['imageData']>, label: string): number {
+  assertImageDimensions(source.width, source.height, label); const pixels = source.width * source.height;
+  if (source.data.byteLength !== pixels * 4) throw new Error(`${label} decoded byte length disagrees with its RGBA dimensions.`);
+  return pixels;
+}
+
 function flattenPsdLayers(layers: PsdLayer[] | undefined, prefix = '', depth = 0, budget = { count: 0, pixels: 0 }): Array<{ layer: PsdLayer; name: string }> {
   if (depth > MAX_TILED_DEPTH) throw new Error('PSD layer nesting exceeds the 64-level safety limit.');
   const flattened: Array<{ layer: PsdLayer; name: string }> = [];
   for (const [index, layer] of (layers ?? []).entries()) {
     budget.count += 1; if (budget.count > MAX_PSD_LAYERS) throw new Error(`PSD exceeds the ${MAX_PSD_LAYERS.toLocaleString('en-US')}-layer safety limit.`);
-    if (layer.imageData) { assertImageDimensions(layer.imageData.width, layer.imageData.height, `PSD layer ${budget.count}`); budget.pixels += layer.imageData.width * layer.imageData.height; if (budget.pixels > MAX_PSD_EXPANDED_PIXELS) throw new Error('PSD layer pixels exceed the 64-megapixel expanded safety budget.'); }
+    if (layer.imageData) { budget.pixels += psdImagePixels(layer.imageData, `PSD layer ${budget.count}`); if (budget.pixels > MAX_PSD_EXPANDED_PIXELS) throw new Error('PSD layer pixels exceed the 64-megapixel expanded safety budget.'); }
     if (layer.children?.length) flattened.push(...flattenPsdLayers(layer.children, `${prefix}${layer.name ?? `Group ${index + 1}`}/`, depth + 1, budget));
     else flattened.push({ layer, name: `${prefix}${layer.name ?? `Layer ${index + 1}`}` });
   }
@@ -303,18 +336,19 @@ function addPsdRasterObject(document: Extract<AIDrawDocument, { kind: 'illustrat
 }
 
 function importPsd(bytes: Buffer, name: string, pixelMode: boolean): ImportResult {
-  if (bytes.byteLength < 26 || bytes.toString('ascii', 0, 4) !== '8BPS' || ![1, 2].includes(bytes.readUInt16BE(4))) throw new Error('PSD header is corrupt or unsupported.');
-  assertImageDimensions(bytes.readUInt32BE(18), bytes.readUInt32BE(14), 'PSD canvas');
-  const psd = readPsd(bytes, { useImageData: true, logMissingFeatures: false });
-  assertImageDimensions(psd.width, psd.height, 'Decoded PSD canvas'); const flattened = flattenPsdLayers(psd.children);
+  const inspected = inspectPsdContainer(bytes);
+  const psd = readPsd(bytes, { useImageData: true, logMissingFeatures: false, totalMemoryLimit: MAX_PSD_DECODED_BYTES });
+  assertImageDimensions(psd.width, psd.height, 'Decoded PSD canvas');
+  if (psd.width !== inspected.width || psd.height !== inspected.height) throw new Error('Decoded PSD canvas dimensions disagree with its file header.');
+  if (psd.imageData) { psdImagePixels(psd.imageData, 'Decoded PSD composite'); if (psd.imageData.width !== psd.width || psd.imageData.height !== psd.height) throw new Error('Decoded PSD composite dimensions disagree with its canvas.'); }
+  const flattened = flattenPsdLayers(psd.children);
   if (pixelMode) {
     const document = createPixelDocument('project', name);
     document.assetIds = []; document.pixelAssets = {};
     for (const { layer, name: layerName } of flattened) {
       if (!layer.imageData) continue;
-      const canvas = createCanvas(layer.imageData.width, layer.imageData.height); canvas.getContext('2d').putImageData(canvasImageData(layer.imageData), 0, 0);
-      const png = canvas.toBuffer('image/png'); const sprite = createPixelSprite(layerName, layer.imageData.width, layer.imageData.height);
-      const cel = Object.values(sprite.cels)[0]; writePixels(cel, quantizeToPalette(png, sprite.width, sprite.height, document.palette));
+      const rgba = canvasImageData(layer.imageData).data; const sprite = createPixelSprite(layerName, layer.imageData.width, layer.imageData.height);
+      const cel = Object.values(sprite.cels)[0]; writePixels(cel, quantizeRgbaToPalette(rgba, sprite.width, sprite.height, document.palette, { alphaThreshold: document.conversionDefaults.alphaThreshold, dithering: document.conversionDefaults.dithering }));
       document.pixelAssets[sprite.id] = sprite; document.assetIds.push(sprite.id); if (!document.activeAssetId) document.activeAssetId = sprite.id;
     }
     if (!document.assetIds.length) { const sprite = createPixelSprite('Composite', psd.width, psd.height); document.pixelAssets[sprite.id] = sprite; document.assetIds = [sprite.id]; document.activeAssetId = sprite.id; }
@@ -510,10 +544,10 @@ async function attachTileset(document: ReturnType<typeof createPixelDocument>, s
   const tileWidth = Number(source.tilewidth ?? fallbackTileWidth); const tileHeight = Number(source.tileheight ?? fallbackTileHeight); let imageWidth = Number(source.imagewidth ?? 0); let imageHeight = Number(source.imageheight ?? 0); let imageBytes: Buffer | undefined; let imagePath: string | undefined;
   if (typeof source.image === 'string') {
     const companion = await readCompanionFile(rootFilePath, sourceFilePath, source.image, MAX_BINARY_IMPORT_BYTES, 'Tileset image'); imagePath = companion.path; imageBytes = companion.bytes;
-    try { const header = inspectImageHeader(imageBytes); assertImageDimensions(header.width, header.height, 'Tileset image'); const decoded = nativeImage.createFromBuffer(imageBytes); if (decoded.isEmpty()) throw new Error('image codec is unsupported'); const size = decoded.getSize(); if (size.width !== header.width || size.height !== header.height) throw new Error('decoded dimensions disagree with the file header'); if ((imageWidth && imageWidth !== size.width) || (imageHeight && imageHeight !== size.height)) throw new Error('declared dimensions disagree with the image file'); imageWidth = size.width; imageHeight = size.height; } catch (error) { warnings.push(`Tileset image ${source.image} could not be decoded: ${error instanceof Error ? error.message : String(error)}.`); imageBytes = undefined; imagePath = undefined; }
+    try { const header = inspectImageHeader(imageBytes); assertImageDimensions(header.width, header.height, 'Tileset image'); const decoded = await loadImage(imageBytes); const size = { width: decoded.width, height: decoded.height }; if (size.width !== header.width || size.height !== header.height) throw new Error('decoded dimensions disagree with the file header'); if ((imageWidth && imageWidth !== size.width) || (imageHeight && imageHeight !== size.height)) throw new Error('declared dimensions disagree with the image file'); imageWidth = size.width; imageHeight = size.height; } catch (error) { warnings.push(`Tileset image ${source.image} could not be decoded: ${error instanceof Error ? error.message : String(error)}.`); imageBytes = undefined; imagePath = undefined; }
   }
   const columns = Math.max(1, Number(source.columns ?? (Math.floor(imageWidth / tileWidth) || 1))); const tileCount = Math.max(1, Number(source.tilecount ?? columns * Math.max(1, Math.floor(imageHeight / tileHeight)))); const rows = Math.max(1, Math.ceil(tileCount / columns)); const spriteWidth = Math.max(tileWidth, imageWidth || columns * tileWidth); const spriteHeight = Math.max(tileHeight, imageHeight || rows * tileHeight); assertImageDimensions(spriteWidth, spriteHeight, 'Tileset pixel source'); const sprite = createPixelSprite(String(source.name ?? 'Tileset pixels'), spriteWidth, spriteHeight);
-  if (imageBytes) { const cel = Object.values(sprite.cels)[0]; writePixels(cel, quantizeToPalette(imageBytes, sprite.width, sprite.height, document.palette)); const embedded = imageAsset(basename(imagePath!), `image/${extname(imagePath!).slice(1).replace('jpg', 'jpeg') || 'png'}`, imageBytes); document.assets[embedded.id] = embedded; document.linkedAssets.push({ id: createId('link'), name: basename(imagePath!), mode: 'linked', relativePath: relative(dirname(rootFilePath), imagePath!).replace(/\\/g, '/'), sha256: embedded.sha256, cachedPreviewAssetId: embedded.id }); }
+  if (imageBytes) { const cel = Object.values(sprite.cels)[0]; writePixels(cel, await quantizeImageToPalette(imageBytes, sprite.width, sprite.height, document.palette, { alphaThreshold: document.conversionDefaults.alphaThreshold, dithering: document.conversionDefaults.dithering })); const embedded = imageAsset(basename(imagePath!), `image/${extname(imagePath!).slice(1).replace('jpg', 'jpeg') || 'png'}`, imageBytes); document.assets[embedded.id] = embedded; document.linkedAssets.push({ id: createId('link'), name: basename(imagePath!), mode: 'linked', relativePath: relative(dirname(rootFilePath), imagePath!).replace(/\\/g, '/'), sha256: embedded.sha256, cachedPreviewAssetId: embedded.id }); }
   const tileset = createPixelTileset(String(source.name ?? 'Tileset'), sprite.id, tileWidth, tileHeight, columns, rows); tileset.firstGid = Math.max(1, Number(sourceReference.firstgid ?? 1)); const margin = Number(source.margin ?? 0); const spacing = Number(source.spacing ?? 0); tileset.margin = margin; tileset.spacing = spacing; const metadata = new Map(arrayify(source.tiles ?? source.tile).map((tile: any) => [Number(tile.id), tile]));
   for (let id = 0; id < tileCount; id += 1) { const tile = metadata.get(id); const definition: TileDefinition = { id, sourceX: margin + id % columns * (tileWidth + spacing), sourceY: margin + Math.floor(id / columns) * (tileHeight + spacing), probability: Number(tile?.probability ?? 1), animation: arrayify(tile?.animation).map((frame: any) => ({ tileId: Number(frame.tileid ?? frame.tileId), durationMs: Number(frame.duration ?? frame.durationMs ?? 100) })), collisions: arrayify(tile?.objectgroup?.objects ?? tile?.collisions).map(tiledObject), properties: tiledProperties(tile?.properties) }; tileset.tiles[id] = definition; }
   tileset.wangSets = arrayify(source.wangsets).map((set: any): WangSet => ({ id: createId('wang'), name: String(set.name ?? 'Terrain'), type: set.type === 'corner' || set.type === 'edge' ? set.type : 'mixed', colors: arrayify(set.colors ?? set.wangcolors).map((color: any, index) => ({ id: index + 1, name: String(color.name ?? `Terrain ${index + 1}`), color: String(color.color ?? '#ff00ff'), tileId: Number(color.tile ?? -1), probability: Number(color.probability ?? 1) })), tiles: arrayify(set.wangtiles).map((tile: any) => ({ tileId: Number(tile.tileid), wangId: wangId(tile.wangid) })) }));
@@ -541,13 +575,19 @@ async function importTiled(bytes: Buffer, name: string, filePath: string): Promi
 
 async function importPdf(bytes: Buffer, name: string, pixelMode: boolean): Promise<ImportResult> {
   Object.assign(globalThis, { DOMMatrix, ImageData, Path2D });
-  const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs'); const loadingTask = pdfjs.getDocument({ data: Uint8Array.from(bytes) }); const source = await loadingTask.promise; const documents: AIDrawDocument[] = [];
+  const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs'); const loadingTask = pdfjs.getDocument({ data: Uint8Array.from(bytes) }); const documents: AIDrawDocument[] = [];
+  let result!: ImportResult; let importFailed = false; let importError: unknown;
   try {
+    const source = await loadingTask.promise;
     if (source.numPages < 1 || source.numPages > MAX_PDF_PAGES) throw new Error(`PDF page count ${source.numPages} exceeds AIDraw's ${MAX_PDF_PAGES}-page import limit.`);
-    let expandedPixels = 0; let extractedTextItems = 0;
+    const pages: Array<{ pageNumber: number; page: Awaited<ReturnType<typeof source.getPage>>; viewport: ReturnType<Awaited<ReturnType<typeof source.getPage>>['getViewport']>; width: number; height: number }> = []; let expandedPixels = 0;
     for (let pageNumber = 1; pageNumber <= source.numPages; pageNumber += 1) {
-      const page = await source.getPage(pageNumber); const viewport = page.getViewport({ scale: 1 }); const pageWidth = Math.max(1, Math.ceil(viewport.width)); const pageHeight = Math.max(1, Math.ceil(viewport.height)); assertImageDimensions(pageWidth, pageHeight, `PDF page ${pageNumber}`); expandedPixels += pageWidth * pageHeight; if (expandedPixels > MAX_PDF_EXPANDED_PIXELS) throw new Error('PDF pages exceed the 64-megapixel expanded import budget.'); const canvas = createCanvas(pageWidth, pageHeight);
-      await page.render({ canvas: null, canvasContext: canvas.getContext('2d') as unknown as CanvasRenderingContext2D, viewport }).promise; const pageName = source.numPages > 1 ? `${name} · Page ${pageNumber}` : name; const imported = importRaster(canvas.toBuffer('image/png'), pageName, 'image/png', pixelMode); const document = imported.documents[0];
+      const page = await source.getPage(pageNumber); const viewport = page.getViewport({ scale: 1 }); const width = Math.max(1, Math.ceil(viewport.width)); const height = Math.max(1, Math.ceil(viewport.height)); assertImageDimensions(width, height, `PDF page ${pageNumber}`); expandedPixels += width * height; if (expandedPixels > MAX_PDF_EXPANDED_PIXELS) throw new Error('PDF pages exceed the 64-megapixel expanded import budget.'); pages.push({ pageNumber, page, viewport, width, height });
+    }
+    let extractedTextItems = 0;
+    for (const { pageNumber, page, viewport, width, height } of pages) {
+      const canvas = createCanvas(width, height);
+      await page.render({ canvas: null, canvasContext: canvas.getContext('2d') as unknown as CanvasRenderingContext2D, viewport }).promise; const pageName = source.numPages > 1 ? `${name} · Page ${pageNumber}` : name; const imported = await importRaster(canvas.toBuffer('image/png'), pageName, 'image/png', pixelMode); const document = imported.documents[0];
       if (document.kind === 'illustration') {
         const timestamp = nowIso(); const textLayer: IllustrationLayer = { id: createId('layer'), revision: 0, name: 'Editable PDF text (hidden)', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, visible: false, locked: false, opacity: 1, blendMode: 'normal', type: 'vector', objectIds: [] }; const text = await page.getTextContent(); extractedTextItems += text.items.length; if (extractedTextItems > 250_000) throw new Error('PDF exceeds the 250,000-item editable-text extraction limit.');
         for (const item of text.items) if ('str' in item && item.str) { const fontSize = Math.max(1, Math.hypot(item.transform[0], item.transform[1])); const object: TextObject = { ...entityBase(item.str.slice(0, 32), textLayer.id), type: 'text', text: item.str, width: Math.max(1, item.width), height: Math.max(1, item.height || fontSize), align: 'left', lineHeight: 1.2, ranges: [{ start: 0, end: item.str.length, fontFamily: item.fontName || 'sans-serif', fontSize, fontWeight: 400, fontStyle: 'normal', color: '#000000', letterSpacing: 0 }] }; object.transform.x = item.transform[4]; object.transform.y = viewport.height - item.transform[5] - fontSize; document.objects[object.id] = object; textLayer.objectIds.push(object.id); }
@@ -555,10 +595,15 @@ async function importPdf(bytes: Buffer, name: string, pixelMode: boolean): Promi
       }
       documents.push(document);
     }
-    return { documents, warnings: ['PDF pages retain a faithful raster fallback. Extracted text is placed on a hidden editable layer; unsupported operators and effects remain rasterized.'] };
-  } finally {
-    await loadingTask.destroy();
+    result = { documents, warnings: ['PDF pages retain a faithful raster fallback. Extracted text is placed on a hidden editable layer; unsupported operators and effects remain rasterized.'] };
+  } catch (error) {
+    importFailed = true; importError = error;
   }
+  let destroyFailed = false; let destroyError: unknown;
+  try { await loadingTask.destroy(); } catch (error) { destroyFailed = true; destroyError = error; }
+  if (importFailed) throw importError;
+  if (destroyFailed) throw destroyError;
+  return result;
 }
 
 export async function importDocument(filePath: string, pixelMode = false): Promise<ImportResult> {
@@ -568,7 +613,7 @@ export async function importDocument(filePath: string, pixelMode = false): Promi
   if ((extension === '.png' || extension === '.apng') && pixelMode) { const animated = importApngBytes(bytes, name); if (animated) return animated; }
   if (extension === '.gif') { inspectGif(bytes); if (pixelMode) return importGifBytes(bytes, name); }
   if (['.png', '.apng', '.jpg', '.jpeg', '.webp', '.gif'].includes(extension)) return importRaster(bytes, name, extension === '.png' || extension === '.apng' ? 'image/png' : extension === '.webp' ? 'image/webp' : extension === '.gif' ? 'image/gif' : 'image/jpeg', pixelMode);
-  if (extension === '.svg') { if (!pixelMode) return importSvg(bytes, name); importSvg(bytes, name); const rendered = nativeImage.createFromBuffer(bytes); if (rendered.isEmpty()) throw new Error('SVG could not be rasterized safely.'); return importRaster(Buffer.from(rendered.toPNG()), name, 'image/png', true); }
+  if (extension === '.svg') { if (!pixelMode) return importSvg(bytes, name); importSvg(bytes, name); const rendered = await loadImage(bytes); assertImageDimensions(rendered.width, rendered.height, 'SVG'); const canvas = createCanvas(rendered.width, rendered.height); canvas.getContext('2d').drawImage(rendered, 0, 0); return importRaster(canvas.toBuffer('image/png'), name, 'image/png', true); }
   if (extension === '.psd') return importPsd(bytes, name, pixelMode);
   if (extension === '.pdf') return importPdf(bytes, name, pixelMode);
   if (extension === '.json' && pixelMode) { const metadata = safeJson(bytes, 'JSON import'); if (metadata.frames && metadata.meta) return importSpriteSheet(bytes, name, filePath); }

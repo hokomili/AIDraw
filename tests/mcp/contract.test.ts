@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
@@ -31,12 +31,32 @@ function toolPayload(message: { result?: Record<string, unknown> }): Record<stri
   const content = message.result?.content as Array<{ text?: string }> | undefined; return JSON.parse(content?.[0]?.text ?? '{}') as Record<string, unknown>;
 }
 
-async function callTool(url: string, headers: Record<string, string>, id: number, name: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
+async function callToolMessage(url: string, headers: Record<string, string>, id: number, name: string, args: Record<string, unknown>) {
   const response = await fetch(url, {
     method: 'POST', headers,
     body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } }),
   });
-  return toolPayload(parseMcp(await response.text()));
+  return parseMcp(await response.text());
+}
+
+async function callTool(url: string, headers: Record<string, string>, id: number, name: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
+  return toolPayload(await callToolMessage(url, headers, id, name, args));
+}
+
+interface DiscoverySchema {
+  const?: unknown;
+  default?: unknown;
+  description?: string;
+  maximum?: number;
+  properties?: Record<string, DiscoverySchema>;
+  required?: string[];
+  oneOf?: DiscoverySchema[];
+  anyOf?: DiscoverySchema[];
+  additionalProperties?: boolean;
+}
+
+function actionBranch(schema: DiscoverySchema | undefined, action: string): DiscoverySchema | undefined {
+  return [...(schema?.oneOf ?? []), ...(schema?.anyOf ?? [])].find((branch) => branch.properties?.action?.const === action);
 }
 
 async function readSseUntil(response: Response, pattern: RegExp, timeoutMs = 4_000): Promise<string> {
@@ -68,7 +88,11 @@ describe('authenticated stateful MCP contract', () => {
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2026-07-28', capabilities: {}, clientInfo: { name: 'contract-test', version: '1.0.0' } } }),
     });
     expect(initialize.status).toBe(200);
-    expect(parseMcp(await initialize.text()).result).toBeTruthy();
+    const initialized = parseMcp(await initialize.text());
+    expect(initialized.result).toBeTruthy();
+    expect(initialized.result?.instructions).toEqual(expect.stringContaining('aidraw_help'));
+    expect(initialized.result?.instructions).toEqual(expect.stringContaining('human alone approves'));
+    expect(initialized.result?.instructions).toEqual(expect.stringContaining('canvas_observe'));
     const sessionId = initialize.headers.get('mcp-session-id');
     expect(sessionId).toBeTruthy();
 
@@ -76,12 +100,95 @@ describe('authenticated stateful MCP contract', () => {
     await fetch(started.url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) });
     const listed = await fetch(started.url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }) });
     const message = parseMcp(await listed.text());
-    const tools = (message.result?.tools ?? []) as Array<{ name: string; inputSchema?: { properties?: Record<string, { default?: unknown; maximum?: number }> } }>;
+    const tools = (message.result?.tools ?? []) as Array<{ name: string; description?: string; inputSchema?: DiscoverySchema; outputSchema?: DiscoverySchema }>;
     const names = tools.map((tool) => tool.name);
-    expect(names).toEqual(expect.arrayContaining(['session_manage', 'canvas_observe', 'canvas_apply', 'history_manage', 'document_manage', 'asset_import', 'document_export', 'generation_start', 'job_manage']));
+    expect(names).toEqual(expect.arrayContaining(['aidraw_help', 'session_manage', 'canvas_observe', 'canvas_apply', 'history_manage', 'document_manage', 'asset_import', 'document_export', 'generation_start', 'job_manage']));
     expect(tools.find((tool) => tool.name === 'document_export')?.inputSchema?.properties?.scale).toMatchObject({ default: 1, maximum: 64 });
     expect(tools.find((tool) => tool.name === 'asset_import')?.inputSchema?.properties).toEqual(expect.objectContaining({ spriteSheet: expect.any(Object), paletteMode: expect.any(Object), projectLinkId: expect.any(Object) }));
     expect(tools.find((tool) => tool.name === 'document_export')?.inputSchema?.properties).toEqual(expect.objectContaining({ projectLinkId: expect.any(Object) }));
+    const documentSchema = tools.find((tool) => tool.name === 'document_manage')?.inputSchema;
+    expect(actionBranch(documentSchema, 'list')).toMatchObject({ required: ['action'], additionalProperties: false, properties: { action: { const: 'list' } } });
+    expect(actionBranch(documentSchema, 'save-as')).toMatchObject({ required: ['action', 'documentId', 'path'], additionalProperties: false, properties: { action: { const: 'save-as' }, documentId: { description: expect.stringContaining('Canonical open document ID') }, path: { description: expect.stringContaining('Exact destination') } } });
+    expect(actionBranch(tools.find((tool) => tool.name === 'history_manage')?.inputSchema, 'checkpoint-merge')).toMatchObject({ required: ['action', 'checkpointId', 'sourceIds'], additionalProperties: false });
+    expect(actionBranch(tools.find((tool) => tool.name === 'job_manage')?.inputSchema, 'wait')).toMatchObject({ required: ['action', 'jobId'], additionalProperties: false, properties: { timeoutMs: { default: 0, maximum: 30_000 } } });
+    expect(actionBranch(tools.find((tool) => tool.name === 'session_manage')?.inputSchema, 'leave')).toMatchObject({ required: ['action'], additionalProperties: false, properties: { action: { const: 'leave' } } });
+    expect(tools.find((tool) => tool.name === 'canvas_apply')?.inputSchema?.properties?.clientOperationId?.description).toContain('idempotency');
+    expect(tools.find((tool) => tool.name === 'aidraw_help')?.outputSchema).toMatchObject({ required: expect.arrayContaining(['topic', 'steps', 'invariants', 'guideUri']), properties: { guideUri: { const: 'aidraw://guide' } } });
+    const canvasApplyOutput = tools.find((tool) => tool.name === 'canvas_apply')?.outputSchema;
+    expect(canvasApplyOutput?.properties?.next?.description ?? canvasApplyOutput?.properties?.next).toBeTruthy();
+    expect(canvasApplyOutput?.properties?.conflict).toMatchObject({
+      description: expect.stringContaining('revision or lock conflict'),
+      additionalProperties: false,
+      required: ['retryable'],
+      properties: {
+        entityId: { description: expect.stringContaining('Canonical entity') },
+        expectedRevision: { description: expect.stringContaining('Revision supplied') },
+        actualRevision: { description: expect.stringContaining('Current canonical entity revision') },
+        retryable: { description: expect.stringContaining('re-observing state') },
+      },
+    });
+    expect(tools.find((tool) => tool.name === 'job_manage')?.outputSchema?.properties).toEqual(expect.objectContaining({ status: expect.any(Object), next: expect.any(Object) }));
+    const crossActionFields = await callToolMessage(started.url, headers, 3, 'document_manage', { action: 'list', path: join(root, 'must-not-be-accepted.aidraw') });
+    const missingConditionalField = await callToolMessage(started.url, headers, 4, 'document_manage', { action: 'save-as', documentId: 'invented' });
+    expect(crossActionFields.result?.isError).toBe(true);
+    expect(missingConditionalField.result?.isError).toBe(true);
+    expect(JSON.stringify([crossActionFields, missingConditionalField])).toContain('Invalid arguments');
+  });
+
+  it('teaches a cold tools-only client to join, observe, mutate, and follow a human approval job without private leakage', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-mcp-cold-client-')); temporaryPaths.push(root);
+    const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0'); documents.initialize();
+    const host = new McpHost(documents, '1.0.0', join(root, 'port.json')); hosts.push(host);
+    const started = await host.start('cold-client-token');
+    const client = await initializeClient(started.url, 'cold-client-token', 'cold-tools-only-client');
+
+    const helpMessage = await callToolMessage(started.url, client.headers, 2, 'aidraw_help', { topic: 'quickstart' });
+    const help = toolPayload(helpMessage);
+    expect(helpMessage.result?.structuredContent).toEqual(help);
+    expect(help).toMatchObject({ topic: 'quickstart', guideUri: 'aidraw://guide', relatedTools: expect.arrayContaining(['session_manage', 'document_manage', 'canvas_observe', 'canvas_apply', 'job_manage']) });
+    expect(help.steps).toEqual(expect.arrayContaining([expect.stringContaining('human must approve')]));
+    expect(JSON.stringify(help)).not.toContain('repository');
+
+    const joined = await callTool(started.url, client.headers, 3, 'session_manage', { action: 'join', name: 'Cold discovery agent', color: '#5177cc' });
+    expect(joined).toMatchObject({ actor: { name: 'Cold discovery agent', color: '#5177cc' }, next: { tool: 'canvas_observe' } });
+    const listed = await callTool(started.url, client.headers, 4, 'document_manage', { action: 'list' });
+    const documentId = String(listed.activeDocumentId);
+    expect((listed.documents as Array<{ id: string }>).map((entry) => entry.id)).toContain(documentId);
+    const observed = await callTool(started.url, client.headers, 5, 'canvas_observe', { documentId });
+    expect(observed).toMatchObject({ document: { id: documentId }, revision: expect.any(Number), currentRevision: expect.any(Number) });
+
+    const appliedMessage = await callToolMessage(started.url, client.headers, 6, 'canvas_apply', {
+      documentId, clientOperationId: 'cold-client-rename-v1', label: 'Cold-client rename', playback: { mode: 'instant', speed: 1 }, operations: [{ kind: 'document.rename', name: 'Discovered canvas' }],
+    });
+    const applied = toolPayload(appliedMessage);
+    expect(appliedMessage.result?.structuredContent).toEqual(applied);
+    expect(applied).toMatchObject({ status: 'committed', revision: Number(observed.revision) + 1, transactionId: expect.any(String) });
+
+    const exportPath = join(root, 'cold-client-never-approved.png');
+    const requestedMessage = await callToolMessage(started.url, client.headers, 7, 'document_export', { documentId, path: exportPath, format: 'png', scale: 1 });
+    const requested = toolPayload(requestedMessage);
+    const jobId = String(requested.jobId);
+    expect(requestedMessage.result?.structuredContent).toEqual(requested);
+    expect(requested).toMatchObject({ status: 'waiting-for-user', next: { tool: 'job_manage', arguments: { action: 'wait', jobId, timeoutMs: 1_000 }, guidance: expect.stringContaining('Agents cannot approve') } });
+
+    const waited = await callTool(started.url, client.headers, 8, 'job_manage', { action: 'wait', jobId, timeoutMs: 0 });
+    expect(waited).toMatchObject({ id: jobId, status: 'waiting-for-user', dependency: { kind: 'user-approval', guidance: expect.stringContaining('cannot approve') }, next: { tool: 'job_manage', arguments: { action: 'wait', jobId } } });
+    const publicSummary = JSON.stringify(waited);
+    expect(publicSummary).not.toContain(exportPath);
+    expect(publicSummary).not.toContain('cold-client-never-approved.png');
+    expect(publicSummary).not.toContain('result');
+    expect(await callTool(started.url, client.headers, 9, 'job_manage', { action: 'approve-dependent', jobId })).toMatchObject({ id: jobId, status: 'waiting-for-user' });
+    expect(await callTool(started.url, client.headers, 10, 'job_manage', { action: 'cancel', jobId })).toMatchObject({ id: jobId, status: 'cancelled' });
+    await expect(access(exportPath)).rejects.toThrow();
+
+    const resourcesResponse = await fetch(started.url, { method: 'POST', headers: client.headers, body: JSON.stringify({ jsonrpc: '2.0', id: 11, method: 'resources/list', params: {} }) });
+    const resources = (parseMcp(await resourcesResponse.text()).result?.resources ?? []) as Array<{ uri: string; description?: string }>;
+    expect(resources).toEqual(expect.arrayContaining([expect.objectContaining({ uri: 'aidraw://guide', description: expect.stringContaining('Complete optional') })]));
+    const guideResponse = await fetch(started.url, { method: 'POST', headers: client.headers, body: JSON.stringify({ jsonrpc: '2.0', id: 12, method: 'resources/read', params: { uri: 'aidraw://guide' } }) });
+    const guide = ((parseMcp(await guideResponse.text()).result?.contents ?? []) as Array<{ text?: string }>)[0]?.text ?? '';
+    expect(guide).toContain('Conditional action contracts');
+    expect(guide).toContain('Strict branches reject fields from other actions');
+    expect(guide).toContain('Only a human can approve');
   });
 
   it('accepts the authenticated Streamable HTTP profile used by each supported agent client', async () => {
@@ -617,6 +724,55 @@ describe('authenticated stateful MCP contract', () => {
     expect(await callTool(started.url, client.headers, 6, 'session_manage', { action: 'inspect' })).toMatchObject({ workspace: { editorAdvisory: { advisory: true, attached: false } } });
   });
 
+  it('returns exact stale-revision details and a canonical observe-before-retry step', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-mcp-revision-conflict-')); temporaryPaths.push(root);
+    const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0'); documents.initialize();
+    const host = new McpHost(documents, '1.0.0', join(root, 'port.json')); hosts.push(host); const started = await host.start('revision-conflict-token');
+    const client = await initializeClient(started.url, 'revision-conflict-token', 'revision-conflict-client');
+    const document = documents.snapshot().activeDocument!; if (document.kind !== 'illustration') throw new Error('Expected illustration');
+    const layer = Object.values(document.layers).find((entry) => entry.type === 'vector'); if (!layer) throw new Error('Expected vector layer');
+    const timestamp = nowIso();
+    const added = await callTool(started.url, client.headers, 2, 'canvas_apply', {
+      documentId: document.id, clientOperationId: 'revision-conflict-add', label: 'Add conflict target', playback: { mode: 'instant', speed: 1 }, operations: [{ kind: 'illustration.object.add', object: { id: 'revision-conflict-object', revision: 0, name: 'Conflict target', createdAt: timestamp, updatedAt: timestamp, createdBy: 'forged', layerId: layer.id, visible: true, locked: false, opacity: 1, blendMode: 'normal', transform: IDENTITY_TRANSFORM, type: 'shape', shape: 'rectangle', width: 20, height: 20, fill: { kind: 'solid', color: '#5f82ff' }, stroke: { paint: { kind: 'none' }, width: 0, opacity: 1, lineCap: 'round', lineJoin: 'round', dash: [] } } }],
+    });
+    expect(added).toMatchObject({ status: 'committed' });
+    const afterAdd = documents.getDocument(document.id); if (!afterAdd || afterAdd.kind !== 'illustration') throw new Error('Expected canonical illustration');
+    const initialObject = afterAdd.objects['revision-conflict-object'];
+    const firstEdit = await callTool(started.url, client.headers, 3, 'canvas_apply', {
+      documentId: document.id, clientOperationId: 'revision-conflict-first-edit', label: 'Commit first edit', playback: { mode: 'instant', speed: 1 }, operations: [{ kind: 'illustration.object.replace', object: { ...initialObject, name: 'Current canonical target' }, expectedRevision: 0 }],
+    });
+    expect(firstEdit).toMatchObject({ status: 'committed' });
+    const beforeConflict = structuredClone(documents.getDocument(document.id)!);
+
+    const staleMessage = await callToolMessage(started.url, client.headers, 4, 'canvas_apply', {
+      documentId: document.id, clientOperationId: 'revision-conflict-stale-edit', label: 'Reject stale edit', playback: { mode: 'instant', speed: 1 }, operations: [{ kind: 'illustration.object.replace', object: { ...initialObject, name: 'Stale target must not commit' }, expectedRevision: 0 }],
+    });
+    const stale = toolPayload(staleMessage);
+    expect(staleMessage.result?.structuredContent).toEqual(stale);
+    expect(stale).toEqual({
+      status: 'conflict',
+      message: 'Revision conflict for Current canonical target',
+      conflict: { entityId: 'revision-conflict-object', expectedRevision: 0, actualRevision: 1, retryable: true },
+      next: {
+        tool: 'canvas_observe',
+        arguments: { documentId: document.id },
+        guidance: 'Re-observe canonical state, honor human/agent locks and current revisions, then retry the same logical intent with a fresh clientOperationId only when appropriate.',
+      },
+    });
+    expect(documents.getDocument(document.id)).toEqual(beforeConflict);
+
+    const observed = await callTool(started.url, client.headers, 5, 'canvas_observe', { documentId: document.id });
+    const observedDocument = observed.document as { objects: Record<string, typeof initialObject> };
+    const currentObject = observedDocument.objects['revision-conflict-object'];
+    expect(currentObject).toMatchObject({ name: 'Current canonical target', revision: 1 });
+    const retried = await callTool(started.url, client.headers, 6, 'canvas_apply', {
+      documentId: document.id, clientOperationId: 'revision-conflict-retry-fresh', label: 'Retry observed intent', playback: { mode: 'instant', speed: 1 }, operations: [{ kind: 'illustration.object.replace', object: { ...currentObject, name: 'Observed retry target' }, expectedRevision: currentObject.revision }],
+    });
+    expect(retried).toMatchObject({ status: 'committed', revision: beforeConflict.revision + 1 });
+    const afterRetry = documents.getDocument(document.id); if (!afterRetry || afterRetry.kind !== 'illustration') throw new Error('Expected retried illustration');
+    expect(afterRetry.objects['revision-conflict-object']).toMatchObject({ name: 'Observed retry target', revision: 2 });
+  });
+
   it('keeps job discovery and control private to the originating authenticated actor', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aidraw-mcp-')); temporaryPaths.push(root);
     const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0'); documents.initialize();
@@ -636,6 +792,26 @@ describe('authenticated stateful MCP contract', () => {
     const dependency = await callTool(started.url, owner.headers, 7, 'job_manage', { action: 'approve-dependent', jobId });
     expect(dependency).toMatchObject({ id: jobId, status: 'waiting-for-user', dependency: { kind: 'user-approval', guidance: expect.stringContaining('cannot approve') } });
     expect(await callTool(started.url, owner.headers, 8, 'job_manage', { action: 'cancel', jobId })).toMatchObject({ id: jobId, status: 'cancelled' });
+  });
+
+  it('keeps completed file output canonical while authenticated job summaries omit raw results', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-mcp-')); temporaryPaths.push(root);
+    const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0'); documents.initialize();
+    const host = new McpHost(documents, '1.0.0', join(root, 'port.json')); hosts.push(host); const started = await host.start('completed-job-token');
+    const client = await initializeClient(started.url, 'completed-job-token', 'completed-job-owner');
+    const documentId = documents.snapshot().activeDocument!.id;
+    const outputPath = join(root, 'private-completed-output.png');
+    const requested = await callTool(started.url, client.headers, 2, 'document_export', { documentId, path: outputPath, format: 'png', scale: 1 });
+    const jobId = String(requested.jobId); const waiting = documents.getJob(jobId)!; const queued = documents.resolveJob(jobId, 'allow-once')!;
+    const output = { path: outputPath, companionPaths: [], warnings: ['private export detail'], reportId: 'report-private' };
+    documents.upsertJob({ ...queued, status: 'completed', progress: 1, updatedAt: nowIso(), message: 'Approved export completed.', result: { ...(queued.result as Record<string, unknown>), output } });
+
+    const summary = await callTool(started.url, client.headers, 3, 'job_manage', { action: 'wait', jobId, timeoutMs: 1 });
+    expect(summary).toMatchObject({ id: jobId, kind: 'export', status: 'completed', actor: { id: waiting.actor.id }, progress: 1 });
+    expect(summary).not.toHaveProperty('result');
+    expect(JSON.stringify(summary)).not.toContain(outputPath);
+    expect(documents.getJob(jobId)).toMatchObject({ result: { output } });
+    expect(documents.snapshot().jobs.find((job) => job.id === jobId)).toMatchObject({ result: { output } });
   });
 
   it('runs resumable numbered batches across MCP sessions and engine-host restart', async () => {
@@ -783,17 +959,79 @@ describe('authenticated stateful MCP contract', () => {
     const sourceCanvas = createCanvas(2, 1); sourceCanvas.getContext('2d').fillStyle = '#ff6b7a'; sourceCanvas.getContext('2d').fillRect(0, 0, 2, 1); const sourceBytes = sourceCanvas.toBuffer('image/png'); const sourceAssetId = 'approval-source';
     expect((await documents.apply({ id: createId('tx'), clientOperationId: 'approval-source-add', documentId, actor: HUMAN_ACTOR, label: 'Add approval source', createdAt: nowIso(), playback: { mode: 'instant', speed: 1 }, operations: [{ kind: 'asset.add', asset: { id: sourceAssetId, name: 'Coral source', mimeType: 'image/png', byteLength: sourceBytes.byteLength, sha256: createHash('sha256').update(sourceBytes).digest('hex'), source: 'imported', data: sourceBytes.toString('base64') } }] })).status).toBe('committed');
     const generation = await call(6, 'generation_start', {
-      documentId, provider: 'openai', mode: 'edit', prompt: 'Structured prompt review', sourceAssetIds: [sourceAssetId], resultCount: 2,
+      documentId, provider: 'openai', mode: 'edit', prompt: 'Structured prompt review', sourceAssetIds: [sourceAssetId], size: { width: 1024, height: 1024 }, resultCount: 2, providerOptions: { quality: 'high' },
     });
     const generationJob = documents.getJob(String(generation.jobId))!;
     expect(generationJob.approval?.options).toEqual(['allow-once', 'deny']);
     expect(generationJob.approval?.review?.fields).toEqual(expect.arrayContaining([
       expect.objectContaining({ label: 'Prompt', value: 'Structured prompt review' }),
       expect.objectContaining({ label: 'Potential paid requests', value: '2', tone: 'paid' }),
+      expect.objectContaining({ label: 'Provider options', value: '{"quality":"high"}' }),
     ]));
     expect(generationJob.approval?.review?.previews).toEqual([expect.objectContaining({ role: 'source', assetId: sourceAssetId, name: 'Coral source', width: 2, height: 1, dataUrl: expect.stringMatching(/^data:image\/png;base64,/) })]);
+    const defaultExpiryMs = new Date(generationJob.approval!.expiresAt).getTime() - new Date(generationJob.createdAt).getTime();
+    expect(defaultExpiryMs).toBeGreaterThanOrEqual(119_900); expect(defaultExpiryMs).toBeLessThanOrEqual(120_100);
+    const revisionBeforeTimeout = documents.getDocument(documentId)!.revision;
+    documents.upsertJob({ ...generationJob, approval: { ...generationJob.approval!, expiresAt: new Date(Date.now() + 20).toISOString() } });
+    for (let attempt = 0; attempt < 20 && documents.getJob(generationJob.id)?.status === 'waiting-for-user'; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(documents.getJob(generationJob.id)).toMatchObject({ status: 'cancelled', approval: undefined, error: { code: 'approval_timeout', retryable: true } });
+    expect(documents.getDocument(documentId)!.revision).toBe(revisionBeforeTimeout);
     const unsupported = await call(7, 'generation_start', { documentId, provider: 'stability', mode: 'variation', prompt: 'Do not approximate this', sourceAssetIds: [], resultCount: 1 });
     expect(unsupported).toMatchObject({ error: 'unsupported_generation_request', message: expect.stringContaining('does not support variation') });
+  });
+
+  it('keeps denied saves inert and allow-once authority exact and nonpersistent', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-mcp-approval-once-'));
+    temporaryPaths.push(root);
+    const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0');
+    documents.initialize();
+    const portPath = join(root, 'mcp-port.json');
+    const host = new McpHost(documents, '1.0.0', portPath);
+    hosts.push(host);
+    const started = await host.start('approval-once-token');
+    const client = await initializeClient(started.url, 'approval-once-token', 'approval-once-client');
+    const call = async (id: number, name: string, args: Record<string, unknown>) => callTool(started.url, client.headers, id, name, args);
+    const documentId = documents.snapshot().activeDocument!.id;
+    const actor = await call(2, 'session_manage', { action: 'join', name: 'QA-06 file approval agent', color: '#b64f75', documentId });
+    expect(actor.actor).toMatchObject({ kind: 'agent', name: 'QA-06 file approval agent', color: '#b64f75' });
+
+    const targetRoot = join(root, 'approval-targets');
+    const deniedPath = join(targetRoot, 'denied-agent-save.aidraw');
+    const allowedPath = join(targetRoot, 'allowed-once-agent-save.aidraw');
+    const trustProbePath = join(targetRoot, 'untrusted-follow-up.aidraw');
+    const canonicalBefore = documents.getDocument(documentId)!;
+    const denied = await call(3, 'document_manage', { action: 'save-as', documentId, path: deniedPath });
+    expect(denied).toMatchObject({ status: 'waiting-for-user' });
+    const deniedJob = documents.getJob(String(denied.jobId))!;
+    expect(deniedJob).toMatchObject({
+      kind: 'save',
+      actor: { name: 'QA-06 file approval agent', color: '#b64f75' },
+      approval: { options: ['allow-once', 'allow-session', 'allow-always', 'deny'], review: { target: deniedPath, trustFolder: targetRoot, overwritePaths: [] } },
+    });
+    expect(documents.resolveJob(deniedJob.id, 'deny')).toMatchObject({ status: 'cancelled', message: 'Denied in AIDraw.' });
+    expect(documents.getDocument(documentId)).toEqual(canonicalBefore);
+    expect(await access(deniedPath).then(() => true, () => false)).toBe(false);
+    expect(await access(targetRoot).then(() => true, () => false)).toBe(false);
+
+    const allowed = await call(4, 'document_manage', { action: 'save-as', documentId, path: allowedPath });
+    expect(allowed).toMatchObject({ status: 'waiting-for-user' });
+    const allowedJob = documents.getJob(String(allowed.jobId))!;
+    const queued = documents.resolveJob(allowedJob.id, 'allow-once')!;
+    expect(queued).toMatchObject({ status: 'queued', result: { approvalDecision: 'allow-once' } });
+    expect(await documents.save(documentId, allowedPath)).toBe(allowedPath);
+    documents.upsertJob({ ...queued, status: 'completed', progress: 1, updatedAt: nowIso(), message: 'Approved save completed.' });
+    expect((await readFile(allowedPath)).byteLength).toBeGreaterThan(0);
+    expect(await readdir(targetRoot)).toEqual(['allowed-once-agent-save.aidraw']);
+    expect(documents.getDocument(documentId)).toMatchObject({ id: documentId, filePath: allowedPath, dirty: false, revision: canonicalBefore.revision });
+
+    const trustProbe = await call(5, 'document_manage', { action: 'save-as', documentId, path: trustProbePath });
+    expect(trustProbe).toMatchObject({ status: 'waiting-for-user' });
+    const trustProbeJob = documents.getJob(String(trustProbe.jobId))!;
+    expect(trustProbeJob.approval?.review).toMatchObject({ target: trustProbePath, trustFolder: targetRoot, overwritePaths: [] });
+    expect(documents.resolveJob(trustProbeJob.id, 'deny')).toMatchObject({ status: 'cancelled' });
+    expect(await access(trustProbePath).then(() => true, () => false)).toBe(false);
+    expect(await readdir(targetRoot)).toEqual(['allowed-once-agent-save.aidraw']);
+    expect(await access(join(root, 'trusted-folders.json')).then(() => true, () => false)).toBe(false);
   });
 
   it('persists explicitly granted folder trust across MCP host restarts', async () => {

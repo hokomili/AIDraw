@@ -58,13 +58,38 @@ describe('cross-agent MCP configuration', () => {
     const configRoot = join(home, 'xdg');
     const configPath = join(configRoot, 'opencode', 'opencode.jsonc');
     await mkdir(join(configRoot, 'opencode'), { recursive: true });
-    await writeFile(configPath, '{\n  // keep this explanation\n  "mcp": { "servers": { "keep": { "type": "remote", "url": "https://keep.test" }, }, },\n}\n', 'utf8');
+    await writeFile(configPath, '{\n  // keep this explanation\n  "mcp": { "keep": { "type": "remote", "url": "https://keep.test", "enabled": true }, },\n}\n', 'utf8');
     await configureAgentClientFile('opencode', connection, { homeDirectory: home, environment: { XDG_CONFIG_HOME: configRoot }, now });
     const text = await readFile(configPath, 'utf8');
-    const config = parse(text) as { mcp: { servers: Record<string, unknown> } };
+    const config = parse(text) as { mcp: Record<string, unknown> };
     expect(text).toContain('// keep this explanation');
-    expect(config.mcp.servers.keep).toMatchObject({ url: 'https://keep.test' });
-    expect(config.mcp.servers.aidraw).toEqual({ type: 'remote', url: connection.url, oauth: false, codemode: false, headers: { Authorization: `Bearer ${connection.token}` } });
+    expect(config.mcp.keep).toMatchObject({ url: 'https://keep.test', enabled: true });
+    expect(config.mcp.aidraw).toEqual({ type: 'remote', url: connection.url, enabled: true, oauth: false, headers: { Authorization: `Bearer ${connection.token}` } });
+    expect(config.mcp).not.toHaveProperty('servers');
+  });
+
+  it('migrates AIDraw\'s obsolete OpenCode V2 wrapper when it contains no unrelated servers', async () => {
+    const home = await temporaryHome();
+    const configRoot = join(home, 'xdg');
+    const configPath = join(configRoot, 'opencode', 'opencode.json');
+    await mkdir(join(configRoot, 'opencode'), { recursive: true });
+    await writeFile(configPath, JSON.stringify({ theme: 'keep', mcp: { servers: { aidraw: { type: 'remote', url: 'http://127.0.0.1:1/mcp', oauth: false, codemode: false, headers: { Authorization: 'Bearer stale-test-value' } } } } }, null, 2), 'utf8');
+    await configureAgentClientFile('opencode', connection, { homeDirectory: home, environment: { XDG_CONFIG_HOME: configRoot }, now });
+    const config = JSON.parse(await readFile(configPath, 'utf8')) as { theme: string; mcp: Record<string, unknown> };
+    expect(config.theme).toBe('keep');
+    expect(config.mcp).not.toHaveProperty('servers');
+    expect(config.mcp.aidraw).toEqual({ type: 'remote', url: connection.url, enabled: true, oauth: false, headers: { Authorization: `Bearer ${connection.token}` } });
+  });
+
+  it('does not migrate unrelated entries from the obsolete OpenCode V2 wrapper', async () => {
+    const home = await temporaryHome();
+    const configRoot = join(home, 'xdg');
+    const configPath = join(configRoot, 'opencode', 'opencode.json');
+    await mkdir(join(configRoot, 'opencode'), { recursive: true });
+    const original = JSON.stringify({ mcp: { servers: { aidraw: { type: 'remote', url: 'old' }, keep: { type: 'remote', url: 'https://keep.test' } } } }, null, 2);
+    await writeFile(configPath, original, 'utf8');
+    await expect(configureAgentClientFile('opencode', connection, { homeDirectory: home, environment: { XDG_CONFIG_HOME: configRoot }, now })).rejects.toThrow('will not migrate unrelated OpenCode settings');
+    expect(await readFile(configPath, 'utf8')).toBe(original);
   });
 
   it('writes the documented Antigravity remote-server schema', async () => {

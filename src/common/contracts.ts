@@ -6,7 +6,7 @@ import type {
   Id,
   NewDocumentOptionsInput,
 } from '@aidraw/core';
-import type { GenerationProvider, GenerationRequest } from './generation';
+import type { GenerationAcceptanceResult, GenerationProvider, GenerationRequest } from './generation';
 import type { CheckpointMergeCandidate } from './checkpoint-merge';
 import type { PaletteFileFormat, PaletteImportMode } from './palette-interchange';
 import type { SpriteSheetSliceOptions } from './sprite-sheet';
@@ -51,6 +51,7 @@ export interface DocumentTab {
   filePath?: string;
   activityState?: 'active' | 'complete' | 'conflict' | 'approval';
   activityActor?: Actor;
+  activityCursor?: { x: number; y: number; tool?: string };
 }
 
 export interface AgentPresence {
@@ -321,7 +322,7 @@ export interface AIDrawDesktopAPI {
   setProviderCredential(provider: Exclude<GenerationProvider, 'comfyui'>, value: string): Promise<{ saved: boolean }>;
   getProviderStatus(): Promise<Record<GenerationProvider, { configured: boolean }>>;
   generationStart(request: GenerationRequest): Promise<{ jobId: Id }>;
-  generationAccept(jobId: Id, outputId: Id): Promise<{ accepted: boolean; message?: string }>;
+  generationAccept(jobId: Id, outputId: Id): Promise<GenerationAcceptanceResult>;
   generationReject(jobId: Id, outputId: Id): Promise<{ rejected: boolean; message?: string }>;
   jobCancel(jobId: Id): Promise<AsyncJob | undefined>;
   importFiles(pixelMode?: boolean): Promise<{ imported: number; warnings: string[]; reportIds: Id[] }>;
@@ -336,6 +337,8 @@ export interface AIDrawDesktopAPI {
   replayTrace(documentId: Id, transactionId: Id): Promise<{ replaying: boolean; reason?: string }>;
   updateEditorAdvisory(state: EditorAdvisoryInput): Promise<void>;
   exportRendererDiagnostics(detail: { message: string; stack?: string; componentStack?: string; userAgent?: string }): Promise<{ saved: boolean; filePath?: string; cancelled?: boolean }>;
+  /** Available only to the exact isolated packaged renderer-recovery test profile. */
+  injectRendererRecoveryTestEvent(): Promise<{ injected: boolean; byteLength: number }>;
   onEvent(callback: (event: WorkspaceEvent) => void): () => void;
   onNewDocumentRequested(callback: (kind?: NewDocumentKind) => void): () => void;
 }
@@ -400,6 +403,7 @@ export const IPC = {
   replayTrace: 'aidraw:trace:replay',
   editorAdvisory: 'aidraw:editor:advisory',
   rendererDiagnosticsExport: 'aidraw:renderer-diagnostics:export',
+  rendererRecoveryTestEvent: 'aidraw:renderer-recovery:test-event',
   event: 'aidraw:event',
   newDocumentRequested: 'aidraw:documents:new-requested',
 } as const;
