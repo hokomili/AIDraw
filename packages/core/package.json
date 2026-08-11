@@ -9,7 +9,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "immer": "11.1.15",
+    "immer": "11.1.16",
     "zod": "4.4.3"
   }
 }
