@@ -61,7 +61,7 @@
     "gifenc": "1.0.3",
     "gifuct-js": "2.1.2",
     "hono": "4.13.0",
-    "immer": "11.1.15",
+    "immer": "11.1.16",
     "jsonc-parser": "3.3.1",
     "lucide-react": "1.28.0",
     "openai": "7.3.0",
