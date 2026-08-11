@@ -355,7 +355,7 @@ async function drawPdfImage(output: PDFDocument, page: PDFPage, document: Illust
 
 async function illustrationPdf(document: IllustrationDocument): Promise<ExportArtifact> {
   const output = await PDFDocument.create(); const page = output.addPage([document.artboard.width, document.artboard.height]);
-  const warnings = new Set<string>(); const rasterized: string[] = []; const fonts = new Map<StandardFonts, PDFFont>();
+  const warnings = new Set<string>(); const rasterized: string[] = []; const fonts = new Map<StandardFonts, PDFFont>(); let searchableImportedTextRuns = 0;
   if (document.artboard.background) {
     const background = pdfColor(document.artboard.background);
     if (background) page.drawRectangle({ x: 0, y: 0, width: document.artboard.width, height: document.artboard.height, color: background.color, opacity: background.opacity });
@@ -363,17 +363,19 @@ async function illustrationPdf(document: IllustrationDocument): Promise<ExportAr
   const drawFallback = async (name: string, png: Buffer) => {
     const image = await output.embedPng(png); page.drawImage(image, { x: 0, y: 0, width: document.artboard.width, height: document.artboard.height }); rasterized.push(name);
   };
-  const drawObject = async (layerId: string, objectId: string, visiting = new Set<string>()): Promise<void> => {
+  const drawObject = async (layerId: string, objectId: string, visiting = new Set<string>(), invisibleText = false): Promise<void> => {
     if (visiting.has(objectId)) return;
     const object = document.objects[objectId]; if (!object?.visible) return;
+    if (invisibleText && object.type !== 'text') return;
     if (!pdfObjectCanRemainNative(document, object)) {
+      if (invisibleText) { warnings.add('Some imported PDF text could not remain searchable because its transform or effects require rasterization.'); return; }
       await drawFallback(object.name, await rasterizedPdfObject(document, layerId, objectId));
       warnings.add('Unsupported object transforms, gradients, masks, blend modes, and effects are embedded as transparent raster fallbacks.');
       return;
     }
     if (object.type === 'group') {
       const next = new Set(visiting); next.add(objectId);
-      for (const childId of object.childIds) await drawObject(layerId, childId, next);
+      for (const childId of object.childIds) await drawObject(layerId, childId, next, invisibleText);
       return;
     }
     if (object.type === 'image') { await drawPdfImage(output, page, document, object); return; }
@@ -382,6 +384,13 @@ async function illustrationPdf(document: IllustrationDocument): Promise<ExportAr
       try {
         const fontFor = async (weight: number, italic: boolean) => { const name = pdfFontName(weight, italic); let font = fonts.get(name); if (!font) { font = await output.embedFont(name); fonts.set(name, font); } return font; };
         for (const range of ranges) await fontFor(range.fontWeight, range.fontStyle === 'italic');
+        if (invisibleText) {
+          const style = ranges[0]; const font = fonts.get(pdfFontName(style.fontWeight, style.fontStyle === 'italic'))!;
+          page.drawText(object.text, { x: object.transform.x, y: document.artboard.height - object.transform.y - style.fontSize, size: style.fontSize, font, color: rgb(0, 0, 0), opacity: 0 });
+          searchableImportedTextRuns += 1;
+          if (ranges.some((range) => !/^(arial|helvetica|sans-serif)$/i.test(range.fontFamily))) warnings.add('PDF text remains searchable/editable but non-embedded document fonts are substituted with Helvetica.');
+          return;
+        }
         const glyphs = layoutStyledText({ ...object, ranges }, (character, style) => fonts.get(pdfFontName(style.fontWeight, style.fontStyle === 'italic'))!.widthOfTextAtSize(character, style.fontSize));
         for (const glyph of glyphs) {
           const fill = pdfColor(glyph.style.color); if (!fill) throw new Error('Unsupported text color.'); const font = fonts.get(pdfFontName(glyph.style.fontWeight, glyph.style.fontStyle === 'italic'))!;
@@ -390,6 +399,7 @@ async function illustrationPdf(document: IllustrationDocument): Promise<ExportAr
         }
         if (ranges.some((range) => !/^(arial|helvetica|sans-serif)$/i.test(range.fontFamily))) warnings.add('PDF text remains searchable/editable but non-embedded document fonts are substituted with Helvetica.');
       } catch {
+        if (invisibleText) { warnings.add('Some imported PDF text could not remain searchable because it contains glyphs outside the built-in PDF font.'); return; }
         await drawFallback(object.name, await rasterizedPdfObject(document, layerId, objectId));
         warnings.add('Text containing glyphs outside the built-in PDF font was rasterized; the export report names the affected object.');
       }
@@ -403,7 +413,11 @@ async function illustrationPdf(document: IllustrationDocument): Promise<ExportAr
     page.drawSvgPath(path, { x: object.transform.x, y: document.artboard.height - object.transform.y, color: fill?.color, opacity: fill ? fill.opacity * object.opacity : undefined, borderColor: stroke?.color, borderOpacity: stroke ? stroke.opacity * strokeOpacity * object.opacity : undefined, borderWidth: object.type === 'vector-stroke' ? 0 : object.stroke.width, borderDashArray: object.type === 'vector-stroke' ? undefined : object.stroke.dash, borderLineCap: lineCap });
   };
   const drawLayer = async (layerId: string): Promise<void> => {
-    const layer = document.layers[layerId]; if (!layer?.visible) return;
+    const layer = document.layers[layerId]; if (!layer) return;
+    if (!layer.visible) {
+      if (layer.type === 'vector' && layer.interchangeRole === 'pdf-extracted-text') for (const objectId of layer.objectIds) await drawObject(layerId, objectId, new Set<string>(), true);
+      return;
+    }
     if (layer.opacity !== 1 || layer.blendMode !== 'normal' || layer.filters?.length || layer.maskLayerId) {
       await drawFallback(layer.name, (await renderIllustration(document, layerId, false)).toBuffer('image/png'));
       warnings.add('Layer compositing, adjustment filters, and layer masks are embedded as transparent raster fallbacks.');
@@ -418,6 +432,7 @@ async function illustrationPdf(document: IllustrationDocument): Promise<ExportAr
     for (const objectId of layer.objectIds) if (!childIds.has(objectId)) await drawObject(layerId, objectId);
   };
   for (const layerId of document.layerIds) await drawLayer(layerId);
+  if (searchableImportedTextRuns) warnings.add(`${searchableImportedTextRuns} imported PDF text run${searchableImportedTextRuns === 1 ? ' was' : 's were'} retained as invisible searchable content.`);
   return { data: Buffer.from(await output.save()), mimeType: 'application/pdf', extension: 'pdf', report: { warnings: [...warnings], rasterized } };
 }
 

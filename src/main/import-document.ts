@@ -589,13 +589,13 @@ async function importPdf(bytes: Buffer, name: string, pixelMode: boolean): Promi
       const canvas = createCanvas(width, height);
       await page.render({ canvas: null, canvasContext: canvas.getContext('2d') as unknown as CanvasRenderingContext2D, viewport }).promise; const pageName = source.numPages > 1 ? `${name} · Page ${pageNumber}` : name; const imported = await importRaster(canvas.toBuffer('image/png'), pageName, 'image/png', pixelMode); const document = imported.documents[0];
       if (document.kind === 'illustration') {
-        const timestamp = nowIso(); const textLayer: IllustrationLayer = { id: createId('layer'), revision: 0, name: 'Editable PDF text (hidden)', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, visible: false, locked: false, opacity: 1, blendMode: 'normal', type: 'vector', objectIds: [] }; const text = await page.getTextContent(); extractedTextItems += text.items.length; if (extractedTextItems > 250_000) throw new Error('PDF exceeds the 250,000-item editable-text extraction limit.');
+        const timestamp = nowIso(); const textLayer: IllustrationLayer = { id: createId('layer'), revision: 0, name: 'Editable PDF text (hidden)', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, interchangeRole: 'pdf-extracted-text', visible: false, locked: false, opacity: 1, blendMode: 'normal', type: 'vector', objectIds: [] }; const text = await page.getTextContent(); extractedTextItems += text.items.length; if (extractedTextItems > 250_000) throw new Error('PDF exceeds the 250,000-item editable-text extraction limit.');
         for (const item of text.items) if ('str' in item && item.str) { const fontSize = Math.max(1, Math.hypot(item.transform[0], item.transform[1])); const object: TextObject = { ...entityBase(item.str.slice(0, 32), textLayer.id), type: 'text', text: item.str, width: Math.max(1, item.width), height: Math.max(1, item.height || fontSize), align: 'left', lineHeight: 1.2, ranges: [{ start: 0, end: item.str.length, fontFamily: item.fontName || 'sans-serif', fontSize, fontWeight: 400, fontStyle: 'normal', color: '#000000', letterSpacing: 0 }] }; object.transform.x = item.transform[4]; object.transform.y = viewport.height - item.transform[5] - fontSize; document.objects[object.id] = object; textLayer.objectIds.push(object.id); }
         if (textLayer.objectIds.length) { document.layers[textLayer.id] = textLayer; document.layerIds.push(textLayer.id); }
       }
       documents.push(document);
     }
-    result = { documents, warnings: ['PDF pages retain a faithful raster fallback. Extracted text is placed on a hidden editable layer; unsupported operators and effects remain rasterized.'] };
+    result = { documents, warnings: ['PDF pages retain a faithful raster fallback. Extracted text is placed on a hidden editable layer and retained invisibly on PDF re-export when supported; unsupported operators and effects remain rasterized.'] };
   } catch (error) {
     importFailed = true; importError = error;
   }

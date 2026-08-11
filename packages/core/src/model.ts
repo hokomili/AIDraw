@@ -225,6 +225,8 @@ export interface RasterBrushPreset {
 
 export interface LayerBase extends EntityBase {
   parentId?: Id;
+  /** Import-authored semantic retained for a compatible interchange re-export. */
+  interchangeRole?: 'pdf-extracted-text';
   visible: boolean;
   locked: boolean;
   opacity: number;
