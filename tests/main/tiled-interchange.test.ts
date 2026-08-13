@@ -58,6 +58,31 @@ describe('representative Tiled JSON interchange', () => {
     expect(tileset.tiles[1]).toMatchObject({ probability: 0.75, animation: [] });
   });
 
+  it('round-trips sanitization-colliding tileset names through distinct referenced PNG companions', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'aidraw-tiled-companion-collisions-')); temporaryDirectories.push(directory);
+    const document = createPixelDocument('project', 'Tiled companion collisions'); document.assetIds = []; document.pixelAssets = {};
+    const firstSprite = createPixelSprite('First pixels', 1, 1); writePixels(Object.values(firstSprite.cels)[0], [{ x: 0, y: 0, index: 2 }]);
+    const secondSprite = createPixelSprite('Second pixels', 1, 1); writePixels(Object.values(secondSprite.cels)[0], [{ x: 0, y: 0, index: 4 }]);
+    const first = createPixelTileset('Terrain/Day', firstSprite.id, 1, 1, 1, 1); first.id = 'first-tileset'; first.firstGid = 1;
+    const second = createPixelTileset('terrain:day', secondSprite.id, 1, 1, 1, 1); second.id = 'second-tileset'; second.firstGid = 2;
+    const map = createPixelTilemap('Collision map'); map.width = 2; map.height = 1; map.tileWidth = 1; map.tileHeight = 1; map.tilesetIds = [first.id, second.id];
+    const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile' || !layer.chunks) throw new Error('Expected tile layer'); writeTiles(layer.chunks, [{ x: 0, y: 0, gid: 1 }, { x: 1, y: 0, gid: 2 }]);
+    document.pixelAssets = { [firstSprite.id]: firstSprite, [secondSprite.id]: secondSprite, [first.id]: first, [second.id]: second, [map.id]: map }; document.assetIds = [firstSprite.id, secondSprite.id, first.id, second.id, map.id]; document.activeAssetId = map.id;
+    const sourcePixels = Buffer.from(renderTilemap(document, map).getContext('2d').getImageData(0, 0, 2, 1).data);
+
+    const artifact = await exportDocument(document, 'tiled-json'); const names = artifact.companions?.map((companion) => companion.name) ?? [];
+    expect(names).toEqual(['Terrain-Day.png', 'terrain-day (2).png']);
+    const mapPath = join(directory, 'collision-map.tmj');
+    await Promise.all([writeFile(mapPath, artifact.data, { flag: 'wx' }), ...artifact.companions!.map((companion) => writeFile(join(directory, companion.name), companion.data, { flag: 'wx' }))]);
+    expect((await readdir(directory)).sort()).toEqual(['collision-map.tmj', ...names].sort());
+
+    const imported = await runImportUtilityRequest({ id: 'companion-collision-roundtrip', kind: 'import-document', filePath: mapPath, pixelMode: true }); expect(imported.warnings).toEqual([]);
+    const reopened = imported.documents[0]; if (reopened.kind !== 'pixel') throw new Error('Expected pixel document');
+    const reopenedMap = reopened.pixelAssets[reopened.activeAssetId]; if (reopenedMap.type !== 'tilemap') throw new Error('Expected tilemap');
+    expect(reopenedMap.tilesetIds.map((id) => reopened.pixelAssets[id].name)).toEqual(['Terrain/Day', 'terrain:day']);
+    expect(Buffer.from(renderTilemap(reopened, reopenedMap).getContext('2d').getImageData(0, 0, 2, 1).data)).toEqual(sourcePixels);
+  });
+
   it('imports an external TSX through TMX with typed properties and geometry', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'aidraw-tmx-fixture-')); temporaryDirectories.push(directory); const xmlFixture = join(directory, basename(xmlFixtureSource)); await Promise.all([copyFile(xmlFixtureSource, xmlFixture), copyFile(xmlTilesetSource, join(directory, 'terrain.tsx'))]);
     const result = await importDocument(xmlFixture, true); expect(result.warnings).toEqual([]); const document = result.documents[0]; if (document.kind !== 'pixel') throw new Error('Expected pixel document'); const map = document.pixelAssets[document.activeAssetId]; if (map.type !== 'tilemap') throw new Error('Expected tilemap');

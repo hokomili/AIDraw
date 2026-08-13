@@ -28,7 +28,7 @@ import { assertTiledExportResourceBudget } from '../common/tiled-resource-policy
 import { layoutStyledText } from '../common/text-layout';
 import { MAX_INTERCHANGE_FIDELITY_ENTRIES, tryAppendInterchangeFidelityEntry, type InterchangeFidelityEntry } from '../common/interchange-fidelity';
 import type { ExportFormat, ExportOptions } from '../common/contracts';
-import { safeTiledAssetName } from './export-artifact-policy';
+import { planTiledExportCompanions, safeTiledAssetName } from './export-artifact-policy';
 import { renderDocument, renderDocumentDimensions, renderIllustration, renderIllustrationLayerSource, renderSprite } from './render-document';
 import { MAX_UTILITY_REPORT_SERIALIZED_BYTES, assertUtilityJsonBudget } from './utility-resource-policy';
 
@@ -846,8 +846,8 @@ function tilemapXml(document: PixelDocument, map: PixelTilemap, images: Record<s
 async function tiled(document: PixelDocument, format: 'tiled-json' | 'tiled-xml'): Promise<ExportArtifact> {
   const active = document.pixelAssets[document.activeAssetId]; if (active?.type !== 'tilemap' && active?.type !== 'tileset') throw new Error('Choose a tilemap or tileset before Tiled export.');
   if (active.type === 'tilemap') assertTiledExportResourceBudget(active);
-  const tilesets = active.type === 'tilemap' ? active.tilesetIds.map((id) => document.pixelAssets[id]).filter((asset): asset is PixelTileset => asset?.type === 'tileset') : [active]; const images: Record<string, string> = {}; const companions: NonNullable<ExportArtifact['companions']> = [];
-  for (const tileset of tilesets) { const sprite = document.pixelAssets[tileset.spriteAssetId]; if (sprite?.type !== 'sprite') continue; const name = safeTiledAssetName(tileset.name, 'png'); images[tileset.id] = name; companions.push({ name, extension: 'png', mimeType: 'image/png', data: renderSprite(document, sprite).toBuffer('image/png') }); }
+  const companionPlan = planTiledExportCompanions(document) ?? []; const images: Record<string, string> = {}; const companions: NonNullable<ExportArtifact['companions']> = [];
+  for (const planned of companionPlan) { const tileset = document.pixelAssets[planned.tilesetId]; if (tileset?.type !== 'tileset') continue; const sprite = document.pixelAssets[tileset.spriteAssetId]; if (sprite?.type !== 'sprite') continue; images[tileset.id] = planned.name; companions.push({ name: planned.name, extension: planned.extension, mimeType: planned.mimeType, data: renderSprite(document, sprite).toBuffer('image/png') }); }
   if (active.type === 'tileset') {
     const body = format === 'tiled-json' ? JSON.stringify(tilesetJson(document, active, images[active.id]), null, 2) : `<?xml version="1.0" encoding="UTF-8"?>${tilesetXml(document, active, images[active.id] ?? safeTiledAssetName(active.name, 'png'))}`;
     return { data: Buffer.from(body), mimeType: format === 'tiled-json' ? 'application/json' : 'application/xml', extension: format === 'tiled-json' ? 'tsj' : 'tsx', companions, report: { warnings: [], rasterized: [] } };

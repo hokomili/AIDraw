@@ -1,6 +1,7 @@
 import { dirname, extname, join } from 'node:path';
 import type { AIDrawDocument, PixelTileset } from '@aidraw/core';
 import type { ExportFormat } from '../common/contracts';
+import { MAX_EXPORT_UTILITY_MEMBERS } from './utility-resource-policy';
 
 export interface ExportArtifactMemberIdentity {
   mimeType: string;
@@ -14,6 +15,14 @@ export interface ExpectedExportArtifactIdentity {
   companions?: ExportArtifactMemberIdentity[];
 }
 
+export interface PlannedTiledCompanion extends ExportArtifactMemberIdentity {
+  tilesetId: string;
+  name: string;
+}
+
+/** The primary Tiled document consumes one member of the utility result envelope. */
+export const MAX_TILED_EXPORT_COMPANIONS = MAX_EXPORT_UTILITY_MEMBERS - 1;
+
 export function safeTiledAssetName(name: string, extension: string): string {
   return `${name.replace(/[<>:"/\\|?*]/g, '-').trim() || 'tileset'}.${extension}`;
 }
@@ -26,6 +35,42 @@ function tiledTilesets(document: AIDrawDocument): PixelTileset[] | undefined {
   return active.tilesetIds
     .map((id) => document.pixelAssets[id])
     .filter((asset): asset is PixelTileset => asset?.type === 'tileset');
+}
+
+function foldedTiledAssetKey(name: string): string {
+  return name.normalize('NFC').toLowerCase();
+}
+
+/**
+ * Plan the exact Tiled PNG member set before any companion is rendered.
+ * Canonical tileset order owns deterministic suffix allocation; the map/tileset
+ * body records the resulting leaf names, so no source identity or pixels change.
+ */
+export function planTiledExportCompanions(document: AIDrawDocument): PlannedTiledCompanion[] | undefined {
+  const tilesets = tiledTilesets(document);
+  if (!tilesets) return undefined;
+  const companions: PlannedTiledCompanion[] = [];
+  const reserved = new Set<string>();
+  const nextSuffix = new Map<string, number>();
+  for (const tileset of tilesets) {
+    if (document.kind !== 'pixel' || document.pixelAssets[tileset.spriteAssetId]?.type !== 'sprite') continue;
+    if (companions.length >= MAX_TILED_EXPORT_COMPANIONS) {
+      throw new RangeError(`Tiled export exceeds the ${MAX_TILED_EXPORT_COMPANIONS.toLocaleString('en-US')}-companion-image safety limit.`);
+    }
+    const extension = 'png';
+    const baseName = safeTiledAssetName(tileset.name, extension);
+    const baseKey = foldedTiledAssetKey(baseName);
+    let name = baseName;
+    let suffix = nextSuffix.get(baseKey) ?? 2;
+    while (reserved.has(foldedTiledAssetKey(name))) {
+      name = `${baseName.slice(0, -(extension.length + 1))} (${suffix}).${extension}`;
+      suffix += 1;
+    }
+    nextSuffix.set(baseKey, suffix);
+    reserved.add(foldedTiledAssetKey(name));
+    companions.push({ tilesetId: tileset.id, name, extension, mimeType: 'image/png' });
+  }
+  return companions;
 }
 
 /** Exact format-derived member identities accepted from the utility worker. */
@@ -48,8 +93,8 @@ export function expectedExportArtifactIdentity(
     };
   }
 
-  const tilesets = tiledTilesets(document);
-  if (!tilesets) return undefined;
+  const companions = planTiledExportCompanions(document);
+  if (!companions) return undefined;
   const active = document.kind === 'pixel' ? document.pixelAssets[document.activeAssetId] : undefined;
   const json = format === 'tiled-json';
   return {
@@ -57,9 +102,7 @@ export function expectedExportArtifactIdentity(
       mimeType: json ? 'application/json' : 'application/xml',
       extension: active?.type === 'tilemap' ? (json ? 'tmj' : 'tmx') : (json ? 'tsj' : 'tsx'),
     },
-    companions: tilesets
-      .filter((tileset) => document.kind === 'pixel' && document.pixelAssets[tileset.spriteAssetId]?.type === 'sprite')
-      .map((tileset) => ({ name: safeTiledAssetName(tileset.name, 'png'), extension: 'png', mimeType: 'image/png' })),
+    companions: companions.map(({ name, extension, mimeType }) => ({ name, extension, mimeType })),
   };
 }
 

@@ -20,6 +20,7 @@ import {
 } from '@aidraw/core';
 import { MAX_PSD_LAYER_NESTING_DEPTH, MAX_PSD_LAYER_RECORDS, assertPsdLayerStructureBudget } from '@common/psd-limits';
 import { assertAnimationExpandedPixelBudget, assertPsdLayerRasterBudget, boundedInterchangeExportReport, exportDocument, illustrationToSvg, plannedExportCompanionPaths } from '@main/export-document';
+import { MAX_TILED_EXPORT_COMPANIONS } from '@main/export-artifact-policy';
 import { renderIllustrationLayerSource } from '@main/render-document';
 import { MAX_UTILITY_REPORT_SERIALIZED_BYTES, MAX_UTILITY_TEXT_BYTES, assertUtilityJsonBudget } from '@main/utility-resource-policy';
 import { decompressFrames, parseGIF } from 'gifuct-js';
@@ -287,6 +288,40 @@ describe('interchange exporters', () => {
     for (const format of ['tiled-json', 'tiled-xml'] as const) {
       await expect(exportDocument(document, format)).rejects.toThrow('4,194,304-cell safety limit');
     }
+  });
+
+  it('rejects over-budget Tiled companion sets before source rendering', async () => {
+    const document = createPixelDocument('project', 'Tiled companion preflight'); document.assetIds = []; document.pixelAssets = {};
+    const sprite = createPixelSprite('Unreachable companion source', 1, 1);
+    const map = createPixelTilemap('Over-budget companion map');
+    const tilesets = Array.from({ length: MAX_TILED_EXPORT_COMPANIONS + 1 }, (_, index) => {
+      const tileset = createPixelTileset(`Companion ${index}`, sprite.id, 1, 1, 1, 1); tileset.id = `companion-${index}`; tileset.firstGid = index + 1; return tileset;
+    });
+    map.tilesetIds = tilesets.map((tileset) => tileset.id);
+    Object.defineProperty(sprite, 'width', { configurable: true, get() { throw new Error('Tiled companion rendering started before member preflight.'); } });
+    document.pixelAssets = { [sprite.id]: sprite, ...Object.fromEntries(tilesets.map((tileset) => [tileset.id, tileset])), [map.id]: map }; document.assetIds = [sprite.id, ...map.tilesetIds, map.id]; document.activeAssetId = map.id;
+
+    for (const format of ['tiled-json', 'tiled-xml'] as const) {
+      await expect(exportDocument(document, format)).rejects.toThrow('4,096-companion-image safety limit');
+    }
+  });
+
+  it('exports colliding tileset names through distinct referenced companion leaves', async () => {
+    const document = createPixelDocument('project', 'Tiled companion collisions'); document.assetIds = []; document.pixelAssets = {};
+    const sprite = createPixelSprite('Shared pixels', 1, 1); writePixels(Object.values(sprite.cels)[0], [{ x: 0, y: 0, index: 3 }]);
+    const first = createPixelTileset('Terrain/Day', sprite.id, 1, 1, 1, 1); first.id = 'first-tileset'; first.firstGid = 1;
+    const second = createPixelTileset('terrain:day', sprite.id, 1, 1, 1, 1); second.id = 'second-tileset'; second.firstGid = 2;
+    const map = createPixelTilemap('Collision map'); map.tilesetIds = [first.id, second.id];
+    document.pixelAssets = { [sprite.id]: sprite, [first.id]: first, [second.id]: second, [map.id]: map }; document.assetIds = [sprite.id, first.id, second.id, map.id]; document.activeAssetId = map.id;
+
+    const json = await exportDocument(document, 'tiled-json'); const parsed = JSON.parse(json.data.toString()) as { tilesets: Array<{ image: string }> };
+    const xml = await exportDocument(document, 'tiled-xml');
+    expect(json.companions?.map((companion) => companion.name)).toEqual(['Terrain-Day.png', 'terrain-day (2).png']);
+    expect(parsed.tilesets.map((tileset) => tileset.image)).toEqual(['Terrain-Day.png', 'terrain-day (2).png']);
+    expect(xml.companions?.map((companion) => companion.name)).toEqual(['Terrain-Day.png', 'terrain-day (2).png']);
+    expect(xml.data.toString()).toContain('<image source="Terrain-Day.png"');
+    expect(xml.data.toString()).toContain('<image source="terrain-day (2).png"');
+    expect(plannedExportCompanionPaths(document, 'tiled-json', '/exports/map.tmj')).toEqual(['/exports/Terrain-Day.png', '/exports/terrain-day (2).png']);
   });
 
   it('exports Tiled JSON/XML with first-GID ranges, chunks, and source artwork', async () => {
