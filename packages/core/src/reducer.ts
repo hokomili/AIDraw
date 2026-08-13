@@ -14,7 +14,13 @@ import { createId, nowIso } from './ids';
 import { remapPixelCelIndices, writePixelRuns, writePixels, writeTileRuns, writeTiles } from './pixel';
 import { findDocumentAssetReferences } from './references';
 import { resolvePixelCel } from './animation';
-import { countPaletteIndexUsage } from './palette';
+import {
+  assertPaletteIndicesExist,
+  assertPixelCelsUsePalette,
+  assertPixelSpriteUsesPalette,
+  assertPixelStampsUsePalette,
+  countPaletteIndexUsage,
+} from './palette';
 
 export interface ApplyTransactionOptions {
   recordActivity?: boolean;
@@ -526,6 +532,7 @@ function applyOperation(
     case 'pixel.stamps.replace': {
       const pixel = requirePixel(document, operationIndex);
       const previous = structuredClone(pixel.stamps);
+      assertPixelStampsUsePalette(operation.stamps, pixel.palette.length);
       pixel.stamps = structuredClone(operation.stamps);
       return { kind: 'pixel.stamps.replace', stamps: previous };
     }
@@ -572,6 +579,7 @@ function applyOperation(
       if (!sprite || sprite.type !== 'sprite') throw new Error('Frame additions require a sprite');
       assertRevision(sprite, operation.expectedRevision, operationIndex);
       if (sprite.frames[operation.frame.id]) throw new Error(`Frame ${operation.frame.id} already exists`);
+      assertPixelCelsUsePalette(operation.cels, pixel.palette.length, `New frame ${operation.frame.id}`);
       sprite.frames[operation.frame.id] = structuredClone(operation.frame);
       const index = Math.max(0, Math.min(operation.index ?? sprite.frameIds.length, sprite.frameIds.length));
       sprite.frameIds.splice(index, 0, operation.frame.id);
@@ -623,6 +631,7 @@ function applyOperation(
       }
       for (const cel of cels) delete sprite.cels[cel.id];
       delete sprite.frames[frame.id];
+      delete sprite.paletteOverrides[frame.id];
       sprite.frameIds.splice(index, 1);
       sprite.tags = sprite.tags.flatMap((tag) => {
         if (tag.fromFrameId === frame.id && tag.toFrameId === frame.id) return [];
@@ -634,6 +643,7 @@ function applyOperation(
     case 'pixel.asset.add': {
       const pixel = requirePixel(document, operationIndex);
       if (pixel.pixelAssets[operation.asset.id]) throw new Error(`Pixel asset ${operation.asset.id} already exists`);
+      if (operation.asset.type === 'sprite') assertPixelSpriteUsesPalette(operation.asset, pixel.palette);
       pixel.pixelAssets[operation.asset.id] = structuredClone(operation.asset);
       const index = Math.max(0, Math.min(operation.index ?? pixel.assetIds.length, pixel.assetIds.length));
       pixel.assetIds.splice(index, 0, operation.asset.id);
@@ -644,6 +654,7 @@ function applyOperation(
       const current = pixel.pixelAssets[operation.asset.id];
       if (!current) throw new Error(`Pixel asset ${operation.asset.id} does not exist`);
       assertRevision(current, operation.expectedRevision, operationIndex);
+      if (operation.asset.type === 'sprite') assertPixelSpriteUsesPalette(operation.asset, pixel.palette);
       const previous = structuredClone(current);
       pixel.pixelAssets[current.id] = structuredClone(operation.asset);
       touch(pixel.pixelAssets[current.id], timestamp);
@@ -675,6 +686,7 @@ function applyOperation(
       if (!cel) throw new Error(`Cel ${operation.celId} does not exist`);
       assertRevision(cel, operation.expectedRevision, operationIndex);
       assertSpriteCoordinates(sprite, operation.changes);
+      assertPaletteIndicesExist(operation.changes.map((change) => change.index), pixel.palette.length, 'Pixel change');
       const inverse = writePixels(cel, operation.changes);
       touch(cel, timestamp);
       touch(sprite, timestamp);
@@ -694,6 +706,7 @@ function applyOperation(
       if (!cel) throw new Error(`Cel ${operation.celId} does not exist`);
       assertRevision(cel, operation.expectedRevision, operationIndex);
       assertSpriteCoordinates(sprite, operation.runs);
+      assertPaletteIndicesExist(operation.runs.map((run) => run.index), pixel.palette.length, 'Pixel region');
       const inverse = writePixelRuns(cel, operation.runs);
       touch(cel, timestamp);
       touch(sprite, timestamp);

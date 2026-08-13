@@ -1,4 +1,4 @@
-import type { PaletteCycle, PixelDocument, PixelSprite } from './model';
+import type { PaletteCycle, PaletteEntry, PixelCel, PixelDocument, PixelSprite, PixelStamp } from './model';
 import type { CanvasOperation } from './operations';
 import { decodePixelChunk, remapPixelCelIndices } from './pixel';
 
@@ -22,6 +22,40 @@ export function countPaletteIndexUsage(document: PixelDocument, paletteIndex: nu
     for (const value of decodePixelChunk(chunk)) if (value === paletteIndex && ++count >= limit) return count;
   }
   return count;
+}
+
+export function assertPaletteIndicesExist(indices: Iterable<number>, paletteLength: number, label: string): void {
+  for (const index of indices) if (!Number.isInteger(index) || index < 0 || index >= paletteLength) {
+    throw new Error(`${label} uses palette index ${index}, but the current palette has ${paletteLength} entries.`);
+  }
+}
+
+export function assertPixelCelsUsePalette(cels: Iterable<PixelCel>, paletteLength: number, label: string): void {
+  for (const cel of cels) for (const chunk of Object.values(cel.chunks ?? {})) {
+    assertPaletteIndicesExist(decodePixelChunk(chunk), paletteLength, `${label} cel ${cel.id}`);
+  }
+}
+
+export function assertPixelStampsUsePalette(stamps: Iterable<PixelStamp>, paletteLength: number): void {
+  for (const stamp of stamps) assertPaletteIndicesExist(stamp.cells.map((cell) => cell.index), paletteLength, `Pixel stamp ${stamp.id}`);
+}
+
+export function assertPixelSpriteUsesPalette(sprite: PixelSprite, palette: readonly PaletteEntry[]): void {
+  assertPixelCelsUsePalette(Object.values(sprite.cels), palette.length, `Pixel sprite ${sprite.id}`);
+  for (const [frameId, override] of Object.entries(sprite.paletteOverrides)) {
+    if (override.length !== palette.length || override.some((entry, index) => entry.id !== palette[index]?.id)) {
+      throw new Error(`Pixel sprite ${sprite.id} frame ${frameId} palette override must match the current palette length and entry order.`);
+    }
+  }
+}
+
+export function assertPixelDocumentPaletteReferences(
+  palette: readonly PaletteEntry[],
+  stamps: Iterable<PixelStamp>,
+  assets: PixelDocument['pixelAssets'],
+): void {
+  assertPixelStampsUsePalette(stamps, palette.length);
+  for (const asset of Object.values(assets)) if (asset.type === 'sprite') assertPixelSpriteUsesPalette(asset, palette);
 }
 
 function spriteNeedsPaletteRemap(sprite: PixelSprite, sourceIndex: number, paletteColor: PixelDocument['palette'][number]): boolean {

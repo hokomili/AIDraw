@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { AIDrawDocument, PixelDocument } from './model';
 import type { CanvasOperation, CanvasTransaction } from './operations';
+import { assertPixelDocumentPaletteReferences } from './palette';
 import { assertAcyclicReferences } from './reference-graph';
 
 const OperationKindSchema = z.enum([
@@ -950,6 +951,11 @@ export function validateNormalizedPixelDocument(document: PixelDocument): PixelD
     activeAssetId: document.activeAssetId,
   });
   if (!assets.success) throw new Error('Invalid persisted pixel asset metadata.');
+  try {
+    assertPixelDocumentPaletteReferences(palette.data, libraries.data.stamps, assets.data.pixelAssets as PixelDocument['pixelAssets']);
+  } catch {
+    throw new Error('Invalid persisted pixel palette references.');
+  }
 
   const links = LinkedAssetsInputSchema.safeParse(document.linkedAssets);
   if (!links.success) throw new Error('Invalid persisted pixel link metadata.');

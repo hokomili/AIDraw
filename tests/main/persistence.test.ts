@@ -209,7 +209,7 @@ describe('.aidraw persistence', () => {
 
   it('isolates one checkpoint payload document-identity mismatch while preserving its ordered sibling and main document', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aidraw-persistence-checkpoint-metadata-')); temporaryPaths.push(root);
-    const document = createPixelDocument('sprite', 'Checkpoint metadata isolation fixture'); const sprite = document.pixelAssets[document.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('Expected sprite'); writePixels(Object.values(sprite.cels)[0], [{ x: 9, y: 10, index: 17 }]);
+    const document = createPixelDocument('sprite', 'Checkpoint metadata isolation fixture'); const sprite = document.pixelAssets[document.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('Expected sprite'); writePixels(Object.values(sprite.cels)[0], [{ x: 9, y: 10, index: 15 }]);
     const checkpoints = ['First valid checkpoint', 'Second selected checkpoint'].map((name, index) => { const checkpointDocument = structuredClone(document); checkpointDocument.name = `${name} document`; checkpointDocument.revision = index + 4; return { id: `checkpoint-metadata-${index + 1}`, documentId: document.id, name, createdAt: `2026-08-05T02:0${index}:00.000Z`, createdBy: HUMAN_ACTOR, sourceRevision: index + 4, kind: index === 0 ? 'manual' as const : 'automatic' as const, document: checkpointDocument }; });
     const validPath = await writeNativeDocument(join(root, 'valid'), document, '1.0.0', undefined, [], checkpoints); const validArchive = unzipSync(new Uint8Array(await readFile(validPath))); const persistedIndex = strFromU8(validArchive['checkpoints/index.json']); const selectedEntry = `checkpoints/${checkpoints[1].id}.json`; const originalSelected = JSON.parse(strFromU8(validArchive[selectedEntry]));
     const valid = await readNativeDocument(validPath); expect(valid.warnings).toEqual([]); expect(valid.checkpoints.map((checkpoint) => checkpoint.id)).toEqual(checkpoints.map((checkpoint) => checkpoint.id)); expect(valid.checkpoints).toHaveLength(2); const retainedCheckpoint = structuredClone(valid.checkpoints[0]); const validMain = structuredClone(valid.document); delete validMain.filePath;
@@ -221,7 +221,7 @@ describe('.aidraw persistence', () => {
 
     const isolated = await readNativeDocument(twinPath); const isolatedMain = structuredClone(isolated.document); delete isolatedMain.filePath;
     expect(isolatedMain).toEqual(validMain); expect(isolated.document.filePath).toBe(twinPath); expect(isolated.checkpoints).toEqual([retainedCheckpoint]); expect(isolated.checkpoints[0]).toEqual(valid.checkpoints[0]); expect(isolated.warnings).toEqual([`Checkpoint “${checkpoints[1].id}” is corrupt and was ignored.`]);
-    if (isolated.document.kind !== 'pixel') throw new Error('Expected isolated pixel document'); const isolatedSprite = isolated.document.pixelAssets[sprite.id]; if (isolatedSprite.type !== 'sprite') throw new Error('Expected isolated sprite'); expect(readPixel(Object.values(isolatedSprite.cels)[0], 9, 10)).toBe(17);
+    if (isolated.document.kind !== 'pixel') throw new Error('Expected isolated pixel document'); const isolatedSprite = isolated.document.pixelAssets[sprite.id]; if (isolatedSprite.type !== 'sprite') throw new Error('Expected isolated sprite'); expect(readPixel(Object.values(isolatedSprite.cels)[0], 9, 10)).toBe(15);
   });
 
   it('reconciles checkpoint index metadata with each payload and its captured document revision', async () => {
@@ -513,6 +513,9 @@ describe('.aidraw persistence', () => {
 
     const mutations: Array<[string, string, (value: Record<string, unknown>) => void]> = [
       ['invalid-palette', 'Invalid persisted pixel palette metadata.', (value) => { ((value.palette as Array<Record<string, unknown>>)[0]).color = '#000000ff'; }],
+      ['invalid-palette-index', 'Invalid persisted pixel palette references.', (value) => {
+        const assets = value.pixelAssets as Record<string, Record<string, unknown>>; const cels = assets[sprite.id].cels as Record<string, Record<string, unknown>>; const chunks = Object.values(cels)[0].chunks as Record<string, Record<string, unknown>>; const chunk = Object.values(chunks)[0]; const bytes = Buffer.from(String(chunk.data), 'base64'); bytes[0] = (value.palette as unknown[]).length; chunk.data = bytes.toString('base64');
+      }],
       ['invalid-pixel-chunk', 'Invalid persisted pixel asset metadata.', (value) => {
         const assets = value.pixelAssets as Record<string, Record<string, unknown>>; const cels = assets[sprite.id].cels as Record<string, Record<string, unknown>>; const chunks = Object.values(cels)[0].chunks as Record<string, Record<string, unknown>>; const chunk = Object.values(chunks)[0]; chunk.data = `!${String(chunk.data).slice(1)}`;
       }],
@@ -534,6 +537,8 @@ describe('.aidraw persistence', () => {
 
     const invalidSave = structuredClone(document); const invalidSprite = invalidSave.pixelAssets[sprite.id]; if (invalidSprite.type !== 'sprite') throw new Error('Expected sprite'); Object.values(Object.values(invalidSprite.cels)[0].chunks)[0].data = 'AAAA';
     await expect(writeNativeDocument(sourcePath, invalidSave, '1.0.1')).rejects.toThrow('Invalid persisted pixel asset metadata.');
+    const invalidPaletteSave = structuredClone(document); const invalidPaletteSprite = invalidPaletteSave.pixelAssets[sprite.id]; if (invalidPaletteSprite.type !== 'sprite') throw new Error('Expected sprite'); writePixels(Object.values(invalidPaletteSprite.cels)[0], [{ x: 3, y: 4, index: invalidPaletteSave.palette.length }]);
+    await expect(writeNativeDocument(sourcePath, invalidPaletteSave, '1.0.1')).rejects.toThrow('Invalid persisted pixel palette references.');
     expect(await readFile(sourcePath)).toEqual(sourceBytes);
     expect((await readdir(root)).some((entry) => entry.endsWith('.tmp'))).toBe(false);
   });

@@ -192,4 +192,16 @@ describe('crash recovery journal', () => {
     expect(recovered.documents).toEqual([expect.objectContaining({ id: valid.id, name: valid.name })]);
     expect(recovered.activeDocumentId).toBeUndefined();
   });
+
+  it('isolates out-of-range persisted palette references without suppressing a valid sibling journal', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-recovery-pixel-palette-')); temporaryPaths.push(root);
+    const journal = new RecoveryJournal(root); const valid = createPixelDocument('sprite', 'Valid palette recovery sibling'); const malformed = createPixelDocument('sprite', 'Invalid palette recovery sibling');
+    const sprite = malformed.pixelAssets[malformed.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('Expected sprite'); writePixels(Object.values(sprite.cels)[0], [{ x: 1, y: 2, index: malformed.palette.length }]);
+    await journal.compact(valid);
+    await writeFile(journalPath(root, malformed.id), `${JSON.stringify({ type: 'snapshot', document: malformed })}\n`, 'utf8');
+    await journal.compactWorkspace([malformed.id, valid.id], malformed.id);
+    const recovered = await journal.recoverWorkspace();
+    expect(recovered.documents).toEqual([expect.objectContaining({ id: valid.id, name: valid.name })]);
+    expect(recovered.activeDocumentId).toBeUndefined();
+  });
 });

@@ -399,6 +399,13 @@ describe('persisted pixel schemas', () => {
     const cases: Array<[string, (fixture: ReturnType<typeof pixelDocument>) => void]> = [
       ['Invalid persisted pixel palette metadata.', ({ document }) => { document.palette[0].color = '#000000ff'; }],
       ['Invalid persisted pixel palette metadata.', ({ document }) => { document.palette[1].id = document.palette[0].id; }],
+      ['Invalid persisted pixel palette references.', ({ document, firstCel }) => { const chunk = Object.values(firstCel.chunks)[0]; const bytes = Buffer.from(chunk.data, 'base64'); bytes[0] = document.palette.length; chunk.data = bytes.toString('base64'); }],
+      ['Invalid persisted pixel palette references.', ({ document }) => { document.stamps[0].cells[0].index = document.palette.length; }],
+      ['Invalid persisted pixel palette references.', ({ sprite }) => { sprite.paletteOverrides[sprite.frameIds[0]].pop(); }],
+      ['Invalid persisted pixel palette references.', ({ sprite }) => {
+        const override = sprite.paletteOverrides[sprite.frameIds[0]];
+        [override[0].id, override[1].id] = [override[1].id, override[0].id];
+      }],
       ['Invalid persisted pixel library metadata.', ({ document }) => { document.paletteCycles[0].toIndex = document.palette.length; }],
       ['Invalid persisted pixel library metadata.', ({ document }) => { document.stamps.push(structuredClone(document.stamps[0])); }],
       ['Invalid persisted pixel library metadata.', ({ document }) => { document.bitmapFonts.push(structuredClone(document.bitmapFonts[0])); }],
