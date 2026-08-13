@@ -432,7 +432,10 @@ async function illustrationPdf(document: IllustrationDocument): Promise<ExportAr
     for (const objectId of layer.objectIds) if (!childIds.has(objectId)) await drawObject(layerId, objectId);
   };
   for (const layerId of document.layerIds) await drawLayer(layerId);
-  if (searchableImportedTextRuns) warnings.add(`${searchableImportedTextRuns} imported PDF text run${searchableImportedTextRuns === 1 ? ' was' : 's were'} retained as invisible searchable content.`);
+  if (searchableImportedTextRuns) {
+    warnings.add('Invisible imported PDF text remains searchable and selectable even when visible artwork covers it; do not treat covering artwork as redaction.');
+    warnings.add(`${searchableImportedTextRuns} imported PDF text run${searchableImportedTextRuns === 1 ? ' was' : 's were'} retained as invisible searchable content.`);
+  }
   return { data: Buffer.from(await output.save()), mimeType: 'application/pdf', extension: 'pdf', report: { warnings: [...warnings], rasterized } };
 }
 

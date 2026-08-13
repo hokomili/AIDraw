@@ -3,7 +3,8 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createCanvas, loadImage } from '@napi-rs/canvas';
+import { createCanvas, loadImage, type Canvas } from '@napi-rs/canvas';
+import { HUMAN_ACTOR, IDENTITY_TRANSFORM, nowIso, type ShapeObject } from '@aidraw/core';
 import { describe, expect, it } from 'vitest';
 import { exportDocument } from '@main/export-document';
 import { renderDocument } from '@main/render-document';
@@ -11,6 +12,7 @@ import { runImportUtilityRequest } from '@main/utility-import';
 
 const fixturePath = fileURLToPath(new URL('../fixtures/pdf/libreoffice-clipped-transparency.pdf', import.meta.url));
 const goldenPath = fileURLToPath(new URL('../fixtures/pdf/libreoffice-clipped-transparency-poppler.png', import.meta.url));
+const invisibleTextSafetyWarning = 'Invisible imported PDF text remains searchable and selectable even when visible artwork covers it; do not treat covering artwork as redaction.';
 
 function sha256(bytes: Buffer): string {
   return createHash('sha256').update(bytes).digest('hex');
@@ -29,6 +31,12 @@ function visualDifference(actual: Uint8ClampedArray, expected: Uint8ClampedArray
     meanAbsoluteChannelDelta: absoluteDelta / actual.byteLength,
     largeChannelDeltaRatio: largeChannelDeltas / actual.byteLength,
   };
+}
+
+function expectOpaqueBlackInterior(canvas: Canvas): void {
+  const inset = 1;
+  const rgba = canvas.getContext('2d').getImageData(inset, inset, canvas.width - inset * 2, canvas.height - inset * 2).data;
+  expect(rgba.every((channel, index) => index % 4 === 3 ? channel === 255 : channel === 0)).toBe(true);
 }
 
 async function extractedPdfText(bytes: Buffer): Promise<string[]> {
@@ -110,6 +118,7 @@ describe('third-party PDF interchange', () => {
       warnings: [
         'Some imported PDF text could not remain searchable because it contains glyphs outside the built-in PDF font.',
         'PDF text remains searchable/editable but non-embedded document fonts are substituted with Helvetica.',
+        invisibleTextSafetyWarning,
         '2 imported PDF text runs were retained as invisible searchable content.',
       ],
       rasterized: [],
@@ -128,6 +137,7 @@ describe('third-party PDF interchange', () => {
       warnings: [
         'Some imported PDF text could not remain searchable because its transform or effects require rasterization.',
         'PDF text remains searchable/editable but non-embedded document fonts are substituted with Helvetica.',
+        invisibleTextSafetyWarning,
         '2 imported PDF text runs were retained as invisible searchable content.',
       ],
       rasterized: [],
@@ -141,6 +151,7 @@ describe('third-party PDF interchange', () => {
     expect(exported.report).toEqual({
       warnings: [
         'PDF text remains searchable/editable but non-embedded document fonts are substituted with Helvetica.',
+        invisibleTextSafetyWarning,
         '3 imported PDF text runs were retained as invisible searchable content.',
       ],
       rasterized: [],
@@ -171,6 +182,52 @@ describe('third-party PDF interchange', () => {
       const difference = visualDifference(actualRgba, expectedRgba);
       expect(difference.meanAbsoluteChannelDelta).toBeLessThan(8);
       expect(difference.largeChannelDeltaRatio).toBeLessThan(0.05);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('warns that covering imported searchable text is not redaction', async () => {
+    const imported = await runImportUtilityRequest({ id: 'libreoffice-covering-overlay-import', kind: 'import-document', filePath: fixturePath, pixelMode: false });
+    const document = imported.documents[0];
+    if (document.kind !== 'illustration') throw new Error('Expected a LibreOffice illustration import.');
+    const visibleVectorLayer = document.layerIds.map((id) => document.layers[id]).find((layer) => layer.type === 'vector' && layer.visible);
+    if (!visibleVectorLayer || visibleVectorLayer.type !== 'vector') throw new Error('Expected the visible PDF fallback layer.');
+    const timestamp = nowIso();
+    const overlay: ShapeObject = {
+      id: 'covering-overlay', revision: 0, name: 'Opaque covering artwork', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
+      layerId: visibleVectorLayer.id, type: 'shape', shape: 'rectangle', width: document.artboard.width, height: document.artboard.height,
+      transform: { ...IDENTITY_TRANSFORM }, visible: true, locked: false, opacity: 1, blendMode: 'normal', fill: { kind: 'solid', color: '#000000' },
+      stroke: { paint: { kind: 'none' }, width: 0, opacity: 1, lineCap: 'round', lineJoin: 'round', dash: [] },
+    };
+    document.objects[overlay.id] = overlay;
+    visibleVectorLayer.objectIds.push(overlay.id);
+    expectOpaqueBlackInterior(await renderDocument(document));
+
+    const exported = await exportDocument(document, 'pdf');
+    expect(exported.report).toEqual({
+      warnings: [
+        'PDF text remains searchable/editable but non-embedded document fonts are substituted with Helvetica.',
+        invisibleTextSafetyWarning,
+        '3 imported PDF text runs were retained as invisible searchable content.',
+      ],
+      rasterized: [],
+    });
+    expect(await extractedPdfText(exported.data)).toEqual([
+      'LibreOffice PDF',
+      'CLIPPED TRANSPARENCY',
+      'external producer fixture',
+    ]);
+
+    const directory = await mkdtemp(join(tmpdir(), 'aidraw-pdf-overlay-'));
+    try {
+      const path = join(directory, 'covered.pdf');
+      await writeFile(path, exported.data);
+      const reopened = await runImportUtilityRequest({ id: 'libreoffice-covering-overlay-reimport', kind: 'import-document', filePath: path, pixelMode: false });
+      const reopenedDocument = reopened.documents[0];
+      if (reopenedDocument?.kind !== 'illustration') throw new Error('Expected a re-imported covered PDF illustration.');
+      expect(reopenedDocument.artboard).toMatchObject({ width: 241, height: 151 });
+      expectOpaqueBlackInterior(await renderDocument(reopenedDocument));
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

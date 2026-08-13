@@ -39,3 +39,10 @@ text; a same-named hidden layer without the role stays omitted, and unsupported
 glyphs or transforms produce explicit loss warnings instead of visible raster
 duplicates. The runtime re-export is checked semantically and visually rather
 than by byte hash because `pdf-lib` writes creation/modification timestamps.
+
+A separate safety regression places opaque black artwork across the full page.
+The export and its production re-import remain visually black while all three
+invisible phrases remain extractable, so the export report explicitly warns
+that covering artwork is not redaction. This proves only the warning condition;
+it does not infer intent, remove underlying content, implement redaction, or
+claim that the resulting PDF securely redacts anything.
