@@ -27,7 +27,7 @@ describe('representative Tiled JSON interchange', () => {
     expect(objectLayer.objects?.[0]).toMatchObject({ type: 'polygon', properties: { name: 'Signal zone', class: 'trigger', enabled: true }, points: [{ x: 0, y: 0 }, { x: 8, y: 0 }, { x: 4, y: 9 }] });
     const tileset = document.pixelAssets[map.tilesetIds[0]]; if (tileset.type !== 'tileset') throw new Error('Expected tileset');
     expect(tileset).toMatchObject({ firstGid: 17, tileWidth: 16, tileHeight: 16, columns: 2, rows: 1, transformations: { hFlip: true, vFlip: false, rotate: true } });
-    expect(tileset.tiles[0]).toMatchObject({ probability: 0.25, animation: [{ tileId: 1, durationMs: 120 }], properties: { walkable: true, cost: 3 } });
+    expect(tileset.tiles[0]).toMatchObject({ probability: 0.25, animation: [{ tileId: 1, durationMs: 120 }, { tileId: 0, durationMs: 80 }, { tileId: 1, durationMs: 200 }], properties: { walkable: true, cost: 3 } });
     expect(tileset.tiles[0].collisions[0]).toMatchObject({ type: 'rectangle', x: 1, y: 2, width: 14, height: 12, properties: { name: 'Footprint', class: 'solid', damage: 2 } });
     expect(tileset.wangSets[0]).toMatchObject({ name: 'Track edge', type: 'mixed', colors: [{ name: 'Rail', color: '#c9953d', tileId: 0, probability: 1 }], tiles: [{ tileId: 0, wangId: [1, 0, 1, 0, 1, 0, 1, 0] }] });
   });
@@ -40,12 +40,50 @@ describe('representative Tiled JSON interchange', () => {
     expect(output.properties).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'seed', type: 'int', value: 42 })]));
   });
 
+  it('round-trips ordered tile animation, probability, typed properties, and collision metadata from the external TMJ/TSJ fixture', async () => {
+    const imported = await importDocument(fixture, true); const document = imported.documents[0]; if (document.kind !== 'pixel') throw new Error('Expected pixel document');
+    const artifact = await exportDocument(document, 'tiled-json'); expect(artifact.report).toEqual({ warnings: [], rasterized: [] });
+    const directory = await mkdtemp(join(tmpdir(), 'aidraw-tiled-json-fixture-roundtrip-')); temporaryDirectories.push(directory);
+    const mapPath = join(directory, 'fixture-roundtrip.tmj');
+    await Promise.all([writeFile(mapPath, artifact.data), ...(artifact.companions ?? []).map((companion) => writeFile(join(directory, companion.name), companion.data))]);
+    const reopened = await importDocument(mapPath, true); expect(reopened.warnings).toEqual([]); const reopenedDocument = reopened.documents[0]; if (reopenedDocument.kind !== 'pixel') throw new Error('Expected reopened pixel document');
+    const map = reopenedDocument.pixelAssets[reopenedDocument.activeAssetId]; if (map.type !== 'tilemap') throw new Error('Expected reopened tilemap');
+    const tileset = reopenedDocument.pixelAssets[map.tilesetIds[0]]; if (tileset.type !== 'tileset') throw new Error('Expected reopened tileset');
+    expect(tileset.tiles[0]).toMatchObject({
+      probability: 0.25,
+      animation: [{ tileId: 1, durationMs: 120 }, { tileId: 0, durationMs: 80 }, { tileId: 1, durationMs: 200 }],
+      properties: { walkable: true, cost: 3 },
+      collisions: [expect.objectContaining({ type: 'rectangle', x: 1, y: 2, width: 14, height: 12, properties: { name: 'Footprint', class: 'solid', damage: 2 } })],
+    });
+    expect(tileset.tiles[1]).toMatchObject({ probability: 0.75, animation: [] });
+  });
+
   it('imports an external TSX through TMX with typed properties and geometry', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'aidraw-tmx-fixture-')); temporaryDirectories.push(directory); const xmlFixture = join(directory, basename(xmlFixtureSource)); await Promise.all([copyFile(xmlFixtureSource, xmlFixture), copyFile(xmlTilesetSource, join(directory, 'terrain.tsx'))]);
     const result = await importDocument(xmlFixture, true); expect(result.warnings).toEqual([]); const document = result.documents[0]; if (document.kind !== 'pixel') throw new Error('Expected pixel document'); const map = document.pixelAssets[document.activeAssetId]; if (map.type !== 'tilemap') throw new Error('Expected tilemap');
     expect(map).toMatchObject({ orientation: 'orthogonal', width: 2, height: 2, properties: { chapter: 7 } }); const group = map.layers[map.layerIds[0]]; if (group.type !== 'group') throw new Error('Expected group'); expect(group).toMatchObject({ name: 'XML World', opacity: 0.6 });
     const ground = map.layers[group.childIds![0]]; const zones = map.layers[group.childIds![1]]; if (ground.type !== 'tile' || zones.type !== 'object') throw new Error('Expected tile and object layers'); expect(readTileAt(ground.chunks!, 1, 0)).toBe(10); expect(ground).toMatchObject({ parallaxX: 0.5, parallaxY: 0.25 }); expect(zones.objects?.[0]).toMatchObject({ type: 'rectangle', properties: { name: 'Spawn', class: 'start', team: 'blue' } });
-    const tileset = document.pixelAssets[map.tilesetIds[0]]; if (tileset.type !== 'tileset') throw new Error('Expected tileset'); expect(tileset).toMatchObject({ firstGid: 9, transformations: { hFlip: true, vFlip: true, rotate: false } }); expect(tileset.tiles[0]).toMatchObject({ probability: 0.4, properties: { friction: 0.75 } }); expect(tileset.tiles[0].collisions[0]).toMatchObject({ type: 'polyline', properties: { name: 'Slope', class: 'ramp', oneWay: true }, points: [{ x: 0, y: 16 }, { x: 8, y: 8 }, { x: 16, y: 0 }] }); expect(tileset.wangSets[0]).toMatchObject({ name: 'XML edge', type: 'edge', colors: [{ name: 'Stone', color: '#8794a8', tileId: 1, probability: 0.5 }] });
+    const tileset = document.pixelAssets[map.tilesetIds[0]]; if (tileset.type !== 'tileset') throw new Error('Expected tileset'); expect(tileset).toMatchObject({ firstGid: 9, transformations: { hFlip: true, vFlip: true, rotate: false } }); expect(tileset.tiles[0]).toMatchObject({ probability: 0.4, animation: [{ tileId: 1, durationMs: 90 }, { tileId: 0, durationMs: 60 }], properties: { friction: 0.75 } }); expect(tileset.tiles[0].collisions[0]).toMatchObject({ type: 'polyline', properties: { name: 'Slope', class: 'ramp', oneWay: true }, points: [{ x: 0, y: 16 }, { x: 8, y: 8 }, { x: 16, y: 0 }] }); expect(tileset.wangSets[0]).toMatchObject({ name: 'XML edge', type: 'edge', colors: [{ name: 'Stone', color: '#8794a8', tileId: 1, probability: 0.5 }] });
+  });
+
+  it('round-trips ordered tile animation, probability, typed properties, and collision metadata from the external TMX/TSX fixture', async () => {
+    const sourceDirectory = await mkdtemp(join(tmpdir(), 'aidraw-tmx-fixture-source-')); temporaryDirectories.push(sourceDirectory);
+    const sourceMap = join(sourceDirectory, basename(xmlFixtureSource));
+    await Promise.all([copyFile(xmlFixtureSource, sourceMap), copyFile(xmlTilesetSource, join(sourceDirectory, 'terrain.tsx'))]);
+    const imported = await importDocument(sourceMap, true); const document = imported.documents[0]; if (document.kind !== 'pixel') throw new Error('Expected pixel document');
+    const artifact = await exportDocument(document, 'tiled-xml'); expect(artifact.report).toEqual({ warnings: [], rasterized: [] });
+    const outputDirectory = await mkdtemp(join(tmpdir(), 'aidraw-tiled-xml-fixture-roundtrip-')); temporaryDirectories.push(outputDirectory);
+    const mapPath = join(outputDirectory, 'fixture-roundtrip.tmx');
+    await Promise.all([writeFile(mapPath, artifact.data), ...(artifact.companions ?? []).map((companion) => writeFile(join(outputDirectory, companion.name), companion.data))]);
+    const reopened = await importDocument(mapPath, true); expect(reopened.warnings).toEqual([]); const reopenedDocument = reopened.documents[0]; if (reopenedDocument.kind !== 'pixel') throw new Error('Expected reopened pixel document');
+    const map = reopenedDocument.pixelAssets[reopenedDocument.activeAssetId]; if (map.type !== 'tilemap') throw new Error('Expected reopened tilemap');
+    const tileset = reopenedDocument.pixelAssets[map.tilesetIds[0]]; if (tileset.type !== 'tileset') throw new Error('Expected reopened tileset');
+    expect(tileset.tiles[0]).toMatchObject({
+      probability: 0.4,
+      animation: [{ tileId: 1, durationMs: 90 }, { tileId: 0, durationMs: 60 }],
+      properties: { friction: 0.75 },
+      collisions: [expect.objectContaining({ type: 'polyline', properties: { name: 'Slope', class: 'ramp', oneWay: true }, points: [{ x: 0, y: 16 }, { x: 8, y: 8 }, { x: 16, y: 0 }] })],
+    });
   });
 
   it('preserves signed orthogonal infinite chunks across external TMJ import and current TMJ export', async () => {

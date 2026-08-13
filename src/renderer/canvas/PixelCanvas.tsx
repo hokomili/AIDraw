@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from 'react';
 import {
-  decodePixelChunk,
   decodeTiledGid,
   decodeTilemapChunk,
   encodeTiledGid,
@@ -62,6 +61,7 @@ import { deleteMapObjectPoint, insertMapObjectPoint, mapObjectAtPoint, mapObject
 import { TILE_VARIANT_SEED_PROPERTY, chooseTileVariant, tileVariantCandidates, tileVariantGroup } from '../../common/tile-variants';
 import { parseBitmapFontJson } from '../../common/bitmap-font-interchange';
 import { cancelPixelGesture, releasePendingPixelLocks } from '../../common/pixel-gesture';
+import { recordValues, safeDecodePixelChunk, spriteBitmap, visibleSpriteLayers } from './pixel-bitmap';
 
 interface PixelPoint { x: number; y: number }
 interface PixelView { scale: number; offsetX: number; offsetY: number; logicalWidth: number; logicalHeight: number }
@@ -86,30 +86,9 @@ function previewMapObject(gesture: MapObjectGesture): CollisionShape {
   return gesture.mode === 'point' ? moveMapObjectPoint(gesture.original, gesture.pointIndex ?? -1, delta) : transformMapObject(gesture.original, gesture.mode, delta);
 }
 
-function recordValues<T>(value: unknown): T[] {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
-  return Object.values(value as Record<string, unknown>).filter((entry) => Boolean(entry) && typeof entry === 'object') as T[];
-}
-
 const celFor = pixelCelForFrame;
 
-function visibleSpriteLayers(sprite: PixelSprite): Array<{ layer: PixelSprite['layers'][string]; opacity: number }> {
-  const result: Array<{ layer: PixelSprite['layers'][string]; opacity: number }> = []; const visit = (id: string, opacity = 1) => { const layer = sprite.layers?.[id]; if (!layer?.visible) return; const combined = opacity * layer.opacity; if (layer.type === 'group') for (const childId of layer.childIds ?? []) visit(childId, combined); else result.push({ layer, opacity: combined }); }; for (const id of sprite.layerIds ?? []) visit(id); return result;
-}
-
 function editableSpriteLayer(sprite: PixelSprite): PixelSprite['layers'][string] | undefined { return [...visibleSpriteLayers(sprite)].reverse().map((entry) => entry.layer).find((layer) => layer.type === 'pixel' && !layer.locked); }
-
-function safeDecodePixelChunk(value: unknown): Uint8Array | undefined {
-  if (!value || typeof value !== 'object') return undefined;
-  const chunk = value as PixelCel['chunks'][string];
-  if (![chunk.x, chunk.y, chunk.width, chunk.height].every(Number.isFinite) || chunk.width !== 32 || chunk.height !== 32 || typeof chunk.data !== 'string') return undefined;
-  try {
-    const decoded = decodePixelChunk(chunk);
-    return decoded.length === chunk.width * chunk.height ? decoded : undefined;
-  } catch {
-    return undefined;
-  }
-}
 
 function safeDecodeTilemapChunk(value: unknown): Uint32Array | undefined {
   if (!value || typeof value !== 'object') return undefined;
@@ -162,23 +141,6 @@ function drawChecker(context: CanvasRenderingContext2D, width: number, height: n
   context.fillStyle = '#f5f1eb'; context.fillRect(0, 0, width, height);
   context.fillStyle = '#e5e0d9';
   for (let y = 0; y < height; y += cell) for (let x = 0; x < width; x += cell) if ((x / cell + y / cell) % 2 === 0) context.fillRect(x, y, cell, cell);
-}
-
-function spriteBitmap(sprite: PixelSprite, frameId: string, palette: PixelDocument['palette']): HTMLCanvasElement {
-  const canvas = window.document.createElement('canvas'); canvas.width = sprite.width; canvas.height = sprite.height;
-  const context = canvas.getContext('2d')!; context.imageSmoothingEnabled = false;
-  for (const { layer, opacity } of visibleSpriteLayers(sprite)) {
-    if (layer.type !== 'pixel') continue;
-    const cel = celFor(sprite, layer.id, frameId); if (!cel) continue; context.globalAlpha = opacity; context.globalCompositeOperation = layer.blendMode === 'normal' ? 'source-over' : layer.blendMode;
-    for (const chunk of recordValues<PixelCel['chunks'][string]>(cel.chunks)) {
-      const values = safeDecodePixelChunk(chunk); if (!values) continue;
-      for (let y = 0; y < chunk.height; y += 1) for (let x = 0; x < chunk.width; x += 1) {
-        const index = values[y * chunk.width + x] ?? 0; if (!index) continue;
-        context.fillStyle = (sprite.paletteOverrides?.[frameId] ?? palette)[index]?.color ?? '#ff00ff'; context.fillRect(chunk.x + x, chunk.y + y, 1, 1);
-      }
-    }
-  }
-  return canvas;
 }
 
 function uniqueChanges(points: PixelPoint[], index: number): Array<{ x: number; y: number; index: number }> {
