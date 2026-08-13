@@ -9,6 +9,9 @@ import {
   createIllustrationDocument,
   createPixelCelReader,
   createPixelDocument,
+  createPixelSprite,
+  createPixelTilemap,
+  createPixelTileset,
   floodPixelRegion,
   nowIso,
   writePixelRuns,
@@ -104,13 +107,16 @@ function paintFixture() {
 }
 
 function mapFixture() {
-  const document = createPixelDocument('tilemap', '65,536 tile performance fixture');
-  const map = document.pixelAssets[document.activeAssetId];
-  if (map.type !== 'tilemap') throw new Error('Tilemap fixture is missing.');
+  const document = createPixelDocument('project', '65,536 addressed tile performance fixture'); document.assetIds = []; document.pixelAssets = {};
+  const sprite = createPixelSprite('Maximum sparse performance sheet', 8_192, 8_192); const cel = Object.values(sprite.cels)[0];
+  writePixelRuns(cel, Array.from({ length: 16 }, (_, y) => ({ x: 0, y, length: 16, index: y % 2 ? 4 : 8 })));
+  const tileset = createPixelTileset('Addressed performance tile', sprite.id, 16, 16, 1, 1); tileset.firstGid = 1;
+  const map = createPixelTilemap('Addressed performance map'); map.tilesetIds = [tileset.id];
   map.width = 256; map.height = 256; map.tileWidth = 8; map.tileHeight = 8;
   const layer = map.layers[map.layerIds[0]];
   if (layer.type !== 'tile' || !layer.chunks) throw new Error('Tile layer is missing.');
-  writeTileRuns(layer.chunks, Array.from({ length: map.height }, (_, y) => ({ x: 0, y, length: map.width, gid: y % 15 + 1 })));
+  writeTileRuns(layer.chunks, Array.from({ length: map.height }, (_, y) => ({ x: 0, y, length: map.width, gid: 1 })));
+  document.pixelAssets = { [sprite.id]: sprite, [tileset.id]: tileset, [map.id]: map }; document.assetIds = [sprite.id, tileset.id, map.id]; document.activeAssetId = map.id;
   return { document, map };
 }
 
@@ -178,7 +184,7 @@ describe('Windows v1 non-GUI performance gate', () => {
       millionCellFloodFillMs: floodFill.durationMs,
       rssGrowthMiB: Number(((peakRss - startingRss) / 1024 / 1024).toFixed(2)),
     };
-    const report = { version: 1, createdAt: new Date().toISOString(), build: process.env.GITHUB_SHA ?? 'local', machine: { hostname: hostname(), platform: platform(), release: release(), arch: process.arch, cpu: cpus()[0]?.model, logicalCpus: cpus().length, totalMemoryMiB: Math.round(totalmem() / 1024 / 1024), freeMemoryMiB: Math.round(freemem() / 1024 / 1024), node: process.version }, coverage: { automated: ['5,000 vector render', 'four 4096×4096 editable paint layers', 'cold and warm four-layer 4096×4096 materialized sparse paint render', '65,536 visible tiles', 'native save', 'PNG export', 'one-million-sample compact accounting', 'one-million-cell bounded flood fill', 'RSS growth'], deferredToPackagedComputerUse: ['pointer-to-preview latency', 'requestAnimationFrame pacing', 'human input during four visible agent lanes', '200% display scaling and tablet latency'] }, budgets, metrics, diagnostics: { memoryProfile } };
+    const report = { version: 1, createdAt: new Date().toISOString(), build: process.env.GITHUB_SHA ?? 'local', machine: { hostname: hostname(), platform: platform(), release: release(), arch: process.arch, cpu: cpus()[0]?.model, logicalCpus: cpus().length, totalMemoryMiB: Math.round(totalmem() / 1024 / 1024), freeMemoryMiB: Math.round(freemem() / 1024 / 1024), node: process.version }, coverage: { automated: ['5,000 vector render', 'four 4096×4096 editable paint layers', 'cold and warm four-layer 4096×4096 materialized sparse paint render', '65,536 addressed tiles from an 8192×8192 sparse source sheet', 'native save', 'PNG export', 'one-million-sample compact accounting', 'one-million-cell bounded flood fill', 'RSS growth'], deferredToPackagedComputerUse: ['pointer-to-preview latency', 'requestAnimationFrame pacing', 'human input during four visible agent lanes', '200% display scaling and tablet latency'] }, budgets, metrics, diagnostics: { memoryProfile } };
     const reportPath = process.env.AIDRAW_PERFORMANCE_REPORT ?? join(process.cwd(), 'test-results', 'performance-gate.json');
     await mkdir(dirname(reportPath), { recursive: true }); await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
     expect(queueAccounting.value.samples).toBe(1_000_000); expect((queueAccounting.value.midpoint[0] as Extract<CanvasOperation, { kind: 'pixel.cel.region' }>).runs.reduce((sum, run) => sum + run.length, 0)).toBe(500_000);

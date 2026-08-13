@@ -576,6 +576,20 @@ The preceding signed infinite-map clipping audit did not change behavior. Canoni
 
 This checkpoint changes no animation metadata, source-sprite frames, map chunks/GIDs/transforms, schema, or Tiled import/export bytes. It does not add time-addressable MCP observation, animated tilemap GIF/APNG export, per-cell phase offsets, packaged frame-pacing/visual evidence, Tiled-application visual equivalence, broad compatibility, Level 3, RC, or stable-v1 evidence. MAP-03 remains Verified only for the exact automated workflow above.
 
+## Latest headless bounded placed-tile source checkpoint
+
+Headless MAP-03/MAP-07/MAP-08 resource evidence (2026-08-12): both map renderers previously built the nominal full source-sprite bitmap before cropping one placed tile. A valid sparse 8,192×8,192 source therefore created a roughly 256 MiB RGBA intermediate even when the map addressed only 16×16 pixels, and each interactive animation tick rebuilt that full surface. One DOM-neutral compositor now preserves the established visible nested layer order, cumulative opacity, blend modes, linked-cel resolution, frame palette override, and nominal sprite clipping while drawing only an addressed region.
+
+The crop planner computes the smallest integer pixel envelope where the requested source intersects the nominal sprite, then retains the original fractional sampling rectangle inside that bounded canvas. This preserves Canvas2D nearest-neighbor behavior for non-integer authored source offsets and for crops clipped by the right/bottom sprite edge; a fully out-of-bounds crop remains transparent, and signed stored cel chunks outside nominal sprite dimensions do not become visible. Expanding sprite bounds from sparse chunk storage was rejected because it would change the established canvas contract and repeat the unresolved infinite-map origin policy in a different model.
+
+Each render owns a 64 MiB / 1,024-entry least-recently-used crop cache keyed by sprite, source frame, and exact rectangle. Repeated placed cells reuse one flattened crop. Entry count bounds tiny-canvas object overhead, byte count bounds retained pixel surfaces, least-recently-used eviction is deterministic, and native/browser canvases are reset when evicted or when the render ends. A crop larger than the cache byte ceiling remains transient and is reset immediately after its draw; this avoids retaining it but does not claim that an authored 8,192×8,192 tile can render without a correspondingly large temporary surface.
+
+Exact regressions compare fractional bounded/full-source sampling byte-for-byte, keep out-of-nominal stored pixels transparent, exercise deterministic cache refresh/eviction/transient disposal, bind both production renderers to the same planner and cache limits, and address the final 16×16 tile in a sparse 8,192×8,192 source through headless map rendering. Focused pinned-Node-24 typecheck/ESLint and **9 files / 35 tests** pass. The complete safe gate passes portability for **369 tracked + 70 prospective** paths, TypeScript, full ESLint, and **147 files / 855 tests**.
+
+The formal performance fixture now renders 65,536 real addressed tiles from an 8,192×8,192 sparse source sheet instead of unresolved fallback-color cells. It passes 1/1 at **863.47 MiB** RSS growth; that addressed render takes **146.49 ms**, the one-million-cell flood takes **171.71 ms**, native save takes **127.38 ms**, and every established metric remains under budget. `/private/tmp/aidraw-bounded-tile-source-performance-gate-final.json` is temporary self-authored diagnostics, not retained release evidence.
+
+This checkpoint changes no sprite/map/tileset schema, coordinate or chunk storage, source metadata, animation time/phase, GID transform, Tiled import/export byte, nominal map extent, or infinite-map origin. It does not establish native-size tall-tile overhang/alignment, maximum-size tile pacing, packaged animation/interaction/visual acceptance, external Tiled rendering equivalence, broad format compatibility, Level 3, RC, or stable-v1 evidence.
+
 ## Failure severity and reruns
 
 | Severity | Meaning | Gate effect |

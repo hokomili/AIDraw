@@ -3,7 +3,7 @@ import { createCanvas, loadImage } from '@napi-rs/canvas';
 import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createIllustrationDocument, createPixelDocument, createPixelSprite, createPixelTilemap, createPixelTileset, encodeTiledGid, nowIso, writePixels, writeTiles, type GroupObject, type ShapeObject } from '@aidraw/core';
 import { exportDocument } from '@main/export-document';
 import { materializePaintTiles } from '@main/persistence';
-import { renderIllustration, renderSprite, renderTilemap } from '@main/render-document';
+import { renderIllustration, renderSprite, renderSpriteRegion, renderTilemap } from '@main/render-document';
 
 describe('native document rendering', () => {
   it('renders a rectangular orthogonal cell at its authored aspect without resampling drift', async () => {
@@ -22,6 +22,43 @@ describe('native document rendering', () => {
     expect(Buffer.from(rendered.getContext('2d').getImageData(0, 0, 3, 5).data)).toEqual(Buffer.from(source));
     const exported = await exportDocument(document, 'png'); const image = await loadImage(exported.data);
     expect({ width: image.width, height: image.height }).toEqual({ width: 3, height: 5 });
+  });
+
+  it('renders a last-sheet tile from a maximum-size sparse sprite without materializing the full source', () => {
+    const document = createPixelDocument('project', 'Maximum sparse tile source'); document.assetIds = []; document.pixelAssets = {};
+    document.palette[2].color = '#ff3366ff';
+    const sprite = createPixelSprite('Maximum sparse sheet', 8_192, 8_192); const cel = Object.values(sprite.cels)[0];
+    writePixels(cel, [{ x: 8_191, y: 8_191, index: 2 }]);
+    const tileset = createPixelTileset('Maximum sparse tiles', sprite.id, 16, 16, 512, 512); tileset.firstGid = 1;
+    const lastLocalId = tileset.columns * tileset.rows - 1;
+    const source = { x: 8_176, y: 8_176, width: 16, height: 16 };
+    const bounded = renderSpriteRegion(document, sprite, source);
+    expect({ width: bounded.canvas.width, height: bounded.canvas.height, sample: bounded.sample }).toEqual({ width: 16, height: 16, sample: { x: 0, y: 0, width: 16, height: 16 } });
+    expect([...bounded.canvas.getContext('2d').getImageData(15, 15, 1, 1).data]).toEqual([255, 51, 102, 255]);
+    bounded.canvas.width = 1; bounded.canvas.height = 1;
+
+    const map = createPixelTilemap('One maximum-sheet tile'); map.width = 1; map.height = 1; map.tileWidth = 16; map.tileHeight = 16; map.tilesetIds = [tileset.id];
+    const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile' || !layer.chunks) throw new Error('Expected tile layer');
+    writeTiles(layer.chunks, [{ x: 0, y: 0, gid: tileset.firstGid + lastLocalId }]);
+    document.pixelAssets = { [sprite.id]: sprite, [tileset.id]: tileset, [map.id]: map }; document.assetIds = [sprite.id, tileset.id, map.id]; document.activeAssetId = map.id;
+    const rendered = renderTilemap(document, map);
+    expect([...rendered.getContext('2d').getImageData(15, 15, 1, 1).data]).toEqual([255, 51, 102, 255]);
+  });
+
+  it('preserves fractional tile-source sampling and nominal edge clipping', () => {
+    const document = createPixelDocument('project', 'Fractional tile source'); document.assetIds = []; document.pixelAssets = {};
+    document.palette[2].color = '#ff0000ff'; document.palette[3].color = '#00ff00ff'; document.palette[4].color = '#0000ffff';
+    const sprite = createPixelSprite('Fractional sheet', 3, 1); const cel = Object.values(sprite.cels)[0];
+    writePixels(cel, [{ x: 0, y: 0, index: 2 }, { x: 1, y: 0, index: 3 }, { x: 2, y: 0, index: 4 }]);
+    const tileset = createPixelTileset('Fractional tiles', sprite.id, 2, 1, 1, 1); tileset.firstGid = 1;
+    tileset.tiles[0] = { id: 0, sourceX: 1.5, sourceY: 0, probability: 1, animation: [], collisions: [], properties: {} };
+    const map = createPixelTilemap('Fractional tile map'); map.width = 1; map.height = 1; map.tileWidth = 4; map.tileHeight = 1; map.tilesetIds = [tileset.id];
+    const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile' || !layer.chunks) throw new Error('Expected tile layer');
+    writeTiles(layer.chunks, [{ x: 0, y: 0, gid: 1 }]);
+    document.pixelAssets = { [sprite.id]: sprite, [tileset.id]: tileset, [map.id]: map }; document.assetIds = [sprite.id, tileset.id, map.id]; document.activeAssetId = map.id;
+
+    const full = renderSprite(document, sprite); const expected = createCanvas(4, 1); expected.getContext('2d').imageSmoothingEnabled = false; expected.getContext('2d').drawImage(full, 1.5, 0, 2, 1, 0, 0, 4, 1);
+    expect(Buffer.from(renderTilemap(document, map).getContext('2d').getImageData(0, 0, 4, 1).data)).toEqual(Buffer.from(expected.getContext('2d').getImageData(0, 0, 4, 1).data));
   });
 
   it('renders placed tile animations at exact times while retaining the stored GID transform', async () => {

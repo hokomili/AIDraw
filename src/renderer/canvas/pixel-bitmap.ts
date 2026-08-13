@@ -6,6 +6,7 @@ import {
   type PixelDocument,
   type PixelSprite,
 } from '@aidraw/core';
+import { drawPixelSpriteRegion, pixelSpriteRegionPlan, type PixelSpriteRegion } from '../../common/pixel-sprite-render';
 
 export function recordValues<T>(value: unknown): T[] {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
@@ -50,30 +51,7 @@ export function drawSpriteRegion(
   palette: PixelDocument['palette'],
   source: { x: number; y: number; width: number; height: number },
 ): void {
-  context.save();
-  context.imageSmoothingEnabled = false;
-  for (const { layer, opacity } of visibleSpriteLayers(sprite)) {
-    if (layer.type !== 'pixel') continue;
-    const cel = pixelCelForFrame(sprite, layer.id, frameId);
-    if (!cel) continue;
-    context.globalAlpha = opacity;
-    context.globalCompositeOperation = layer.blendMode === 'normal' ? 'source-over' : layer.blendMode;
-    for (const chunk of recordValues<PixelCel['chunks'][string]>(cel.chunks)) {
-      const values = safeDecodePixelChunk(chunk);
-      if (!values) continue;
-      const startX = Math.max(0, source.x - chunk.x);
-      const startY = Math.max(0, source.y - chunk.y);
-      const endX = Math.min(chunk.width, source.x + source.width - chunk.x);
-      const endY = Math.min(chunk.height, source.y + source.height - chunk.y);
-      for (let y = startY; y < endY; y += 1) for (let x = startX; x < endX; x += 1) {
-        const index = values[y * chunk.width + x] ?? 0;
-        if (!index) continue;
-        context.fillStyle = (sprite.paletteOverrides?.[frameId] ?? palette)[index]?.color ?? '#ff00ff';
-        context.fillRect(chunk.x + x - source.x, chunk.y + y - source.y, 1, 1);
-      }
-    }
-  }
-  context.restore();
+  drawPixelSpriteRegion(context, sprite, frameId, palette, source, { invalidChunk: 'skip' });
 }
 
 export function drawSpriteThumbnail(
@@ -123,11 +101,17 @@ export function drawSpriteRegionThumbnail(
   context.restore();
 }
 
-export function spriteBitmap(sprite: PixelSprite, frameId: string, palette: PixelDocument['palette']): HTMLCanvasElement {
+export interface SpriteRegionBitmap {
+  canvas: HTMLCanvasElement;
+  sample: PixelSpriteRegion;
+}
+
+export function spriteRegionBitmap(sprite: PixelSprite, frameId: string, palette: PixelDocument['palette'], source: PixelSpriteRegion): SpriteRegionBitmap {
+  const plan = pixelSpriteRegionPlan(sprite, source);
   const canvas = window.document.createElement('canvas');
-  canvas.width = sprite.width;
-  canvas.height = sprite.height;
+  canvas.width = plan.render.width;
+  canvas.height = plan.render.height;
   const context = canvas.getContext('2d')!;
-  drawSpriteRegion(context, sprite, frameId, palette, { x: 0, y: 0, width: sprite.width, height: sprite.height });
-  return canvas;
+  if (!plan.empty) drawSpriteRegion(context, sprite, frameId, palette, plan.render);
+  return { canvas, sample: plan.sample };
 }

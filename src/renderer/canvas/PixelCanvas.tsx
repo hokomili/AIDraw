@@ -72,7 +72,9 @@ import { DEFAULT_ONION_SKIN_SETTINGS, onionSkinLayers, type OnionSkinSettings } 
 import { tileAnimationFrameAt, tilesetTileSourceRect } from '../../common/tile-animation';
 import { parseBitmapFontJson } from '../../common/bitmap-font-interchange';
 import { cancelPixelGesture, releasePendingPixelLocks } from '../../common/pixel-gesture';
-import { editableSpriteLayer, recordValues, safeDecodePixelChunk, spriteBitmap, visibleSpriteLayers } from './pixel-bitmap';
+import { BoundedResourceCache } from '../../common/bounded-resource-cache';
+import { pixelSpriteRegionPlan } from '../../common/pixel-sprite-render';
+import { editableSpriteLayer, recordValues, safeDecodePixelChunk, spriteRegionBitmap, visibleSpriteLayers, type SpriteRegionBitmap } from './pixel-bitmap';
 
 interface PixelPoint { x: number; y: number }
 interface PixelView { scale: number; offsetX: number; offsetY: number; logicalWidth: number; logicalHeight: number }
@@ -87,6 +89,8 @@ type LocalSelectionClipboard =
 let localSelectionClipboard: LocalSelectionClipboard | undefined;
 const MIN_TILE_ANIMATION_TICK_MS = 16;
 const MAX_BROWSER_TIMEOUT_MS = 2_147_483_647;
+const MAX_MAP_TILE_SOURCE_CACHE_BYTES = 64 * 1024 * 1024;
+const MAX_MAP_TILE_SOURCE_CACHE_ENTRIES = 1_024;
 
 function parseIntegerScale(value: string): { x: number; y: number } | undefined {
   const match = value.trim().match(/^(\d+)(?:\s*(?:x|×|,)\s*(\d+))?$/i); if (!match) return undefined;
@@ -521,14 +525,14 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
         context.stroke();
       }
     } else if (tilemap) {
-      const mapSources = new Map<string, HTMLCanvasElement>();
+      const mapSources = new BoundedResourceCache<SpriteRegionBitmap>(MAX_MAP_TILE_SOURCE_CACHE_ENTRIES, MAX_MAP_TILE_SOURCE_CACHE_BYTES, (source) => { source.canvas.width = 1; source.canvas.height = 1; });
       const animatedLocalIds = new Map<string, number>();
       const animatedLocalId = (resolved: NonNullable<ReturnType<typeof resolveTilesetForGid>>) => {
         const key = `${resolved.tileset.id}\0${resolved.localId}`; const cached = animatedLocalIds.get(key); if (cached !== undefined) return cached;
         const sampled = tileAnimationFrameAt(resolved.tileset.tiles[resolved.localId]?.animation ?? [], tileAnimationTimeMs)?.tileId ?? resolved.localId; animatedLocalIds.set(key, sampled); return sampled;
       };
       const visibleLayers: Array<{ layer: typeof tilemap.layers[string]; opacity: number }> = []; const visit = (id: string, opacity = 1) => { const layer = tilemap.layers[id]; if (!layer?.visible) return; const combined = opacity * layer.opacity; if (layer.type === 'group') for (const childId of layer.childIds ?? []) visit(childId, combined); else visibleLayers.push({ layer, opacity: combined }); }; for (const id of tilemap.layerIds) visit(id);
-      for (const entry of visibleLayers) {
+      try { for (const entry of visibleLayers) {
         const { layer } = entry;
         context.save(); context.translate(pan.x * (layer.parallaxX - 1), pan.y * (layer.parallaxY - 1));
         if (layer.type === 'object') {
@@ -554,18 +558,23 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
         const drawCell = (x: number, y: number, raw: number) => {
           const decoded = decodeTiledGid(raw); if (!decoded.gid || hiddenCells?.has(replayPointKey(x, y))) return;
           const resolved = resolveTilesetForGid(document, tilemap, decoded.gid); const mapSourceAsset = resolved ? document.pixelAssets[resolved.tileset.spriteAssetId] : undefined;
-          let mapSource = mapSourceAsset?.type === 'sprite' ? mapSources.get(mapSourceAsset.id) : undefined; if (!mapSource && mapSourceAsset?.type === 'sprite') { mapSource = spriteBitmap(mapSourceAsset, mapSourceAsset.frameIds[0], document.palette); mapSources.set(mapSourceAsset.id, mapSource); }
           const visibleLocalId = resolved ? animatedLocalId(resolved) : undefined;
           const sourceRect = resolved && visibleLocalId !== undefined ? tilesetTileSourceRect(resolved.tileset, visibleLocalId) : undefined;
-          const drawTile = (rect: IsometricCellRect) => { if (!mapSource || !resolved || !sourceRect) return false; const transform = tiledTileTransformMatrix(decoded); context.save(); context.translate(rect.x + rect.width / 2, rect.y + rect.height / 2); context.transform(transform.a, transform.b, transform.c, transform.d, 0, 0); context.drawImage(mapSource, sourceRect.x, sourceRect.y, sourceRect.width, sourceRect.height, -rect.width / 2, -rect.height / 2, rect.width, rect.height); context.restore(); return true; };
+          const sourcePlan = mapSourceAsset?.type === 'sprite' && sourceRect ? pixelSpriteRegionPlan(mapSourceAsset, sourceRect) : undefined; const frameId = mapSourceAsset?.type === 'sprite' ? mapSourceAsset.frameIds[0] : undefined;
+          const mapSource = mapSourceAsset?.type === 'sprite' && sourceRect && sourcePlan && frameId
+            ? mapSources.acquire(`${mapSourceAsset.id}\0${frameId}\0${sourceRect.x},${sourceRect.y},${sourceRect.width},${sourceRect.height}`, sourcePlan.render.width * sourcePlan.render.height * 4, () => spriteRegionBitmap(mapSourceAsset, frameId, document.palette, sourceRect))
+            : undefined;
+          const drawTile = (rect: IsometricCellRect) => { if (!mapSource || !resolved || !sourceRect) return false; const transform = tiledTileTransformMatrix(decoded); const sampled = mapSource.value; context.save(); try { context.translate(rect.x + rect.width / 2, rect.y + rect.height / 2); context.transform(transform.a, transform.b, transform.c, transform.d, 0, 0); context.drawImage(sampled.canvas, sampled.sample.x, sampled.sample.y, sampled.sample.width, sampled.sample.height, -rect.width / 2, -rect.height / 2, rect.width, rect.height); } finally { context.restore(); } return true; };
           const visibleGid = resolved && visibleLocalId !== undefined ? resolved.tileset.firstGid + visibleLocalId : decoded.gid;
-          if (tilemap.orientation === 'orthogonal') {
-            const rect = gridCellRect({ x, y });
-            if (!drawTile(rect)) { context.fillStyle = `hsl(${visibleGid * 47 % 360} 52% 62%)`; context.fillRect(rect.x, rect.y, rect.width, rect.height); }
-          } else {
-            const rect = gridCellRect({ x, y });
-            if (!drawTile(rect)) { context.fillStyle = `hsl(${visibleGid * 47 % 360} 52% 62%)`; traceIsometricCell(context, rect); context.fill(); }
-          }
+          try {
+            if (tilemap.orientation === 'orthogonal') {
+              const rect = gridCellRect({ x, y });
+              if (!drawTile(rect)) { context.fillStyle = `hsl(${visibleGid * 47 % 360} 52% 62%)`; context.fillRect(rect.x, rect.y, rect.width, rect.height); }
+            } else {
+              const rect = gridCellRect({ x, y });
+              if (!drawTile(rect)) { context.fillStyle = `hsl(${visibleGid * 47 % 360} 52% 62%)`; traceIsometricCell(context, rect); context.fill(); }
+            }
+          } finally { mapSource?.release(); }
         };
         if (tilemap.orientation === 'isometric') for (const cell of isometricTileRenderCells(Object.values(layer.chunks), safeDecodeTilemapChunk)) drawCell(cell.x, cell.y, cell.raw);
         else for (const chunk of Object.values(layer.chunks)) {
@@ -573,7 +582,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
           for (let localY = 0; localY < 32; localY += 1) for (let localX = 0; localX < 32; localX += 1) drawCell(chunk.x + localX, chunk.y + localY, values[localY * 32 + localX] ?? 0);
         }
         context.restore();
-      }
+      } } finally { mapSources.clear(); }
     }
 
     if (preview.length || bulkPreview.length) {
