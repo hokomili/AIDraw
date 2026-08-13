@@ -204,7 +204,7 @@ async function drawIllustrationObject(context: Context, document: IllustrationDo
   context.restore();
 }
 
-async function renderIllustrationSurface(document: IllustrationDocument, region: IllustrationRasterRegion, onlyLayerId?: string, includeBackground = true): Promise<Canvas> {
+async function renderIllustrationSurface(document: IllustrationDocument, region: IllustrationRasterRegion, onlyLayerId?: string, includeBackground = true, neutralizeOnlyLayer = false): Promise<Canvas> {
   const canvas = createCanvas(region.width, region.height);
   const context = canvas.getContext('2d');
   context.save();
@@ -229,7 +229,8 @@ async function renderIllustrationSurface(document: IllustrationDocument, region:
   };
   const drawLayer = async (layerId: string, target: Context = context): Promise<void> => {
     const layer = document.layers[layerId];
-    if (!layer?.visible) return;
+    const neutralize = neutralizeOnlyLayer && layerId === onlyLayerId;
+    if (!layer || (!layer.visible && !neutralize)) return;
     const drawContents = async (output: Context) => {
       if (layer.type === 'paint') {
         const plan = paintTileCachePlan(layer, document.assets);
@@ -259,9 +260,10 @@ async function renderIllustrationSurface(document: IllustrationDocument, region:
     target.save();
     const maskLayer = layer.maskLayerId ? document.layers[layer.maskLayerId] : undefined;
     if (maskLayer?.type === 'vector') { const maskPath = new Path2D(); for (const objectId of maskLayer.objectIds) { const path = document.objects[objectId] ? transformedObjectPath(document.objects[objectId]) : undefined; if (path) maskPath.addPath(path); } target.clip(maskPath); }
-    if (layer.opacity !== 1 || layer.blendMode !== 'normal' || layer.filters?.length) {
+    const opacity = neutralize ? 1 : layer.opacity; const blendMode = neutralize ? 'normal' : layer.blendMode;
+    if (opacity !== 1 || blendMode !== 'normal' || layer.filters?.length) {
       const buffer = acquireScratchCanvas(region.width, region.height); const bufferContext = buffer.getContext('2d'); bufferContext.translate(-region.x, -region.y);
-      try { await drawContents(bufferContext); target.globalAlpha *= layer.opacity; target.globalCompositeOperation = composite(layer.blendMode); target.filter = adjustmentFilter(layer.filters); target.drawImage(buffer, region.x, region.y); }
+      try { await drawContents(bufferContext); target.globalAlpha *= opacity; target.globalCompositeOperation = composite(blendMode); target.filter = adjustmentFilter(layer.filters); target.drawImage(buffer, region.x, region.y); }
       finally { releaseScratchCanvas(buffer); }
     } else await drawContents(target);
     target.restore();
@@ -284,6 +286,10 @@ function cropIllustrationSurface(source: Canvas, x: number, y: number, width: nu
 
 export async function renderIllustration(document: IllustrationDocument, onlyLayerId?: string, includeBackground = true): Promise<Canvas> {
   return renderIllustrationSurface(document, { x: 0, y: 0, width: document.artboard.width, height: document.artboard.height }, onlyLayerId, includeBackground);
+}
+
+export async function renderIllustrationLayerSource(document: IllustrationDocument, layerId: string): Promise<Canvas> {
+  return renderIllustrationSurface(document, { x: 0, y: 0, width: document.artboard.width, height: document.artboard.height }, layerId, false, true);
 }
 
 export async function renderIllustrationRegion(document: IllustrationDocument, requested: IllustrationRasterRegion, onlyLayerId?: string, includeBackground = true): Promise<Canvas> {

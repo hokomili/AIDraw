@@ -27,7 +27,7 @@ import { MAX_STATIC_RASTER_PIXELS } from '../common/static-raster';
 import { layoutStyledText } from '../common/text-layout';
 import type { ExportFormat, ExportOptions } from '../common/contracts';
 import { safeTiledAssetName } from './export-artifact-policy';
-import { renderDocument, renderDocumentDimensions, renderIllustration, renderSprite } from './render-document';
+import { renderDocument, renderDocumentDimensions, renderIllustration, renderIllustrationLayerSource, renderSprite } from './render-document';
 
 initializePsdCanvas(createCanvas as unknown as (width: number, height: number) => HTMLCanvasElement);
 
@@ -574,10 +574,10 @@ function pixelPsdExportBudget(sprite: PixelSprite): PsdExportBudget {
 }
 
 async function renderPsdLayerFallback(document: IllustrationDocument, layerId: string): Promise<NonNullable<PsdLayer['imageData']>> {
-  const source = structuredClone(document); const layer = source.layers[layerId]; if (!layer) throw new Error(`Layer ${layerId} is missing.`);
-  layer.visible = true; layer.opacity = 1; layer.blendMode = 'normal';
-  const rendered = await renderIllustration(source, layerId, false);
-  return rendered.getContext('2d').getImageData(0, 0, document.artboard.width, document.artboard.height);
+  if (!document.layers[layerId]) throw new Error(`Layer ${layerId} is missing.`);
+  const rendered = await renderIllustrationLayerSource(document, layerId);
+  try { return rendered.getContext('2d').getImageData(0, 0, document.artboard.width, document.artboard.height); }
+  finally { rendered.width = 1; rendered.height = 1; }
 }
 
 function renderPsdPixelLayer(document: Extract<AIDrawDocument, { kind: 'pixel' }>, sprite: PixelSprite, layerId: string): NonNullable<PsdLayer['imageData']> {
@@ -600,7 +600,8 @@ async function psd(document: AIDrawDocument): Promise<ExportArtifact> {
       const layer = document.layers[layerId]; if (!layer) return undefined;
       const common = { name: layer.name, opacity: layer.opacity, hidden: !layer.visible, blendMode: psdBlendMode(layer.blendMode), ...aidrawPsdLockFields(layer.locked) };
       if (layer.type === 'group' && !layer.filters?.length && !layer.maskLayerId) {
-        const nested = (await Promise.all(layer.childIds.map(exportLayer))).filter((entry): entry is PsdLayer => Boolean(entry));
+        const nested: PsdLayer[] = [];
+        for (const childId of layer.childIds) { const entry = await exportLayer(childId); if (entry) nested.push(entry); }
         return { ...common, children: nested, opened: true };
       }
       const imageData = await renderPsdLayerFallback(document, layerId); report.rasterized.push(layer.name);
@@ -613,7 +614,7 @@ async function psd(document: AIDrawDocument): Promise<ExportArtifact> {
       editableTextCount += texts.length;
       return { ...common, children: [{ name: `${layer.name} · visual fallback`, imageData }, ...texts.map(psdTextLayer)], opened: true };
     };
-    children.push(...(await Promise.all(document.layerIds.map(exportLayer))).filter((entry): entry is PsdLayer => Boolean(entry)));
+    for (const layerId of document.layerIds) { const entry = await exportLayer(layerId); if (entry) children.push(entry); }
     report.warnings.push('Vector and paint layers include visually faithful raster fallbacks because PSD cannot preserve every AIDraw path, mask, blend, and effect feature.');
     if (editableTextCount) report.warnings.push(`${editableTextCount} styled text object${editableTextCount === 1 ? '' : 's'} were also written as hidden editable PSD text layers beside their visible fallbacks.`);
   } else {
@@ -634,7 +635,10 @@ async function psd(document: AIDrawDocument): Promise<ExportArtifact> {
     report.warnings.push('Pixel PSD export writes the current frame as a raster layer/group hierarchy; later animation frames are not included.');
   }
   const composite = await renderDocument(document);
-  const value: Psd = { width, height, children, imageData: composite.getContext('2d').getImageData(0, 0, width, height) };
+  let compositeImageData: NonNullable<Psd['imageData']>;
+  try { compositeImageData = composite.getContext('2d').getImageData(0, 0, width, height); }
+  finally { composite.width = 1; composite.height = 1; }
+  const value: Psd = { width, height, children, imageData: compositeImageData };
   return { data: writePsdBuffer(value, { generateThumbnail: true }), mimeType: 'image/vnd.adobe.photoshop', extension: 'psd', report };
 }
 

@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { ImageData } from '@napi-rs/canvas';
 import { readPsd, writePsdBuffer, type Layer as PsdLayer } from 'ag-psd';
 import { describe, expect, it } from 'vitest';
-import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createId, createIllustrationDocument, createPixelDocument, nowIso, writePixels, type IllustrationLayer, type PixelLayer, type TextObject } from '@aidraw/core';
+import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createId, createIllustrationDocument, createPixelDocument, nowIso, writePixels, type IllustrationLayer, type PixelLayer, type ShapeObject, type TextObject } from '@aidraw/core';
 import { illustrationTransformMatrix } from '@common/psd-text';
 import { exportDocument } from '@main/export-document';
 import { importDocument } from '@main/import-document';
@@ -52,6 +52,21 @@ describe('PSD interchange', () => {
       expect(Object.values(reopened.objects).some((object) => object.type === 'image' && object.visible && /raster fallback|visual fallback/.test(object.name))).toBe(true);
       expect(imported.warnings).toContainEqual(expect.stringMatching(/layer hierarchy/)); expect(imported.warnings).toContainEqual(expect.stringMatching(/hidden editable text/));
     } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it('renders hidden illustration fallback sources without cloning or baking layer composite state', async () => {
+    const document = createIllustrationDocument('Hidden source'); document.artboard = { ...document.artboard, width: 4, height: 4, background: null };
+    const vector = Object.values(document.layers).find((layer) => layer.type === 'vector');
+    if (!vector || vector.type !== 'vector') throw new Error('Expected vector layer');
+    vector.name = 'Hidden quarter layer'; vector.visible = false; vector.opacity = 0.25; vector.blendMode = 'multiply';
+    const timestamp = nowIso(); const shape: ShapeObject = { id: createId('shape'), revision: 0, name: 'Source red', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, layerId: vector.id, type: 'shape', shape: 'rectangle', width: 4, height: 4, transform: IDENTITY_TRANSFORM, visible: true, locked: false, opacity: 1, blendMode: 'normal', fill: { kind: 'solid', color: '#ff0000' }, stroke: { paint: { kind: 'none' }, width: 0, opacity: 1, lineCap: 'round', lineJoin: 'round', dash: [] } };
+    document.objects[shape.id] = shape; vector.objectIds.push(shape.id); const before = structuredClone(document);
+
+    const artifact = await exportDocument(document, 'psd'); const decoded = readPsd(artifact.data, { useImageData: true, logMissingFeatures: false }); const layer = decoded.children?.find((entry) => entry.name === vector.name);
+    expect(layer).toMatchObject({ hidden: true, opacity: Math.round(0.25 * 255) / 255, blendMode: 'multiply' });
+    const alphas = layer?.imageData ? [...layer.imageData.data].filter((_value, index) => index % 4 === 3) : [];
+    expect(Math.max(...alphas)).toBe(255);
+    expect(document).toEqual(before);
   });
 
   it('writes the pixel layer hierarchy with raw source pixels and separate composite metadata', async () => {
