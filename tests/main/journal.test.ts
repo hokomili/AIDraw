@@ -169,4 +169,15 @@ describe('crash recovery journal', () => {
       expect(recovered.documents.map(({ id }) => id).sort()).toEqual([first.id, second.id].sort()); expect(recovered.activeDocumentId).toBeUndefined();
     }
   });
+
+  it('isolates a malformed illustration snapshot without suppressing a valid sibling journal', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-recovery-illustration-schema-')); temporaryPaths.push(root);
+    const journal = new RecoveryJournal(root); const valid = createIllustrationDocument('Valid recovery sibling'); const malformed = createIllustrationDocument('Malformed recovery sibling'); malformed.artboard.width = 0;
+    await journal.compact(valid);
+    await writeFile(journalPath(root, malformed.id), `${JSON.stringify({ type: 'snapshot', document: malformed })}\n`, 'utf8');
+    await journal.compactWorkspace([malformed.id, valid.id], malformed.id);
+    const recovered = await journal.recoverWorkspace();
+    expect(recovered.documents).toEqual([expect.objectContaining({ id: valid.id, name: valid.name })]);
+    expect(recovered.activeDocumentId).toBeUndefined();
+  });
 });

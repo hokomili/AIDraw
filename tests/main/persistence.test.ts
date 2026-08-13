@@ -4,7 +4,7 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate';
-import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createId, createIllustrationDocument, createPixelDocument, duplicatePixelFrame, nowIso, readPixel, readTileAt, resolvePixelCel, writePixels, writeTiles, type CanvasTransaction, type GroupObject, type IllustrationLayer, type PixelLayer, type TilemapLayer } from '@aidraw/core';
+import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createId, createIllustrationDocument, createPixelDocument, duplicatePixelFrame, nowIso, readPixel, readTileAt, resolvePixelCel, writePixels, writeTiles, type CanvasTransaction, type GroupObject, type IllustrationLayer, type PixelLayer, type ShapeObject, type TilemapLayer } from '@aidraw/core';
 import type { TransactionTraceEntry } from '@common/contracts';
 import { MAX_TRANSACTION_SERIALIZED_BYTES } from '@common/transaction-limits';
 import { nativeSaveFileSystem, readNativeDocument, writeNativeDocument, type NativeSaveFileSystem } from '@main/persistence';
@@ -450,6 +450,40 @@ describe('.aidraw persistence', () => {
     const invalidSave = structuredClone(document);
     (invalidSave.activity[0] as unknown as Record<string, unknown>).actor = null;
     await expect(writeNativeDocument(sourcePath, invalidSave, '1.0.1')).rejects.toThrow('Invalid persisted document activity metadata.');
+    expect(await readFile(sourcePath)).toEqual(sourceBytes);
+    expect((await readdir(root)).some((entry) => entry.endsWith('.tmp'))).toBe(false);
+  });
+
+  it('rejects malformed native illustration records before renderer/export consumers or destination replacement', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-persistence-illustration-schema-')); temporaryPaths.push(root);
+    const document = createIllustrationDocument('Native illustration schema fixture');
+    const vector = Object.values(document.layers).find((entry) => entry.type === 'vector'); if (!vector || vector.type !== 'vector') throw new Error('Expected vector layer');
+    const timestamp = nowIso(); const object: ShapeObject = {
+      id: 'native-schema-shape', revision: 0, name: 'Native schema shape', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
+      layerId: vector.id, visible: true, locked: false, opacity: 1, blendMode: 'normal', transform: { ...IDENTITY_TRANSFORM },
+      type: 'shape', shape: 'rectangle', width: 32, height: 24, fill: { kind: 'solid', color: '#336699' },
+      stroke: { paint: { kind: 'none' }, width: 0, opacity: 1, lineCap: 'round', lineJoin: 'round', dash: [] },
+    };
+    document.objects[object.id] = object; vector.objectIds.push(object.id);
+    const sourcePath = await writeNativeDocument(join(root, 'source.aidraw'), document, '1.0.0');
+    const sourceBytes = await readFile(sourcePath); const files = unzipSync(new Uint8Array(sourceBytes)); const persisted = JSON.parse(strFromU8(files['document.json'])) as Record<string, unknown>;
+    const valid = await readNativeDocument(sourcePath);
+    expect(valid.document.kind === 'illustration' ? valid.document.objects[object.id] : undefined).toEqual(object);
+
+    const mutations: Array<[string, string, (value: Record<string, unknown>) => void]> = [
+      ['invalid-artboard', 'Invalid persisted illustration artboard metadata.', (value) => { (value.artboard as Record<string, unknown>).width = 0; }],
+      ['duplicate-layer-order', 'Invalid persisted illustration layer ordering.', (value) => { const ids = value.layerIds as string[]; ids.push(ids[0]); }],
+      ['expanded-layer', 'Invalid persisted illustration layer metadata.', (value) => { const layers = value.layers as Record<string, Record<string, unknown>>; layers[vector.id].unexpected = true; }],
+      ['invalid-object-transform', 'Invalid persisted illustration object metadata.', (value) => { const objects = value.objects as Record<string, Record<string, unknown>>; (objects[object.id].transform as Record<string, unknown>).x = 'not-a-number'; }],
+    ];
+    for (const [name, error, mutate] of mutations) {
+      const value = structuredClone(persisted); mutate(value);
+      const path = join(root, `${name}.aidraw`); await writeFile(path, zipSync({ ...files, 'document.json': strToU8(JSON.stringify(value)) }, { level: 6 }));
+      await expect(readNativeDocument(path)).rejects.toThrow(error);
+    }
+
+    const invalidSave = structuredClone(document); invalidSave.objects[object.id].transform.x = Number.POSITIVE_INFINITY;
+    await expect(writeNativeDocument(sourcePath, invalidSave, '1.0.1')).rejects.toThrow('Invalid persisted illustration object metadata.');
     expect(await readFile(sourcePath)).toEqual(sourceBytes);
     expect((await readdir(root)).some((entry) => entry.endsWith('.tmp'))).toBe(false);
   });

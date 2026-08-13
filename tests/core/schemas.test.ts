@@ -11,6 +11,7 @@ import {
   createPixelSprite,
   migrateDocument,
   nowIso,
+  type ShapeObject,
 } from '@aidraw/core';
 
 describe('canvas operation schemas', () => {
@@ -261,6 +262,69 @@ describe('persisted attribution schemas', () => {
     for (const mutate of candidates) {
       const document = attributedDocument(); mutate(document);
       expect(() => migrateDocument(document)).toThrow('Invalid persisted document provenance metadata.');
+    }
+  });
+});
+
+describe('persisted illustration schemas', () => {
+  function illustrationDocument() {
+    const document = createIllustrationDocument('Persisted illustration');
+    const vector = Object.values(document.layers).find((entry) => entry.type === 'vector');
+    if (!vector || vector.type !== 'vector') throw new Error('Expected vector layer');
+    const timestamp = nowIso();
+    const object: ShapeObject = {
+      id: 'persisted-shape', revision: 0, name: 'Persisted shape', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
+      layerId: vector.id, visible: true, locked: false, opacity: 1, blendMode: 'normal', transform: { ...IDENTITY_TRANSFORM },
+      type: 'shape', shape: 'rectangle', width: 32, height: 24, fill: { kind: 'solid', color: '#336699' },
+      stroke: { paint: { kind: 'none' }, width: 0, opacity: 1, lineCap: 'round', lineJoin: 'round', dash: [] },
+    };
+    document.objects[object.id] = object; vector.objectIds.push(object.id);
+    document.brushPresets = [{
+      id: 'persisted-brush', name: 'Persisted brush', size: 12, opacity: 1, hardness: 1, flow: 1,
+      dynamics: { tip: 'round', spacing: 0.1, stabilization: 0, scatter: 0, sizeJitter: 0, opacityJitter: 0, angle: 0, roundness: 1, wetness: 0, granulation: 0 },
+    }];
+    document.guides = [{ id: 'persisted-guide', orientation: 'vertical', position: 16, color: '#55aaff', locked: false }];
+    return document;
+  }
+
+  function vectorLayer(document: ReturnType<typeof illustrationDocument>) {
+    const layer = Object.values(document.layers).find((entry) => entry.type === 'vector');
+    if (!layer || layer.type !== 'vector') throw new Error('Expected vector layer');
+    return layer;
+  }
+
+  it('validates complete illustration records while preserving missing-reference recovery', () => {
+    const source = illustrationDocument(); const vector = vectorLayer(source); const object = source.objects['persisted-shape'];
+    source.layerIds.push('missing-root-layer'); vector.objectIds.push('missing-object'); vector.maskLayerId = 'missing-mask-layer'; object.maskObjectId = 'missing-mask-object';
+    const migrated = migrateDocument(source);
+    expect(migrated).toMatchObject({
+      layerIds: expect.arrayContaining(['missing-root-layer']),
+      layers: { [vector.id]: { objectIds: expect.arrayContaining(['missing-object']), maskLayerId: 'missing-mask-layer' } },
+      objects: { [object.id]: { maskObjectId: 'missing-mask-object' } },
+    });
+  });
+
+  it('rejects malformed illustration fields, expanded records, duplicate order IDs, and key/ID contradictions', () => {
+    const cases: Array<[string, (document: ReturnType<typeof illustrationDocument>) => void]> = [
+      ['Invalid persisted illustration artboard metadata.', (document) => { document.artboard.width = 0; }],
+      ['Invalid persisted illustration layer ordering.', (document) => { document.layerIds.push(document.layerIds[0]); }],
+      ['Invalid persisted illustration layer metadata.', (document) => { (document as unknown as Record<string, unknown>).layers = []; }],
+      ['Invalid persisted illustration layer metadata.', (document) => { vectorLayer(document).id = 'contradictory-layer-id'; }],
+      ['Invalid persisted illustration layer metadata.', (document) => { (vectorLayer(document) as unknown as Record<string, unknown>).unexpected = true; }],
+      ['Invalid persisted illustration layer metadata.', (document) => {
+        const paint = Object.values(document.layers).find((entry) => entry.type === 'paint'); if (!paint || paint.type !== 'paint') throw new Error('Expected paint layer');
+        paint.strokes.push({ id: 'invalid-stroke', actorId: HUMAN_ACTOR.id, points: [{ x: 1, y: 2, pressure: 2 }], color: '#112233', size: 4, opacity: 1, hardness: 1, flow: 1, mode: 'paint', preset: 'hard-round' });
+      }],
+      ['Invalid persisted illustration object metadata.', (document) => { document.objects['persisted-shape'].id = 'contradictory-object-id'; }],
+      ['Invalid persisted illustration object metadata.', (document) => { document.objects['persisted-shape'].transform.x = Number.POSITIVE_INFINITY; }],
+      ['Invalid persisted illustration object metadata.', (document) => { (document.objects['persisted-shape'] as unknown as Record<string, unknown>).unexpected = true; }],
+      ['Invalid persisted illustration brush preset metadata.', (document) => { document.brushPresets.push(structuredClone(document.brushPresets[0])); }],
+      ['Invalid persisted illustration guide metadata.', (document) => { document.guides.push(structuredClone(document.guides[0])); }],
+      ['Invalid persisted illustration snap settings.', (document) => { (document.snapSettings as unknown as Record<string, unknown>).unexpected = true; }],
+    ];
+    for (const [error, mutate] of cases) {
+      const document = illustrationDocument(); mutate(document);
+      expect(() => migrateDocument(document)).toThrow(error);
     }
   });
 });

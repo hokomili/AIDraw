@@ -121,6 +121,13 @@ const EntityBaseInputShape = {
   updatedAt: z.string().min(1),
   createdBy: IdSchema,
 };
+const ArtboardInputSchema = z.object({
+  width: FiniteNumberSchema.int().min(1).max(8_192),
+  height: FiniteNumberSchema.int().min(1).max(8_192),
+  background: z.union([ColorInputSchema, z.null()]),
+  colorSpace: z.literal('srgb'),
+  dpi: FiniteNumberSchema.int().min(1).max(1_200),
+}).strict();
 const IllustrationKeyframeInputSchema = z.object({
   ...EntityBaseInputShape,
   objectId: IdSchema,
@@ -197,6 +204,10 @@ const RasterBrushPresetInputSchema = z.object({
   flow: FiniteNumberSchema.min(0.01).max(1),
   dynamics: RasterBrushDynamicsSchema.omit({ seed: true }),
 }).strict();
+const RasterBrushPresetsInputSchema = z.array(RasterBrushPresetInputSchema).max(256).superRefine((presets, context) => {
+  const ids = new Set<string>();
+  presets.forEach((preset, index) => { if (ids.has(preset.id)) context.addIssue({ code: 'custom', path: [index, 'id'], message: 'Brush preset IDs must be unique' }); ids.add(preset.id); });
+});
 const PointSampleInputSchema = z.object({
   x: FiniteNumberSchema,
   y: FiniteNumberSchema,
@@ -363,9 +374,20 @@ const IllustrationObjectInputSchema = z.discriminatedUnion('type', [
   if (object.type === 'text' && object.ranges.some((range) => range.end > object.text.length)) context.addIssue({ code: 'custom', path: ['ranges'], message: 'Text style ranges must fit inside the text' });
   if (object.type === 'image' && object.crop && object.sourceWidth !== undefined && object.sourceHeight !== undefined && (object.crop.x + object.crop.width > object.sourceWidth || object.crop.y + object.crop.height > object.sourceHeight)) context.addIssue({ code: 'custom', path: ['crop'], message: 'Image crop must fit inside source geometry' });
 });
+const IllustrationLayerIdsInputSchema = z.array(IdSchema).max(1_000_000).refine((ids) => new Set(ids).size === ids.length, { message: 'Illustration root layer IDs must be unique' });
+const IllustrationLayersInputSchema = z.record(z.string(), IllustrationLayerInputSchema).superRefine((layers, context) => {
+  for (const [id, layer] of Object.entries(layers)) if (layer.id !== id) context.addIssue({ code: 'custom', path: [id, 'id'], message: 'Illustration layer record keys must match entity IDs' });
+});
+const IllustrationObjectsInputSchema = z.record(z.string(), IllustrationObjectInputSchema).superRefine((objects, context) => {
+  for (const [id, object] of Object.entries(objects)) if (object.id !== id) context.addIssue({ code: 'custom', path: [id, 'id'], message: 'Illustration object record keys must match entity IDs' });
+});
 const BitmapGlyphInputSchema = z.object({ width: FiniteNumberSchema.int().min(1).max(64), advance: FiniteNumberSchema.int().min(1).max(128), rows: z.array(z.string().regex(/^[.#]{1,64}$/)).min(1).max(64) }).strict().superRefine((glyph, context) => { glyph.rows.forEach((row, index) => { if (row.length !== glyph.width) context.addIssue({ code: 'custom', path: ['rows', index], message: 'Every bitmap glyph row must match its width' }); }); });
 const BitmapFontInputSchema = z.object({ id: IdSchema, name: z.string().trim().min(1).max(200), lineHeight: FiniteNumberSchema.int().min(1).max(128), glyphs: z.record(z.string().min(1).max(4), BitmapGlyphInputSchema) }).strict();
 const IllustrationGuideInputSchema = z.object({ id: IdSchema, orientation: z.enum(['horizontal', 'vertical']), position: FiniteNumberSchema.min(-1_000_000).max(1_000_000), color: z.string().regex(/^#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?$/), locked: z.boolean() }).strict();
+const IllustrationGuidesInputSchema = z.array(IllustrationGuideInputSchema).max(1_024).superRefine((guides, context) => {
+  const ids = new Set<string>();
+  guides.forEach((guide, index) => { if (ids.has(guide.id)) context.addIssue({ code: 'custom', path: [index, 'id'], message: 'Guide IDs must be unique' }); ids.add(guide.id); });
+});
 const IllustrationSnapSettingsInputSchema = z.object({ artboard: z.boolean(), objects: z.boolean(), guides: z.boolean(), grid: z.boolean(), pixel: z.boolean(), gridSize: FiniteNumberSchema.min(1).max(4_096), tolerance: FiniteNumberSchema.min(0).max(128) }).strict();
 const FrameInputSchema = z.object({
   ...EntityBaseInputShape,
@@ -510,24 +532,12 @@ const PixelAssetInputSchema = z.object({
 const TargetedOperationSchemas: Record<z.infer<typeof OperationKindSchema>, z.ZodType> = {
   'document.rename': z.object({ name: z.string().min(1).max(200) }).loose(),
   'illustration.artboard.replace': z.object({
-    artboard: z.object({
-      width: FiniteNumberSchema.int().min(1).max(8_192),
-      height: FiniteNumberSchema.int().min(1).max(8_192),
-      background: z.union([z.string().regex(/^#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?$/), z.null()]),
-      colorSpace: z.literal('srgb'),
-      dpi: FiniteNumberSchema.int().min(1).max(1_200),
-    }).strict(),
+    artboard: ArtboardInputSchema,
     expectedRevision: ExpectedRevisionSchema,
   }).loose(),
   'illustration.artboard.translate': z.object({
     kind: z.literal('illustration.artboard.translate'),
-    artboard: z.object({
-      width: FiniteNumberSchema.int().min(1).max(8_192),
-      height: FiniteNumberSchema.int().min(1).max(8_192),
-      background: z.union([z.string().regex(/^#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?$/), z.null()]),
-      colorSpace: z.literal('srgb'),
-      dpi: FiniteNumberSchema.int().min(1).max(1_200),
-    }).strict(),
+    artboard: ArtboardInputSchema,
     offsetX: FiniteNumberSchema.int().min(-8_192).max(8_192),
     offsetY: FiniteNumberSchema.int().min(-8_192).max(8_192),
     expectedRevision: ExpectedRevisionSchema,
@@ -557,11 +567,8 @@ const TargetedOperationSchemas: Record<z.infer<typeof OperationKindSchema>, z.Zo
     stroke: RasterStrokeInputSchema,
     expectedRevision: ExpectedRevisionSchema,
   }).loose(),
-  'illustration.brush-presets.replace': z.object({ kind: z.literal('illustration.brush-presets.replace'), presets: z.array(RasterBrushPresetInputSchema).max(256) }).strict().superRefine((operation, context) => {
-    const seen = new Set<string>();
-    operation.presets.forEach((preset, index) => { if (seen.has(preset.id)) context.addIssue({ code: 'custom', path: ['presets', index, 'id'], message: 'Brush preset IDs must be unique' }); seen.add(preset.id); });
-  }),
-  'illustration.guides.replace': z.object({ kind: z.literal('illustration.guides.replace'), guides: z.array(IllustrationGuideInputSchema).max(1_024), expectedRevision: ExpectedRevisionSchema }).strict().superRefine((operation, context) => { const ids = new Set<string>(); operation.guides.forEach((guide, index) => { if (ids.has(guide.id)) context.addIssue({ code: 'custom', path: ['guides', index, 'id'], message: 'Guide IDs must be unique' }); ids.add(guide.id); }); }),
+  'illustration.brush-presets.replace': z.object({ kind: z.literal('illustration.brush-presets.replace'), presets: RasterBrushPresetsInputSchema }).strict(),
+  'illustration.guides.replace': z.object({ kind: z.literal('illustration.guides.replace'), guides: IllustrationGuidesInputSchema, expectedRevision: ExpectedRevisionSchema }).strict(),
   'illustration.snap-settings.replace': z.object({ kind: z.literal('illustration.snap-settings.replace'), settings: IllustrationSnapSettingsInputSchema, expectedRevision: ExpectedRevisionSchema }).strict(),
   'illustration.animation.settings.replace': z.object({
     kind: z.literal('illustration.animation.settings.replace'),
@@ -746,27 +753,34 @@ export function validateDocument(value: unknown): AIDrawDocument {
   }
   const document = parsed.data;
   if (document.kind === 'illustration') {
-    if (!Array.isArray(document.layerIds) || typeof document.layers !== 'object' || typeof document.objects !== 'object') {
-      throw new Error('Invalid illustration document structure');
-    }
     if (!Array.isArray(document.brushPresets)) document.brushPresets = [];
     if (!Array.isArray(document.guides)) document.guides = [];
     document.snapSettings ??= { artboard: true, objects: true, guides: true, grid: false, pixel: false, gridSize: 16, tolerance: 8 };
     document.animation ??= { durationMs: 2_000, framesPerSecond: 12, playback: 'loop', keyframeIds: [], keyframes: {} };
+    const artboard = ArtboardInputSchema.safeParse(document.artboard);
+    if (!artboard.success) throw new Error('Invalid persisted illustration artboard metadata.');
+    const layerIds = IllustrationLayerIdsInputSchema.safeParse(document.layerIds);
+    if (!layerIds.success) throw new Error('Invalid persisted illustration layer ordering.');
+    const layers = IllustrationLayersInputSchema.safeParse(document.layers);
+    if (!layers.success) throw new Error('Invalid persisted illustration layer metadata.');
+    const objects = IllustrationObjectsInputSchema.safeParse(document.objects);
+    if (!objects.success) throw new Error('Invalid persisted illustration object metadata.');
+    const brushPresets = RasterBrushPresetsInputSchema.safeParse(document.brushPresets);
+    if (!brushPresets.success) throw new Error('Invalid persisted illustration brush preset metadata.');
+    const guides = IllustrationGuidesInputSchema.safeParse(document.guides);
+    if (!guides.success) throw new Error('Invalid persisted illustration guide metadata.');
+    const snapSettings = IllustrationSnapSettingsInputSchema.safeParse(document.snapSettings);
+    if (!snapSettings.success) throw new Error('Invalid persisted illustration snap settings.');
     const animation = IllustrationAnimationInputSchema.safeParse(document.animation);
     if (!animation.success) throw new Error(`Invalid illustration animation: ${animation.error.issues.map((issue) => issue.message).join('; ')}`);
+    document.artboard = artboard.data;
+    document.layerIds = layerIds.data;
+    document.layers = layers.data;
+    document.objects = objects.data;
+    document.brushPresets = brushPresets.data;
+    document.guides = guides.data;
+    document.snapSettings = snapSettings.data;
     document.animation = animation.data;
-    for (const [layerId, layer] of Object.entries(document.layers)) {
-      if (!layer || typeof layer !== 'object' || typeof layer.type !== 'string') throw new Error(`Invalid illustration layer ${layerId}`);
-      if (layer.type !== 'paint') continue;
-      if (layer.tileSize !== 256 || !Array.isArray(layer.strokes) || !layer.tileAssetIds || typeof layer.tileAssetIds !== 'object' || Array.isArray(layer.tileAssetIds)) throw new Error(`Invalid paint layer ${layerId}`);
-      const tileEntries = Object.entries(layer.tileAssetIds);
-      if (tileEntries.length > 16_384 || tileEntries.some(([key, assetId]) => !/^-?\d+,-?\d+$/.test(key) || typeof assetId !== 'string' || !assetId)) throw new Error(`Invalid paint tile index on layer ${layerId}`);
-      if (layer.tileCache) {
-        const cache = layer.tileCache;
-        if (cache.version !== 1 || !Number.isInteger(cache.strokeCount) || cache.strokeCount < 0 || cache.strokeCount > layer.strokes.length || !/^[0-9a-f]{64}$/i.test(cache.strokesSha256)) throw new Error(`Invalid paint tile cache on layer ${layerId}`);
-      }
-    }
     assertAcyclicGroupChildren(document.layers, 'Illustration layer hierarchy contains a cycle.');
     assertAcyclicGroupChildren(document.objects, 'Illustration object hierarchy contains a cycle.');
   } else if (!Array.isArray(document.assetIds) || typeof document.pixelAssets !== 'object') {
