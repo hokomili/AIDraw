@@ -77,6 +77,7 @@ import { cancelPixelGesture, releasePendingPixelLocks } from '../../common/pixel
 import { BoundedResourceCache } from '../../common/bounded-resource-cache';
 import { drawPixelSpriteRegion, pixelSpriteRegionPlan } from '../../common/pixel-sprite-render';
 import { constrainTileTransformFlags, tileTransformFlagsAllowed } from '../../common/tile-transform-options';
+import { EDITOR_DENSITY } from '../../common/editor-layout';
 import { editableSpriteLayer, spriteRegionBitmap, visibleSpriteLayers, type SpriteRegionBitmap } from './pixel-bitmap';
 
 interface PixelPoint { x: number; y: number }
@@ -391,7 +392,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
 
   useEffect(() => {
     if (!containerRef.current) return;
-    const observer = new ResizeObserver(([entry]) => setSize({ width: Math.max(1, entry.contentRect.width), height: Math.max(1, entry.contentRect.height - (hasTimeline ? 122 : 0)) }));
+    const observer = new ResizeObserver(([entry]) => setSize({ width: Math.max(1, entry.contentRect.width), height: Math.max(1, entry.contentRect.height - (hasTimeline ? EDITOR_DENSITY.timelineHeight : 0)) }));
     observer.observe(containerRef.current);
     return () => observer.disconnect();
   }, [hasTimeline]);

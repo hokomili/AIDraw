@@ -1437,6 +1437,8 @@ function TopBar({ onOpenShortcuts }: { onOpenShortcuts: () => void }) {
         </button>
         <button
           className="agent-pill"
+          aria-label="Open agent activity"
+          title="Open agent activity"
           onClick={() => useEditorStore.getState().setRightPanel("activity")}
         >
           <Bot size={15} />

@@ -6,6 +6,7 @@ import { basename, dirname, extname, isAbsolute, relative, resolve } from 'node:
 import { pathToFileURL } from 'node:url';
 import { CanvasTransactionSchema, HUMAN_ACTOR, createId, nowIso, type AsyncJob, type CanvasOperation } from '@aidraw/core';
 import { IPC, type BatchDocumentResult, type DocumentPresetInput, type EngineStatus, type ExportOptions, type HumanLockRequest, type InterchangeReportInput, type NewDocumentOptions, type PixelLinkAction, type PixelLinkActionResult } from '../common/contracts';
+import { EDITOR_CONTENT_VIEWPORT, editorOuterMinimumSize } from '../common/editor-layout';
 import { MAX_PALETTE_FILE_BYTES, applyPortablePalette, parsePaletteFile, serializePaletteFile, type PaletteFileFormat, type PaletteImportMode } from '../common/palette-interchange';
 import type { DocumentService } from './document-service';
 import type { McpHost } from './mcp-host';
@@ -937,11 +938,10 @@ function reportEditorWindowFailure(failure: EditorWindowFailure): void {
 }
 
 function createElectronWindow(): BrowserWindow {
-  return new BrowserWindow({
-    width: 1520,
-    height: 940,
-    minWidth: 980,
-    minHeight: 640,
+  const window = new BrowserWindow({
+    width: EDITOR_CONTENT_VIEWPORT.defaultWidth,
+    height: EDITOR_CONTENT_VIEWPORT.defaultHeight,
+    useContentSize: true,
     backgroundColor: '#eeeae4',
     title: 'AIDraw',
     show: false,
@@ -954,6 +954,19 @@ function createElectronWindow(): BrowserWindow {
       allowRunningInsecureContent: false,
     },
   });
+  try {
+    const [outerWidth, outerHeight] = window.getSize();
+    const [contentWidth, contentHeight] = window.getContentSize();
+    const minimumOuterSize = editorOuterMinimumSize(
+      { width: outerWidth, height: outerHeight },
+      { width: contentWidth, height: contentHeight },
+    );
+    window.setMinimumSize(minimumOuterSize.width, minimumOuterSize.height);
+    return window;
+  } catch (error) {
+    if (!window.isDestroyed()) window.destroy();
+    throw error;
+  }
 }
 
 function bindElectronWindowEvents(window: BrowserWindow, events: EditorWindowEvents): void {

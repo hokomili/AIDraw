@@ -18,6 +18,7 @@ describe('editor accessibility baseline', () => {
     expect(app).toContain('aria-selected={visiblePanel ===');
     expect(app).toContain('aria-label="Canvas zoom"');
     expect(app).toContain('aria-label="Stop all agents working on this document"');
+    expect(app).toContain('aria-label="Open agent activity"');
     expect(app).toContain('aria-live="polite"');
     expect(app).toContain('aria-modal="true"');
     expect(app).toContain('aria-describedby={description ? descriptionId : undefined}');
