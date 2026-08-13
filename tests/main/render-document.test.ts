@@ -12,20 +12,44 @@ describe('native document rendering', () => {
     const layer = Object.values(document.layers).find((entry) => entry.type === 'vector');
     if (!layer || layer.type !== 'vector') throw new Error('Expected vector layer');
     const timestamp = nowIso();
-    const shape = (id: string, x: number, y: number, color: string): ShapeObject => ({
+    const shape = (id: string, kind: ShapeObject['shape'], x: number, y: number, width: number, height: number, color: string): ShapeObject => ({
       id, revision: 0, name: id, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
       layerId: layer.id, visible: true, locked: false, opacity: 1, blendMode: 'normal', transform: { ...IDENTITY_TRANSFORM, x, y },
-      type: 'shape', shape: 'rectangle', width: 34, height: 26, fill: { kind: 'solid', color },
+      type: 'shape', shape: kind, width, height, fill: { kind: 'solid', color },
       stroke: { paint: { kind: 'none' }, width: 0, opacity: 1, lineCap: 'round', lineJoin: 'round', dash: [] },
     });
-    const first = shape('rectangle', 8, 7, '#ff6b7a'); const second = shape('overlap', 29, 20, '#31a6a0');
+    const rectangle = shape('rectangle', 'rectangle', 8, 7, 34, 26, '#ff6b7a');
+    const polygon = { ...shape('polygon', 'polygon', 37, 23, 31, 29, '#f6c344'), sides: 7 };
+    const star = { ...shape('star', 'star', 20, 20, 24, 24, '#5b78e680'), sides: 5, innerRadius: 0.38 };
+    const phaseCases: ShapeObject[] = [
+      rectangle,
+      polygon,
+      star,
+      { ...shape('triangle', 'polygon', 9, 31, 35, 27, '#edc94880'), sides: 3 },
+      { ...shape('polygon-many', 'polygon', 44, 17, 23, 37, '#b07aa180'), sides: 64 },
+      { ...shape('polygon-maximum', 'polygon', 11, 9, 63, 47, '#ff9da780'), sides: 1_000 },
+      { ...shape('star-dense', 'star', 55, 26, 21, 29, '#76b7b280'), sides: 17, innerRadius: 0.72 },
+      { ...shape('star-hollow-center', 'star', 31, 35, 33, 19, '#e1575980'), sides: 8, innerRadius: 0.08 },
+      { ...shape('star-zero-inner', 'star', 24, 12, 37, 41, '#9c755f80'), sides: 6, innerRadius: 0 },
+      { ...shape('star-solid-center', 'star', 16, 16, 45, 39, '#4e79a780'), sides: 9, innerRadius: 1 },
+    ];
+    const parityRegions = [{ x: 9, y: 5, width: 75, height: 56 }, { x: 17, y: 13, width: 67, height: 51 }];
+    for (const background of ['#f8efe5', null]) for (const candidate of phaseCases) for (const candidateRegion of parityRegions) {
+      document.artboard.background = background;
+      document.objects = { [candidate.id]: candidate }; layer.objectIds = [candidate.id];
+      const candidateFull = await renderIllustration(document); const candidateActual = await renderIllustrationRegion(document, candidateRegion);
+      expect(Buffer.from(candidateActual.getContext('2d').getImageData(0, 0, candidateRegion.width, candidateRegion.height).data), `${candidate.id}/${background ?? 'transparent'}/${candidateRegion.x},${candidateRegion.y}`).toEqual(Buffer.from(candidateFull.getContext('2d').getImageData(candidateRegion.x, candidateRegion.y, candidateRegion.width, candidateRegion.height).data));
+      candidateFull.width = 1; candidateFull.height = 1; candidateActual.width = 1; candidateActual.height = 1;
+    }
+    document.artboard.background = '#f8efe5';
     const group: GroupObject = {
       id: 'group', revision: 0, name: 'group', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
-      layerId: layer.id, visible: true, locked: false, opacity: 1, blendMode: 'normal', transform: structuredClone(IDENTITY_TRANSFORM),
-      type: 'group', childIds: [first.id, second.id],
+      layerId: layer.id, visible: true, locked: false, opacity: 1, blendMode: 'normal', transform: { ...IDENTITY_TRANSFORM, x: 2, y: 1 },
+      type: 'group', childIds: [rectangle.id, polygon.id, star.id],
     };
-    document.objects = { [first.id]: first, [second.id]: second, [group.id]: group }; layer.objectIds = [first.id, second.id, group.id];
-    const region = { x: 17, y: 13, width: 37, height: 31 };
+    document.objects = { [rectangle.id]: rectangle, [polygon.id]: polygon, [star.id]: star, [group.id]: group };
+    layer.objectIds = [rectangle.id, polygon.id, star.id, group.id];
+    const region = { x: 9, y: 5, width: 75, height: 56 };
 
     const full = await renderIllustration(document); const actual = await renderIllustrationRegion(document, region);
     expect({ width: actual.width, height: actual.height }).toEqual({ width: region.width, height: region.height });

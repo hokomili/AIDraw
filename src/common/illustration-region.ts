@@ -9,16 +9,6 @@ export interface IllustrationRasterRegion {
 
 export const ILLUSTRATION_REGION_OVERSCAN_PIXELS = 4;
 
-function isIdentityTransform(transform: Transform): boolean {
-  return transform.x === 0
-    && transform.y === 0
-    && transform.scaleX === 1
-    && transform.scaleY === 1
-    && transform.rotation === 0
-    && transform.skewX === 0
-    && transform.skewY === 0;
-}
-
 function isIntegerTranslation(transform: Transform): boolean {
   return Number.isSafeInteger(transform.x)
     && Number.isSafeInteger(transform.y)
@@ -36,25 +26,35 @@ function objectCanRenderPhaseExactly(object: IllustrationObject): boolean {
     || (object.blur ?? 0) !== 0
     || object.shadow
     || object.filters?.length) return false;
-  if (object.type === 'group') return isIdentityTransform(object.transform);
+  if (object.type === 'group') return isIntegerTranslation(object.transform);
   if (object.type !== 'shape'
-    || object.shape !== 'rectangle'
-    || (object.cornerRadius ?? 0) !== 0
+    || !['rectangle', 'polygon', 'star'].includes(object.shape)
     || !isIntegerTranslation(object.transform)
     || !Number.isSafeInteger(object.width)
     || !Number.isSafeInteger(object.height)
     || object.width < 0
     || object.height < 0
     || (object.fill.kind !== 'none' && object.fill.kind !== 'solid')) return false;
+  if (object.shape === 'rectangle') {
+    const cornerRadius = object.cornerRadius ?? 0;
+    if (cornerRadius !== 0) return false;
+  }
+  if (object.shape === 'polygon' || object.shape === 'star') {
+    const sides = object.sides ?? (object.shape === 'star' ? 5 : 6);
+    if (!Number.isSafeInteger(sides) || sides < 3 || sides > 1_000) return false;
+    const innerRadius = object.innerRadius ?? 0.45;
+    if (object.shape === 'star' && (!Number.isFinite(innerRadius) || innerRadius < 0 || innerRadius > 1)) return false;
+  }
   return object.stroke.paint.kind === 'none' || object.stroke.width <= 0;
 }
 
 /**
  * Canvas coverage is not generally invariant when identical geometry is
  * translated onto a differently sized backing surface. The regional path is
- * therefore limited to integer-aligned solid rectangles and empty structural
- * containers. Richer vector/raster content retains the established full-
- * artboard render and raw-crop path.
+ * therefore limited to the integer-translated square-rectangle/polygon/star subset
+ * proven byte-exact by parity coverage, plus structural containers. Richer
+ * vector/raster content retains the established full-artboard render and raw-
+ * crop path.
  */
 export function illustrationRegionCanRenderLocally(document: IllustrationDocument, onlyLayerId?: string): boolean {
   const objectChildren = new Set(Object.values(document.objects).flatMap((object) => object.type === 'group' ? object.childIds : []));

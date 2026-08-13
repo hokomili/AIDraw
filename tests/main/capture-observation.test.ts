@@ -54,13 +54,13 @@ describe('bounded illustration observation', () => {
     const layer = Object.values(document.layers).find((entry) => entry.type === 'vector');
     if (!layer || layer.type !== 'vector') throw new Error('Expected vector layer');
     const timestamp = nowIso(); const object: ShapeObject = {
-      id: 'far-edge', revision: 0, name: 'Far edge', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
-      layerId: layer.id, visible: true, locked: false, opacity: 1, blendMode: 'normal', transform: { ...IDENTITY_TRANSFORM, x: 8_191, y: 8_191 },
-      type: 'shape', shape: 'rectangle', width: 1, height: 1, fill: { kind: 'solid', color: '#ff3366' },
+      id: 'far-edge-star', revision: 0, name: 'Far edge star', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
+      layerId: layer.id, visible: true, locked: false, opacity: 1, blendMode: 'normal', transform: { ...IDENTITY_TRANSFORM, x: 8_176, y: 8_176 },
+      type: 'shape', shape: 'star', width: 16, height: 16, sides: 5, innerRadius: 0.45, fill: { kind: 'solid', color: '#ff3366' },
       stroke: { paint: { kind: 'none' }, width: 0, opacity: 1, lineCap: 'round', lineJoin: 'round', dash: [] },
     };
     document.objects[object.id] = object; layer.objectIds.push(object.id);
-    const region = { x: 8_191, y: 8_191, width: 1, height: 1 };
+    const region = { x: 8_184, y: 8_184, width: 1, height: 1 };
 
     const observed = await captureObservation(document, { region, scale: 1, background: 'transparent' });
     expect(observed).toMatchObject({ available: true, width: 1, height: 1, region });

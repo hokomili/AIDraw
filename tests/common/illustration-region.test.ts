@@ -44,7 +44,7 @@ describe('bounded illustration raster regions', () => {
     expect(() => illustrationRegionBacking(document, { x: 0.5, y: 0, width: 1, height: 1 })).toThrow('Illustration raster regions must use nonnegative safe-integer coordinates');
   });
 
-  it('admits phase-stable rectangles but rejects richer raster dependencies', () => {
+  it('admits integer-phase closed primitives but rejects richer raster dependencies', () => {
     const document = createIllustrationDocument('Regional eligibility');
     const vector = Object.values(document.layers).find((layer) => layer.type === 'vector');
     const paint = Object.values(document.layers).find((layer) => layer.type === 'paint');
@@ -58,7 +58,24 @@ describe('bounded illustration raster regions', () => {
     object.transform.x = 0;
     object.shape = 'ellipse';
     expect(illustrationRegionCanRenderLocally(document)).toBe(false);
+    object.shape = 'polygon'; object.sides = 7;
+    expect(illustrationRegionCanRenderLocally(document)).toBe(true);
+    object.sides = 7.5;
+    expect(illustrationRegionCanRenderLocally(document)).toBe(false);
+    object.sides = 1_001;
+    expect(illustrationRegionCanRenderLocally(document)).toBe(false);
+    object.shape = 'star'; object.sides = 5; object.innerRadius = 0.4;
+    expect(illustrationRegionCanRenderLocally(document)).toBe(true);
+    object.innerRadius = 1.1;
+    expect(illustrationRegionCanRenderLocally(document)).toBe(false);
+    object.shape = 'rectangle'; object.cornerRadius = 4;
+    expect(illustrationRegionCanRenderLocally(document)).toBe(false);
+    object.cornerRadius = 0; object.shape = 'line';
+    expect(illustrationRegionCanRenderLocally(document)).toBe(false);
     object.shape = 'rectangle';
+    object.fill = { kind: 'linear-gradient', x1: 0, y1: 0, x2: 20, y2: 0, stops: [{ offset: 0, color: '#111111', opacity: 1 }, { offset: 1, color: '#eeeeee', opacity: 1 }] };
+    expect(illustrationRegionCanRenderLocally(document)).toBe(false);
+    object.fill = { kind: 'solid', color: '#8268dd' };
     object.stroke = { ...object.stroke, paint: { kind: 'solid', color: '#111111' }, width: 1 };
     expect(illustrationRegionCanRenderLocally(document)).toBe(false);
     object.stroke = { ...object.stroke, paint: { kind: 'none' }, width: 0 };
@@ -104,6 +121,11 @@ describe('bounded illustration raster regions', () => {
     group.opacity = 0.5;
     expect(illustrationRegionCanRenderLocally(document)).toBe(false);
     group.opacity = 1;
+    group.transform = { ...group.transform, x: 7, y: -3 };
+    expect(illustrationRegionCanRenderLocally(document)).toBe(true);
+    group.transform = { ...group.transform, x: 7.5 };
+    expect(illustrationRegionCanRenderLocally(document)).toBe(false);
+    group.transform = { ...group.transform, x: 7 };
     group.transform = { ...group.transform, rotation: 15 };
     expect(illustrationRegionCanRenderLocally(document)).toBe(false);
     group.visible = false; child.blur = 8;

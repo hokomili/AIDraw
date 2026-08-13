@@ -162,13 +162,13 @@ function sparseIllustrationRegionFixture() {
   if (!layer || layer.type !== 'vector') throw new Error('Sparse regional illustration layer is missing.');
   const timestamp = nowIso();
   const object: ShapeObject = {
-    id: 'perf-far-edge-rectangle', revision: 0, name: 'Far edge rectangle', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
-    layerId: layer.id, visible: true, locked: false, opacity: 1, blendMode: 'normal', transform: { ...IDENTITY_TRANSFORM, x: 8_191, y: 8_191 },
-    type: 'shape', shape: 'rectangle', width: 1, height: 1, fill: { kind: 'solid', color: '#ff3366' },
+    id: 'perf-far-edge-star', revision: 0, name: 'Far edge star', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
+    layerId: layer.id, visible: true, locked: false, opacity: 1, blendMode: 'normal', transform: { ...IDENTITY_TRANSFORM, x: 8_176, y: 8_176 },
+    type: 'shape', shape: 'star', width: 16, height: 16, sides: 5, innerRadius: 0.45, fill: { kind: 'solid', color: '#ff3366' },
     stroke: { paint: { kind: 'none' }, width: 0, opacity: 1, lineCap: 'round', lineJoin: 'round', dash: [] },
   };
   document.objects[object.id] = object; layer.objectIds.push(object.id);
-  return { document, region: { x: 8_191, y: 8_191, width: 1, height: 1 } };
+  return { document, region: { x: 8_184, y: 8_184, width: 1, height: 1 } };
 }
 
 function sparseSpriteRegionFixture() {
