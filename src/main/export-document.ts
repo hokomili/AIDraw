@@ -506,6 +506,36 @@ function psdTextLayer(object: Extract<IllustrationObject, { type: 'text' }>): Ps
   };
 }
 
+export function assertPsdLayerRasterBudget(width: number, height: number, layerRasterCount: number): void {
+  if (!Number.isSafeInteger(width) || width < 1 || !Number.isSafeInteger(height) || height < 1) throw new RangeError('PSD raster dimensions must be positive safe integers.');
+  assertScaledDimensions(width, height, 1);
+  if (!Number.isSafeInteger(layerRasterCount) || layerRasterCount < 0) throw new RangeError('PSD raster layer count must be a nonnegative safe integer.');
+  const pixels = width * height;
+  if (layerRasterCount > Math.floor(MAX_STATIC_RASTER_PIXELS / pixels)) throw new RangeError('PSD layer rasters exceed the 64-megapixel expanded safety budget.');
+}
+
+function illustrationPsdRasterLayerCount(document: IllustrationDocument): number {
+  const countLayer = (layerId: string, ancestors = new Set<string>()): number => {
+    const layer = document.layers[layerId]; if (!layer) return 0;
+    if (ancestors.has(layerId)) throw new Error('Illustration layer hierarchy contains a cycle.');
+    if (layer.type !== 'group' || layer.filters?.length || layer.maskLayerId) return 1;
+    const next = new Set(ancestors); next.add(layerId);
+    return layer.childIds.reduce((count, childId) => count + countLayer(childId, next), 0);
+  };
+  return document.layerIds.reduce((count, layerId) => count + countLayer(layerId), 0);
+}
+
+function pixelPsdRasterLayerCount(sprite: PixelSprite): number {
+  const countLayer = (layerId: string, ancestors = new Set<string>()): number => {
+    const layer = sprite.layers[layerId]; if (!layer) return 0;
+    if (ancestors.has(layerId)) throw new Error('Pixel layer hierarchy contains a cycle.');
+    if (layer.type === 'pixel') return 1;
+    const next = new Set(ancestors); next.add(layerId);
+    return (layer.childIds ?? []).reduce((count, childId) => count + countLayer(childId, next), 0);
+  };
+  return sprite.layerIds.reduce((count, layerId) => count + countLayer(layerId), 0);
+}
+
 function textObjectsInLayer(document: IllustrationDocument, layerId: string): Array<Extract<IllustrationObject, { type: 'text' }>> {
   const layer = document.layers[layerId]; if (!layer || layer.type !== 'vector') return [];
   const result: Array<Extract<IllustrationObject, { type: 'text' }>> = []; const visited = new Set<string>();
@@ -537,6 +567,7 @@ async function psd(document: AIDrawDocument): Promise<ExportArtifact> {
   let width: number; let height: number; const children: PsdLayer[] = [];
   if (document.kind === 'illustration') {
     width = document.artboard.width; height = document.artboard.height;
+    assertPsdLayerRasterBudget(width, height, illustrationPsdRasterLayerCount(document));
     let editableTextCount = 0;
     const exportLayer = async (layerId: string): Promise<PsdLayer | undefined> => {
       const layer = document.layers[layerId]; if (!layer) return undefined;
@@ -562,6 +593,7 @@ async function psd(document: AIDrawDocument): Promise<ExportArtifact> {
     const asset = document.pixelAssets[document.activeAssetId];
     if (asset?.type !== 'sprite') throw new Error('PSD export from pixel mode requires an active sprite.');
     width = asset.width; height = asset.height;
+    assertPsdLayerRasterBudget(width, height, pixelPsdRasterLayerCount(asset));
     const exportLayer = (layerId: string, ancestors = new Set<string>()): PsdLayer | undefined => {
       const layer = asset.layers[layerId]; if (!layer) return undefined;
       if (ancestors.has(layerId)) throw new Error('Pixel layer hierarchy contains a cycle.');

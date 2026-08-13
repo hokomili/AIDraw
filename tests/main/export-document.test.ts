@@ -16,11 +16,30 @@ import {
   type ShapeObject,
   type TextObject,
 } from '@aidraw/core';
-import { exportDocument, illustrationToSvg, plannedExportCompanionPaths } from '@main/export-document';
+import { assertPsdLayerRasterBudget, exportDocument, illustrationToSvg, plannedExportCompanionPaths } from '@main/export-document';
 import { decompressFrames, parseGIF } from 'gifuct-js';
 import UPNG from 'upng-js';
 
 describe('interchange exporters', () => {
+  it('rejects expanded PSD layer rasters before allocating their full canvases', async () => {
+    expect(() => assertPsdLayerRasterBudget(8_192, 8_192, 1)).not.toThrow();
+    expect(() => assertPsdLayerRasterBudget(4_096, 4_096, 4)).not.toThrow();
+    expect(() => assertPsdLayerRasterBudget(8_192, 8_192, 2)).toThrow(/64-megapixel expanded safety budget/);
+    expect(() => assertPsdLayerRasterBudget(4_096, 4_096, 5)).toThrow(/64-megapixel expanded safety budget/);
+    expect(() => assertPsdLayerRasterBudget(0, 4_096, 1)).toThrow(/positive safe integers/);
+    expect(() => assertPsdLayerRasterBudget(4_096, 4_096, -1)).toThrow(/nonnegative safe integer/);
+
+    const pixel = createPixelDocument('sprite', 'PSD raster budget'); const sprite = pixel.pixelAssets[pixel.activeAssetId];
+    if (sprite.type !== 'sprite') throw new Error('Expected sprite'); sprite.width = 8_192; sprite.height = 8_192;
+    const firstLayer = sprite.layers[sprite.layerIds[0]]; const firstCel = Object.values(sprite.cels)[0]; const secondLayerId = createId('layer'); const secondCelId = createId('cel');
+    sprite.layers[secondLayerId] = { ...structuredClone(firstLayer), id: secondLayerId, name: 'Second layer' }; sprite.layerIds.push(secondLayerId);
+    sprite.cels[secondCelId] = { ...structuredClone(firstCel), id: secondCelId, name: 'Second cel', layerId: secondLayerId, chunks: {} };
+    await expect(exportDocument(pixel, 'psd')).rejects.toThrow(/64-megapixel expanded safety budget/);
+
+    const illustration = createIllustrationDocument('PSD raster budget'); illustration.artboard = { ...illustration.artboard, width: 8_192, height: 8_192 };
+    await expect(exportDocument(illustration, 'psd')).rejects.toThrow(/64-megapixel expanded safety budget/);
+  });
+
   it('preserves editable illustration shapes in SVG', () => {
     const document = createIllustrationDocument('Vector export');
     const layer = document.layerIds.map((id) => document.layers[id]).find((entry) => entry.type === 'vector')!;
