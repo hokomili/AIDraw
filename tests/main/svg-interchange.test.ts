@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCanvas, loadImage } from '@napi-rs/canvas';
 import { importDocument } from '@main/import-document';
@@ -107,6 +109,39 @@ describe('editable SVG interchange', () => {
     const invalidSymbol = importEditableSvg(source.replace('width="50%" height="100px"', 'width="0" height="100px"'), 'Invalid symbol viewport');
     expect(invalidSymbol.warnings).toContain('An SVG <use> symbol with invalid or zero viewport dimensions was omitted.');
     expect(Object.values(invalidSymbol.document.objects).some((object) => object.name === 'badge-top')).toBe(false);
+  });
+
+  it('rejects SVG transform arithmetic that cannot produce finite canonical geometry', async () => {
+    const svg = (body: string) => `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="24">${body}</svg>`;
+    const invalid = [
+      ['non-finite token', svg('<rect width="4" height="4" transform="scale(1e309)"/>')],
+      ['transform-list overflow', svg('<g transform="scale(1e308) scale(1e308)"><image href="data:image/png;base64,AA=="/></g>')],
+      ['nested visual overflow', svg('<g transform="scale(1e308)"><rect width="4" height="4" transform="scale(2)"/></g>')],
+      ['decomposition overflow', svg('<rect width="4" height="4" transform="matrix(1.7976931348623157e308 1.7976931348623157e308 0 1 0 0)"/>')],
+      ['referenced-symbol overflow', svg('<defs><symbol id="unsafe" transform="scale(1e309)"><image href="data:image/png;base64,AA=="/></symbol></defs><use href="#unsafe" width="4" height="4"/>')],
+      ['positioned nested overflow', svg('<g transform="scale(1e308)"><svg x="2" width="4" height="4"><image href="data:image/png;base64,AA=="/></svg></g>')],
+      ['mask-prefix overflow', svg('<defs><clipPath id="unsafe" transform="scale(1e308) scale(1e308)"><image href="data:image/png;base64,AA=="/></clipPath></defs><rect width="4" height="4" clip-path="url(#unsafe)"/>')],
+      ['linear-gradient endpoint overflow', svg('<defs><linearGradient id="unsafe" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="10" y2="0" gradientTransform="scale(1e308)"><stop offset="0" stop-color="#000"/><stop offset="1" stop-color="#fff"/></linearGradient></defs><rect width="10" height="10" fill="url(#unsafe)"/>')],
+      ['radial-gradient endpoint overflow', svg('<defs><radialGradient id="unsafe" gradientUnits="userSpaceOnUse" cx="10" cy="0" r="10" gradientTransform="scale(1e308)"><stop offset="0" stop-color="#000"/><stop offset="1" stop-color="#fff"/></radialGradient></defs><rect width="10" height="10" fill="url(#unsafe)"/>')],
+    ] as const;
+    for (const [label, source] of invalid) expect(() => importEditableSvg(source, `Invalid transform · ${label}`)).toThrow('SVG transform produces non-finite canonical geometry.');
+
+    const directory = await mkdtemp(join(tmpdir(), 'aidraw-svg-transform-')); const filePath = join(directory, 'invalid.svg');
+    try {
+      await writeFile(filePath, invalid[1][1], 'utf8');
+      await expect(importDocument(filePath)).rejects.toThrow('SVG transform produces non-finite canonical geometry.');
+    } finally { await rm(directory, { recursive: true, force: true }); }
+
+    const valid = importEditableSvg(svg('<g id="finite-parent" transform="scale(100)"><rect id="finite-child" width="4" height="4" transform="scale(100)"/></g><rect id="finite-list" width="4" height="4" transform="scale(100) scale(100)"/>'), 'Finite transform');
+    for (const name of ['finite-parent', 'finite-child', 'finite-list']) {
+      const object = Object.values(valid.document.objects).find((entry) => entry.name === name);
+      expect(object).toBeDefined();
+      expect(Object.values(object!.transform).every(Number.isFinite)).toBe(true);
+    }
+
+    const ignored = importEditableSvg(svg('<title transform="scale(1e309)">Metadata only</title><foreignObject transform="scale(1e309)"/><rect id="safe" width="4" height="4" transform="unknown(1e309)"/>'), 'Ignored transforms');
+    expect(Object.values(ignored.document.objects).some((entry) => entry.name === 'safe')).toBe(true);
+    expect(ignored.warnings).toContain('Unsupported SVG <foreignObject> content was omitted.');
   });
 
   it('preserves centered and right-aligned AIDraw text boxes without shifting their transforms', () => {

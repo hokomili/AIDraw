@@ -47,6 +47,7 @@ const MAX_EDITABLE_OBJECTS = 100_000;
 const MAX_EMBEDDED_IMAGE_BYTES = 16 * 1024 * 1024;
 const MAX_ILLUSTRATION_TEXT_BOX_SIZE = 1_000_000;
 const MAX_ILLUSTRATION_IMAGE_SIZE = 1_000_000;
+const NON_FINITE_SVG_TRANSFORM_ERROR = 'SVG transform produces non-finite canonical geometry.';
 
 interface AIDrawSvgTextBox { width: number; height: number; lineHeight: number }
 interface AIDrawSvgImageCrop {
@@ -202,11 +203,18 @@ function matrixIsIdentity(matrix: Matrix): boolean {
   return matrix.every((value, index) => Number.isFinite(value) && Math.abs(value - IDENTITY_MATRIX[index]) <= Number.EPSILON * 16 * Math.max(1, Math.abs(value), Math.abs(IDENTITY_MATRIX[index])));
 }
 
+function finiteSvgMatrix(matrix: Matrix): Matrix {
+  if (!matrix.every(Number.isFinite)) throw new Error(NON_FINITE_SVG_TRANSFORM_ERROR);
+  return matrix;
+}
+
 function svgTransform(value: unknown): Matrix {
   let output = IDENTITY_MATRIX;
   const pattern = /([a-zA-Z]+)\s*\(([^)]*)\)/g;
   for (const match of String(value ?? '').matchAll(pattern)) {
-    const args = numberList(match[2]);
+    if (!['matrix', 'translate', 'scale', 'rotate', 'skewX', 'skewY'].includes(match[1])) continue;
+    const args = (match[2].match(/[-+]?(?:\d*\.\d+|\d+\.?)(?:e[-+]?\d+)?/gi) ?? []).map(Number);
+    if (!args.every(Number.isFinite)) throw new Error(NON_FINITE_SVG_TRANSFORM_ERROR);
     let next: Matrix | undefined;
     if (match[1] === 'matrix' && args.length >= 6) next = args.slice(0, 6) as Matrix;
     else if (match[1] === 'translate') next = translate(args[0] ?? 0, args[1] ?? 0);
@@ -216,18 +224,25 @@ function svgTransform(value: unknown): Matrix {
       next = args.length >= 3 ? multiply(multiply(translate(args[1], args[2]), rotation), translate(-args[1], -args[2])) : rotation;
     } else if (match[1] === 'skewX') next = [1, 0, Math.tan((args[0] ?? 0) * Math.PI / 180), 1, 0, 0];
     else if (match[1] === 'skewY') next = [1, Math.tan((args[0] ?? 0) * Math.PI / 180), 0, 1, 0, 0];
-    if (next) output = multiply(output, next);
+    if (next) output = finiteSvgMatrix(multiply(output, finiteSvgMatrix(next)));
   }
   return output;
 }
 
 function transformFromMatrix(matrix: Matrix): Transform {
+  finiteSvgMatrix(matrix);
   const scaleX = Math.hypot(matrix[0], matrix[1]);
-  if (scaleX < 1e-12) return { ...IDENTITY_TRANSFORM, x: matrix[4], y: matrix[5], scaleX: 0, scaleY: Math.hypot(matrix[2], matrix[3]) };
-  const cosine = matrix[0] / scaleX; const sine = matrix[1] / scaleX;
-  const skew = cosine * matrix[2] + sine * matrix[3];
-  const scaleY = -sine * matrix[2] + cosine * matrix[3];
-  return { x: matrix[4], y: matrix[5], scaleX, scaleY, rotation: Math.atan2(sine, cosine) * 180 / Math.PI, skewX: Math.atan(skew) * 180 / Math.PI, skewY: 0 };
+  let transform: Transform;
+  if (scaleX < 1e-12) transform = { ...IDENTITY_TRANSFORM, x: matrix[4], y: matrix[5], scaleX: 0, scaleY: Math.hypot(matrix[2], matrix[3]) };
+  else {
+    const cosine = matrix[0] / scaleX; const sine = matrix[1] / scaleX;
+    const skew = cosine * matrix[2] + sine * matrix[3];
+    const scaleY = -sine * matrix[2] + cosine * matrix[3];
+    if (![scaleX, cosine, sine, skew, scaleY].every(Number.isFinite)) throw new Error(NON_FINITE_SVG_TRANSFORM_ERROR);
+    transform = { x: matrix[4], y: matrix[5], scaleX, scaleY, rotation: Math.atan2(sine, cosine) * 180 / Math.PI, skewX: Math.atan(skew) * 180 / Math.PI, skewY: 0 };
+  }
+  if (!Object.values(transform).every(Number.isFinite)) throw new Error(NON_FINITE_SVG_TRANSFORM_ERROR);
+  return transform;
 }
 
 function declarations(value: unknown): Style {
@@ -367,11 +382,13 @@ export function importEditableSvg(source: string, name: string): SvgImportResult
     if (node.tag === 'linearGradient') {
       const start = apply(percentageCoordinate(attributes.x1, box.x, box.width, '0%'), percentageCoordinate(attributes.y1, box.y, box.height, '0%'));
       const end = apply(percentageCoordinate(attributes.x2, box.x, box.width, '100%'), percentageCoordinate(attributes.y2, box.y, box.height, '0%'));
+      if (![start.x, start.y, end.x, end.y].every(Number.isFinite)) throw new Error(NON_FINITE_SVG_TRANSFORM_ERROR);
       return { kind: 'linear-gradient', stops, x1: start.x, y1: start.y, x2: end.x, y2: end.y };
     }
     const centerX = percentageCoordinate(attributes.cx, box.x, box.width, '50%'); const centerY = percentageCoordinate(attributes.cy, box.y, box.height, '50%');
     const radius = units === 'userSpaceOnUse' ? finite(attributes.r, Math.min(width, height) / 2) : percentageCoordinate(attributes.r, 0, Math.min(box.width, box.height), '50%');
     const center = apply(centerX, centerY); const edge = apply(centerX + radius, centerY);
+    if (![center.x, center.y, edge.x, edge.y].every(Number.isFinite)) throw new Error(NON_FINITE_SVG_TRANSFORM_ERROR);
     if (attributes.fx !== undefined || attributes.fy !== undefined) warnings.add('Off-center SVG radial-gradient focal points were reduced to centered AIDraw gradients.');
     return { kind: 'radial-gradient', stops, x1: center.x, y1: center.y, x2: edge.x, y2: edge.y };
   };
@@ -400,8 +417,10 @@ export function importEditableSvg(source: string, name: string): SvgImportResult
 
   const firstGeometry = (node: SvgNode, parentStyle: Style, prefix: Matrix, depth: number): IllustrationObject | undefined => {
     if (depth > 64) throw new Error('SVG nesting exceeds the 64-level safety limit.');
+    if (node.tag === '#text' || node.tag === 'title' || node.tag === 'desc' || node.tag === 'metadata' || node.tag === 'style') return undefined;
     const style = styleFor(node, parentStyle, rules);
-    const matrix = multiply(prefix, svgTransform(node.attributes.transform));
+    const matrix = finiteSvgMatrix(multiply(prefix, svgTransform(node.attributes.transform)));
+    void transformFromMatrix(matrix);
     if (supportedGeometry.has(node.tag)) return element(node, style, matrix, true);
     for (const child of node.children) { const result = firstGeometry(child, style, matrix, depth + 1); if (result) return result; }
     return undefined;
@@ -428,7 +447,7 @@ export function importEditableSvg(source: string, name: string): SvgImportResult
     return add(object);
   };
 
-  const aidrawCroppedImage = (node: SvgNode, style: Style, crop: AIDrawSvgImageCrop): ImageObject | undefined => {
+  const aidrawCroppedImage = (node: SvgNode, style: Style, matrix: Matrix, crop: AIDrawSvgImageCrop): ImageObject | undefined => {
     const meaningfulChildren = node.children.filter((child) => child.tag !== '#text' || Boolean(child.text?.trim()));
     const clipNodes = meaningfulChildren.filter((child) => child.tag === 'clipPath');
     const imageNodes = meaningfulChildren.filter((child) => child.tag === 'image');
@@ -458,43 +477,45 @@ export function importEditableSvg(source: string, name: string): SvgImportResult
     const asset: DocumentAsset = { id: assetId, name: String(node.attributes['aria-label'] ?? node.attributes.id ?? 'Embedded SVG image'), mimeType: embedded.mimeType, byteLength: embedded.bytes.byteLength, sha256: createHash('sha256').update(embedded.bytes).digest('hex'), source: 'imported', data: embedded.bytes.toString('base64') };
     document.assets[asset.id] = asset;
     const object: ImageObject = {
-      ...base(node, style, svgTransform(node.attributes.transform), 'Image'),
+      ...base(node, style, matrix, 'Image'),
       type: 'image', assetId, width: crop.displayWidth, height: crop.displayHeight, sourceWidth: crop.sourceWidth, sourceHeight: crop.sourceHeight, crop: crop.crop, filters: [],
     };
     return finish(object, style, false);
   };
 
-  function element(node: SvgNode, style: Style, matrix: Matrix, asMask = false): IllustrationObject | undefined {
+  function element(node: SvgNode, style: Style, matrix: Matrix, asMask = false, visualPrefix: Matrix = IDENTITY_MATRIX): IllustrationObject | undefined {
+    const visuallyFinite = (local: Matrix): Matrix => { finiteSvgMatrix(multiply(visualPrefix, local)); return local; };
     if (node.tag === 'rect') {
       const objectWidth = Math.max(0, finite(node.attributes.width)); const objectHeight = Math.max(0, finite(node.attributes.height)); const bounds = { x: 0, y: 0, width: objectWidth, height: objectHeight };
-      const object: ShapeObject = { ...base(node, style, multiply(matrix, translate(finite(node.attributes.x), finite(node.attributes.y))), 'Rectangle'), type: 'shape', shape: 'rectangle', width: objectWidth, height: objectHeight, cornerRadius: Math.max(0, finite(node.attributes.rx ?? node.attributes.ry)), fill: paint(style.fill, bounds, '#000000'), stroke: stroke(style, bounds) };
+      const object: ShapeObject = { ...base(node, style, visuallyFinite(multiply(matrix, translate(finite(node.attributes.x), finite(node.attributes.y)))), 'Rectangle'), type: 'shape', shape: 'rectangle', width: objectWidth, height: objectHeight, cornerRadius: Math.max(0, finite(node.attributes.rx ?? node.attributes.ry)), fill: paint(style.fill, bounds, '#000000'), stroke: stroke(style, bounds) };
       return finish(object, style, asMask);
     }
     if (node.tag === 'ellipse' || node.tag === 'circle') {
       const radiusX = Math.max(0, finite(node.attributes.rx ?? node.attributes.r)); const radiusY = Math.max(0, finite(node.attributes.ry ?? node.attributes.r)); const bounds = { x: 0, y: 0, width: radiusX * 2, height: radiusY * 2 };
-      const object: ShapeObject = { ...base(node, style, multiply(matrix, translate(finite(node.attributes.cx, radiusX) - radiusX, finite(node.attributes.cy, radiusY) - radiusY)), 'Ellipse'), type: 'shape', shape: 'ellipse', width: radiusX * 2, height: radiusY * 2, fill: paint(style.fill, bounds, '#000000'), stroke: stroke(style, bounds) };
+      const object: ShapeObject = { ...base(node, style, visuallyFinite(multiply(matrix, translate(finite(node.attributes.cx, radiusX) - radiusX, finite(node.attributes.cy, radiusY) - radiusY))), 'Ellipse'), type: 'shape', shape: 'ellipse', width: radiusX * 2, height: radiusY * 2, fill: paint(style.fill, bounds, '#000000'), stroke: stroke(style, bounds) };
       return finish(object, style, asMask);
     }
     if (node.tag === 'line') {
       const x1 = finite(node.attributes.x1); const y1 = finite(node.attributes.y1); const objectWidth = finite(node.attributes.x2) - x1; const objectHeight = finite(node.attributes.y2) - y1; const bounds = { x: 0, y: 0, width: Math.abs(objectWidth), height: Math.abs(objectHeight) };
       const arrow = Boolean(style['marker-end'] ?? node.attributes['marker-end']);
-      const object: ShapeObject = { ...base(node, style, multiply(matrix, translate(x1, y1)), arrow ? 'Arrow' : 'Line'), type: 'shape', shape: arrow ? 'arrow' : 'line', width: objectWidth, height: objectHeight, fill: { kind: 'none' }, stroke: stroke(style, bounds) };
+      const object: ShapeObject = { ...base(node, style, visuallyFinite(multiply(matrix, translate(x1, y1))), arrow ? 'Arrow' : 'Line'), type: 'shape', shape: arrow ? 'arrow' : 'line', width: objectWidth, height: objectHeight, fill: { kind: 'none' }, stroke: stroke(style, bounds) };
       return finish(object, style, asMask);
     }
     if (node.tag === 'path' || node.tag === 'polygon' || node.tag === 'polyline') {
       const pathData = node.tag === 'path' ? String(node.attributes.d ?? '') : pathFromPoints(parsePoints(node.attributes.points), node.tag === 'polygon');
       if (!pathData.trim()) return undefined;
       const bounds = { x: 0, y: 0, width, height };
-      const object: PathObject = { ...base(node, style, matrix, node.tag === 'path' ? 'Path' : node.tag === 'polygon' ? 'Polygon' : 'Polyline'), type: 'path', pathData, closed: node.tag === 'polygon' || /[zZ]\s*$/.test(pathData), fill: paint(style.fill, bounds, node.tag === 'polyline' ? 'none' : '#000000'), stroke: stroke(style, bounds), fillRule: style['fill-rule'] === 'evenodd' ? 'evenodd' : 'nonzero' };
+      const object: PathObject = { ...base(node, style, visuallyFinite(matrix), node.tag === 'path' ? 'Path' : node.tag === 'polygon' ? 'Polygon' : 'Polyline'), type: 'path', pathData, closed: node.tag === 'polygon' || /[zZ]\s*$/.test(pathData), fill: paint(style.fill, bounds, node.tag === 'polyline' ? 'none' : '#000000'), stroke: stroke(style, bounds), fillRule: style['fill-rule'] === 'evenodd' ? 'evenodd' : 'nonzero' };
       if (style.fill?.startsWith('url(')) warnings.add('Object-bounding-box gradients on arbitrary SVG paths use the artboard as a conservative editable bound.');
       return finish(object, style, asMask);
     }
     if (node.tag === 'image') {
+      const objectMatrix = visuallyFinite(multiply(matrix, translate(finite(node.attributes.x), finite(node.attributes.y))));
       const href = node.attributes.href ?? node.attributes['xlink:href']; const embedded = dataImage(href);
       if (!embedded) { warnings.add('External or unsupported SVG image references were omitted; embed PNG/JPEG/WebP/GIF data to retain editability.'); return undefined; }
       const assetId = createId('asset'); const asset: DocumentAsset = { id: assetId, name: String(node.attributes.id ?? 'Embedded SVG image'), mimeType: embedded.mimeType, byteLength: embedded.bytes.byteLength, sha256: createHash('sha256').update(embedded.bytes).digest('hex'), source: 'imported', data: embedded.bytes.toString('base64') }; document.assets[asset.id] = asset;
       const objectWidth = positiveLength(node.attributes.width, embedded.width); const objectHeight = positiveLength(node.attributes.height, embedded.height);
-      const object = { ...base(node, style, multiply(matrix, translate(finite(node.attributes.x), finite(node.attributes.y))), 'Image'), type: 'image' as const, assetId, width: objectWidth, height: objectHeight, sourceWidth: embedded.width, sourceHeight: embedded.height, filters: [] };
+      const object = { ...base(node, style, objectMatrix, 'Image'), type: 'image' as const, assetId, width: objectWidth, height: objectHeight, sourceWidth: embedded.width, sourceHeight: embedded.height, filters: [] };
       if (node.attributes.preserveAspectRatio && node.attributes.preserveAspectRatio !== 'none') warnings.add('SVG image preserveAspectRatio is represented by the editable image box and may require crop adjustment.');
       return finish(object, style, asMask);
     }
@@ -507,7 +528,7 @@ export function importEditableSvg(source: string, name: string): SvgImportResult
       const fontSize = ranges[0]?.fontSize ?? Math.max(1, finite(style['font-size'], 48)); if (!ranges.length) appendText(content, style);
       const aidrawBox = aidrawSvgTextBox(node.attributes, warnings);
       const textWidth = aidrawBox?.width ?? positiveLength(node.attributes.width, Math.max(1, content.length * fontSize * 0.62)); const textHeight = aidrawBox?.height ?? positiveLength(node.attributes.height, fontSize * 1.3); const anchor = style['text-anchor']; const x = finite(node.attributes.x) - (anchor === 'middle' ? textWidth / 2 : anchor === 'end' ? textWidth : 0);
-      const object: TextObject = { ...base(node, style, multiply(matrix, translate(x, finite(node.attributes.y) - fontSize)), 'Text'), type: 'text', text: content, width: textWidth, height: textHeight, align: anchor === 'middle' ? 'center' : anchor === 'end' ? 'right' : 'left', lineHeight: aidrawBox?.lineHeight ?? 1.2, ranges };
+      const object: TextObject = { ...base(node, style, visuallyFinite(multiply(matrix, translate(x, finite(node.attributes.y) - fontSize))), 'Text'), type: 'text', text: content, width: textWidth, height: textHeight, align: anchor === 'middle' ? 'center' : anchor === 'end' ? 'right' : 'left', lineHeight: aidrawBox?.lineHeight ?? 1.2, ranges };
       if (node.children.some((child) => child.tag === 'tspan' && (child.attributes.x !== undefined || child.attributes.y !== undefined || child.attributes.dx !== undefined || child.attributes.dy !== undefined))) warnings.add('Per-tspan SVG positioning was reduced to contiguous styled text ranges.');
       return finish(object, style, asMask);
     }
@@ -521,11 +542,23 @@ export function importEditableSvg(source: string, name: string): SvgImportResult
     return [finish(wrapper, {}, false).id];
   };
 
-  const process = (node: SvgNode, parentStyle: Style, depth: number, viewport: SvgViewportContext, useStack = new Set<string>()): string[] => {
+  const process = (node: SvgNode, parentStyle: Style, depth: number, viewport: SvgViewportContext, visualPrefix: Matrix, useStack = new Set<string>()): string[] => {
     if (depth > 64) throw new Error('SVG nesting exceeds the 64-level safety limit.');
     if (node.tag === '#text' || node.tag === 'defs' || node.tag === 'style' || node.tag === 'symbol' || ['linearGradient', 'radialGradient', 'filter', 'clipPath', 'mask', 'marker'].includes(node.tag)) return [];
+    if (!supportedGeometry.has(node.tag) && node.tag !== 'use' && node.tag !== 'g' && node.tag !== 'svg') {
+      if (node.tag !== 'title' && node.tag !== 'desc' && node.tag !== 'metadata') warnings.add(`Unsupported SVG <${node.tag}> content was omitted.`);
+      return [];
+    }
     const style = styleFor(node, parentStyle, rules);
+    const nodeTransform = svgTransform(node.attributes.transform);
+    void transformFromMatrix(nodeTransform);
+    const nodeVisual = finiteSvgMatrix(multiply(visualPrefix, nodeTransform));
     if (node.tag === 'use') {
+      const x = svgViewportCoordinate(node.attributes.x, viewport.width); const y = svgViewportCoordinate(node.attributes.y, viewport.height);
+      if (x === undefined || y === undefined) warnings.add('Invalid SVG <use> position was reduced to the origin.');
+      const useTransform = finiteSvgMatrix(multiply(nodeTransform, translate(x ?? 0, y ?? 0)));
+      void transformFromMatrix(useTransform);
+      const useVisual = finiteSvgMatrix(multiply(visualPrefix, useTransform));
       const reference = String(node.attributes.href ?? node.attributes['xlink:href'] ?? '').replace(/^#/, '');
       if (!reference || useStack.has(reference) || !idNodes.has(reference)) { warnings.add('An unresolved or cyclic SVG <use> reference was omitted.'); return []; }
       const nextStack = new Set(useStack); nextStack.add(reference); const sourceNode = idNodes.get(reference)!;
@@ -536,31 +569,33 @@ export function importEditableSvg(source: string, name: string): SvgImportResult
         const viewBox = svgViewBox(sourceNode.attributes.viewBox, warnings);
         const viewportMatrix = svgViewportMatrix(sourceNode.attributes, viewportWidth, viewportHeight, viewBox, warnings);
         if (!viewportMatrix.every(Number.isFinite)) { warnings.add('An SVG <use> symbol with an invalid viewport transform was omitted.'); return []; }
+        const symbolTransform = svgTransform(sourceNode.attributes.transform);
+        void transformFromMatrix(symbolTransform);
+        const symbolVisual = finiteSvgMatrix(multiply(useVisual, symbolTransform));
+        const childVisual = finiteSvgMatrix(multiply(symbolVisual, viewportMatrix));
         const childViewport = { width: viewBox?.width ?? viewportWidth, height: viewBox?.height ?? viewportHeight };
         const symbolStyle = styleFor(sourceNode, style, rules);
-        const symbolChildren = sourceNode.children.flatMap((child) => process(child, symbolStyle, depth + 1, childViewport, nextStack));
+        const symbolChildren = sourceNode.children.flatMap((child) => process(child, symbolStyle, depth + 1, childViewport, childVisual, nextStack));
         if (!symbolChildren.length) return [];
         const mappedChildren = viewportChildren(symbolChildren, viewportMatrix, 'Symbol ViewBox');
-        const symbol: GroupObject = { ...base(sourceNode, symbolStyle, svgTransform(sourceNode.attributes.transform), 'Symbol'), type: 'group', childIds: mappedChildren };
+        const symbol: GroupObject = { ...base(sourceNode, symbolStyle, symbolTransform, 'Symbol'), type: 'group', childIds: mappedChildren };
         childIds = [finish(symbol, symbolStyle, false).id];
         warnings.add('Nested SVG/symbol overflow clipping is not represented; transformed content remains editable outside its viewport.');
-      } else childIds = process(sourceNode, style, depth + 1, viewport, nextStack);
+      } else childIds = process(sourceNode, style, depth + 1, viewport, useVisual, nextStack);
       if (!childIds.length) return [];
-      const x = svgViewportCoordinate(node.attributes.x, viewport.width); const y = svgViewportCoordinate(node.attributes.y, viewport.height);
-      if (x === undefined || y === undefined) warnings.add('Invalid SVG <use> position was reduced to the origin.');
-      const group: GroupObject = { ...base(node, style, multiply(svgTransform(node.attributes.transform), translate(x ?? 0, y ?? 0)), 'Use'), type: 'group', childIds };
+      const group: GroupObject = { ...base(node, style, useTransform, 'Use'), type: 'group', childIds };
       return [finish(group, style, false).id];
     }
     if (node.tag === 'g') {
       const crop = aidrawSvgImageCrop(node.attributes, warnings);
       if (crop) {
-        const image = aidrawCroppedImage(node, style, crop);
+        const image = aidrawCroppedImage(node, style, nodeTransform, crop);
         if (image) return [image.id];
         warnings.add('AIDraw SVG image-crop metadata did not match its standard SVG crop and was ignored.');
       }
-      const childIds = node.children.flatMap((child) => process(child, style, depth + 1, viewport, useStack));
+      const childIds = node.children.flatMap((child) => process(child, style, depth + 1, viewport, nodeVisual, useStack));
       if (!childIds.length) return [];
-      const group: GroupObject = { ...base(node, style, svgTransform(node.attributes.transform), 'Group'), type: 'group', childIds };
+      const group: GroupObject = { ...base(node, style, nodeTransform, 'Group'), type: 'group', childIds };
       return [finish(group, style, false).id];
     }
     if (node.tag === 'svg') {
@@ -568,25 +603,29 @@ export function importEditableSvg(source: string, name: string): SvgImportResult
       if (viewportWidth === undefined || viewportHeight === undefined) { warnings.add('A nested SVG with invalid or zero viewport dimensions was omitted.'); return []; }
       const x = svgViewportCoordinate(node.attributes.x, viewport.width); const y = svgViewportCoordinate(node.attributes.y, viewport.height);
       if (x === undefined || y === undefined) warnings.add('Invalid nested SVG viewport position was reduced to the origin.');
+      const nestedTransform = finiteSvgMatrix(multiply(nodeTransform, translate(x ?? 0, y ?? 0)));
+      void transformFromMatrix(nestedTransform);
+      const nestedVisual = finiteSvgMatrix(multiply(visualPrefix, nestedTransform));
       const viewBox = svgViewBox(node.attributes.viewBox, warnings);
       const viewportMatrix = svgViewportMatrix(node.attributes, viewportWidth, viewportHeight, viewBox, warnings);
       if (!viewportMatrix.every(Number.isFinite)) { warnings.add('A nested SVG with an invalid viewport transform was omitted.'); return []; }
+      const childVisual = finiteSvgMatrix(multiply(nestedVisual, viewportMatrix));
       const childViewport = { width: viewBox?.width ?? viewportWidth, height: viewBox?.height ?? viewportHeight };
-      const childIds = node.children.flatMap((child) => process(child, style, depth + 1, childViewport, useStack));
+      const childIds = node.children.flatMap((child) => process(child, style, depth + 1, childViewport, childVisual, useStack));
       if (!childIds.length) return [];
       const mappedChildren = viewportChildren(childIds, viewportMatrix, 'Nested SVG ViewBox');
-      const group: GroupObject = { ...base(node, style, multiply(svgTransform(node.attributes.transform), translate(x ?? 0, y ?? 0)), 'SVG viewport'), type: 'group', childIds: mappedChildren };
+      const group: GroupObject = { ...base(node, style, nestedTransform, 'SVG viewport'), type: 'group', childIds: mappedChildren };
       warnings.add('Nested SVG/symbol overflow clipping is not represented; transformed content remains editable outside its viewport.');
       return [finish(group, style, false).id];
     }
-    const object = element(node, style, svgTransform(node.attributes.transform));
+    const object = element(node, style, nodeTransform, false, visualPrefix);
     if (object) return [object.id];
-    if (node.tag !== 'title' && node.tag !== 'desc' && node.tag !== 'metadata') warnings.add(`Unsupported SVG <${node.tag}> content was omitted.`);
+    warnings.add(`Unsupported SVG <${node.tag}> content was omitted.`);
     return [];
   };
 
   const rootStyle = styleFor(root, {}, rules);
-  const topLevel = root.children.flatMap((child) => process(child, rootStyle, 0, { width, height }));
+  const topLevel = root.children.flatMap((child) => process(child, rootStyle, 0, { width, height }, viewportMatrix));
   if (!matrixIsIdentity(viewportMatrix) && topLevel.length) {
     const wrapperNode: SvgNode = { tag: 'g', attributes: {}, children: [] };
     const wrapper: GroupObject = { ...base(wrapperNode, rootStyle, viewportMatrix, 'ViewBox'), type: 'group', childIds: topLevel };

@@ -26,6 +26,8 @@ Interactive and headless illustration rendering also share one transform/isolati
 
 Human and approved-agent SVG import also share nested viewport resolution. Nested `<svg>` and referenced `<symbol>` content uses the same unitless/px/percentage placement, sizing, and viewBox matrix before entering canonical groups; unreferenced symbols stay definition-only. The shared importer warns and retains editable overflow because nested viewport clipping, CSS length resolution, and external references are not represented by this source/headless checkpoint.
 
+The same shared SVG importer rejects any transform-bearing geometry/container/reference/mask or referenced gradient whose parsed numbers, composed matrix, decomposition, or derived paint coordinates are non-finite. Human file import and approved-agent import therefore cannot diverge by admitting `Infinity`/`NaN` canonical state. Transforms on metadata and unsupported omitted elements remain irrelevant; this statement does not change the canonical magnitude policy or claim full transform grammar, external-corpus behavior, or packaged presentation.
+
 ## Closed parity gaps
 
 | Area | Current contract and evidence |
