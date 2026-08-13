@@ -19,7 +19,7 @@ if (dirname(makeOutput) !== output || basename(makeOutput) !== 'make') {
 
 await rm(makeOutput, { recursive: true, force: true });
 const generatedManifests = (await readdir(output, { withFileTypes: true }).catch(() => []))
-  .filter((entry) => entry.isFile() && (/^SHA256SUMS(?:-[a-z0-9-]+)?\.txt$/i.test(entry.name) || /^THIRD_PARTY_LICENSES\.(?:json|md)$/i.test(entry.name)))
+  .filter((entry) => entry.isFile() && (/^SHA256SUMS(?:-[a-z0-9-]+)?\.txt$/i.test(entry.name) || /^THIRD_PARTY_LICENSES\.(?:json|md)$/i.test(entry.name) || /^RELEASE_PROVENANCE-[a-z0-9-]+\.json$/i.test(entry.name)))
   .map((entry) => entry.name);
 for (const filename of generatedManifests) {
   await rm(join(output, filename), { force: true });

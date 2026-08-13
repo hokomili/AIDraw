@@ -36,6 +36,7 @@ describe('desktop release artifact preflight', () => {
     await writeFile(join(workspace, 'out', 'SHA256SUMS.txt'), 'stale', 'utf8');
     await writeFile(join(workspace, 'out', 'SHA256SUMS-linux-x64.txt'), 'stale', 'utf8');
     await writeFile(join(workspace, 'out', 'THIRD_PARTY_LICENSES.json'), 'stale', 'utf8');
+    await writeFile(join(workspace, 'out', 'RELEASE_PROVENANCE-linux-x64.json'), 'stale', 'utf8');
     await writeFile(join(workspace, 'out', 'AIDraw-win32-x64', 'keep.txt'), 'current package', 'utf8');
 
     const script = resolve('scripts/prepare-make-output.mjs');
@@ -46,6 +47,7 @@ describe('desktop release artifact preflight', () => {
     await expect(readFile(join(workspace, 'out', 'SHA256SUMS.txt'))).rejects.toMatchObject({ code: 'ENOENT' });
     await expect(readFile(join(workspace, 'out', 'SHA256SUMS-linux-x64.txt'))).rejects.toMatchObject({ code: 'ENOENT' });
     await expect(readFile(join(workspace, 'out', 'THIRD_PARTY_LICENSES.json'))).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(readFile(join(workspace, 'out', 'RELEASE_PROVENANCE-linux-x64.json'))).rejects.toMatchObject({ code: 'ENOENT' });
     await expect(readFile(join(workspace, 'out', 'AIDraw-win32-x64', 'keep.txt'), 'utf8')).resolves.toBe('current package');
   });
 

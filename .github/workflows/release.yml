@@ -56,12 +56,16 @@ jobs:
           AIDRAW_CHECKSUM_FILE: SHA256SUMS-${{ matrix.platform }}.txt
       - run: npm run licenses
         if: runner.os == 'Windows'
+      - run: npm run provenance
+        env:
+          AIDRAW_RELEASE_PLATFORM: ${{ matrix.platform }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: desktop-${{ matrix.platform }}
           path: |
             out/make/**/*
             out/SHA256SUMS-${{ matrix.platform }}.txt
+            out/RELEASE_PROVENANCE-${{ matrix.platform }}.json
             out/THIRD_PARTY_LICENSES.json
             out/THIRD_PARTY_LICENSES.md
           if-no-files-found: error

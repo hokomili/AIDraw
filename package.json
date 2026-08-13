@@ -44,8 +44,12 @@
     "test:level3:auto": "npm run release:windows",
     "checksums": "node scripts/checksums.mjs",
     "licenses": "node scripts/license-report.mjs",
+    "provenance": "node scripts/release-provenance.mjs capture",
+    "reproducibility:compare": "node scripts/release-provenance.mjs compare",
+    "rc:audit": "node scripts/check-rc-readiness.mjs --audit",
+    "rc:verify": "node scripts/check-rc-readiness.mjs",
     "verify": "npm run check:portability && npm run typecheck && npm run lint && npm run test",
-    "release:current": "npm run verify && npm run test:performance && npm audit --omit=dev --audit-level=high && npm run make && node scripts/verify-package.mjs && npm run checksums && npm run licenses",
+    "release:current": "npm run verify && npm run test:performance && npm audit --omit=dev --audit-level=high && npm run make && node scripts/verify-package.mjs && npm run checksums && npm run licenses && npm run provenance",
     "release:windows": "npm run release:current && npm run test:e2e:only"
   },
   "dependencies": {
