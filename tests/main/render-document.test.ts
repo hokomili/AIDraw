@@ -4,24 +4,37 @@ import { materializePaintTiles } from '@main/persistence';
 import { renderIllustration } from '@main/render-document';
 
 describe('native illustration rendering', () => {
-  it('renders persisted sparse paint tiles plus newly appended editable strokes without visual drift', async () => {
+  it('renders sparse paint caches without drift and updates only tiles touched by appended strokes', async () => {
     const document = createIllustrationDocument('Sparse paint cache');
-    document.artboard = { ...document.artboard, width: 520, height: 80, background: null };
+    document.artboard = { ...document.artboard, width: 768, height: 128, background: null };
     const paint = Object.values(document.layers).find((entry) => entry.type === 'paint');
     if (!paint || paint.type !== 'paint') throw new Error('Paint layer missing');
-    paint.strokes.push({ id: 'cross-tile', actorId: HUMAN_ACTOR.id, points: [{ x: 8, y: 24, pressure: 0.5 }, { x: 512, y: 24, pressure: 0.5 }], color: '#d94a67', size: 12, opacity: 1, hardness: 1, flow: 1, mode: 'paint', preset: 'hard-round' });
-    const uncached = (await renderIllustration(document)).getContext('2d').getImageData(0, 0, 520, 80).data;
-    materializePaintTiles(document);
-    expect(paint.tileCache?.strokeCount).toBe(1);
-    expect(Object.keys(paint.tileAssetIds)).toHaveLength(3);
-    const cached = (await renderIllustration(document)).getContext('2d').getImageData(0, 0, 520, 80).data;
+    paint.strokes.push(
+      { id: 'left-stroke', actorId: HUMAN_ACTOR.id, points: [{ x: 32, y: 32, pressure: 0.5 }, { x: 96, y: 64, pressure: 0.5 }], color: '#d94a67', size: 12, opacity: 1, hardness: 1, flow: 1, mode: 'paint', preset: 'hard-round' },
+      { id: 'right-stroke', actorId: HUMAN_ACTOR.id, points: [{ x: 544, y: 40, pressure: 0.5 }, { x: 608, y: 72, pressure: 0.5 }], color: '#449966', size: 10, opacity: 1, hardness: 1, flow: 1, mode: 'paint', preset: 'hard-round' },
+    );
+    const uncached = (await renderIllustration(document)).getContext('2d').getImageData(0, 0, 768, 128).data;
+    expect(materializePaintTiles(document)).toEqual({ layers: 1, renderedTiles: 2, reusedTiles: 0 });
+    expect(paint.tileCache?.strokeCount).toBe(2);
+    expect(Object.keys(paint.tileAssetIds)).toEqual(['0,0', '2,0']);
+    const cached = (await renderIllustration(document)).getContext('2d').getImageData(0, 0, 768, 128).data;
     expect(Buffer.from(cached)).toEqual(Buffer.from(uncached));
 
-    paint.strokes.push({ id: 'tail-stroke', actorId: HUMAN_ACTOR.id, points: [{ x: 260, y: 40, pressure: 0.5 }, { x: 260, y: 72, pressure: 0.5 }], color: '#3344cc', size: 8, opacity: 1, hardness: 1, flow: 1, mode: 'paint', preset: 'hard-round' });
-    const cachedWithTail = (await renderIllustration(document)).getContext('2d').getImageData(0, 0, 520, 80).data;
+    const originalLeftAssetId = paint.tileAssetIds['0,0'];
+    const originalRightAssetId = paint.tileAssetIds['2,0'];
+    paint.strokes.push({ id: 'appended-left-stroke', actorId: HUMAN_ACTOR.id, points: [{ x: 128, y: 72, pressure: 0.5 }, { x: 192, y: 88, pressure: 0.5 }], color: '#3344cc', size: 8, opacity: 1, hardness: 1, flow: 1, mode: 'paint', preset: 'hard-round' });
+    const cachedWithTail = (await renderIllustration(document)).getContext('2d').getImageData(0, 0, 768, 128).data;
     const sourceOnly = structuredClone(document); const sourcePaint = Object.values(sourceOnly.layers).find((entry) => entry.type === 'paint'); if (!sourcePaint || sourcePaint.type !== 'paint') throw new Error('Paint layer missing'); sourcePaint.tileAssetIds = {}; delete sourcePaint.tileCache;
-    const fullStrokeRender = (await renderIllustration(sourceOnly)).getContext('2d').getImageData(0, 0, 520, 80).data;
+    const fullStrokeRender = (await renderIllustration(sourceOnly)).getContext('2d').getImageData(0, 0, 768, 128).data;
     expect(Buffer.from(cachedWithTail)).toEqual(Buffer.from(fullStrokeRender));
+
+    expect(materializePaintTiles(document)).toEqual({ layers: 1, renderedTiles: 1, reusedTiles: 1 });
+    expect(paint.tileCache?.strokeCount).toBe(3);
+    expect(paint.tileAssetIds['0,0']).not.toBe(originalLeftAssetId);
+    expect(paint.tileAssetIds['2,0']).toBe(originalRightAssetId);
+    expect(document.assets[originalLeftAssetId]).toBeUndefined();
+    const incrementallyMaterialized = (await renderIllustration(document)).getContext('2d').getImageData(0, 0, 768, 128).data;
+    expect(Buffer.from(incrementallyMaterialized)).toEqual(Buffer.from(fullStrokeRender));
   });
 
   it('applies non-destructive blur to vector objects', async () => {

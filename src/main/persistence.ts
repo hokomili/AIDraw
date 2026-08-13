@@ -136,7 +136,7 @@ function strokeTileRadius(stroke: RasterStroke): number {
   return Math.max(2, size * (1.25 + scatter + sizeJitter) + 4);
 }
 
-function strokesByTouchedTile(document: Extract<AIDrawDocument, { kind: 'illustration' }>, layer: PaintLayer): Map<string, RasterStroke[]> {
+function strokesByTouchedTile(document: Extract<AIDrawDocument, { kind: 'illustration' }>, layer: PaintLayer, strokes: RasterStroke[] = layer.strokes): Map<string, RasterStroke[]> {
   const tileSize = layer.tileSize;
   const columns = Math.ceil(document.artboard.width / tileSize);
   const rows = Math.ceil(document.artboard.height / tileSize);
@@ -149,7 +149,7 @@ function strokesByTouchedTile(document: Extract<AIDrawDocument, { kind: 'illustr
     const bottom = Math.min(rows - 1, Math.floor((Math.max(from.y, to.y) + radius) / tileSize));
     for (let tileY = top; tileY <= bottom; tileY += 1) for (let tileX = left; tileX <= right; tileX += 1) keys.add(`${tileX},${tileY}`);
   };
-  for (const stroke of layer.strokes) {
+  for (const stroke of strokes) {
     if (!stroke.points.length) continue;
     const keys = new Set<string>();
     const radius = strokeTileRadius(stroke);
@@ -162,6 +162,13 @@ function strokesByTouchedTile(document: Extract<AIDrawDocument, { kind: 'illustr
     }
   }
   return result;
+}
+
+function comparePaintTileKeys(left: string, right: string): number {
+  const leftCoordinates = parsePaintTileKey(left);
+  const rightCoordinates = parsePaintTileKey(right);
+  if (!leftCoordinates || !rightCoordinates) return left.localeCompare(right);
+  return leftCoordinates.tileY - rightCoordinates.tileY || leftCoordinates.tileX - rightCoordinates.tileX || left.localeCompare(right);
 }
 
 function pruneUnreferencedPaintTiles(document: AIDrawDocument): void {
@@ -180,32 +187,71 @@ export function clearPaintTileCaches(document: AIDrawDocument): void {
   pruneUnreferencedPaintTiles(document);
 }
 
-export function materializePaintTiles(document: AIDrawDocument): void {
-  if (document.kind !== 'illustration') return;
+function inspectPaintTileCache(document: Extract<AIDrawDocument, { kind: 'illustration' }>, layer: PaintLayer): { plan?: NonNullable<ReturnType<typeof paintTileCachePlan>>; reason?: string } {
+  if (!layer.tileCache) return { reason: 'its metadata or referenced assets are incomplete' };
+  const plan = paintTileCachePlan(layer, document.assets);
+  if (!plan) return { reason: 'its metadata or referenced assets are incomplete' };
+  if (paintStrokePrefixSha256(layer.strokes, plan.strokeCount) !== layer.tileCache.strokesSha256.toLowerCase()) return { reason: 'its editable stroke digest does not match' };
+  const expectedKeys = new Set(strokesByTouchedTile(document, layer, layer.strokes.slice(0, plan.strokeCount)).keys());
+  if (expectedKeys.size !== plan.entries.length || plan.entries.some((entry) => !expectedKeys.has(entry.key))) return { reason: 'its tile index does not match editable stroke coverage' };
+  const columns = Math.ceil(document.artboard.width / layer.tileSize);
+  const rows = Math.ceil(document.artboard.height / layer.tileSize);
+  for (const entry of plan.entries) {
+    if (entry.tileX < 0 || entry.tileY < 0 || entry.tileX >= columns || entry.tileY >= rows) return { reason: 'a tile falls outside the artboard' };
+    try {
+      const bytes = Buffer.from(entry.asset.data!, 'base64');
+      const header = inspectImageHeader(bytes);
+      if (header.mimeType !== 'image/png' || header.width !== layer.tileSize || header.height !== layer.tileSize || bytes.byteLength !== entry.asset.byteLength || createHash('sha256').update(bytes).digest('hex') !== entry.asset.sha256.toLowerCase()) return { reason: 'a tile payload is inconsistent' };
+    } catch { return { reason: 'a tile payload is corrupt' }; }
+  }
+  return { plan };
+}
+
+export interface PaintTileMaterializationResult {
+  layers: number;
+  renderedTiles: number;
+  reusedTiles: number;
+}
+
+export function materializePaintTiles(document: AIDrawDocument): PaintTileMaterializationResult {
+  const result: PaintTileMaterializationResult = { layers: 0, renderedTiles: 0, reusedTiles: 0 };
+  if (document.kind !== 'illustration') return result;
   for (const layer of Object.values(document.layers)) {
     if (layer.type !== 'paint') continue;
-    layer.tileAssetIds = {};
-    const canvas = createCanvas(layer.tileSize, layer.tileSize);
+    result.layers += 1;
+    const reusable = inspectPaintTileCache(document, layer).plan;
+    const allTiles = strokesByTouchedTile(document, layer);
+    const dirtyKeys = reusable
+      ? new Set(strokesByTouchedTile(document, layer, layer.strokes.slice(reusable.strokeCount)).keys())
+      : new Set(allTiles.keys());
+    const nextTileAssetIds: Record<string, string> = reusable ? Object.fromEntries(reusable.entries.map((entry) => [entry.key, entry.assetId])) : {};
+    result.reusedTiles += reusable?.entries.filter((entry) => !dirtyKeys.has(entry.key)).length ?? 0;
+    const canvas = dirtyKeys.size ? createCanvas(layer.tileSize, layer.tileSize) : undefined;
     try {
-      for (const [key, strokes] of strokesByTouchedTile(document, layer)) {
+      for (const key of [...dirtyKeys].sort(comparePaintTileKeys)) {
+        const strokes = allTiles.get(key);
+        if (!strokes?.length) { delete nextTileAssetIds[key]; continue; }
         const coordinates = parsePaintTileKey(key);
         if (!coordinates) continue;
-        const context = canvas.getContext('2d');
+        const context = canvas!.getContext('2d');
         context.reset();
         context.translate(-coordinates.tileX * layer.tileSize, -coordinates.tileY * layer.tileSize);
         context.lineCap = 'round';
         context.lineJoin = 'round';
         for (const stroke of strokes) renderRasterStroke(context, stroke);
-        const bytes = canvas.toBuffer('image/png');
+        const bytes = canvas!.toBuffer('image/png');
         const sha256 = createHash('sha256').update(bytes).digest('hex');
         const id = `paint-tile-${sha256}`;
         document.assets[id] = { id, name: `${layer.name} ${key}`, mimeType: 'image/png', byteLength: bytes.byteLength, sha256, source: 'rendered', data: bytes.toString('base64') };
-        layer.tileAssetIds[key] = id;
+        nextTileAssetIds[key] = id;
+        result.renderedTiles += 1;
       }
-    } finally { canvas.width = 1; canvas.height = 1; }
+    } finally { if (canvas) { canvas.width = 1; canvas.height = 1; } }
+    layer.tileAssetIds = Object.fromEntries(Object.entries(nextTileAssetIds).sort(([left], [right]) => comparePaintTileKeys(left, right)));
     layer.tileCache = { version: 1, strokeCount: layer.strokes.length, strokesSha256: paintStrokePrefixSha256(layer.strokes) };
   }
   pruneUnreferencedPaintTiles(document);
+  return result;
 }
 
 function validateLoadedPaintTileCaches(document: AIDrawDocument, warnings: string[]): void {
@@ -216,27 +262,28 @@ function validateLoadedPaintTileCaches(document: AIDrawDocument, warnings: strin
       layer.tileAssetIds = {};
       continue;
     }
-    const plan = paintTileCachePlan(layer, document.assets);
-    let reason: string | undefined;
-    if (!plan) reason = 'its metadata or referenced assets are incomplete';
-    else if (paintStrokePrefixSha256(layer.strokes, plan.strokeCount) !== layer.tileCache.strokesSha256.toLowerCase()) reason = 'its editable stroke digest does not match';
-    else {
-      const columns = Math.ceil(document.artboard.width / layer.tileSize);
-      const rows = Math.ceil(document.artboard.height / layer.tileSize);
-      for (const entry of plan.entries) {
-        if (entry.tileX < 0 || entry.tileY < 0 || entry.tileX >= columns || entry.tileY >= rows) { reason = 'a tile falls outside the artboard'; break; }
-        try {
-          const bytes = Buffer.from(entry.asset.data!, 'base64');
-          const header = inspectImageHeader(bytes);
-          if (header.mimeType !== 'image/png' || header.width !== layer.tileSize || header.height !== layer.tileSize || bytes.byteLength !== entry.asset.byteLength || createHash('sha256').update(bytes).digest('hex') !== entry.asset.sha256.toLowerCase()) reason = 'a tile payload is inconsistent';
-        } catch { reason = 'a tile payload is corrupt'; }
-        if (reason) break;
-      }
-    }
+    const { reason } = inspectPaintTileCache(document, layer);
     if (reason) {
       layer.tileAssetIds = {};
       delete layer.tileCache;
       warnings.push(`Paint cache for “${layer.name}” was ignored because ${reason}. Editable strokes were preserved.`);
+    }
+  }
+  pruneUnreferencedPaintTiles(document);
+}
+
+function adoptPaintTileCaches(document: AIDrawDocument, persisted: AIDrawDocument): void {
+  if (document.kind !== 'illustration' || persisted.kind !== 'illustration' || document.id !== persisted.id || document.artboard.width !== persisted.artboard.width || document.artboard.height !== persisted.artboard.height) return;
+  for (const persistedLayer of Object.values(persisted.layers)) {
+    if (persistedLayer.type !== 'paint' || !persistedLayer.tileCache) continue;
+    const layer = document.layers[persistedLayer.id];
+    if (!layer || layer.type !== 'paint' || layer.tileSize !== persistedLayer.tileSize || (layer.tileCache?.strokeCount ?? -1) > persistedLayer.tileCache.strokeCount) continue;
+    if (persistedLayer.tileCache.strokeCount > layer.strokes.length || paintStrokePrefixSha256(layer.strokes, persistedLayer.tileCache.strokeCount) !== persistedLayer.tileCache.strokesSha256.toLowerCase()) continue;
+    layer.tileAssetIds = structuredClone(persistedLayer.tileAssetIds);
+    layer.tileCache = structuredClone(persistedLayer.tileCache);
+    for (const assetId of new Set(Object.values(persistedLayer.tileAssetIds))) {
+      const asset = persisted.assets[assetId];
+      if (asset) document.assets[assetId] = structuredClone(asset);
     }
   }
   pruneUnreferencedPaintTiles(document);
@@ -398,8 +445,9 @@ export async function writeNativeDocument(
     } finally {
       await handle.close();
     }
-    await readNativeDocument(temp);
+    const persisted = (await readNativeDocument(temp)).document;
     await fileSystem.replace(temp, destination);
+    adoptPaintTileCaches(document, persisted);
   } catch (error) {
     // Preserve the original failure. An OS-locked temp may remain as an uncommitted sibling, but it is never promoted or used for recovery implicitly.
     await fileSystem.remove(temp).catch(() => undefined);

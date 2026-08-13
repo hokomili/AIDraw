@@ -44,6 +44,9 @@ describe('.aidraw persistence', () => {
     const trace = [{ version: 1 as const, documentId: document.id, revision: 1, recordedAt: nowIso(), outcome: 'committed' as const, transaction }];
     const path = await writeNativeDocument(join(root, 'drawing'), document, '1.0.0', undefined, trace);
     expect(path.endsWith('.aidraw')).toBe(true);
+    expect(paint.tileCache).toMatchObject({ version: 1, strokeCount: 1, strokesSha256: expect.stringMatching(/^[0-9a-f]{64}$/) });
+    expect(Object.keys(paint.tileAssetIds).length).toBeGreaterThan(1);
+    expect(Object.values(paint.tileAssetIds).every((assetId) => typeof document.assets[assetId]?.data === 'string')).toBe(true);
     const archive = unzipSync(new Uint8Array(await readFile(path)));
     expect(Object.keys(archive)).toEqual(expect.arrayContaining(['manifest.json', 'document.json', 'activity.json', 'trace/transactions.jsonl', 'preview.png']));
     expect(JSON.parse(Buffer.from(archive['document.json']).toString('utf8')).filePath).toBeUndefined();
@@ -242,6 +245,31 @@ describe('.aidraw persistence', () => {
     expect(loaded.warnings).toContainEqual(expect.stringMatching(/editable stroke digest does not match/));
   });
 
+  it('drops an incomplete paint tile index instead of trusting partial stroke coverage', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-persistence-')); temporaryPaths.push(root);
+    const document = createIllustrationDocument('Incomplete cache index');
+    document.artboard = { ...document.artboard, width: 520, height: 80, background: null };
+    const paint = Object.values(document.layers).find((layer) => layer.type === 'paint');
+    if (!paint || paint.type !== 'paint') throw new Error('Paint layer missing');
+    paint.strokes.push({ id: 'cross-tile', actorId: HUMAN_ACTOR.id, points: [{ x: 8, y: 24, pressure: 0.5 }, { x: 512, y: 24, pressure: 0.5 }], color: '#d94a67', size: 12, opacity: 1, hardness: 1, flow: 1, mode: 'paint', preset: 'hard-round' });
+    const sourcePath = await writeNativeDocument(join(root, 'incomplete.aidraw'), document, '1.0.0');
+    const files = unzipSync(new Uint8Array(await readFile(sourcePath)));
+    const persisted = JSON.parse(strFromU8(files['document.json'])) as typeof document;
+    const persistedPaint = Object.values(persisted.layers).find((layer) => layer.type === 'paint');
+    if (!persistedPaint || persistedPaint.type !== 'paint') throw new Error('Persisted paint layer missing');
+    expect(Object.keys(persistedPaint.tileAssetIds)).toHaveLength(3);
+    delete persistedPaint.tileAssetIds['1,0'];
+    files['document.json'] = strToU8(JSON.stringify(persisted));
+    const incompletePath = join(root, 'incomplete-mutated.aidraw'); await writeFile(incompletePath, zipSync(files));
+
+    const loaded = await readNativeDocument(incompletePath);
+    const loadedPaint = loaded.document.kind === 'illustration' ? Object.values(loaded.document.layers).find((layer) => layer.type === 'paint') : undefined;
+    expect(loadedPaint?.type === 'paint' ? loadedPaint.strokes : undefined).toEqual(paint.strokes);
+    expect(loadedPaint?.type === 'paint' ? loadedPaint.tileCache : undefined).toBeUndefined();
+    expect(loadedPaint?.type === 'paint' ? loadedPaint.tileAssetIds : undefined).toEqual({});
+    expect(loaded.warnings).toContainEqual(expect.stringMatching(/tile index does not match editable stroke coverage/));
+  });
+
   it('stores editable checkpoints in the native container without duplicating asset payload files', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aidraw-persistence-'));
     temporaryPaths.push(root);
@@ -325,6 +353,33 @@ describe('.aidraw persistence', () => {
     await writeNativeDocument(destination, replacement, '1.0.1');
     expect(Buffer.compare(await readFile(destination), originalBytes)).not.toBe(0);
     expect((await readNativeDocument(destination)).document.name).toBe('Replacement document');
+    expect(await readdir(root)).toEqual(['drawing.aidraw']);
+  });
+
+  it('adopts a materialized paint cache only after the atomic replacement succeeds', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-persistence-cache-adoption-')); temporaryPaths.push(root);
+    const document = createIllustrationDocument('Cache adoption');
+    document.artboard = { ...document.artboard, width: 520, height: 80, background: null };
+    const paint = Object.values(document.layers).find((layer) => layer.type === 'paint');
+    if (!paint || paint.type !== 'paint') throw new Error('Paint layer missing');
+    paint.strokes.push({ id: 'initial-stroke', actorId: HUMAN_ACTOR.id, points: [{ x: 24, y: 24, pressure: 0.5 }, { x: 96, y: 48, pressure: 0.5 }], color: '#d94a67', size: 12, opacity: 1, hardness: 1, flow: 1, mode: 'paint', preset: 'hard-round' });
+    const destination = await writeNativeDocument(join(root, 'drawing'), document, '1.0.0');
+    expect(paint.tileCache?.strokeCount).toBe(1);
+    const cacheBefore = structuredClone(paint.tileCache);
+    const tileAssetIdsBefore = structuredClone(paint.tileAssetIds);
+    const assetsBefore = structuredClone(document.assets);
+    const destinationBefore = await readFile(destination);
+    paint.strokes.push({ id: 'appended-stroke', actorId: HUMAN_ACTOR.id, points: [{ x: 128, y: 40, pressure: 0.5 }, { x: 192, y: 56, pressure: 0.5 }], color: '#3344cc', size: 8, opacity: 1, hardness: 1, flow: 1, mode: 'paint', preset: 'hard-round' });
+
+    const fileSystem: NativeSaveFileSystem = {
+      ...nativeSaveFileSystem,
+      replace: async () => { throw new Error('Injected replace failure.'); },
+    };
+    await expect(writeNativeDocument(destination, document, '1.0.1', undefined, [], [], fileSystem)).rejects.toThrow('Injected replace failure.');
+    expect(paint.tileCache).toEqual(cacheBefore);
+    expect(paint.tileAssetIds).toEqual(tileAssetIdsBefore);
+    expect(document.assets).toEqual(assetsBefore);
+    expect(await readFile(destination)).toEqual(destinationBefore);
     expect(await readdir(root)).toEqual(['drawing.aidraw']);
   });
 });
