@@ -8,7 +8,7 @@ import {
   type ImageObject,
   type ShapeObject,
 } from '@aidraw/core';
-import { illustrationRegionBacking, illustrationRegionCanRenderLocally, paintTileCacheEntriesForIllustrationRegion } from '../../src/common/illustration-region';
+import { illustrationRegionBacking, illustrationRegionCanRenderLocally, paintTileCacheEntriesForIllustrationRegion, phaseExactIllustrationObjectIntersectsRegion } from '../../src/common/illustration-region';
 
 const timestamp = '2026-08-12T00:00:00.000Z';
 
@@ -56,6 +56,18 @@ describe('bounded illustration raster regions', () => {
     ];
     expect(paintTileCacheEntriesForIllustrationRegion(entries, 256, { x: 256, y: 4, width: 1, height: 248 }).map(({ key }) => key)).toEqual(['1,0']);
     expect(paintTileCacheEntriesForIllustrationRegion(entries, 256, { x: 255, y: 255, width: 2, height: 2 }).map(({ key }) => key)).toEqual(['0,0', '1,0', '1,1']);
+  });
+
+  it('retains only exact-subset object frames intersecting the regional backing', () => {
+    const object = rectangle('bounded-shape', 'vector');
+    const region = { x: 256, y: 4, width: 1, height: 248 };
+    object.transform = { ...object.transform, x: 236, y: 10 };
+    expect(phaseExactIllustrationObjectIntersectsRegion(object, region)).toBe(false);
+    object.transform.x = 237;
+    expect(phaseExactIllustrationObjectIntersectsRegion(object, region)).toBe(true);
+    object.transform = { ...object.transform, x: 0, y: 0 };
+    expect(phaseExactIllustrationObjectIntersectsRegion(object, region, { x: 237, y: 10 })).toBe(true);
+    expect(phaseExactIllustrationObjectIntersectsRegion(object, region, { x: Number.MAX_SAFE_INTEGER, y: 0 })).toBe(true);
   });
 
   it('admits integer-phase closed primitives but rejects richer raster dependencies', () => {

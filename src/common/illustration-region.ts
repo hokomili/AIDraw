@@ -102,6 +102,28 @@ export function paintTileCacheEntriesForIllustrationRegion(
 }
 
 /**
+ * Returns a conservative frame intersection for the exact integer-phase leaf
+ * subset admitted by illustrationRegionCanRenderLocally. Unsupported leaves
+ * and unsafe accumulated arithmetic stay included so this helper can reduce
+ * Canvas work without becoming a second rendering authority.
+ */
+export function phaseExactIllustrationObjectIntersectsRegion(
+  object: IllustrationObject,
+  region: IllustrationRasterRegion,
+  parentTranslation: Readonly<{ x: number; y: number }> = { x: 0, y: 0 },
+): boolean {
+  if (object.type !== 'shape' && object.type !== 'image') return true;
+  const left = parentTranslation.x + object.transform.x;
+  const top = parentTranslation.y + object.transform.y;
+  const right = left + object.width;
+  const bottom = top + object.height;
+  const regionRight = region.x + region.width;
+  const regionBottom = region.y + region.height;
+  if (![left, top, right, bottom, regionRight, regionBottom].every(Number.isSafeInteger)) return true;
+  return left < regionRight && right > region.x && top < regionBottom && bottom > region.y;
+}
+
+/**
  * Canvas coverage is not generally invariant when identical geometry is
  * translated onto a differently sized backing surface. The regional path is
  * therefore limited to the integer-translated square-rectangle/polygon/star

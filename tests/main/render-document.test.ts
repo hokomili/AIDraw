@@ -123,6 +123,37 @@ describe('native document rendering', () => {
     }
   });
 
+  it('does not decode exact-subset images outside the regional backing', async () => {
+    const document = createIllustrationDocument('Illustration regional object culling');
+    document.artboard = { ...document.artboard, width: 8_192, height: 8_192, background: null };
+    const layer = Object.values(document.layers).find((entry) => entry.type === 'vector');
+    if (!layer || layer.type !== 'vector') throw new Error('Expected vector layer');
+    const source = createCanvas(16, 16); source.getContext('2d').fillStyle = '#3355ff'; source.getContext('2d').fillRect(0, 0, 16, 16);
+    const bytes = source.toBuffer('image/png'); const data = bytes.toString('base64'); source.width = 1; source.height = 1;
+    let dataReads = 0;
+    const asset: DocumentAsset = {
+      id: 'distant-regional-png', name: 'Distant regional PNG', mimeType: 'image/png', byteLength: bytes.byteLength,
+      sha256: createHash('sha256').update(bytes).digest('hex'), source: 'embedded', get data() { dataReads += 1; return data; },
+    };
+    const timestamp = nowIso(); const image: ImageObject = {
+      id: 'distant-regional-image', revision: 0, name: 'Distant regional image', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
+      layerId: layer.id, visible: true, locked: false, opacity: 1, blendMode: 'normal', transform: structuredClone(IDENTITY_TRANSFORM),
+      type: 'image', assetId: asset.id, width: 16, height: 16, sourceWidth: 16, sourceHeight: 16, filters: [],
+    };
+    const target: ShapeObject = {
+      id: 'regional-cull-target', revision: 0, name: 'Regional cull target', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
+      layerId: layer.id, visible: true, locked: false, opacity: 1, blendMode: 'normal', transform: { ...IDENTITY_TRANSFORM, x: 8_176, y: 8_176 },
+      type: 'shape', shape: 'rectangle', width: 16, height: 16, fill: { kind: 'solid', color: '#ff3366' },
+      stroke: { paint: { kind: 'none' }, width: 0, opacity: 1, lineCap: 'round', lineJoin: 'round', dash: [] },
+    };
+    document.assets[asset.id] = asset; document.objects = { [image.id]: image, [target.id]: target }; layer.objectIds = [image.id, target.id];
+
+    const rendered = await renderIllustrationRegion(document, { x: 8_184, y: 8_184, width: 1, height: 1 });
+    expect([...rendered.getContext('2d').getImageData(0, 0, 1, 1).data]).toEqual([255, 51, 102, 255]);
+    expect(dataReads).toBe(1);
+    rendered.width = 1; rendered.height = 1;
+  });
+
   it('renders a rectangular orthogonal cell at its authored aspect without resampling drift', async () => {
     const document = createPixelDocument('project', 'Orthogonal rectangular cell'); document.assetIds = []; document.pixelAssets = {};
     const sprite = createPixelSprite('Rectangular tile', 3, 5); const cel = Object.values(sprite.cels)[0];
