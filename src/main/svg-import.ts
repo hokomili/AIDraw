@@ -36,6 +36,7 @@ interface SvgNode {
 interface CssRule { selectors: string[]; declarations: Style }
 interface Bounds { x: number; y: number; width: number; height: number }
 interface SvgViewBox { minX: number; minY: number; width: number; height: number }
+interface SvgViewportContext { width: number; height: number }
 
 const IDENTITY_MATRIX: Matrix = [1, 0, 0, 1, 0, 0];
 const inheritedProperties = new Set(['color', 'fill', 'fill-rule', 'font-family', 'font-size', 'font-style', 'font-weight', 'letter-spacing', 'stroke', 'stroke-dasharray', 'stroke-linecap', 'stroke-linejoin', 'stroke-width', 'text-anchor', 'visibility']);
@@ -171,11 +172,34 @@ function svgViewportMatrix(attributes: Attributes, viewportWidth: number, viewpo
     }
   }
   const scaleX = viewportWidth / viewBox.width; const scaleY = viewportHeight / viewBox.height;
-  if (alignment.mode === 'none') return [scaleX, 0, 0, scaleY, -viewBox.minX * scaleX, -viewBox.minY * scaleY];
+  const cleanZero = (value: number) => Object.is(value, -0) ? 0 : value;
+  if (alignment.mode === 'none') return [scaleX, 0, 0, scaleY, cleanZero(-viewBox.minX * scaleX), cleanZero(-viewBox.minY * scaleY)];
   const scale = alignment.mode === 'slice' ? Math.max(scaleX, scaleY) : Math.min(scaleX, scaleY);
   const x = (viewportWidth - viewBox.width * scale) * alignment.x - viewBox.minX * scale;
   const y = (viewportHeight - viewBox.height * scale) * alignment.y - viewBox.minY * scale;
-  return [scale, 0, 0, scale, x, y];
+  return [scale, 0, 0, scale, cleanZero(x), cleanZero(y)];
+}
+
+function svgViewportValue(value: unknown, reference: number): number | undefined {
+  const match = /^([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[-+]?\d+)?)(%|px)?$/i.exec(String(value).trim());
+  if (!match) return undefined;
+  const number = Number(match[1]); const resolved = match[2] === '%' ? number / 100 * reference : number;
+  return Number.isFinite(resolved) ? resolved : undefined;
+}
+
+function svgViewportLength(value: unknown, reference: number): number | undefined {
+  if (value === undefined || String(value).trim() === 'auto') return reference;
+  const resolved = svgViewportValue(value, reference);
+  return resolved !== undefined && resolved > 0 ? resolved : undefined;
+}
+
+function svgViewportCoordinate(value: unknown, reference: number): number | undefined {
+  if (value === undefined) return 0;
+  return svgViewportValue(value, reference);
+}
+
+function matrixIsIdentity(matrix: Matrix): boolean {
+  return matrix.every((value, index) => Number.isFinite(value) && Math.abs(value - IDENTITY_MATRIX[index]) <= Number.EPSILON * 16 * Math.max(1, Math.abs(value), Math.abs(IDENTITY_MATRIX[index])));
 }
 
 function svgTransform(value: unknown): Matrix {
@@ -292,6 +316,7 @@ export function importEditableSvg(source: string, name: string): SvgImportResult
   const height = Math.ceil(positiveLength(root.attributes.height, viewBox?.height || 1080));
   if (width > MAX_INLINE_IMAGE_DIMENSION || height > MAX_INLINE_IMAGE_DIMENSION || width * height > MAX_INLINE_IMAGE_PIXELS) throw new Error(`SVG artboard dimensions ${width}×${height} exceed AIDraw's 8192px/16MP import limit.`);
   const viewportMatrix = svgViewportMatrix(root.attributes, width, height, viewBox, warnings);
+  if (!viewportMatrix.every(Number.isFinite)) throw new Error('SVG viewBox produces a non-finite viewport transform.');
 
   const document = createIllustrationDocument(name);
   document.artboard = { ...document.artboard, width, height, background: null };
@@ -489,32 +514,69 @@ export function importEditableSvg(source: string, name: string): SvgImportResult
     return undefined;
   }
 
-  const process = (node: SvgNode, parentStyle: Style, depth: number, useStack = new Set<string>()): string[] => {
+  const viewportChildren = (childIds: string[], matrix: Matrix, name: string): string[] => {
+    if (matrixIsIdentity(matrix)) return childIds;
+    const wrapperNode: SvgNode = { tag: 'g', attributes: {}, children: [] };
+    const wrapper: GroupObject = { ...base(wrapperNode, {}, matrix, name), type: 'group', childIds };
+    return [finish(wrapper, {}, false).id];
+  };
+
+  const process = (node: SvgNode, parentStyle: Style, depth: number, viewport: SvgViewportContext, useStack = new Set<string>()): string[] => {
     if (depth > 64) throw new Error('SVG nesting exceeds the 64-level safety limit.');
-    if (node.tag === '#text' || node.tag === 'defs' || node.tag === 'style' || ['linearGradient', 'radialGradient', 'filter', 'clipPath', 'mask', 'marker'].includes(node.tag)) return [];
+    if (node.tag === '#text' || node.tag === 'defs' || node.tag === 'style' || node.tag === 'symbol' || ['linearGradient', 'radialGradient', 'filter', 'clipPath', 'mask', 'marker'].includes(node.tag)) return [];
     const style = styleFor(node, parentStyle, rules);
     if (node.tag === 'use') {
       const reference = String(node.attributes.href ?? node.attributes['xlink:href'] ?? '').replace(/^#/, '');
       if (!reference || useStack.has(reference) || !idNodes.has(reference)) { warnings.add('An unresolved or cyclic SVG <use> reference was omitted.'); return []; }
       const nextStack = new Set(useStack); nextStack.add(reference); const sourceNode = idNodes.get(reference)!;
-      const childIds = process(sourceNode, style, depth + 1, nextStack);
+      let childIds: string[];
+      if (sourceNode.tag === 'symbol') {
+        const viewportWidth = svgViewportLength(node.attributes.width, viewport.width); const viewportHeight = svgViewportLength(node.attributes.height, viewport.height);
+        if (viewportWidth === undefined || viewportHeight === undefined) { warnings.add('An SVG <use> symbol with invalid or zero viewport dimensions was omitted.'); return []; }
+        const viewBox = svgViewBox(sourceNode.attributes.viewBox, warnings);
+        const viewportMatrix = svgViewportMatrix(sourceNode.attributes, viewportWidth, viewportHeight, viewBox, warnings);
+        if (!viewportMatrix.every(Number.isFinite)) { warnings.add('An SVG <use> symbol with an invalid viewport transform was omitted.'); return []; }
+        const childViewport = { width: viewBox?.width ?? viewportWidth, height: viewBox?.height ?? viewportHeight };
+        const symbolStyle = styleFor(sourceNode, style, rules);
+        const symbolChildren = sourceNode.children.flatMap((child) => process(child, symbolStyle, depth + 1, childViewport, nextStack));
+        if (!symbolChildren.length) return [];
+        const mappedChildren = viewportChildren(symbolChildren, viewportMatrix, 'Symbol ViewBox');
+        const symbol: GroupObject = { ...base(sourceNode, symbolStyle, svgTransform(sourceNode.attributes.transform), 'Symbol'), type: 'group', childIds: mappedChildren };
+        childIds = [finish(symbol, symbolStyle, false).id];
+        warnings.add('Nested SVG/symbol overflow clipping is not represented; transformed content remains editable outside its viewport.');
+      } else childIds = process(sourceNode, style, depth + 1, viewport, nextStack);
       if (!childIds.length) return [];
-      const group: GroupObject = { ...base(node, style, multiply(svgTransform(node.attributes.transform), translate(finite(node.attributes.x), finite(node.attributes.y))), 'Use'), type: 'group', childIds };
+      const x = svgViewportCoordinate(node.attributes.x, viewport.width); const y = svgViewportCoordinate(node.attributes.y, viewport.height);
+      if (x === undefined || y === undefined) warnings.add('Invalid SVG <use> position was reduced to the origin.');
+      const group: GroupObject = { ...base(node, style, multiply(svgTransform(node.attributes.transform), translate(x ?? 0, y ?? 0)), 'Use'), type: 'group', childIds };
       return [finish(group, style, false).id];
     }
-    if (node.tag === 'g' || node.tag === 'svg' || node.tag === 'symbol') {
-      if (node.tag === 'g') {
-        const crop = aidrawSvgImageCrop(node.attributes, warnings);
-        if (crop) {
-          const image = aidrawCroppedImage(node, style, crop);
-          if (image) return [image.id];
-          warnings.add('AIDraw SVG image-crop metadata did not match its standard SVG crop and was ignored.');
-        }
+    if (node.tag === 'g') {
+      const crop = aidrawSvgImageCrop(node.attributes, warnings);
+      if (crop) {
+        const image = aidrawCroppedImage(node, style, crop);
+        if (image) return [image.id];
+        warnings.add('AIDraw SVG image-crop metadata did not match its standard SVG crop and was ignored.');
       }
-      const childIds = node.children.flatMap((child) => process(child, style, depth + 1, useStack));
+      const childIds = node.children.flatMap((child) => process(child, style, depth + 1, viewport, useStack));
       if (!childIds.length) return [];
-      const offsetX = node.tag === 'svg' ? finite(node.attributes.x) : 0; const offsetY = node.tag === 'svg' ? finite(node.attributes.y) : 0;
-      const group: GroupObject = { ...base(node, style, multiply(svgTransform(node.attributes.transform), translate(offsetX, offsetY)), node.tag === 'g' ? 'Group' : 'SVG viewport'), type: 'group', childIds };
+      const group: GroupObject = { ...base(node, style, svgTransform(node.attributes.transform), 'Group'), type: 'group', childIds };
+      return [finish(group, style, false).id];
+    }
+    if (node.tag === 'svg') {
+      const viewportWidth = svgViewportLength(node.attributes.width, viewport.width); const viewportHeight = svgViewportLength(node.attributes.height, viewport.height);
+      if (viewportWidth === undefined || viewportHeight === undefined) { warnings.add('A nested SVG with invalid or zero viewport dimensions was omitted.'); return []; }
+      const x = svgViewportCoordinate(node.attributes.x, viewport.width); const y = svgViewportCoordinate(node.attributes.y, viewport.height);
+      if (x === undefined || y === undefined) warnings.add('Invalid nested SVG viewport position was reduced to the origin.');
+      const viewBox = svgViewBox(node.attributes.viewBox, warnings);
+      const viewportMatrix = svgViewportMatrix(node.attributes, viewportWidth, viewportHeight, viewBox, warnings);
+      if (!viewportMatrix.every(Number.isFinite)) { warnings.add('A nested SVG with an invalid viewport transform was omitted.'); return []; }
+      const childViewport = { width: viewBox?.width ?? viewportWidth, height: viewBox?.height ?? viewportHeight };
+      const childIds = node.children.flatMap((child) => process(child, style, depth + 1, childViewport, useStack));
+      if (!childIds.length) return [];
+      const mappedChildren = viewportChildren(childIds, viewportMatrix, 'Nested SVG ViewBox');
+      const group: GroupObject = { ...base(node, style, multiply(svgTransform(node.attributes.transform), translate(x ?? 0, y ?? 0)), 'SVG viewport'), type: 'group', childIds: mappedChildren };
+      warnings.add('Nested SVG/symbol overflow clipping is not represented; transformed content remains editable outside its viewport.');
       return [finish(group, style, false).id];
     }
     const object = element(node, style, svgTransform(node.attributes.transform));
@@ -524,9 +586,8 @@ export function importEditableSvg(source: string, name: string): SvgImportResult
   };
 
   const rootStyle = styleFor(root, {}, rules);
-  const topLevel = root.children.flatMap((child) => process(child, rootStyle, 0));
-  const differsFromIdentity = viewportMatrix.some((value, index) => Math.abs(value - IDENTITY_MATRIX[index]) > Number.EPSILON * 16 * Math.max(1, Math.abs(value), Math.abs(IDENTITY_MATRIX[index])));
-  if (differsFromIdentity && topLevel.length) {
+  const topLevel = root.children.flatMap((child) => process(child, rootStyle, 0, { width, height }));
+  if (!matrixIsIdentity(viewportMatrix) && topLevel.length) {
     const wrapperNode: SvgNode = { tag: 'g', attributes: {}, children: [] };
     const wrapper: GroupObject = { ...base(wrapperNode, rootStyle, viewportMatrix, 'ViewBox'), type: 'group', childIds: topLevel };
     finish(wrapper, rootStyle, false);

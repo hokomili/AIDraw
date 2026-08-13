@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
-import { createCanvas } from '@napi-rs/canvas';
+import { createCanvas, loadImage } from '@napi-rs/canvas';
 import { importDocument } from '@main/import-document';
 import { illustrationToSvg } from '@main/export-document';
 import { importEditableSvg } from '@main/svg-import';
@@ -76,6 +76,37 @@ describe('editable SVG interchange', () => {
     expect(invalid.result.warnings).toContain('Invalid SVG preserveAspectRatio was reduced to the default xMidYMid meet behavior.');
     expect(invalid.viewport).toMatchObject({ type: 'group', transform: { x: 40, y: -20, scaleX: 1, scaleY: 1 } });
     invalid.canvas.width = 1; invalid.canvas.height = 1;
+    expect(() => importEditableSvg(source('none').replace('viewBox="10 20 100 100"', 'viewBox="10 20 5e-324 100"'), 'Non-finite outer viewport')).toThrow('SVG viewBox produces a non-finite viewport transform.');
+  });
+
+  it('applies nested SVG and referenced-symbol viewports while leaving unreferenced symbols hidden', async () => {
+    const source = '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="240" height="120"><defs><symbol id="badge" viewBox="0 0 10 20"><rect id="badge-top" width="10" height="10" fill="#ff0000"/><rect id="badge-bottom" y="10" width="10" height="10" fill="#0000ff"/></symbol></defs><symbol id="unused"><rect id="unused-fill" width="240" height="120" fill="#ff00ff"/></symbol><use id="badge-use" xlink:href="#badge" x="20" y="10" width="50%" height="100px"/><svg id="nested" x="60%" y="10" width="80px" height="100" viewBox="0 0 20 10" preserveAspectRatio="none"><rect id="nested-left" width="10" height="10" fill="#00ff00"/><rect id="nested-right" x="10" width="10" height="10" fill="#ffff00"/></svg></svg>';
+    const result = importEditableSvg(source, 'Nested viewports'); const byName = (name: string) => Object.values(result.document.objects).find((object) => object.name === name);
+    expect(byName('badge-use')).toMatchObject({ type: 'group', transform: { x: 20, y: 10 } });
+    expect(byName('Symbol ViewBox')).toMatchObject({ type: 'group', transform: { x: 35, y: 0, scaleX: 5, scaleY: 5 } });
+    expect(byName('nested')).toMatchObject({ type: 'group', transform: { x: 144, y: 10 } });
+    expect(byName('Nested SVG ViewBox')).toMatchObject({ type: 'group', transform: { x: 0, y: 0, scaleX: 4, scaleY: 10 } });
+    expect(byName('unused')).toBeUndefined(); expect(byName('unused-fill')).toBeUndefined();
+    expect(result.warnings).toContain('Nested SVG/symbol overflow clipping is not represented; transformed content remains editable outside its viewport.');
+
+    const referenceSource = '<svg xmlns="http://www.w3.org/2000/svg" width="240" height="120"><svg x="20" y="10" width="120" height="100" viewBox="0 0 10 20"><rect width="10" height="10" fill="#ff0000"/><rect y="10" width="10" height="10" fill="#0000ff"/></svg><svg x="144" y="10" width="80" height="100" viewBox="0 0 20 10" preserveAspectRatio="none"><rect width="10" height="10" fill="#00ff00"/><rect x="10" width="10" height="10" fill="#ffff00"/></svg></svg>';
+    const imported = await renderIllustration(result.document); const referenceImage = await loadImage(Buffer.from(referenceSource)); const reference = createCanvas(240, 120); reference.getContext('2d').drawImage(referenceImage, 0, 0);
+    const importedPixels = Buffer.from(imported.getContext('2d').getImageData(0, 0, imported.width, imported.height).data);
+    const referencePixels = Buffer.from(reference.getContext('2d').getImageData(0, 0, reference.width, reference.height).data);
+    let totalDelta = 0; let changed = 0;
+    for (let index = 0; index < importedPixels.length; index += 1) { const delta = Math.abs(importedPixels[index] - referencePixels[index]); totalDelta += delta; if (delta > 32) changed += 1; }
+    expect({ mean: totalDelta / importedPixels.length, changed: changed / importedPixels.length }).toEqual({ mean: 0, changed: 0 });
+    imported.width = 1; imported.height = 1; reference.width = 1; reference.height = 1;
+
+    const invalid = importEditableSvg(source.replace('width="80px" height="100" viewBox', 'width="0" height="100" viewBox'), 'Invalid nested viewport');
+    expect(invalid.warnings).toContain('A nested SVG with invalid or zero viewport dimensions was omitted.');
+    expect(Object.values(invalid.document.objects).some((object) => object.name === 'nested')).toBe(false);
+    const invalidTransform = importEditableSvg(source.replace('viewBox="0 0 20 10"', 'viewBox="0 0 5e-324 10"'), 'Invalid nested transform');
+    expect(invalidTransform.warnings).toContain('A nested SVG with an invalid viewport transform was omitted.');
+    expect(Object.values(invalidTransform.document.objects).some((object) => object.name === 'nested-left')).toBe(false);
+    const invalidSymbol = importEditableSvg(source.replace('width="50%" height="100px"', 'width="0" height="100px"'), 'Invalid symbol viewport');
+    expect(invalidSymbol.warnings).toContain('An SVG <use> symbol with invalid or zero viewport dimensions was omitted.');
+    expect(Object.values(invalidSymbol.document.objects).some((object) => object.name === 'badge-top')).toBe(false);
   });
 
   it('preserves centered and right-aligned AIDraw text boxes without shifting their transforms', () => {

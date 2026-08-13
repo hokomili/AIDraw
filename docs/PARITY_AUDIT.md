@@ -24,6 +24,8 @@ Human and approved-agent SVG export share the same standards-first image-crop ad
 
 Interactive and headless illustration rendering also share one transform/isolation classification for object groups. A transform by itself is applied while traversing the group's children directly, so geometry outside the nominal artboard can move or scale into view without a premature artboard-sized buffer clip; opacity, blend, filters, masks, blur, or shadow still require one isolated composite. This parity statement does not certify effect-bearing transformed-group overhang or packaged Canvas behavior.
 
+Human and approved-agent SVG import also share nested viewport resolution. Nested `<svg>` and referenced `<symbol>` content uses the same unitless/px/percentage placement, sizing, and viewBox matrix before entering canonical groups; unreferenced symbols stay definition-only. The shared importer warns and retains editable overflow because nested viewport clipping, CSS length resolution, and external references are not represented by this source/headless checkpoint.
+
 ## Closed parity gaps
 
 | Area | Current contract and evidence |
