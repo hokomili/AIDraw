@@ -3,7 +3,9 @@ import {
   HUMAN_ACTOR,
   IDENTITY_TRANSFORM,
   createIllustrationDocument,
+  type DocumentAsset,
   type GroupObject,
+  type ImageObject,
   type ShapeObject,
 } from '@aidraw/core';
 import { illustrationRegionBacking, illustrationRegionCanRenderLocally, paintTileCacheEntriesForIllustrationRegion } from '../../src/common/illustration-region';
@@ -149,5 +151,38 @@ describe('bounded illustration raster regions', () => {
     expect(illustrationRegionCanRenderLocally(document)).toBe(false);
     group.visible = false; child.blur = 8;
     expect(illustrationRegionCanRenderLocally(document)).toBe(true);
+  });
+
+  it('admits only integer-phase embedded PNG image geometry', () => {
+    const document = createIllustrationDocument('Regional PNG images');
+    const vector = Object.values(document.layers).find((layer) => layer.type === 'vector');
+    if (!vector || vector.type !== 'vector') throw new Error('Expected vector layer');
+    const asset: DocumentAsset = { id: 'png', name: 'PNG', mimeType: 'image/png', byteLength: 1, sha256: 'a'.repeat(64), source: 'embedded', data: 'AA==' };
+    const image: ImageObject = {
+      id: 'image', revision: 0, name: 'Image', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
+      layerId: vector.id, visible: true, locked: false, opacity: 1, blendMode: 'normal', transform: { ...IDENTITY_TRANSFORM, x: 17, y: 9 },
+      type: 'image', assetId: asset.id, width: 16, height: 12, sourceWidth: 16, sourceHeight: 12, filters: [],
+    };
+    document.assets[asset.id] = asset; document.objects[image.id] = image; vector.objectIds = [image.id];
+    expect(illustrationRegionCanRenderLocally(document)).toBe(true);
+    delete image.sourceWidth;
+    expect(illustrationRegionCanRenderLocally(document)).toBe(false);
+    image.sourceWidth = 16; image.sourceHeight = 12.5;
+    expect(illustrationRegionCanRenderLocally(document)).toBe(false);
+    image.sourceHeight = 12;
+    image.crop = { x: 3, y: 2, width: 9, height: 7 };
+    expect(illustrationRegionCanRenderLocally(document)).toBe(true);
+    image.crop.x = 3.5;
+    expect(illustrationRegionCanRenderLocally(document)).toBe(false);
+    image.crop = { x: 8, y: 2, width: 9, height: 7 };
+    expect(illustrationRegionCanRenderLocally(document)).toBe(false);
+    delete image.crop; image.width = 16.5;
+    expect(illustrationRegionCanRenderLocally(document)).toBe(false);
+    image.width = 16; image.transform.x = 17.5;
+    expect(illustrationRegionCanRenderLocally(document)).toBe(false);
+    image.transform.x = 17; asset.mimeType = 'image/jpeg';
+    expect(illustrationRegionCanRenderLocally(document)).toBe(false);
+    asset.mimeType = 'image/png'; delete asset.data;
+    expect(illustrationRegionCanRenderLocally(document)).toBe(false);
   });
 });

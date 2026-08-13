@@ -20,7 +20,7 @@ function isIntegerTranslation(transform: Transform): boolean {
     && transform.skewY === 0;
 }
 
-function objectCanRenderPhaseExactly(object: IllustrationObject): boolean {
+function objectCanRenderPhaseExactly(document: IllustrationDocument, object: IllustrationObject): boolean {
   if (object.opacity !== 1
     || object.blendMode !== 'normal'
     || object.maskObjectId
@@ -28,6 +28,30 @@ function objectCanRenderPhaseExactly(object: IllustrationObject): boolean {
     || object.shadow
     || object.filters?.length) return false;
   if (object.type === 'group') return isIntegerTranslation(object.transform);
+  if (object.type === 'image') {
+    const asset = document.assets[object.assetId];
+    if (!asset?.data || asset.mimeType !== 'image/png'
+      || !isIntegerTranslation(object.transform)
+      || !Number.isSafeInteger(object.width)
+      || !Number.isSafeInteger(object.height)
+      || object.width < 1
+      || object.height < 1
+      || !Number.isSafeInteger(object.sourceWidth)
+      || !Number.isSafeInteger(object.sourceHeight)
+      || object.sourceWidth! < 1
+      || object.sourceHeight! < 1) return false;
+    if (!object.crop) return true;
+    const { x, y, width, height } = object.crop;
+    return [x, y, width, height].every(Number.isSafeInteger)
+      && x >= 0
+      && y >= 0
+      && width > 0
+      && height > 0
+      && Number.isSafeInteger(x + width)
+      && Number.isSafeInteger(y + height)
+      && x + width <= object.sourceWidth!
+      && y + height <= object.sourceHeight!;
+  }
   if (object.type !== 'shape'
     || !['rectangle', 'polygon', 'star'].includes(object.shape)
     || !isIntegerTranslation(object.transform)
@@ -81,10 +105,11 @@ export function paintTileCacheEntriesForIllustrationRegion(
  * Canvas coverage is not generally invariant when identical geometry is
  * translated onto a differently sized backing surface. The regional path is
  * therefore limited to the integer-translated square-rectangle/polygon/star
- * subset proven byte-exact by parity coverage, structural containers, and
- * complete materialized paint caches whose pixels can be copied at integer
- * tile coordinates. Live paint tails and richer vector/raster content retain
- * the established full-artboard render and raw-crop path.
+ * subset and integer-source/destination/crop embedded PNGs proven byte-exact
+ * by parity coverage, structural containers, and complete materialized paint
+ * caches whose pixels can be copied at integer tile coordinates. Live paint
+ * tails and richer vector/raster content retain the established full-artboard
+ * render and raw-crop path.
  */
 export function illustrationRegionCanRenderLocally(document: IllustrationDocument, onlyLayerId?: string): boolean {
   const objectChildren = new Set(Object.values(document.objects).flatMap((object) => object.type === 'group' ? object.childIds : []));
@@ -113,7 +138,7 @@ export function illustrationRegionCanRenderLocally(document: IllustrationDocumen
     const object = document.objects[objectId];
     if (!object) return false;
     if (!object.visible) { visitedObjects.add(objectId); return true; }
-    if (!objectCanRenderPhaseExactly(object)) return false;
+    if (!objectCanRenderPhaseExactly(document, object)) return false;
     visitingObjects.add(objectId);
     const local = object.type !== 'group' || object.childIds.every(visitObject);
     visitingObjects.delete(objectId);

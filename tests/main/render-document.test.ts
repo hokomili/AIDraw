@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createCanvas, loadImage } from '@napi-rs/canvas';
-import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createIllustrationDocument, createPixelDocument, createPixelSprite, createPixelTilemap, createPixelTileset, encodeTiledGid, nowIso, writePixels, writeTiles, type CollisionShape, type GroupObject, type ShapeObject } from '@aidraw/core';
+import { createHash } from 'node:crypto';
+import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createIllustrationDocument, createPixelDocument, createPixelSprite, createPixelTilemap, createPixelTileset, encodeTiledGid, nowIso, writePixels, writeTiles, type CollisionShape, type DocumentAsset, type GroupObject, type ImageObject, type ShapeObject } from '@aidraw/core';
 import { exportDocument } from '@main/export-document';
 import { materializePaintTiles } from '@main/persistence';
 import { renderIllustration, renderIllustrationRegion, renderSprite, renderSpriteRegion, renderTilemap, renderTilemapRegion } from '@main/render-document';
@@ -74,6 +75,52 @@ describe('native document rendering', () => {
     const full = await renderIllustration(document); const actual = await renderIllustrationRegion(document, region);
     expect(Buffer.from(actual.getContext('2d').getImageData(0, 0, region.width, region.height).data)).toEqual(Buffer.from(full.getContext('2d').getImageData(region.x, region.y, region.width, region.height).data));
     full.width = 1; full.height = 1; actual.width = 1; actual.height = 1;
+  });
+
+  it('renders integer-phase embedded PNG regions byte-exactly against full-raster crops', async () => {
+    const document = createIllustrationDocument('Illustration PNG region parity');
+    document.artboard = { ...document.artboard, width: 96, height: 72, background: '#f8efe5' };
+    const layer = Object.values(document.layers).find((entry) => entry.type === 'vector');
+    if (!layer || layer.type !== 'vector') throw new Error('Expected vector layer');
+    const source = createCanvas(16, 12); const sourceContext = source.getContext('2d');
+    sourceContext.fillStyle = '#ff335580'; sourceContext.fillRect(0, 0, 8, 6);
+    sourceContext.fillStyle = '#22aa66'; sourceContext.fillRect(8, 0, 8, 6);
+    sourceContext.fillStyle = '#3355ff'; sourceContext.fillRect(0, 6, 8, 6);
+    sourceContext.fillStyle = '#ffd84d40'; sourceContext.fillRect(8, 6, 8, 6);
+    const bytes = source.toBuffer('image/png'); source.width = 1; source.height = 1;
+    const asset: DocumentAsset = { id: 'regional-png', name: 'Regional PNG', mimeType: 'image/png', byteLength: bytes.byteLength, sha256: createHash('sha256').update(bytes).digest('hex'), source: 'embedded', data: bytes.toString('base64') };
+    const timestamp = nowIso(); const base: ImageObject = {
+      id: 'regional-image', revision: 0, name: 'Regional image', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
+      layerId: layer.id, visible: true, locked: false, opacity: 1, blendMode: 'normal', transform: { ...IDENTITY_TRANSFORM, x: 31, y: 19 },
+      type: 'image', assetId: asset.id, width: 16, height: 12, sourceWidth: 16, sourceHeight: 12, filters: [],
+    };
+    const phaseCases: ImageObject[] = [
+      base,
+      { ...base, id: 'upscaled', width: 32, height: 24 },
+      { ...base, id: 'downscaled', width: 8, height: 6 },
+      { ...base, id: 'cropped-native', width: 9, height: 7, crop: { x: 3, y: 2, width: 9, height: 7 } },
+      { ...base, id: 'cropped-scaled', width: 27, height: 14, crop: { x: 3, y: 2, width: 9, height: 7 } },
+    ];
+    const regions = [{ x: 9, y: 5, width: 75, height: 56 }, { x: 17, y: 13, width: 67, height: 51 }];
+    document.assets[asset.id] = asset;
+    for (const background of ['#f8efe5', null]) for (const image of phaseCases) for (const region of regions) {
+      document.artboard.background = background; document.objects = { [image.id]: image }; layer.objectIds = [image.id];
+      const full = await renderIllustration(document); const regional = await renderIllustrationRegion(document, region);
+      expect(Buffer.from(regional.getContext('2d').getImageData(0, 0, region.width, region.height).data), `${image.id}/${background ?? 'transparent'}/${region.x},${region.y}`).toEqual(Buffer.from(full.getContext('2d').getImageData(region.x, region.y, region.width, region.height).data));
+      full.width = 1; full.height = 1; regional.width = 1; regional.height = 1;
+    }
+    const group: GroupObject = {
+      id: 'png-group', revision: 0, name: 'PNG group', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
+      layerId: layer.id, visible: true, locked: false, opacity: 1, blendMode: 'normal', transform: { ...IDENTITY_TRANSFORM, x: 2, y: 1 },
+      type: 'group', childIds: [base.id],
+    };
+    document.objects = { [base.id]: base, [group.id]: group }; layer.objectIds = [base.id, group.id];
+    for (const background of ['#f8efe5', null]) for (const region of regions) {
+      document.artboard.background = background;
+      const full = await renderIllustration(document); const regional = await renderIllustrationRegion(document, region);
+      expect(Buffer.from(regional.getContext('2d').getImageData(0, 0, region.width, region.height).data), `group/${background ?? 'transparent'}/${region.x},${region.y}`).toEqual(Buffer.from(full.getContext('2d').getImageData(region.x, region.y, region.width, region.height).data));
+      full.width = 1; full.height = 1; regional.width = 1; regional.height = 1;
+    }
   });
 
   it('renders a rectangular orthogonal cell at its authored aspect without resampling drift', async () => {

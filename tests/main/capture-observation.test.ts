@@ -1,5 +1,6 @@
 import { createCanvas, loadImage } from '@napi-rs/canvas';
-import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createIllustrationDocument, createPixelDocument, createPixelSprite, createPixelTilemap, createPixelTileset, nowIso, writePixels, writeTiles, type ShapeObject } from '@aidraw/core';
+import { createHash } from 'node:crypto';
+import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createIllustrationDocument, createPixelDocument, createPixelSprite, createPixelTilemap, createPixelTileset, nowIso, writePixels, writeTiles, type DocumentAsset, type ImageObject, type ShapeObject } from '@aidraw/core';
 import { describe, expect, it } from 'vitest';
 
 import { captureObservation, MAX_OBSERVATION_SIDE } from '../../src/main/capture-observation';
@@ -86,6 +87,30 @@ describe('bounded illustration observation', () => {
     const observed = await captureObservation(document, { region, scale: 1, background: 'transparent' });
     expect(observed).toMatchObject({ available: true, width: 1, height: 1, region });
     const image = await loadImage(Buffer.from(String(observed.data), 'base64')); const canvas = createCanvas(1, 1); canvas.getContext('2d').drawImage(image, 0, 0);
+    expect([...canvas.getContext('2d').getImageData(0, 0, 1, 1).data]).toEqual([255, 51, 102, 255]);
+
+    await expect(captureObservation(document, { scale: 1, background: 'transparent' })).resolves.toMatchObject({ error: 'observation_too_large', limit: { pixels: 4_194_304 } });
+  });
+
+  it('observes a tiny far-edge region from an integer-phase embedded PNG', async () => {
+    const document = createIllustrationDocument('Maximum embedded-PNG observation');
+    document.artboard = { ...document.artboard, width: 8_192, height: 8_192, background: null };
+    const layer = Object.values(document.layers).find((entry) => entry.type === 'vector');
+    if (!layer || layer.type !== 'vector') throw new Error('Expected vector layer');
+    const source = createCanvas(16, 16); source.getContext('2d').fillStyle = '#ff3366'; source.getContext('2d').fillRect(0, 0, 16, 16);
+    const bytes = source.toBuffer('image/png'); source.width = 1; source.height = 1;
+    const asset: DocumentAsset = { id: 'far-edge-png', name: 'Far edge PNG', mimeType: 'image/png', byteLength: bytes.byteLength, sha256: createHash('sha256').update(bytes).digest('hex'), source: 'embedded', data: bytes.toString('base64') };
+    const timestamp = nowIso(); const image: ImageObject = {
+      id: 'far-edge-image', revision: 0, name: 'Far edge image', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
+      layerId: layer.id, visible: true, locked: false, opacity: 1, blendMode: 'normal', transform: { ...IDENTITY_TRANSFORM, x: 8_176, y: 8_176 },
+      type: 'image', assetId: asset.id, width: 16, height: 16, sourceWidth: 16, sourceHeight: 16, filters: [],
+    };
+    document.assets[asset.id] = asset; document.objects[image.id] = image; layer.objectIds.push(image.id);
+    const region = { x: 8_184, y: 8_184, width: 1, height: 1 };
+
+    const observed = await captureObservation(document, { region, scale: 1, background: 'transparent' });
+    expect(observed).toMatchObject({ available: true, width: 1, height: 1, region });
+    const decoded = await loadImage(Buffer.from(String(observed.data), 'base64')); const canvas = createCanvas(1, 1); canvas.getContext('2d').drawImage(decoded, 0, 0);
     expect([...canvas.getContext('2d').getImageData(0, 0, 1, 1).data]).toEqual([255, 51, 102, 255]);
 
     await expect(captureObservation(document, { scale: 1, background: 'transparent' })).resolves.toMatchObject({ error: 'observation_too_large', limit: { pixels: 4_194_304 } });
