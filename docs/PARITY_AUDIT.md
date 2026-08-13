@@ -28,6 +28,8 @@ Human and approved-agent SVG import also share nested viewport resolution. Neste
 
 The same shared SVG importer rejects any transform-bearing geometry/container/reference/mask or referenced gradient whose parsed numbers, composed matrix, decomposition, or derived paint coordinates are non-finite. Human file import and approved-agent import therefore cannot diverge by admitting `Infinity`/`NaN` canonical state. Transforms on metadata and unsupported omitted elements remain irrelevant; this statement does not change the canonical magnitude policy or claim full transform grammar, external-corpus behavior, or packaged presentation.
 
+Both entry surfaces also receive the same completed-document canonical gate. Canvas-recognized standard CSS colors are reduced to canonical sRGB hex, invalid colors share one warned black fallback, reverse-direction lines retain exact endpoint geometry, and bounded names share the same truncation warnings. Any remaining out-of-model result fails the complete import with the same exact error before either surface can use it. This proves generated source/headless parity only; it does not claim a complete CSS grammar, color-profile fidelity, external-producer recovery, or packaged error presentation.
+
 ## Closed parity gaps
 
 | Area | Current contract and evidence |

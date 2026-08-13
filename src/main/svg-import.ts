@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { createCanvas } from '@napi-rs/canvas';
 import { XMLParser } from 'fast-xml-parser';
 import {
   HUMAN_ACTOR,
@@ -6,6 +7,7 @@ import {
   createId,
   createIllustrationDocument,
   nowIso,
+  validateDocument,
   type BlendMode,
   type DocumentAsset,
   type GroupObject,
@@ -47,7 +49,13 @@ const MAX_EDITABLE_OBJECTS = 100_000;
 const MAX_EMBEDDED_IMAGE_BYTES = 16 * 1024 * 1024;
 const MAX_ILLUSTRATION_TEXT_BOX_SIZE = 1_000_000;
 const MAX_ILLUSTRATION_IMAGE_SIZE = 1_000_000;
+const MAX_CANONICAL_ENTITY_NAME_LENGTH = 200;
+const MAX_CANONICAL_COLOR_SOURCE_LENGTH = 256;
+const MAX_CANONICAL_GRADIENT_STOPS = 32;
+const MAX_CANONICAL_TEXT_LENGTH = 100_000;
+const MAX_CANONICAL_TEXT_RANGES = 100_000;
 const NON_FINITE_SVG_TRANSFORM_ERROR = 'SVG transform produces non-finite canonical geometry.';
+const INVALID_CANONICAL_SVG_ERROR = "SVG import produced content outside AIDraw's canonical illustration limits.";
 
 interface AIDrawSvgTextBox { width: number; height: number; lineHeight: number }
 interface AIDrawSvgImageCrop {
@@ -326,6 +334,40 @@ export function importEditableSvg(source: string, name: string): SvgImportResult
   const root = parsed.map(nodeFromOrdered).find((node) => node?.tag === 'svg');
   if (!root) throw new Error('SVG root element was not found.');
   const warnings = new Set<string>();
+  const colorCanvas = createCanvas(1, 1); const colorContext = colorCanvas.getContext('2d'); const colorCache = new Map<string, string>();
+  const rememberColor = (sourceColor: string, canonical: string): string => { if (colorCache.size < 4_096) colorCache.set(sourceColor, canonical); return canonical; };
+  const canonicalColor = (value: string | undefined): string => {
+    const sourceColor = String(value ?? '#000000').trim(); const cached = colorCache.get(sourceColor); if (cached) return cached;
+    if (/^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(sourceColor)) return rememberColor(sourceColor, sourceColor.toLowerCase());
+    const shorthand = /^#([0-9a-f]{3,4})$/i.exec(sourceColor);
+    if (shorthand) return rememberColor(sourceColor, `#${[...shorthand[1]].map((character) => character.repeat(2)).join('').toLowerCase()}`);
+    let accepted = false;
+    if (sourceColor && sourceColor.length <= MAX_CANONICAL_COLOR_SOURCE_LENGTH) {
+      try {
+        colorContext.fillStyle = '#010203'; colorContext.fillStyle = sourceColor; const first = String(colorContext.fillStyle);
+        colorContext.fillStyle = '#040506'; colorContext.fillStyle = sourceColor; accepted = first === String(colorContext.fillStyle);
+      } catch { accepted = false; }
+    }
+    if (!accepted) {
+      warnings.add('Unsupported SVG color was replaced with canonical black.');
+      return rememberColor(sourceColor, '#000000');
+    }
+    colorContext.clearRect(0, 0, 1, 1); colorContext.globalAlpha = 1; colorContext.globalCompositeOperation = 'source-over'; colorContext.fillStyle = sourceColor; colorContext.fillRect(0, 0, 1, 1);
+    const channels = colorContext.getImageData(0, 0, 1, 1).data; const hex = (channel: number) => channel.toString(16).padStart(2, '0');
+    return rememberColor(sourceColor, `#${hex(channels[0])}${hex(channels[1])}${hex(channels[2])}${channels[3] === 255 ? '' : hex(channels[3])}`);
+  };
+  const boundedName = (value: unknown, fallback: string): string => {
+    const sourceName = String(value ?? '') || fallback;
+    if (sourceName.length <= MAX_CANONICAL_ENTITY_NAME_LENGTH) return sourceName;
+    warnings.add('SVG names longer than 200 characters were truncated for editable import.');
+    return sourceName.slice(0, MAX_CANONICAL_ENTITY_NAME_LENGTH);
+  };
+  const boundedFontFamily = (value: string | undefined): string => {
+    const sourceFamily = value?.trim() || 'sans-serif';
+    if (sourceFamily.length <= MAX_CANONICAL_ENTITY_NAME_LENGTH) return sourceFamily;
+    warnings.add('SVG font-family values longer than 200 characters were truncated for editable import.');
+    return sourceFamily.slice(0, MAX_CANONICAL_ENTITY_NAME_LENGTH);
+  };
   const viewBox = svgViewBox(root.attributes.viewBox, warnings);
   const width = Math.ceil(positiveLength(root.attributes.width, viewBox?.width || 1920));
   const height = Math.ceil(positiveLength(root.attributes.height, viewBox?.height || 1080));
@@ -349,7 +391,7 @@ export function importEditableSvg(source: string, name: string): SvgImportResult
     if (objectCount > MAX_EDITABLE_OBJECTS) throw new Error(`SVG exceeds the ${MAX_EDITABLE_OBJECTS.toLocaleString('en-US')} editable-object limit.`);
     const timestamp = nowIso(); const mode = style['mix-blend-mode'] as BlendMode | undefined;
     return {
-      id: createId('object'), revision: 0, name: String(node.attributes['aria-label'] ?? node.attributes.id ?? fallbackName), createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
+      id: createId('object'), revision: 0, name: boundedName(node.attributes['aria-label'] ?? node.attributes.id, fallbackName), createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
       layerId: layer.id, visible: style.display !== 'none' && style.visibility !== 'hidden', locked: false, opacity: clamp01(style.opacity), blendMode: mode && blendModes.has(mode) ? mode : 'normal' as BlendMode,
       transform: transformFromMatrix(matrix),
     };
@@ -366,14 +408,16 @@ export function importEditableSvg(source: string, name: string): SvgImportResult
     const attributes = { ...(inherited?.attributes ?? {}), ...node.attributes };
     const stopNodes = node.children.filter((child) => child.tag === 'stop');
     const sourceStops = stopNodes.length ? stopNodes : inherited?.children.filter((child) => child.tag === 'stop') ?? [];
+    if (sourceStops.length > MAX_CANONICAL_GRADIENT_STOPS) throw new Error(INVALID_CANONICAL_SVG_ERROR);
     const stops = sourceStops.map((stop, stopIndex) => {
       const stopStyle = { ...declarations(stop.attributes.style), ...Object.fromEntries(Object.entries(stop.attributes).map(([key, value]) => [key, String(value)])) };
       const offsetSource = String(stopStyle.offset ?? (sourceStops.length <= 1 ? 0 : stopIndex / (sourceStops.length - 1)));
       const offset = clamp01(offsetSource.endsWith('%') ? finite(offsetSource) / 100 : offsetSource, stopIndex / Math.max(1, sourceStops.length - 1));
-      return { offset, color: stopStyle['stop-color'] ?? '#000000', opacity: clamp01(stopStyle['stop-opacity']) };
+      return { offset, color: canonicalColor(stopStyle['stop-color']), opacity: clamp01(stopStyle['stop-opacity']) };
     });
     if (!stops.length && href) return gradient(href, bounds, nextStack);
     if (!stops.length) stops.push({ offset: 0, color: '#000000', opacity: 1 }, { offset: 1, color: '#ffffff', opacity: 1 });
+    else if (stops.length === 1) stops.splice(0, 1, { ...stops[0], offset: 0 }, { ...stops[0], offset: 1 });
     const units = String(attributes.gradientUnits ?? 'objectBoundingBox');
     const box = units === 'userSpaceOnUse' ? { x: 0, y: 0, width, height } : bounds;
     const transform = svgTransform(attributes.gradientTransform);
@@ -393,18 +437,19 @@ export function importEditableSvg(source: string, name: string): SvgImportResult
     return { kind: 'radial-gradient', stops, x1: center.x, y1: center.y, x2: edge.x, y2: edge.y };
   };
 
-  const paint = (value: string | undefined, bounds: Bounds, fallback: string): PaintStyle => {
+  const paint = (value: string | undefined, bounds: Bounds, fallback: string, currentColor = '#000000'): PaintStyle => {
     const sourceValue = value ?? fallback;
     if (sourceValue === 'none') return { kind: 'none' };
     const reference = /^url\(\s*#([^\s)]+)\s*\)$/.exec(sourceValue);
     if (reference) return gradient(reference[1], bounds) ?? (warnings.add(`Unsupported SVG paint server #${reference[1]} was replaced with black.`), { kind: 'solid', color: '#000000' });
-    return { kind: 'solid', color: sourceValue === 'currentColor' ? '#000000' : sourceValue };
+    return { kind: 'solid', color: canonicalColor(sourceValue === 'currentColor' ? currentColor : sourceValue) };
   };
 
   const stroke = (style: Style, bounds: Bounds): StrokeStyle => {
     const lineCap = ['butt', 'round', 'square'].includes(style['stroke-linecap']) ? style['stroke-linecap'] as StrokeStyle['lineCap'] : 'butt';
     const lineJoin = ['miter', 'round', 'bevel'].includes(style['stroke-linejoin']) ? style['stroke-linejoin'] as StrokeStyle['lineJoin'] : 'miter';
-    return { paint: paint(style.stroke, bounds, 'none'), width: Math.max(0, finite(style['stroke-width'], 1)), opacity: clamp01(style['stroke-opacity']), lineCap, lineJoin, dash: numberList(style['stroke-dasharray']) };
+    const sourcePaint = style.stroke === 'currentColor' ? style.color ?? '#000000' : style.stroke;
+    return { paint: paint(sourcePaint, bounds, 'none', style.color), width: Math.max(0, finite(style['stroke-width'], 1)), opacity: clamp01(style['stroke-opacity']), lineCap, lineJoin, dash: numberList(style['stroke-dasharray']) };
   };
 
   const blurFor = (style: Style): number | undefined => {
@@ -433,7 +478,7 @@ export function importEditableSvg(source: string, name: string): SvgImportResult
     const before = objectCount;
     const object = firstGeometry(definition, {}, IDENTITY_MATRIX, 0);
     if (!object) { warnings.add(`SVG clip or mask #${id} contains no supported path geometry.`); return undefined; }
-    object.visible = false; object.name = `Mask · ${id}`; maskObjects.set(id, object.id);
+    object.visible = false; object.name = boundedName(`Mask · ${id}`, 'Mask'); maskObjects.set(id, object.id);
     if (objectCount - before > 1 || definition.children.filter((child) => supportedGeometry.has(child.tag)).length > 1) warnings.add('Multi-shape SVG clips/masks currently use their first editable geometry.');
     if (definition.tag === 'mask') warnings.add('SVG luminance/alpha masks were approximated with editable clipping geometry.');
     return object.id;
@@ -487,25 +532,27 @@ export function importEditableSvg(source: string, name: string): SvgImportResult
     const visuallyFinite = (local: Matrix): Matrix => { finiteSvgMatrix(multiply(visualPrefix, local)); return local; };
     if (node.tag === 'rect') {
       const objectWidth = Math.max(0, finite(node.attributes.width)); const objectHeight = Math.max(0, finite(node.attributes.height)); const bounds = { x: 0, y: 0, width: objectWidth, height: objectHeight };
-      const object: ShapeObject = { ...base(node, style, visuallyFinite(multiply(matrix, translate(finite(node.attributes.x), finite(node.attributes.y)))), 'Rectangle'), type: 'shape', shape: 'rectangle', width: objectWidth, height: objectHeight, cornerRadius: Math.max(0, finite(node.attributes.rx ?? node.attributes.ry)), fill: paint(style.fill, bounds, '#000000'), stroke: stroke(style, bounds) };
+      const object: ShapeObject = { ...base(node, style, visuallyFinite(multiply(matrix, translate(finite(node.attributes.x), finite(node.attributes.y)))), 'Rectangle'), type: 'shape', shape: 'rectangle', width: objectWidth, height: objectHeight, cornerRadius: Math.max(0, finite(node.attributes.rx ?? node.attributes.ry)), fill: paint(style.fill, bounds, '#000000', style.color), stroke: stroke(style, bounds) };
       return finish(object, style, asMask);
     }
     if (node.tag === 'ellipse' || node.tag === 'circle') {
       const radiusX = Math.max(0, finite(node.attributes.rx ?? node.attributes.r)); const radiusY = Math.max(0, finite(node.attributes.ry ?? node.attributes.r)); const bounds = { x: 0, y: 0, width: radiusX * 2, height: radiusY * 2 };
-      const object: ShapeObject = { ...base(node, style, visuallyFinite(multiply(matrix, translate(finite(node.attributes.cx, radiusX) - radiusX, finite(node.attributes.cy, radiusY) - radiusY))), 'Ellipse'), type: 'shape', shape: 'ellipse', width: radiusX * 2, height: radiusY * 2, fill: paint(style.fill, bounds, '#000000'), stroke: stroke(style, bounds) };
+      const object: ShapeObject = { ...base(node, style, visuallyFinite(multiply(matrix, translate(finite(node.attributes.cx, radiusX) - radiusX, finite(node.attributes.cy, radiusY) - radiusY))), 'Ellipse'), type: 'shape', shape: 'ellipse', width: radiusX * 2, height: radiusY * 2, fill: paint(style.fill, bounds, '#000000', style.color), stroke: stroke(style, bounds) };
       return finish(object, style, asMask);
     }
     if (node.tag === 'line') {
       const x1 = finite(node.attributes.x1); const y1 = finite(node.attributes.y1); const objectWidth = finite(node.attributes.x2) - x1; const objectHeight = finite(node.attributes.y2) - y1; const bounds = { x: 0, y: 0, width: Math.abs(objectWidth), height: Math.abs(objectHeight) };
       const arrow = Boolean(style['marker-end'] ?? node.attributes['marker-end']);
-      const object: ShapeObject = { ...base(node, style, visuallyFinite(multiply(matrix, translate(x1, y1))), arrow ? 'Arrow' : 'Line'), type: 'shape', shape: arrow ? 'arrow' : 'line', width: objectWidth, height: objectHeight, fill: { kind: 'none' }, stroke: stroke(style, bounds) };
+      const direction: Matrix = [objectWidth < 0 ? -1 : 1, 0, 0, objectHeight < 0 ? -1 : 1, 0, 0];
+      const lineMatrix = multiply(multiply(matrix, translate(x1, y1)), direction);
+      const object: ShapeObject = { ...base(node, style, visuallyFinite(lineMatrix), arrow ? 'Arrow' : 'Line'), type: 'shape', shape: arrow ? 'arrow' : 'line', width: Math.abs(objectWidth), height: Math.abs(objectHeight), fill: { kind: 'none' }, stroke: stroke(style, bounds) };
       return finish(object, style, asMask);
     }
     if (node.tag === 'path' || node.tag === 'polygon' || node.tag === 'polyline') {
       const pathData = node.tag === 'path' ? String(node.attributes.d ?? '') : pathFromPoints(parsePoints(node.attributes.points), node.tag === 'polygon');
       if (!pathData.trim()) return undefined;
       const bounds = { x: 0, y: 0, width, height };
-      const object: PathObject = { ...base(node, style, visuallyFinite(matrix), node.tag === 'path' ? 'Path' : node.tag === 'polygon' ? 'Polygon' : 'Polyline'), type: 'path', pathData, closed: node.tag === 'polygon' || /[zZ]\s*$/.test(pathData), fill: paint(style.fill, bounds, node.tag === 'polyline' ? 'none' : '#000000'), stroke: stroke(style, bounds), fillRule: style['fill-rule'] === 'evenodd' ? 'evenodd' : 'nonzero' };
+      const object: PathObject = { ...base(node, style, visuallyFinite(matrix), node.tag === 'path' ? 'Path' : node.tag === 'polygon' ? 'Polygon' : 'Polyline'), type: 'path', pathData, closed: node.tag === 'polygon' || /[zZ]\s*$/.test(pathData), fill: paint(style.fill, bounds, node.tag === 'polyline' ? 'none' : '#000000', style.color), stroke: stroke(style, bounds), fillRule: style['fill-rule'] === 'evenodd' ? 'evenodd' : 'nonzero' };
       if (style.fill?.startsWith('url(')) warnings.add('Object-bounding-box gradients on arbitrary SVG paths use the artboard as a conservative editable bound.');
       return finish(object, style, asMask);
     }
@@ -521,7 +568,12 @@ export function importEditableSvg(source: string, name: string): SvgImportResult
     }
     if (node.tag === 'text') {
       const ranges: TextStyleRange[] = []; let content = '';
-      const appendText = (text: string, rangeStyle: Style) => { if (!text) return; const start = content.length; content += text; const fontSize = Math.max(1, finite(rangeStyle['font-size'], 48)); ranges.push({ start, end: content.length, fontFamily: rangeStyle['font-family'] ?? 'sans-serif', fontSize, fontWeight: Math.max(1, finite(rangeStyle['font-weight'], 400)), fontStyle: rangeStyle['font-style'] === 'italic' ? 'italic' : 'normal', color: rangeStyle.fill ?? '#000000', letterSpacing: finite(rangeStyle['letter-spacing']), underline: rangeStyle['text-decoration']?.includes('underline') }); };
+      const appendText = (text: string, rangeStyle: Style) => {
+        if (!text) return;
+        if (content.length + text.length > MAX_CANONICAL_TEXT_LENGTH || ranges.length >= MAX_CANONICAL_TEXT_RANGES) throw new Error(INVALID_CANONICAL_SVG_ERROR);
+        const start = content.length; content += text; const fontSize = Math.max(1, finite(rangeStyle['font-size'], 48)); const fill = rangeStyle.fill === 'currentColor' ? rangeStyle.color ?? '#000000' : rangeStyle.fill;
+        ranges.push({ start, end: content.length, fontFamily: boundedFontFamily(rangeStyle['font-family']), fontSize, fontWeight: Math.max(1, finite(rangeStyle['font-weight'], 400)), fontStyle: rangeStyle['font-style'] === 'italic' ? 'italic' : 'normal', color: canonicalColor(fill), letterSpacing: finite(rangeStyle['letter-spacing']), underline: rangeStyle['text-decoration']?.includes('underline') });
+      };
       const collect = (value: SvgNode, inherited: Style) => { const current = styleFor(value, inherited, rules); if (value.tag === '#text') appendText(value.text ?? '', current); else value.children.forEach((child) => collect(child, current)); };
       node.children.forEach((child) => collect(child, style));
       if (!content) content = textContent(node);
@@ -632,5 +684,12 @@ export function importEditableSvg(source: string, name: string): SvgImportResult
     finish(wrapper, rootStyle, false);
   }
   document.dirty = true;
-  return { document, warnings: [...warnings] };
+  try {
+    const canonical = validateDocument(document);
+    if (canonical.kind !== 'illustration') throw new Error(INVALID_CANONICAL_SVG_ERROR);
+    return { document: canonical, warnings: [...warnings] };
+  } catch (error) {
+    if (error instanceof Error && error.message === INVALID_CANONICAL_SVG_ERROR) throw error;
+    throw new Error(INVALID_CANONICAL_SVG_ERROR);
+  }
 }

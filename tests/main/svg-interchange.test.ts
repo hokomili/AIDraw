@@ -8,7 +8,7 @@ import { importDocument } from '@main/import-document';
 import { illustrationToSvg } from '@main/export-document';
 import { importEditableSvg } from '@main/svg-import';
 import { renderIllustration } from '@main/render-document';
-import { createIllustrationDocument, HUMAN_ACTOR, IDENTITY_TRANSFORM, nowIso, type DocumentAsset, type ImageObject, type TextObject } from '@aidraw/core';
+import { createIllustrationDocument, HUMAN_ACTOR, IDENTITY_TRANSFORM, nowIso, validateDocument, type DocumentAsset, type ImageObject, type TextObject } from '@aidraw/core';
 
 const fixture = join(process.cwd(), 'tests', 'fixtures', 'svg', 'structured-editor.svg');
 
@@ -35,6 +35,7 @@ describe('editable SVG interchange', () => {
     expect(byName('badge-use')?.type).toBe('group');
     expect(byName('ViewBox')).toMatchObject({ type: 'group', transform: { x: -10, y: -20 } });
     expect(imported.warnings).toContainEqual(expect.stringMatching(/foreignObject/));
+    expect(validateDocument(document)).toEqual(document);
   });
 
   it('round-trips the supported editable structure through AIDraw SVG export', async () => {
@@ -142,6 +143,53 @@ describe('editable SVG interchange', () => {
     const ignored = importEditableSvg(svg('<title transform="scale(1e309)">Metadata only</title><foreignObject transform="scale(1e309)"/><rect id="safe" width="4" height="4" transform="unknown(1e309)"/>'), 'Ignored transforms');
     expect(Object.values(ignored.document.objects).some((entry) => entry.name === 'safe')).toBe(true);
     expect(ignored.warnings).toContain('Unsupported SVG <foreignObject> content was omitted.');
+  });
+
+  it('returns canonical editable SVG colors, names, and reverse-direction line geometry or fails the whole import', async () => {
+    const svg = (body: string) => `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="48">${body}</svg>`;
+    const longName = 'n'.repeat(201); const longFamily = 'f'.repeat(201);
+    const result = importEditableSvg(svg(`
+      <defs><linearGradient id="colors"><stop offset="0" stop-color="#abc"/><stop offset="1" stop-color="rgba(10,20,30,.5)"/></linearGradient><linearGradient id="single"><stop offset=".5" stop-color="orange"/></linearGradient></defs>
+      <rect id="named" x="0" width="8" height="8" fill="red"/>
+      <rect id="short-alpha" x="8" width="8" height="8" fill="#0f08"/>
+      <rect id="functional" x="16" width="8" height="8" fill="hsl(240 100% 50%)"/>
+      <g color="rebeccapurple"><rect id="current" x="24" width="8" height="8" fill="currentColor"/></g>
+      <rect id="transparent" x="32" width="8" height="8" fill="transparent"/>
+      <rect id="invalid" x="40" width="8" height="8" fill="not-a-color"/>
+      <rect id="gradient" y="8" width="8" height="8" fill="url(#colors)"/>
+      <rect id="single-gradient" x="8" y="8" width="8" height="8" fill="url(#single)"/>
+      <line id="reverse" x1="20" y1="30" x2="5" y2="12" stroke="rgb(10, 20, 30)"/>
+      <rect id="${longName}" y="32" width="2" height="2"/>
+      <text id="bounded-font" y="46" font-family="${longFamily}" font-size="12" fill="navy">x</text>
+    `), 'Canonical SVG');
+    const byName = (name: string) => Object.values(result.document.objects).find((object) => object.name === name);
+    const color = (name: string) => { const object = byName(name); return object?.type === 'shape' && object.fill.kind === 'solid' ? object.fill.color : undefined; };
+    expect(color('named')).toBe('#ff0000'); expect(color('short-alpha')).toBe('#00ff0088'); expect(color('functional')).toBe('#0000ff');
+    expect(color('current')).toBe('#663399'); expect(color('transparent')).toBe('#00000000'); expect(color('invalid')).toBe('#000000');
+    const gradient = byName('gradient'); expect(gradient?.type === 'shape' ? gradient.fill : undefined).toMatchObject({ kind: 'linear-gradient', stops: [{ color: '#aabbcc' }, { color: '#0a141e7f' }] });
+    const single = byName('single-gradient'); expect(single?.type === 'shape' ? single.fill : undefined).toMatchObject({ kind: 'linear-gradient', stops: [{ offset: 0, color: '#ffa500' }, { offset: 1, color: '#ffa500' }] });
+    expect(byName('reverse')).toMatchObject({ type: 'shape', width: 15, height: 18, transform: { x: 20, y: 30, scaleX: 1, scaleY: 1, rotation: 180 } });
+    expect(byName(longName.slice(0, 200))?.name).toHaveLength(200); const text = byName('bounded-font'); expect(text?.type === 'text' ? text.ranges[0].fontFamily : undefined).toHaveLength(200);
+    expect(result.warnings).toContain('Unsupported SVG color was replaced with canonical black.');
+    expect(result.warnings).toContain('SVG names longer than 200 characters were truncated for editable import.');
+    expect(result.warnings).toContain('SVG font-family values longer than 200 characters were truncated for editable import.');
+    expect(validateDocument(result.document)).toEqual(result.document);
+
+    const invalid = [
+      svg('<rect width="4" height="4" transform="scale(10001)"/>'),
+      svg('<rect width="1000001" height="4"/>'),
+      svg('<line x2="4" y2="4" stroke="#000" stroke-width="10001"/>'),
+      svg('<defs><filter id="blur"><feGaussianBlur stdDeviation="4097"/></filter></defs><rect width="4" height="4" filter="url(#blur)"/>'),
+      svg(`<defs><linearGradient id="many">${Array.from({ length: 33 }, (_, index) => `<stop offset="${index / 32}" stop-color="#000"/>`).join('')}</linearGradient></defs><rect width="4" height="4" fill="url(#many)"/>`),
+      svg('<text y="10" font-size="501">x</text>'),
+    ];
+    for (const source of invalid) expect(() => importEditableSvg(source, 'Non-canonical SVG')).toThrow("SVG import produced content outside AIDraw's canonical illustration limits.");
+
+    const directory = await mkdtemp(join(tmpdir(), 'aidraw-svg-canonical-')); const filePath = join(directory, 'invalid.svg');
+    try {
+      await writeFile(filePath, invalid[0], 'utf8');
+      await expect(importDocument(filePath)).rejects.toThrow("SVG import produced content outside AIDraw's canonical illustration limits.");
+    } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
   it('preserves centered and right-aligned AIDraw text boxes without shifting their transforms', () => {
