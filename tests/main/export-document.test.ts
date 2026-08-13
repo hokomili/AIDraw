@@ -274,6 +274,21 @@ describe('interchange exporters', () => {
     await expect(exportDocument(illustration, 'png', { scale: 2 })).rejects.toThrow('available for pixel documents');
   });
 
+  it('rejects over-budget Tiled layer planes before companion rendering or chunk decode', async () => {
+    const document = createPixelDocument('project', 'Tiled export preflight'); document.assetIds = []; document.pixelAssets = {};
+    const sprite = createPixelSprite('Unreachable companion', 1, 1);
+    const tileset = createPixelTileset('Unreachable companion', sprite.id, 1, 1, 1, 1);
+    const map = createPixelTilemap('Over-budget finite map'); map.width = 2_049; map.height = 2_048; map.tilesetIds = [tileset.id];
+    const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile' || !layer.chunks) throw new Error('Expected tile layer');
+    layer.chunks['0,0'] = { x: 0, y: 0, width: 32, height: 32, data: 'payload must not decode' };
+    Object.defineProperty(sprite, 'width', { configurable: true, get() { throw new Error('Tiled companion rendering started before resource preflight.'); } });
+    document.pixelAssets = { [sprite.id]: sprite, [tileset.id]: tileset, [map.id]: map }; document.assetIds = [sprite.id, tileset.id, map.id]; document.activeAssetId = map.id;
+
+    for (const format of ['tiled-json', 'tiled-xml'] as const) {
+      await expect(exportDocument(document, format)).rejects.toThrow('4,194,304-cell safety limit');
+    }
+  });
+
   it('exports Tiled JSON/XML with first-GID ranges, chunks, and source artwork', async () => {
     const document = createPixelDocument('project', 'Terrain'); document.assetIds = []; document.pixelAssets = {};
     const sprite = createPixelSprite('Terrain pixels', 16, 16); writePixels(Object.values(sprite.cels)[0], [{ x: 0, y: 0, index: 3 }]);

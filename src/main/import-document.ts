@@ -41,6 +41,7 @@ import { createExactAnimationPalettePlanner, exactAnimationFrameChanges, exactSh
 import { tryAppendInterchangeFidelityEntry, type InterchangeFidelityEntry } from '../common/interchange-fidelity';
 import { aidrawPsdTextGeometry, aidrawPsdTextObjectName, psdLayerHasPartialLock, psdLayerIsLockedAll } from '../common/psd-text';
 import { MAX_PSD_EXPANDED_LAYER_PIXELS, MAX_PSD_LAYER_NESTING_DEPTH, MAX_PSD_LAYER_RECORDS } from '../common/psd-limits';
+import { MAX_TILED_DEPTH, MAX_TILED_LAYERS, MAX_TILED_LAYER_CELLS, MAX_TILED_OBJECTS, MAX_TILED_TOTAL_CELLS } from '../common/tiled-resource-policy';
 import { displayImageDimensions, inspectImageHeader, MAX_INLINE_ASSET_BYTES, MAX_INLINE_IMAGE_DIMENSION, MAX_INLINE_IMAGE_PIXELS } from './transaction-policy';
 import { importEditableSvg } from './svg-import';
 import { MAX_IMPORT_UTILITY_DOCUMENTS, MAX_IMPORT_UTILITY_SERIALIZED_BYTES } from './utility-contract';
@@ -66,11 +67,6 @@ const PDF_TEXT_TRANSFER_LIMIT_ERROR = `PDF editable text exceeds the ${Math.floo
 const INVALID_CANONICAL_PSD_ERROR = "PSD import produced content outside AIDraw's canonical document limits.";
 const PSD_TEXT_TRANSFER_LIMIT_ERROR = `PSD editable text exceeds the ${Math.floor(MAX_IMPORT_UTILITY_SERIALIZED_BYTES / 1024 / 1024)} MiB imported-document transfer limit.`;
 const PSD_PALETTE_FALLBACK_WARNING = 'PSD raster layers contain more than 255 visible RGBA colors after the alpha threshold; layers were quantized to the document palette.';
-const MAX_TILED_LAYERS = 4_096;
-const MAX_TILED_DEPTH = 64;
-const MAX_TILED_LAYER_CELLS = 4_194_304;
-const MAX_TILED_TOTAL_CELLS = 16_777_216;
-const MAX_TILED_OBJECTS = 100_000;
 const MAX_TILESET_TILES = 1_048_576;
 
 export async function renderPdfPagePng(

@@ -24,6 +24,7 @@ import { splitColorAlpha } from '../common/color';
 import { AIDRAW_PSD_EDITABLE_TEXT_SUFFIX, aidrawPsdLockFields, aidrawPsdTextMatrix } from '../common/psd-text';
 import { MAX_PSD_EXPANDED_LAYER_PIXELS, MAX_PSD_LAYER_RECORDS, assertPsdLayerStructureBudget } from '../common/psd-limits';
 import { MAX_STATIC_RASTER_PIXELS } from '../common/static-raster';
+import { assertTiledExportResourceBudget } from '../common/tiled-resource-policy';
 import { layoutStyledText } from '../common/text-layout';
 import { MAX_INTERCHANGE_FIDELITY_ENTRIES, tryAppendInterchangeFidelityEntry, type InterchangeFidelityEntry } from '../common/interchange-fidelity';
 import type { ExportFormat, ExportOptions } from '../common/contracts';
@@ -786,6 +787,7 @@ function tilesetJson(document: PixelDocument, tileset: PixelTileset, image?: str
 }
 
 export function tilemapToTiled(document: PixelDocument, map: PixelTilemap, images: Record<string, string> = {}) {
+  assertTiledExportResourceBudget(map);
   let nextLayerId = 1;
   const layerJson = (id: string): Record<string, unknown> => {
     const layer = map.layers[id]; const common = { id: nextLayerId++, name: layer.name, visible: layer.visible, opacity: layer.opacity, parallaxx: layer.parallaxX, parallaxy: layer.parallaxY };
@@ -843,6 +845,7 @@ function tilemapXml(document: PixelDocument, map: PixelTilemap, images: Record<s
 
 async function tiled(document: PixelDocument, format: 'tiled-json' | 'tiled-xml'): Promise<ExportArtifact> {
   const active = document.pixelAssets[document.activeAssetId]; if (active?.type !== 'tilemap' && active?.type !== 'tileset') throw new Error('Choose a tilemap or tileset before Tiled export.');
+  if (active.type === 'tilemap') assertTiledExportResourceBudget(active);
   const tilesets = active.type === 'tilemap' ? active.tilesetIds.map((id) => document.pixelAssets[id]).filter((asset): asset is PixelTileset => asset?.type === 'tileset') : [active]; const images: Record<string, string> = {}; const companions: NonNullable<ExportArtifact['companions']> = [];
   for (const tileset of tilesets) { const sprite = document.pixelAssets[tileset.spriteAssetId]; if (sprite?.type !== 'sprite') continue; const name = safeTiledAssetName(tileset.name, 'png'); images[tileset.id] = name; companions.push({ name, extension: 'png', mimeType: 'image/png', data: renderSprite(document, sprite).toBuffer('image/png') }); }
   if (active.type === 'tileset') {
