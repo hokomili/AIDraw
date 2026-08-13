@@ -1,12 +1,113 @@
 import { describe, expect, it, vi } from 'vitest';
 import { HUMAN_ACTOR, createPixelDocument, nowIso, readPixel, writePixels } from '@aidraw/core';
 import { GIFEncoder } from 'gifenc';
+import { crc32, deflateSync } from 'node:zlib';
 
 vi.mock('electron', () => ({ nativeImage: { createFromBuffer: () => ({ isEmpty: () => true }) } }));
 
 import { exportDocument } from '../../src/main/export-document';
 import { importApngBytes, importGifBytes } from '../../src/main/import-document';
 import { decodeApng } from '../../src/main/apng';
+
+const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+const ADAM7_PASSES = [
+  [0, 0, 8, 8], [4, 0, 8, 8], [0, 4, 4, 8], [2, 0, 4, 4],
+  [0, 2, 2, 4], [1, 0, 2, 2], [0, 1, 1, 2],
+] as const;
+type Rgba = readonly [number, number, number, number];
+
+function pngChunk(type: string, data = Buffer.alloc(0)): Buffer {
+  const typeBytes = Buffer.from(type, 'ascii'); const chunk = Buffer.alloc(data.byteLength + 12);
+  chunk.writeUInt32BE(data.byteLength, 0); typeBytes.copy(chunk, 4); data.copy(chunk, 8);
+  chunk.writeUInt32BE(crc32(Buffer.concat([typeBytes, data])) >>> 0, data.byteLength + 8);
+  return chunk;
+}
+
+function rewritePngChunk(bytes: Buffer, targetType: string, occurrence: number, mutate: (data: Buffer) => void, validCrc = true): Buffer {
+  const rewritten = Buffer.from(bytes); let offset = 8; let matched = 0;
+  while (offset + 12 <= rewritten.length) {
+    const length = rewritten.readUInt32BE(offset); const type = rewritten.toString('ascii', offset + 4, offset + 8); const start = offset + 8; const end = start + length;
+    if (end + 4 > rewritten.length) break;
+    if (type === targetType && matched++ === occurrence) {
+      const data = Buffer.from(rewritten.subarray(start, end)); mutate(data); if (data.length !== length) throw new Error('PNG test mutations must retain chunk length.'); data.copy(rewritten, start);
+      if (validCrc) rewritten.writeUInt32BE(crc32(rewritten.subarray(offset + 4, end)) >>> 0, end); else rewritten[end + 3] ^= 1;
+      return rewritten;
+    }
+    offset = end + 4;
+  }
+  throw new Error(`PNG test fixture is missing ${targetType} occurrence ${occurrence}.`);
+}
+
+function rgbaScanlines(width: number, height: number, rgbaAt: (x: number, y: number) => Rgba, interlaced: boolean): Buffer {
+  const rows: Buffer[] = [];
+  const passes = interlaced ? ADAM7_PASSES : [[0, 0, 1, 1]] as const;
+  for (const [startX, startY, stepX, stepY] of passes) {
+    if (startX >= width || startY >= height) continue;
+    for (let y = startY; y < height; y += stepY) {
+      const row: number[] = [0]; for (let x = startX; x < width; x += stepX) row.push(...rgbaAt(x, y)); rows.push(Buffer.from(row));
+    }
+  }
+  return Buffer.concat(rows);
+}
+
+function apngFrameControl(sequence: number, width: number, height: number, x: number, y: number, delayNumerator: number, dispose: 0 | 1 | 2, blend: 0 | 1) {
+  const control = Buffer.alloc(26); control.writeUInt32BE(sequence, 0); control.writeUInt32BE(width, 4); control.writeUInt32BE(height, 8); control.writeUInt32BE(x, 12); control.writeUInt32BE(y, 16); control.writeUInt16BE(delayNumerator, 20); control.writeUInt16BE(100, 22); control[24] = dispose; control[25] = blend; return control;
+}
+
+function interlacedRgbaApng(malformedFirstFrame = false): { bytes: Buffer; expectedFrames: [Uint8ClampedArray, Uint8ClampedArray] } {
+  const width = 8; const height = 8; const patchWidth = 3; const patchHeight = 3; const patchX = 2; const patchY = 3;
+  const firstColors: Rgba[] = [[0, 0, 0, 0], [255, 107, 122, 255], [49, 166, 160, 255], [229, 184, 75, 255]];
+  const patchColors: Rgba[] = [[255, 107, 122, 255], [155, 227, 194, 255], [57, 120, 184, 255], [0, 0, 0, 0]];
+  const firstAt = (x: number, y: number): Rgba => firstColors[(x + y * 2) % firstColors.length];
+  const patchAt = (x: number, y: number): Rgba => patchColors[(x * 2 + y) % patchColors.length];
+  const first = new Uint8ClampedArray(width * height * 4);
+  for (let y = 0; y < height; y += 1) for (let x = 0; x < width; x += 1) first.set(firstAt(x, y), (y * width + x) * 4);
+  const second = first.slice();
+  for (let y = 0; y < patchHeight; y += 1) for (let x = 0; x < patchWidth; x += 1) second.set(patchAt(x, y), ((patchY + y) * width + patchX + x) * 4);
+  const header = Buffer.alloc(13); header.writeUInt32BE(width, 0); header.writeUInt32BE(height, 4); header[8] = 8; header[9] = 6; header[12] = 1;
+  const animation = Buffer.alloc(8); animation.writeUInt32BE(2, 0);
+  const firstData = deflateSync(rgbaScanlines(width, height, firstAt, !malformedFirstFrame));
+  const secondData = deflateSync(rgbaScanlines(patchWidth, patchHeight, patchAt, true)); const frameData = Buffer.alloc(secondData.byteLength + 4); frameData.writeUInt32BE(2, 0); secondData.copy(frameData, 4);
+  const bytes = Buffer.concat([
+    PNG_SIGNATURE,
+    pngChunk('IHDR', header),
+    pngChunk('acTL', animation),
+    pngChunk('fcTL', apngFrameControl(0, width, height, 0, 0, 5, 0, 0)),
+    pngChunk('IDAT', firstData),
+    pngChunk('fcTL', apngFrameControl(1, patchWidth, patchHeight, patchX, patchY, 7, 2, 0)),
+    pngChunk('fdAT', frameData),
+    pngChunk('IEND'),
+  ]);
+  return { bytes, expectedFrames: [first, second] };
+}
+
+function interlacedIndexedApng(): { bytes: Buffer; expected: Uint8ClampedArray } {
+  const width = 8; const height = 8; const rows: Buffer[] = []; const expected = new Uint8ClampedArray(width * height * 4);
+  for (const [startX, startY, stepX, stepY] of ADAM7_PASSES) {
+    if (startX >= width || startY >= height) continue;
+    for (let y = startY; y < height; y += stepY) {
+      const passWidth = Math.ceil((width - startX) / stepX); const row = Buffer.alloc(1 + Math.ceil(passWidth / 8)); let passX = 0;
+      for (let x = startX; x < width; x += stepX) { const index = (x + y) % 2; if (index) row[1 + Math.floor(passX / 8)] |= 1 << (7 - passX % 8); passX += 1; }
+      rows.push(row);
+    }
+  }
+  for (let y = 0; y < height; y += 1) for (let x = 0; x < width; x += 1) expected.set((x + y) % 2 ? [255, 107, 122, 255] : [0, 0, 0, 0], (y * width + x) * 4);
+  const header = Buffer.alloc(13); header.writeUInt32BE(width, 0); header.writeUInt32BE(height, 4); header[8] = 1; header[9] = 3; header[12] = 1;
+  const animation = Buffer.alloc(8); animation.writeUInt32BE(1, 0);
+  return {
+    bytes: Buffer.concat([
+      PNG_SIGNATURE,
+      pngChunk('IHDR', header),
+      pngChunk('PLTE', Buffer.from([0, 0, 0, 255, 107, 122])),
+      pngChunk('tRNS', Buffer.from([0, 255])),
+      pngChunk('acTL', animation),
+      pngChunk('fcTL', apngFrameControl(0, width, height, 0, 0, 4, 0, 0)),
+      pngChunk('IDAT', deflateSync(Buffer.concat(rows))),
+      pngChunk('IEND'),
+    ]),
+    expected,
+  };
+}
 
 function animatedFixture() {
   const document = createPixelDocument('sprite', 'Round trip'); const sprite = document.pixelAssets[document.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('Expected sprite'); sprite.width = 4; sprite.height = 3; const firstCel = Object.values(sprite.cels)[0]; sprite.frames[sprite.frameIds[0]].durationMs = 80; writePixels(firstCel, [{ x: 0, y: 0, index: 4 }, { x: 3, y: 2, index: 2 }]);
@@ -20,6 +121,36 @@ function assertImported(result: ReturnType<typeof importGifBytes> | NonNullable<
 describe('animated pixel import', () => {
   it('round-trips GIF frames, delays, transparency, and source retention', async () => { const { document } = animatedFixture(); const artifact = await exportDocument(document, 'gif'); assertImported(importGifBytes(artifact.data, 'GIF round trip')); });
   it('round-trips APNG frames, delays, transparency, and source retention', async () => { const { document } = animatedFixture(); const artifact = await exportDocument(document, 'apng'); const imported = importApngBytes(artifact.data, 'APNG round trip'); expect(imported).toBeTruthy(); assertImported(imported!); });
+
+  it('imports a spec-derived interlaced RGBA APNG with exact frame rectangles and pixels', () => {
+    const fixture = interlacedRgbaApng(); const decoded = decodeApng(fixture.bytes); expect(decoded).toBeTruthy();
+    expect(decoded).toMatchObject({ width: 8, height: 8 }); expect(decoded!.frames.map(({ delayMs, dispose, blend }) => ({ delayMs, dispose, blend }))).toEqual([{ delayMs: 50, dispose: 0, blend: 0 }, { delayMs: 70, dispose: 2, blend: 0 }]);
+    expect(decoded!.frames.map(({ rgba }) => Buffer.from(rgba))).toEqual(fixture.expectedFrames.map((rgba) => Buffer.from(rgba)));
+    const imported = importApngBytes(fixture.bytes, 'Interlaced APNG'); expect(imported).toBeTruthy(); const document = imported!.documents[0]; if (document.kind !== 'pixel') throw new Error('Expected pixel'); const sprite = document.pixelAssets[document.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('Expected sprite');
+    expect([sprite.width, sprite.height]).toEqual([8, 8]); expect(sprite.frameIds.map((id) => sprite.frames[id].durationMs)).toEqual([50, 70]); const cels = sprite.frameIds.map((frameId) => Object.values(sprite.cels).find((cel) => cel.frameId === frameId)!); expect([readPixel(cels[0], 2, 3), readPixel(cels[1], 2, 3)]).toEqual([0, 4]); expect(Object.values(document.assets)[0]).toMatchObject({ mimeType: 'image/apng', data: fixture.bytes.toString('base64') });
+  });
+
+  it('rejects an interlaced APNG whose inflated rows use the noninterlaced layout', () => {
+    expect(() => decodeApng(interlacedRgbaApng(true).bytes)).toThrow(/APNG frame decoded to \d+ bytes instead of \d+\./);
+  });
+
+  it('deinterlaces packed one-bit indexed APNG samples without losing transparency', () => {
+    const fixture = interlacedIndexedApng(); const decoded = decodeApng(fixture.bytes); expect(decoded).toBeTruthy(); expect(Buffer.from(decoded!.frames[0].rgba)).toEqual(Buffer.from(fixture.expected));
+    const imported = importApngBytes(fixture.bytes, 'Indexed interlaced APNG')!; const document = imported.documents[0]; if (document.kind !== 'pixel') throw new Error('Expected pixel'); const sprite = document.pixelAssets[document.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('Expected sprite'); const cel = Object.values(sprite.cels)[0];
+    expect([sprite.width, sprite.height, sprite.frames[sprite.frameIds[0]].durationMs]).toEqual([8, 8, 40]); expect([readPixel(cel, 0, 0), readPixel(cel, 1, 0)]).toEqual([0, 4]); expect(Object.values(document.assets)[0].data).toBe(fixture.bytes.toString('base64'));
+  });
+
+  it('rejects APNG CRC, sequence, declared-count, and final-IEND contradictions before import', () => {
+    const valid = interlacedRgbaApng().bytes;
+    const cases: Array<[string, Buffer, RegExp]> = [
+      ['crc', rewritePngChunk(valid, 'acTL', 0, () => undefined, false), /chunk acTL .* invalid CRC/],
+      ['sequence', rewritePngChunk(valid, 'fcTL', 1, (data) => data.writeUInt32BE(3, 0)), /sequence number 3 .* 1 was required/],
+      ['frame-count', rewritePngChunk(valid, 'acTL', 0, (data) => data.writeUInt32BE(3, 0)), /declares 3 frames but contains 2 frame controls/],
+      ['missing-end', valid.subarray(0, -12), /missing its final IEND chunk/],
+      ['trailing-data', Buffer.concat([valid, Buffer.from([0])]), /IEND must be empty and end the file/],
+    ];
+    for (const [name, bytes, message] of cases) expect(() => importApngBytes(bytes, `Invalid APNG ${name}`)).toThrow(message);
+  });
 
   it('composites GIF background disposal before the following frame', () => {
     const encoder = GIFEncoder(); const palette = [[0, 0, 0], [255, 107, 122], [155, 227, 194], [57, 120, 184]];
