@@ -9,6 +9,7 @@ This checklist complements `FEATURE_TRACKER.md`; it cannot override a missing or
 - [ ] Run the packaged Level 2 automated regression matrix.
 - [ ] Record known limitations and ensure README claims match the tracker.
 - [ ] Build Squirrel/DMG/DEB/RPM/ZIP artifacts on their native OS runners; generate per-platform SHA-256 and license reports.
+- [ ] Require package verification to find the exact `LiberationSans-OFL-1.1.txt` resource in every native app layout, and require the generated license inventory to agree with its four bundled font hashes and complete OFL notice.
 - [ ] Retain each native job's `RELEASE_PROVENANCE-<platform>.json`; it must bind a clean commit and exact source/toolchain/checksum/artifact inventory.
 - [ ] Verify no credentials, MCP tokens, user profiles, QA artifacts, or personal artwork are staged.
 - [ ] Run `node scripts/npm-node24.mjs run rc:audit`; treat its ranked output as planning evidence only, not as a release certificate.

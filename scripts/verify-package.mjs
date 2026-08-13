@@ -14,6 +14,7 @@ import { assertPackagedUtilityQuantizationResultSources } from './packaged-utili
 import { assertPackagedUtilityExportResultSources } from './packaged-utility-export-result.mjs';
 import { assertPackagedUtilityImportResultSources } from './packaged-utility-import-result.mjs';
 import { assertPackagedUtilityGenerationResultSources } from './packaged-utility-generation-result.mjs';
+import { inspectPackagedFontLicense } from './packaged-font-license.mjs';
 
 const execute = promisify(execFile);
 
@@ -144,6 +145,7 @@ try {
     rendererSource,
   });
   const packagedSecurity = await inspectPackagedSecurity({ executable, archive });
+  const packagedFontLicense = await inspectPackagedFontLicense({ packageDirectory: packageDir, platform });
   process.stdout.write(`${JSON.stringify({
     verified: true,
     node: process.version,
@@ -169,6 +171,7 @@ try {
     packagedUtilityExportResult,
     packagedUtilityImportResult,
     packagedUtilityGenerationResult,
+    packagedFontLicense,
     packagedSecurity,
   }, null, 2)}\n`);
 } catch (error) {

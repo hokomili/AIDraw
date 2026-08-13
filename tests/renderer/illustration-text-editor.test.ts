@@ -29,7 +29,7 @@ describe('illustration in-canvas text editor', () => {
       height: 80,
       transform: 'matrix(2, 0, 0, 2, 16, 28)',
       transformOrigin: '0 0',
-      font: 'italic 700 24px "Missing face"',
+      font: 'italic 700 24px "Missing face", "AIDraw Liberation Sans"',
       lineHeight: 1.4,
       letterSpacing: '2px',
       color: '#123456',

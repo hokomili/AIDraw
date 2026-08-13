@@ -20,6 +20,7 @@ import {
   type PathObject,
   type RasterStroke,
   type ShapeObject,
+  type TextObject,
 } from '@aidraw/core';
 import { renderIllustration, renderSprite, renderTilemap } from '@main/render-document';
 import { createBooleanPath } from '../../src/common/path-boolean';
@@ -77,6 +78,25 @@ async function illustrationBooleanGolden(): Promise<string> {
   return rgbaHash(await renderIllustration(document));
 }
 
+async function missingFontTextGolden(): Promise<string> {
+  const document = createIllustrationDocument('Missing-font golden'); document.artboard = { ...document.artboard, width: 180, height: 96, background: null };
+  const layer = Object.values(document.layers).find((entry) => entry.type === 'vector'); if (!layer || layer.type !== 'vector') throw new Error('Missing vector layer');
+  const timestamp = nowIso(); const text = 'Regular\nBold\nItalic\nBold Italic';
+  const object: TextObject = {
+    id: 'missing-font-text', revision: 0, name: 'Missing-font text', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
+    layerId: layer.id, visible: true, locked: false, opacity: 1, blendMode: 'normal', transform: { ...IDENTITY_TRANSFORM, x: 4, y: 4 },
+    type: 'text', text, width: 172, height: 88, align: 'left', lineHeight: 1.12,
+    ranges: [
+      { start: 0, end: 8, fontFamily: 'Definitely Missing AIDraw Font 86', fontSize: 18, fontWeight: 400, fontStyle: 'normal', color: '#27213c', letterSpacing: 0 },
+      { start: 8, end: 13, fontFamily: 'Definitely Missing AIDraw Font 86', fontSize: 18, fontWeight: 700, fontStyle: 'normal', color: '#27213c', letterSpacing: 0 },
+      { start: 13, end: 20, fontFamily: 'Definitely Missing AIDraw Font 86', fontSize: 18, fontWeight: 400, fontStyle: 'italic', color: '#27213c', letterSpacing: 0 },
+      { start: 20, end: text.length, fontFamily: 'Definitely Missing AIDraw Font 86', fontSize: 18, fontWeight: 700, fontStyle: 'italic', color: '#27213c', letterSpacing: 0 },
+    ],
+  };
+  document.objects = { [object.id]: object }; layer.objectIds = [object.id];
+  return rgbaHash(await renderIllustration(document));
+}
+
 async function brushGolden(): Promise<string> {
   const document = createIllustrationDocument('Brush golden'); document.artboard = { ...document.artboard, width: 96, height: 64, background: '#fffdf7' };
   const paint = Object.values(document.layers).find((entry) => entry.type === 'paint'); if (!paint || paint.type !== 'paint') throw new Error('Missing paint layer');
@@ -126,6 +146,7 @@ const GOLDEN_HASHES = {
   illustrationComposite: '623e92216930debf11a73466c4d34b888bd9c3c1a57dfce863694784eafd3ac6',
   illustrationStrokes: '28318fc1cc7f7442de0d63d098ca7d7f2579dad6363c07c925304638c32db284',
   illustrationBoolean: 'e0309ac1a79db64b45171ceb4cc991b3612061d820edcd0d4f66099537a16083',
+  missingFontText: '09e38eae27a70c6787e2a4efe5f0a71f5a164868db054dbb9415b3ae9762dce8',
   naturalBrushes: process.platform === 'darwin' && process.arch === 'arm64'
     ? '24d10ac55affbf827b91e0c7336cef4914c99cb08466a40b3c940551b4668bfa'
     : '1ec4a2d01fa69b61bc9f6706abee685b6e207cfa2a9bcffd33a1eea9569bae00',
@@ -138,7 +159,7 @@ const GOLDEN_HASHES = {
 
 describe('deterministic raw-RGBA rendering goldens', () => {
   it('matches the maintained cross-mode corpus', async () => {
-    const actual = { illustrationComposite: await illustrationCompositeGolden(), illustrationStrokes: await illustrationStrokeGolden(), illustrationBoolean: await illustrationBooleanGolden(), naturalBrushes: await brushGolden(), indexedSprite: spriteGolden(), orthogonalMap: mapGolden('orthogonal'), isometricMap: mapGolden('isometric'), tileTransforms: tileTransformGolden(), illustrationAnimation: await animationGolden() };
+    const actual = { illustrationComposite: await illustrationCompositeGolden(), illustrationStrokes: await illustrationStrokeGolden(), illustrationBoolean: await illustrationBooleanGolden(), missingFontText: await missingFontTextGolden(), naturalBrushes: await brushGolden(), indexedSprite: spriteGolden(), orthogonalMap: mapGolden('orthogonal'), isometricMap: mapGolden('isometric'), tileTransforms: tileTransformGolden(), illustrationAnimation: await animationGolden() };
     expect(actual).toEqual(GOLDEN_HASHES);
   });
 });

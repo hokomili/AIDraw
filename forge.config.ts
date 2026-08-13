@@ -56,6 +56,7 @@ const config: ForgeConfig = {
   outDir: process.env.AIDRAW_FORGE_OUT_DIR || 'out',
   packagerConfig: {
     asar: { unpack: '**/*.node' },
+    extraResource: [resolve('resources/licenses/LiberationSans-OFL-1.1.txt')],
     prune: false,
     appBundleId: macBundleIdentifier,
     osxSign: macSigningOptions,

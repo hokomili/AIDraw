@@ -30,6 +30,7 @@ import { renderStyledText } from '../common/text-layout';
 import { tileAnimationFrameAt, tilesetTileSourceRect } from '../common/tile-animation';
 import { isometricTileRenderCells } from '../common/tile-render-order';
 import { tilemapChunksIntersectingRegion } from '../common/tilemap-region';
+import { ensureBundledNativeCanvasFonts } from './canvas-fonts';
 
 type Context = ReturnType<Canvas['getContext']>;
 type LoadedImage = Awaited<ReturnType<typeof loadImage>>;
@@ -206,6 +207,7 @@ async function drawIllustrationObject(context: Context, document: IllustrationDo
 }
 
 async function renderIllustrationSurface(document: IllustrationDocument, region: IllustrationRasterRegion, onlyLayerId?: string, includeBackground = true, neutralizeOnlyLayer = false, restrictPaintTilesToRegion = false, restrictObjectsToRegion = false): Promise<Canvas> {
+  ensureBundledNativeCanvasFonts();
   const canvas = createCanvas(region.width, region.height);
   const context = canvas.getContext('2d');
   context.save();

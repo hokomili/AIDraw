@@ -1,5 +1,6 @@
+import { createHash } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import process from 'node:process';
 
 const root = process.cwd();
@@ -23,6 +24,30 @@ records.sort((a, b) => `${a.name}@${a.version}`.localeCompare(`${b.name}@${b.ver
 const unique = [...new Map(records.map((record) => [`${record.name}@${record.version}`, record])).values()];
 const unknown = unique.filter((record) => record.license === 'UNKNOWN');
 if (unknown.length) throw new Error(`Unknown dependency licenses: ${unknown.map((record) => `${record.name}@${record.version}`).join(', ')}`);
-const out = join(root, 'out');
-await writeFile(join(out, 'THIRD_PARTY_LICENSES.json'), `${JSON.stringify(unique, null, 2)}\n`, 'utf8');
-await writeFile(join(out, 'THIRD_PARTY_LICENSES.md'), `# Third-party dependency licenses\n\nGenerated from the release lockfile. Every entry must have a verified license before publishing.\n\n${unique.map((record) => `- **${record.name}@${record.version}** — ${record.license}${record.repository ? ` — ${record.repository}` : ''}`).join('\n')}\n`, 'utf8');
+
+const pdfjs = unique.find((record) => record.name === 'pdfjs-dist');
+if (!pdfjs) throw new Error('The bundled Canvas fallback font requires pdfjs-dist in the release lockfile.');
+const fontDirectory = join(root, 'node_modules', 'pdfjs-dist', 'standard_fonts');
+const bundledFontFiles = ['LiberationSans-Regular.ttf', 'LiberationSans-Bold.ttf', 'LiberationSans-Italic.ttf', 'LiberationSans-BoldItalic.ttf'];
+const fontAssets = await Promise.all(bundledFontFiles.map(async (fileName) => {
+  const bytes = await readFile(join(fontDirectory, fileName));
+  return { fileName, sha256: createHash('sha256').update(bytes).digest('hex') };
+}));
+const upstreamFontNotice = await readFile(join(fontDirectory, 'LICENSE_LIBERATION'), 'utf8');
+const fontNotice = await readFile(join(root, 'resources', 'licenses', 'LiberationSans-OFL-1.1.txt'), 'utf8');
+if (fontNotice !== upstreamFontNotice) throw new Error('The packaged Liberation Sans OFL notice differs from the locked pdfjs-dist copy.');
+const bundledFontRecord = {
+  name: 'pdfjs-dist Liberation Sans font assets',
+  version: pdfjs.version,
+  license: 'OFL-1.1',
+  repository: pdfjs.repository,
+  sourcePackage: `pdfjs-dist@${pdfjs.version}`,
+  noticePath: 'resources/licenses/LiberationSans-OFL-1.1.txt',
+  assetFiles: fontAssets,
+};
+const inventory = [...unique, bundledFontRecord];
+const out = process.env.AIDRAW_LICENSE_REPORT_OUT_DIR
+  ? resolve(root, process.env.AIDRAW_LICENSE_REPORT_OUT_DIR)
+  : join(root, 'out');
+await writeFile(join(out, 'THIRD_PARTY_LICENSES.json'), `${JSON.stringify(inventory, null, 2)}\n`, 'utf8');
+await writeFile(join(out, 'THIRD_PARTY_LICENSES.md'), `# Third-party dependency licenses\n\nGenerated from the release lockfile. Every entry must have a verified license before publishing.\n\n${unique.map((record) => `- **${record.name}@${record.version}** — ${record.license}${record.repository ? ` — ${record.repository}` : ''}`).join('\n')}\n\n## Bundled font asset notice\n\n- **${bundledFontRecord.name}@${bundledFontRecord.version}** — ${bundledFontRecord.license} — source package ${bundledFontRecord.sourcePackage}\n${fontAssets.map((asset) => `  - \`${asset.fileName}\` — SHA-256 \`${asset.sha256}\``).join('\n')}\n\n### Liberation Sans license and copyright notice\n\n\`\`\`text\n${fontNotice.trimEnd()}\n\`\`\`\n`, 'utf8');
