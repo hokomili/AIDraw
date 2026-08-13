@@ -49,6 +49,7 @@ import {
 } from './clipboard-workflows';
 import { buildCheckpointComparison } from './checkpoint-comparison';
 import { readBoundedRegularFile } from './bounded-file-read';
+import { resolveMcpConnectionHandoffPath, writeMcpConnectionHandoff } from './mcp-connection-handoff';
 
 declare const MAIN_WINDOW_VITE_DEV_SERVER_URL: string | undefined;
 declare const MAIN_WINDOW_VITE_NAME: string;
@@ -85,7 +86,10 @@ const startupCommand = cliInvocation
       : 'show';
 if (startupCommand === 'headless' || startupCommand === 'cli') app.disableHardwareAcceleration();
 const explicitUserData = process.argv.find((argument) => argument.startsWith('--user-data-dir='))?.slice('--user-data-dir='.length);
-const explicitMcpConnectionFile = process.argv.find((argument) => argument.startsWith('--write-mcp-connection='))?.slice('--write-mcp-connection='.length);
+const explicitMcpConnectionArgument = process.argv.find((argument) => argument.startsWith('--write-mcp-connection='));
+const explicitMcpConnectionFile = explicitMcpConnectionArgument === undefined
+  ? undefined
+  : resolveMcpConnectionHandoffPath(explicitMcpConnectionArgument.slice('--write-mcp-connection='.length));
 const explicitTrustedFolders = process.argv
   .filter((argument) => argument.startsWith('--trust-folder='))
   .map((argument) => argument.slice('--trust-folder='.length));
@@ -1043,11 +1047,17 @@ async function initializeApplication(): Promise<void> {
     launchTrustedFolders = await mcpHost.grantLaunchFolderTrust(explicitTrustedFolders.map((folder) => resolve(folder)));
   }
   if (explicitMcpConnectionFile) {
-    const connectionPath = resolve(explicitMcpConnectionFile);
+    const connectionPath = explicitMcpConnectionFile;
     const credentials = mcpHost.credentials();
     if (!credentials.url) throw new Error('Cannot write an MCP connection file because the local server did not start.');
-    await mkdir(dirname(connectionPath), { recursive: true });
-    await writeFile(connectionPath, `${JSON.stringify({ version: 1, url: credentials.url, token: credentials.token, activeDocumentId: service.getActiveDocumentId(), pid: process.pid, trustedFolders: launchTrustedFolders }, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+    await writeMcpConnectionHandoff(connectionPath, {
+      version: 1,
+      url: credentials.url,
+      token: credentials.token,
+      activeDocumentId: service.getActiveDocumentId(),
+      pid: process.pid,
+      trustedFolders: launchTrustedFolders,
+    });
   }
   if (fnd09UtilityContainmentE2e) {
     void runFnd09UtilityContainmentScenario(engineRuntime, fnd09UtilityContainmentE2e)
