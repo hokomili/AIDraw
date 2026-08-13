@@ -6,6 +6,24 @@ import { materializePaintTiles } from '@main/persistence';
 import { renderIllustration, renderSprite, renderTilemap } from '@main/render-document';
 
 describe('native document rendering', () => {
+  it('renders a rectangular orthogonal cell at its authored aspect without resampling drift', async () => {
+    const document = createPixelDocument('project', 'Orthogonal rectangular cell'); document.assetIds = []; document.pixelAssets = {};
+    const sprite = createPixelSprite('Rectangular tile', 3, 5); const cel = Object.values(sprite.cels)[0];
+    writePixels(cel, Array.from({ length: 15 }, (_, offset) => ({ x: offset % 3, y: Math.floor(offset / 3), index: offset + 1 })));
+    const tileset = createPixelTileset('Rectangular tile', sprite.id, 3, 5, 1, 1); tileset.firstGid = 1;
+    const map = createPixelTilemap('One rectangle'); map.width = 1; map.height = 1; map.tileWidth = 3; map.tileHeight = 5; map.tilesetIds = [tileset.id];
+    const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile' || !layer.chunks) throw new Error('Expected tile layer');
+    writeTiles(layer.chunks, [{ x: 0, y: 0, gid: 1 }]);
+    document.pixelAssets = { [sprite.id]: sprite, [tileset.id]: tileset, [map.id]: map }; document.assetIds = [sprite.id, tileset.id, map.id]; document.activeAssetId = map.id;
+
+    const source = renderSprite(document, sprite).getContext('2d').getImageData(0, 0, 3, 5).data;
+    const rendered = renderTilemap(document, map);
+    expect({ width: rendered.width, height: rendered.height }).toEqual({ width: 3, height: 5 });
+    expect(Buffer.from(rendered.getContext('2d').getImageData(0, 0, 3, 5).data)).toEqual(Buffer.from(source));
+    const exported = await exportDocument(document, 'png'); const image = await loadImage(exported.data);
+    expect({ width: image.width, height: image.height }).toEqual({ width: 3, height: 5 });
+  });
+
   it('renders a one-cell non-square isometric map without clipping either tile edge', () => {
     const document = createPixelDocument('project', 'Isometric edge bounds'); document.assetIds = []; document.pixelAssets = {};
     const sprite = createPixelSprite('Non-square tile', 4, 2); const cel = Object.values(sprite.cels)[0];

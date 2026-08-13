@@ -18,6 +18,7 @@ import {
 import { colorWithOpacity } from '../common/color';
 import { isometricCellRect, isometricObjectMatrix, isometricProjectionExtent } from '../common/isometric-projection';
 import { drawMapObjectOverlay } from '../common/map-object-render';
+import { orthogonalCellRect, orthogonalObjectMatrix, orthogonalProjectionExtent } from '../common/orthogonal-projection';
 import { paintTileCachePlan } from '../common/paint-tile-cache';
 import { renderRasterStroke } from '../common/raster-brush';
 import { renderStyledText } from '../common/text-layout';
@@ -277,9 +278,11 @@ export function renderSprite(document: PixelDocument, sprite: PixelSprite, frame
 
 export function renderTilemap(document: PixelDocument, map: PixelTilemap, onlyLayerId?: string): Canvas {
   const isometric = map.orientation === 'isometric';
-  const projected = isometric ? isometricProjectionExtent(map.width, map.height, map.tileWidth, map.tileHeight) : undefined;
-  const width = projected ? Math.max(1, Math.ceil(projected.width)) : map.width * map.tileWidth;
-  const height = projected ? Math.max(1, Math.ceil(projected.height)) : map.height * map.tileHeight;
+  const projected = isometric
+    ? isometricProjectionExtent(map.width, map.height, map.tileWidth, map.tileHeight)
+    : orthogonalProjectionExtent(map.width, map.height, map.tileWidth, map.tileHeight);
+  const width = Math.max(1, Math.ceil(projected.width));
+  const height = Math.max(1, Math.ceil(projected.height));
   const canvas = createCanvas(width, height); const context = canvas.getContext('2d'); context.imageSmoothingEnabled = false;
   const sources = new Map<string, Canvas>();
   const visibleLayers: Array<{ layer: PixelTilemap['layers'][string]; opacity: number }> = []; const visit = (id: string, opacity = 1) => { const layer = map.layers[id]; if (!layer?.visible) return; const combined = opacity * layer.opacity; if (layer.type === 'group') for (const childId of layer.childIds ?? []) visit(childId, combined); else visibleLayers.push({ layer, opacity: combined }); }; if (onlyLayerId) visit(onlyLayerId); else for (const id of map.layerIds) visit(id);
@@ -290,6 +293,9 @@ export function renderTilemap(document: PixelDocument, map: PixelTilemap, onlyLa
       context.save();
       if (isometric) {
         const matrix = isometricObjectMatrix(map.height, map.tileWidth, map.tileHeight, map.tileWidth, map.tileHeight);
+        context.transform(matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f);
+      } else {
+        const matrix = orthogonalObjectMatrix(map.tileWidth, map.tileHeight, map.tileWidth, map.tileHeight);
         context.transform(matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f);
       }
       const unitScale = isometric ? map.tileWidth / Math.max(map.tileWidth, map.tileHeight) : 1;
@@ -302,7 +308,7 @@ export function renderTilemap(document: PixelDocument, map: PixelTilemap, onlyLa
       const decoded = decodeTiledGid(raw); if (!decoded.gid) return;
       const rect = isometric
         ? isometricCellRect(tileX, tileY, map.height, map.tileWidth, map.tileHeight)
-        : { x: tileX * map.tileWidth, y: tileY * map.tileHeight, width: map.tileWidth, height: map.tileHeight };
+        : orthogonalCellRect(tileX, tileY, map.tileWidth, map.tileHeight);
       const resolved = resolveTilesetForGid(document, map, decoded.gid); const sourceAsset = resolved ? document.pixelAssets[resolved.tileset.spriteAssetId] : undefined;
       if (resolved && sourceAsset?.type === 'sprite') {
         let source = sources.get(sourceAsset.id); if (!source) { source = renderSprite(document, sourceAsset); sources.set(sourceAsset.id, source); }

@@ -1,4 +1,5 @@
 import { isometricCoordinateFromScreen } from '../../common/isometric-projection';
+import { orthogonalCoordinateFromScreen } from '../../common/orthogonal-projection';
 
 export interface CanvasBounds {
   left: number;
@@ -48,6 +49,30 @@ export function clientPointToPixel(
     x: Math.floor((canvas.x - view.offsetX) / view.scale),
     y: Math.floor((canvas.y - view.offsetY) / view.scale),
   };
+}
+
+export function clientPointToOrthogonalTile(
+  clientX: number,
+  clientY: number,
+  bounds: CanvasBounds,
+  logicalSize: CanvasLogicalSize,
+  view: PixelViewport,
+  cellHeight: number,
+): PixelCoordinate {
+  const point = clientPointToOrthogonalCoordinate(clientX, clientY, bounds, logicalSize, view, cellHeight);
+  return { x: Math.floor(point.x), y: Math.floor(point.y) };
+}
+
+export function clientPointToOrthogonalCoordinate(
+  clientX: number,
+  clientY: number,
+  bounds: CanvasBounds,
+  logicalSize: CanvasLogicalSize,
+  view: PixelViewport,
+  cellHeight: number,
+): PixelCoordinate {
+  const canvas = clientPointToCanvas(clientX, clientY, bounds, logicalSize);
+  return orthogonalCoordinateFromScreen(canvas.x - view.offsetX, canvas.y - view.offsetY, view.scale, cellHeight);
 }
 
 export function clientPointToIsometricTile(

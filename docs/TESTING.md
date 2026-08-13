@@ -550,6 +550,18 @@ Focused pinned-Node-24 typecheck/ESLint and 5 files / 23 tests pass. The complet
 
 This checkpoint changes no canonical map-object schema, transaction, Tiled metadata, or Tiled export bytes. AIDraw's deterministic overlay style is not claimed to match Tiled-native object visualization. Packaged layout/pointer/drag acceptance, viewport-specific headless parallax, broad Tiled fidelity, Level 3, RC, and stable-v1 readiness remain unclaimed. MAP-09 stays Working.
 
+## Latest headless orthogonal projection-parity checkpoint
+
+Headless MAP-07 projection evidence (2026-08-12): the production headless renderer already honored an orthogonal map's authored `tileWidth` and `tileHeight`, but the editor fit and drew every map cell as a square. Rectangular tile artwork was therefore distorted in the editor, object geometry and hit testing used independent X/Y scaling, pointer/parallax inversion assumed equal row and column steps, and grid/selection/lasso/stamp/tool/replay feedback could disagree with the exported PNG.
+
+One pure orthogonal kernel now defines finite extent, cell rectangles, continuous screen inversion, screen-delta inversion, and the map-object affine matrix. The editor keeps one horizontal fit scale derived from `tileWidth` and computes row height as that scale × `tileHeight / tileWidth`; canonical object pixels consequently receive one uniform screen scale. Artwork, object overlays and gestures, CSS-scaled pointer input, parallax correction, checker/grid rows, selection/lasso/stamp/tool/replay feedback, and headless dimensions consume the same authored-aspect geometry. Preserving the canonical aspect was chosen over a square convenience preview because square cells visually move and reshape authored content relative to observation/export.
+
+Pure coverage exercises a 3×5 grid with 48×24 cells, exact first/last rectangles, fractional inverse/delta coordinates, object matrices, and invalid geometry. Browser-coordinate coverage proves exact integer tile and fractional object targeting through independently CSS-scaled bounds with a 40×15 displayed cell. Source coverage binds shared extent/cell/object/inverse/delta helpers to both render surfaces and the editor's grid rows. A production one-cell 3×5 indexed tile preserves all fifteen source pixels byte-exact in the 3×5 headless raster, and ordinary PNG export reports the same dimensions. Neighboring isometric and map-object regressions remain exact.
+
+Focused pinned-Node-24 typecheck/ESLint and 8 files / 36 tests pass. The complete safe gate passes portability for 369 tracked plus 65 prospective paths, TypeScript, full ESLint, and 144 files / 844 tests. The formal performance gate passes 1/1 at 823.89 MiB RSS growth; the one-million-cell flood takes 169.12 ms, the 65,536-tile render takes 40.01 ms, native save takes 125.37 ms, and every established metric remains under budget. `/private/tmp/aidraw-orthogonal-projection-performance-gate.json` is temporary self-authored diagnostics, not retained release evidence. The non-certifying audit remains Level 3 `BLOCKED` 2 and stable v1 `BLOCKED` 5, with 25 unfinished P0, 57 selected-v1 P1 rows unclosed, and 147 dirty paths.
+
+This checkpoint changes no canonical map, tileset, chunk, GID, transform, schema, or Tiled bytes. Tileset artwork still scales into the addressed map cell. Native-size tall-tile overhang, explicit Tiled tile offsets/alignment, non-square diagonal-transform policy, infinite-view expansion beyond nominal bounds, packaged layout/pointer/visual acceptance, broad Tiled fidelity, Level 3, RC, and stable-v1 readiness remain unclaimed. MAP-07 stays Working.
+
 ## Failure severity and reruns
 
 | Severity | Meaning | Gate effect |

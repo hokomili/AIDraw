@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { clientPointToIsometricCoordinate, clientPointToIsometricTile, clientPointToPixel } from '../../src/renderer/canvas/pixel-coordinates';
+import { clientPointToIsometricCoordinate, clientPointToIsometricTile, clientPointToOrthogonalCoordinate, clientPointToOrthogonalTile, clientPointToPixel } from '../../src/renderer/canvas/pixel-coordinates';
 
 describe('pixel canvas pointer coordinates', () => {
   it('maps through a CSS-stretched canvas without shifting the target pixel', () => {
@@ -34,6 +34,18 @@ describe('pixel canvas pointer coordinates', () => {
       logicalSize,
       view,
     )).toEqual(target);
+  });
+
+  it('inverts an authored-aspect orthogonal cell after CSS scaling', () => {
+    const logicalSize = { width: 960, height: 540 }; const bounds = { left: 17.5, top: 22.25, width: 1200, height: 675 }; const view = { scale: 40, offsetX: 65, offsetY: 35 }; const cellHeight = 15; const target = { x: 6, y: 9 };
+    const canvasX = view.offsetX + (target.x + 0.5) * view.scale; const canvasY = view.offsetY + (target.y + 0.5) * cellHeight;
+    expect(clientPointToOrthogonalTile(bounds.left + canvasX * bounds.width / logicalSize.width, bounds.top + canvasY * bounds.height / logicalSize.height, bounds, logicalSize, view, cellHeight)).toEqual(target);
+  });
+
+  it('preserves fractional orthogonal coordinates for object gestures', () => {
+    const logicalSize = { width: 960, height: 540 }; const bounds = { left: 17.5, top: 22.25, width: 1200, height: 675 }; const view = { scale: 40, offsetX: 65, offsetY: 35 }; const cellHeight = 15; const target = { x: 6.25, y: 9.75 };
+    const canvasX = view.offsetX + target.x * view.scale; const canvasY = view.offsetY + target.y * cellHeight;
+    expect(clientPointToOrthogonalCoordinate(bounds.left + canvasX * bounds.width / logicalSize.width, bounds.top + canvasY * bounds.height / logicalSize.height, bounds, logicalSize, view, cellHeight)).toEqual(target);
   });
 
   it('inverts an asymmetric isometric diamond projection after CSS scaling', () => {
