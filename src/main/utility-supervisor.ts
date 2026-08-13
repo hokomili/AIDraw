@@ -1,4 +1,4 @@
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { createId, type AIDrawDocument, type PaletteEntry } from '@aidraw/core';
 import type { ExportFormat, ExportOptions } from '../common/contracts';
 import type { ExportArtifact } from './export-document';
@@ -8,6 +8,7 @@ import {
   assertNormalizeGenerationAcceptanceInput,
   assertNormalizeGenerationAcceptanceUtilityResponse,
   assertGenerationUtilityResponse,
+  assertInspectSpriteSheetUtilityResponse,
   isBoundedUtilityErrorResponse,
   isGenerationProgressUtilityResponse,
   assertObservationUtilityResponse,
@@ -18,6 +19,7 @@ import {
   validateImportUtilityResponse,
   MAX_QUANTIZE_UTILITY_SOURCE_BYTES,
   type ExportUtilityRequest,
+  type InspectSpriteSheetUtilityRequest,
   type QuantizeUtilityRequest,
   type UtilityCancelRequest,
   type UtilityContainmentProbeRequest,
@@ -312,7 +314,7 @@ export class RasterUtilitySupervisor {
 
   importSpriteSheet(
     filePath: string,
-    metadata: { options: SpriteSheetSliceOptions; name: string; mimeType: string; expectedSha256: string },
+    metadata: { options: SpriteSheetSliceOptions; name: string; mimeType?: 'image/png' | 'image/jpeg' | 'image/webp'; expectedSha256?: string },
     control: { signal?: AbortSignal; timeoutMs?: number } = {},
   ): Promise<{ documents: AIDrawDocument[]; warnings: string[]; fidelity?: InterchangeFidelityEntry[] }> {
     const request: Extract<UtilityRequest, { kind: 'import-document' }> = { id: createId('utility'), kind: 'import-document', filePath, pixelMode: true, spriteSheet: structuredClone(metadata) };
@@ -320,6 +322,26 @@ export class RasterUtilitySupervisor {
       if (response.kind !== 'import-document') throw new Error('Raster utility returned the wrong result kind.');
       await this.validateImportedDocumentImages(response.documents, control);
       return { documents: response.documents, warnings: response.warnings, ...(response.fidelity === undefined ? {} : { fidelity: response.fidelity }) };
+    });
+  }
+
+  inspectSpriteSheet(
+    filePath: string,
+    control: { signal?: AbortSignal; timeoutMs?: number } = {},
+  ): Promise<{ sha256: string; mimeType: 'image/png' | 'image/jpeg' | 'image/webp'; width: number; height: number; previewPng: Buffer }> {
+    if (!filePath || filePath.length > 32_768 || filePath.includes('\0') || !isAbsolute(filePath)) {
+      return Promise.reject(new Error('Sprite-sheet inspection requires one absolute approved path.'));
+    }
+    const request: InspectSpriteSheetUtilityRequest = { id: createId('utility'), kind: 'inspect-sprite-sheet', filePath };
+    return this.enqueue(request, { ...control, timeoutMs: control.timeoutMs ?? 120_000 }).then((response) => {
+      if (response.kind !== 'inspect-sprite-sheet') throw new Error('Raster utility returned the wrong sprite-sheet inspection result kind.');
+      return {
+        sha256: response.sha256,
+        mimeType: response.mimeType,
+        width: response.width,
+        height: response.height,
+        previewPng: Buffer.from(response.previewDataBase64, 'base64'),
+      };
     });
   }
 
@@ -615,6 +637,7 @@ export class RasterUtilitySupervisor {
           const imported = validateImportUtilityResponse(task.request, response);
           Object.assign(response, imported);
         }
+        if (task.request.kind === 'inspect-sprite-sheet') assertInspectSpriteSheetUtilityResponse(task.request, response);
       } catch (error) {
         this.rejectInvalidResponse(worker, task, error instanceof Error ? error : new Error(String(error)));
         return;

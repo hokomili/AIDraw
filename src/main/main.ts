@@ -63,7 +63,7 @@ let engineShutdownComplete = false;
 let engineQuitPending = false;
 let engineReadyPromise: Promise<void> | undefined;
 let suppressMacLoginActivationUntil = 0;
-const pendingSpriteSheets = new Map<string, { filePath: string; sha256: string; name: string; mimeType: string; expiresAt: number }>();
+const pendingSpriteSheets = new Map<string, { filePath: string; sha256: string; name: string; mimeType: 'image/png' | 'image/jpeg' | 'image/webp'; expiresAt: number }>();
 
 async function recordInterchangeReport(input: InterchangeReportInput) {
   const report = await engineRuntime.interchangeReports.record(input);
@@ -366,7 +366,7 @@ async function runApprovedFileJob(job: AsyncJob): Promise<void> {
         const report = await recordInterchangeReport({ kind: 'import', status: 'completed', actor: job.actor, documentIds: [document.id], documentNames: [document.name], format: `palette-${parsed.format}`, sourcePaths: [requestedPath], destinationPaths: [], warnings, rasterized: [] }); output = { imported: [document.id], added: applied.added, updated: applied.updated, skipped: applied.skipped, warnings, reportId: report.id };
       } else {
         let imported;
-        if (spriteSheet) { const bytes = await readFile(requestedPath); const extension = extname(requestedPath).toLowerCase(); const mimeType = extension === '.webp' ? 'image/webp' : extension === '.jpg' || extension === '.jpeg' ? 'image/jpeg' : 'image/png'; imported = await engineRuntime.rasterUtilities.importSpriteSheet(requestedPath, { options: spriteSheet, name: basename(requestedPath, extension), mimeType, expectedSha256: createHash('sha256').update(bytes).digest('hex') }); }
+        if (spriteSheet) { const extension = extname(requestedPath).toLowerCase(); imported = await engineRuntime.rasterUtilities.importSpriteSheet(requestedPath, { options: spriteSheet, name: basename(requestedPath, extension) }); }
         else imported = await engineRuntime.rasterUtilities.importDocument(requestedPath, request.pixelMode === true);
         for (const document of imported.documents) service.addDocument(document);
         const report = await recordInterchangeReport({ kind: 'import', status: 'completed', actor: job.actor, documentIds: imported.documents.map((document) => document.id), documentNames: imported.documents.map((document) => document.name), format: spriteSheet ? 'sprite-sheet-image' : extname(requestedPath).slice(1).toLowerCase() || 'unknown', sourcePaths: [requestedPath], destinationPaths: [], warnings: imported.warnings, rasterized: imported.warnings.filter((warning) => /raster|flatten|fallback/i.test(warning)), ...(imported.fidelity?.length ? { fidelity: imported.fidelity } : {}) });
@@ -663,18 +663,16 @@ function registerIpc(): void {
   handle(IPC.selectSpriteSheet, async () => {
     const result = await dialog.showOpenDialog(mainWindow!, { title: 'Choose a sprite-sheet image', properties: ['openFile'], filters: [{ name: 'Sprite-sheet images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }] });
     if (result.canceled || !result.filePaths[0]) return { cancelled: true };
-    const filePath = result.filePaths[0]; const bytes = await readFile(filePath); const image = nativeImage.createFromBuffer(bytes); if (image.isEmpty()) throw new Error('The selected sprite sheet is corrupt or uses an unsupported codec.');
-    const { width, height } = image.getSize(); if (width < 1 || height < 1 || width > 8_192 || height > 8_192 || width * height > 16_777_216) throw new Error('Sprite sheet must be at most 8192px per side and 16 megapixels.');
+    const filePath = result.filePaths[0]; const inspected = await engineRuntime.rasterUtilities.inspectSpriteSheet(filePath); const { width, height } = inspected;
     const now = Date.now(); for (const [id, selection] of pendingSpriteSheets) if (selection.expiresAt <= now) pendingSpriteSheets.delete(id); while (pendingSpriteSheets.size >= 8) pendingSpriteSheets.delete(pendingSpriteSheets.keys().next().value!);
-    const id = createId('sprite-sheet'); const expiresAt = now + 120_000; const extension = extname(filePath).toLowerCase(); const mimeType = extension === '.webp' ? 'image/webp' : extension === '.jpg' || extension === '.jpeg' ? 'image/jpeg' : 'image/png'; const name = basename(filePath, extension);
-    pendingSpriteSheets.set(id, { filePath, sha256: createHash('sha256').update(bytes).digest('hex'), name, mimeType, expiresAt });
-    const preview = width >= height ? image.resize({ width: Math.min(640, width), quality: 'good' }) : image.resize({ height: Math.min(480, height), quality: 'good' });
+    const id = createId('sprite-sheet'); const expiresAt = now + 120_000; const extension = extname(filePath).toLowerCase(); const name = basename(filePath, extension);
+    pendingSpriteSheets.set(id, { filePath, sha256: inspected.sha256, name, mimeType: inspected.mimeType, expiresAt });
     const divisors = [64, 48, 32, 24, 16, 8].filter((size) => width % size === 0 && height % size === 0 && width * height / (size * size) >= 2); const suggested = divisors[0] ?? Math.min(32, width, height);
-    return { selection: { id, name, width, height, previewDataUrl: preview.toDataURL(), suggestedFrameWidth: suggested, suggestedFrameHeight: suggested, expiresAt: new Date(expiresAt).toISOString() } };
+    return { selection: { id, name, width, height, previewDataUrl: `data:image/png;base64,${inspected.previewPng.toString('base64')}`, suggestedFrameWidth: suggested, suggestedFrameHeight: suggested, expiresAt: new Date(expiresAt).toISOString() } };
   });
   handle(IPC.importSpriteSheet, async (_event, selectionId: string, input: SpriteSheetSliceOptions) => {
     const selection = pendingSpriteSheets.get(selectionId); if (!selection || selection.expiresAt <= Date.now()) { pendingSpriteSheets.delete(selectionId); throw new Error('The sprite-sheet selection expired; choose the image again.'); }
-    const options = validateSpriteSheetSliceOptions(input); const bytes = await readFile(selection.filePath); if (createHash('sha256').update(bytes).digest('hex') !== selection.sha256) throw new Error('The selected sprite-sheet file changed; choose it again before importing.');
+    const options = validateSpriteSheetSliceOptions(input);
     const imported = await engineRuntime.rasterUtilities.importSpriteSheet(selection.filePath, { options, name: selection.name, mimeType: selection.mimeType, expectedSha256: selection.sha256 }); const document = imported.documents[0]; service.addDocument(document); pendingSpriteSheets.delete(selectionId);
     const report = await recordInterchangeReport({ kind: 'import', status: 'completed', actor: HUMAN_ACTOR, documentIds: [document.id], documentNames: [document.name], format: 'sprite-sheet-image', sourcePaths: [selection.filePath], destinationPaths: [], warnings: imported.warnings, rasterized: [] });
     return { imported: true, documentId: document.id, warnings: imported.warnings, reportId: report.id };

@@ -45,6 +45,7 @@ import { displayImageDimensions, inspectImageHeader, MAX_INLINE_ASSET_BYTES, MAX
 import { importEditableSvg } from './svg-import';
 import { MAX_IMPORT_UTILITY_DOCUMENTS, MAX_IMPORT_UTILITY_SERIALIZED_BYTES } from './utility-contract';
 import { jsonStringSerializedByteLength } from './utility-resource-policy';
+import { inspectSpriteSheetSource } from './sprite-sheet-preview';
 
 initializePsdCanvas(createCanvas as unknown as (width: number, height: number) => HTMLCanvasElement);
 
@@ -343,9 +344,9 @@ function rgbaCrop(source: Uint8ClampedArray, sourceWidth: number, x: number, y: 
 
 export async function importSlicedSpriteSheetBytes(bytes: Buffer, name: string, mimeType: string, value: SpriteSheetSliceOptions): Promise<ImportResult> {
   assertImportedInlineAssetBytes(bytes, 'Sprite-sheet source');
-  const options = validateSpriteSheetSliceOptions(value); const header = inspectImageHeader(bytes); assertImageDimensions(header.width, header.height, 'Sprite sheet'); const image = await loadImage(bytes);
+  const options = validateSpriteSheetSliceOptions(value); const sourceIdentity = inspectSpriteSheetSource(bytes); if (sourceIdentity.mimeType !== mimeType) throw new Error('Sprite-sheet source MIME disagrees with its file header.'); const image = await loadImage(bytes);
   const width = image.width; const height = image.height;
-  if (width !== header.width || height !== header.height) throw new Error('Decoded sprite-sheet dimensions disagree with its file header.');
+  if (width !== sourceIdentity.width || height !== sourceIdentity.height) throw new Error('Decoded sprite-sheet dimensions disagree with its display-oriented file header.');
   const layout = calculateSpriteSheetLayout(width, height, options); const canvas = createCanvas(width, height); const context = canvas.getContext('2d'); context.imageSmoothingEnabled = false; context.drawImage(image, 0, 0);
   const decoded = layout.frames.map((frame) => ({ frame, rgba: context.getImageData(frame.x, frame.y, frame.width, frame.height).data }));
   const kept = options.skipEmpty ? decoded.filter(({ rgba }) => { for (let offset = 3; offset < rgba.length; offset += 4) if (rgba[offset] > 0) return true; return false; }) : decoded;

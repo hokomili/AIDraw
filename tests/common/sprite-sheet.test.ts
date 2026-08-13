@@ -1,9 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import { calculateSpriteSheetLayout, validateSpriteSheetSliceOptions, type SpriteSheetSliceOptions } from '../../src/common/sprite-sheet';
+import { calculateSpriteSheetLayout, spriteSheetPreviewDimensions, validateSpriteSheetSliceOptions, type SpriteSheetSliceOptions } from '../../src/common/sprite-sheet';
 
 const defaults: SpriteSheetSliceOptions = { frameWidth: 16, frameHeight: 16, marginX: 1, marginY: 1, spacingX: 2, spacingY: 2, order: 'rows', durationMs: 100, trimTransparent: false, skipEmpty: false };
 
 describe('sprite-sheet slicing', () => {
+  it('bounds preview geometry deterministically without enlarging small sources', () => {
+    expect(spriteSheetPreviewDimensions(320, 200)).toEqual({ width: 320, height: 200 });
+    expect(spriteSheetPreviewDimensions(8_192, 4_096)).toEqual({ width: 640, height: 320 });
+    expect(spriteSheetPreviewDimensions(4_096, 8_192)).toEqual({ width: 240, height: 480 });
+    expect(spriteSheetPreviewDimensions(7, 8_192)).toEqual({ width: 1, height: 480 });
+  });
+
   it('calculates row-major rectangles with symmetric margins and spacing', () => {
     const layout = calculateSpriteSheetLayout(56, 38, defaults);
     expect(layout).toMatchObject({ columns: 3, rows: 2, availableFrames: 6 });

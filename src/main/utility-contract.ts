@@ -4,7 +4,7 @@ import UPNG from 'upng-js';
 import { migrateDocument, type AIDrawDocument, type PaletteEntry } from '@aidraw/core';
 import type { ExportFormat, ExportOptions } from '../common/contracts';
 import type { QuantizeImageOptions } from './quantize-image';
-import type { SpriteSheetSliceOptions } from '../common/sprite-sheet';
+import { spriteSheetPreviewDimensions, type SpriteSheetSliceOptions } from '../common/sprite-sheet';
 import type { ObservationRequest } from './capture-observation';
 import { MAX_STATIC_RASTER_SIDE } from '../common/static-raster';
 import {
@@ -67,6 +67,8 @@ const MAX_EXPORT_UTILITY_BASE64_CHARACTERS = Math.ceil(MAX_EXPORT_UTILITY_TOTAL_
 export const MAX_IMPORT_UTILITY_DOCUMENTS = 256;
 /** captureObservation already rejects a static PNG above this decoded-byte ceiling. */
 export const MAX_OBSERVATION_PNG_BYTES = 4 * 1024 * 1024;
+/** Bounded static PNG returned only for the renderer's sprite-sheet slicing preview. */
+export const MAX_SPRITE_SHEET_PREVIEW_BYTES = 4 * 1024 * 1024;
 /** Includes the maximum base64 PNG plus bounded JSON observation metadata. */
 export const MAX_OBSERVATION_UTILITY_RESULT_SERIALIZED_BYTES = Math.ceil(MAX_OBSERVATION_PNG_BYTES / 3) * 4 + 64 * 1024;
 /** Provider adapters enforce these per-image limits before returning generated output. */
@@ -127,11 +129,17 @@ export interface ImportUtilityRequest {
   spriteSheet?: {
     options: SpriteSheetSliceOptions;
     name: string;
-    mimeType: string;
-    expectedSha256: string;
+    mimeType?: 'image/png' | 'image/jpeg' | 'image/webp';
+    expectedSha256?: string;
   };
   /** Fixed private packaged-QA fault; accepted only by the isolated worker gate. */
   e2eResultFault?: Fnd09ImportResultFault;
+}
+
+export interface InspectSpriteSheetUtilityRequest {
+  id: string;
+  kind: 'inspect-sprite-sheet';
+  filePath: string;
 }
 
 export interface ObservationUtilityRequest {
@@ -182,13 +190,14 @@ export interface SerializedExportArtifact {
   companions?: Array<{ dataBase64: string; extension: string; mimeType: string; name: string }>;
 }
 
-export type UtilityRequest = ValidateImageUtilityRequest | QuantizeUtilityRequest | ExportUtilityRequest | ImportUtilityRequest | ObservationUtilityRequest | GenerationUtilityRequest | NormalizeGenerationAcceptanceUtilityRequest | UtilityContainmentProbeRequest;
+export type UtilityRequest = ValidateImageUtilityRequest | QuantizeUtilityRequest | ExportUtilityRequest | ImportUtilityRequest | InspectSpriteSheetUtilityRequest | ObservationUtilityRequest | GenerationUtilityRequest | NormalizeGenerationAcceptanceUtilityRequest | UtilityContainmentProbeRequest;
 
 export type UtilityResponse =
   | { id: string; ok: true; kind: 'validate-image'; width: number; height: number }
   | { id: string; ok: true; kind: 'quantize-image'; changes: Array<{ x: number; y: number; index: number }> }
   | { id: string; ok: true; kind: 'export-document'; artifact: SerializedExportArtifact }
   | { id: string; ok: true; kind: 'import-document'; documents: AIDrawDocument[]; warnings: string[]; fidelity?: InterchangeFidelityEntry[] }
+  | { id: string; ok: true; kind: 'inspect-sprite-sheet'; sha256: string; mimeType: 'image/png' | 'image/jpeg' | 'image/webp'; width: number; height: number; previewDataBase64: string }
   | { id: string; ok: true; kind: 'capture-observation'; result: Record<string, unknown> }
   | { id: string; ok: true; kind: 'generation-run'; outputs: GeneratedOutput[] }
   | { id: string; ok: true; kind: 'normalize-generation-acceptance'; result: GeneratedAcceptancePreparation }
@@ -410,20 +419,24 @@ function expectedObservationRegion(request: ObservationUtilityRequest, target: O
   return request.request.region ?? { x: 0, y: 0, width: target.sourceWidth, height: target.sourceHeight };
 }
 
-function assertObservationPng(data: unknown, width: number, height: number): void {
-  const maxBase64Characters = Math.ceil(MAX_OBSERVATION_PNG_BYTES / 3) * 4;
+function assertStaticPng(
+  data: unknown,
+  width: number,
+  height: number,
+  maxBytes: number,
+  messages: { malformed: string; limit: string; undecodable: string },
+): void {
+  const maxBase64Characters = Math.ceil(maxBytes / 3) * 4;
   if (typeof data !== 'string' || data.length > maxBase64Characters || !isCanonicalBase64(data)) {
-    throw new Error('Raster utility returned a malformed observation image.');
+    throw new Error(messages.malformed);
   }
   const decodedBytes = base64DecodedByteLength(data);
-  if (decodedBytes < 1) throw new Error('Raster utility returned a malformed observation image.');
-  if (decodedBytes > MAX_OBSERVATION_PNG_BYTES) {
-    throw new Error(`Raster utility observation result exceeds its ${MAX_OBSERVATION_PNG_BYTES}-byte PNG limit.`);
-  }
+  if (decodedBytes < 1) throw new Error(messages.malformed);
+  if (decodedBytes > maxBytes) throw new Error(messages.limit);
 
   const bytes = Buffer.from(data, 'base64');
   const signature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
-  if (bytes.byteLength < 45 || !bytes.subarray(0, 8).equals(signature)) throw new Error('Raster utility returned a malformed observation image.');
+  if (bytes.byteLength < 45 || !bytes.subarray(0, 8).equals(signature)) throw new Error(messages.malformed);
   let offset = 8;
   let imageWidth: number | undefined;
   let imageHeight: number | undefined;
@@ -431,29 +444,29 @@ function assertObservationPng(data: unknown, width: number, height: number): voi
   let sawEnd = false;
   while (offset + 12 <= bytes.byteLength) {
     const chunkLength = bytes.readUInt32BE(offset);
-    if (chunkLength > bytes.byteLength - offset - 12) throw new Error('Raster utility returned a malformed observation image.');
+    if (chunkLength > bytes.byteLength - offset - 12) throw new Error(messages.malformed);
     const typeStart = offset + 4;
     const dataStart = offset + 8;
     const dataEnd = dataStart + chunkLength;
     const type = bytes.toString('ascii', typeStart, dataStart);
     const expectedCrc = bytes.readUInt32BE(dataEnd);
-    if ((crc32(bytes.subarray(typeStart, dataEnd)) >>> 0) !== expectedCrc) throw new Error('Raster utility returned a malformed observation image.');
+    if ((crc32(bytes.subarray(typeStart, dataEnd)) >>> 0) !== expectedCrc) throw new Error(messages.malformed);
     if (offset === 8) {
-      if (type !== 'IHDR' || chunkLength !== 13) throw new Error('Raster utility returned a malformed observation image.');
+      if (type !== 'IHDR' || chunkLength !== 13) throw new Error(messages.malformed);
       imageWidth = bytes.readUInt32BE(dataStart);
       imageHeight = bytes.readUInt32BE(dataStart + 4);
     } else if (type === 'IHDR' || type === 'acTL') {
-      throw new Error('Raster utility returned a malformed observation image.');
+      throw new Error(messages.malformed);
     } else if (type === 'IDAT') {
       sawImageData = true;
     } else if (type === 'IEND') {
-      if (chunkLength !== 0 || dataEnd + 4 !== bytes.byteLength) throw new Error('Raster utility returned a malformed observation image.');
+      if (chunkLength !== 0 || dataEnd + 4 !== bytes.byteLength) throw new Error(messages.malformed);
       sawEnd = true;
       break;
     }
     offset = dataEnd + 4;
   }
-  if (!sawImageData || !sawEnd || imageWidth !== width || imageHeight !== height) throw new Error('Raster utility returned a malformed observation image.');
+  if (!sawImageData || !sawEnd || imageWidth !== width || imageHeight !== height) throw new Error(messages.malformed);
   try {
     const decoded = UPNG.decode(Uint8Array.from(bytes).buffer);
     const frames = UPNG.toRGBA8(decoded);
@@ -461,8 +474,40 @@ function assertObservationPng(data: unknown, width: number, height: number): voi
       throw new Error('Decoded observation geometry disagrees with its envelope.');
     }
   } catch {
-    throw new Error('Raster utility returned an undecodable observation image.');
+    throw new Error(messages.undecodable);
   }
+}
+
+function assertObservationPng(data: unknown, width: number, height: number): void {
+  assertStaticPng(data, width, height, MAX_OBSERVATION_PNG_BYTES, {
+    malformed: 'Raster utility returned a malformed observation image.',
+    limit: `Raster utility observation result exceeds its ${MAX_OBSERVATION_PNG_BYTES}-byte PNG limit.`,
+    undecodable: 'Raster utility returned an undecodable observation image.',
+  });
+}
+
+export function assertInspectSpriteSheetUtilityResponse(
+  request: InspectSpriteSheetUtilityRequest,
+  value: unknown,
+): asserts value is Extract<UtilityResponse, { ok: true; kind: 'inspect-sprite-sheet' }> {
+  if (!isRecord(value)) throw new Error('Raster utility returned a malformed sprite-sheet inspection.');
+  const response = value as Record<string, unknown>;
+  if (response.kind !== request.kind
+    || !hasOnlyKeys(response, ['id', 'ok', 'kind', 'sha256', 'mimeType', 'width', 'height', 'previewDataBase64'])
+    || !hasKeys(response, ['id', 'ok', 'kind', 'sha256', 'mimeType', 'width', 'height', 'previewDataBase64'])
+    || typeof response.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(response.sha256)
+    || response.mimeType !== 'image/png' && response.mimeType !== 'image/jpeg' && response.mimeType !== 'image/webp'
+    || !isPositiveInteger(response.width) || !isPositiveInteger(response.height)
+    || response.width > MAX_INLINE_IMAGE_DIMENSION || response.height > MAX_INLINE_IMAGE_DIMENSION
+    || response.width * response.height > MAX_INLINE_IMAGE_PIXELS) {
+    throw new Error('Raster utility returned a malformed sprite-sheet inspection.');
+  }
+  const preview = spriteSheetPreviewDimensions(response.width, response.height);
+  assertStaticPng(response.previewDataBase64, preview.width, preview.height, MAX_SPRITE_SHEET_PREVIEW_BYTES, {
+    malformed: 'Raster utility returned a malformed sprite-sheet preview.',
+    limit: `Raster utility sprite-sheet preview exceeds its ${MAX_SPRITE_SHEET_PREVIEW_BYTES}-byte PNG limit.`,
+    undecodable: 'Raster utility returned an undecodable sprite-sheet preview.',
+  });
 }
 
 function assertObservationError(request: ObservationUtilityRequest, result: Record<string, unknown>): void {

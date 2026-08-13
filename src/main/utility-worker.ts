@@ -56,7 +56,7 @@ const generationControllers = new Map<string, AbortController>();
 function validateRequest(value: unknown): UtilityRequest {
   if (!value || typeof value !== 'object') throw new Error('Utility request must be an object.');
   const base = value as { id?: unknown; kind?: unknown };
-  if (typeof base.id !== 'string' || !base.id || !['validate-image', 'quantize-image', 'export-document', 'import-document', 'capture-observation', 'generation-run', 'normalize-generation-acceptance', 'containment-probe'].includes(String(base.kind))) throw new Error('Unknown utility request.');
+  if (typeof base.id !== 'string' || !base.id || !['validate-image', 'quantize-image', 'export-document', 'import-document', 'inspect-sprite-sheet', 'capture-observation', 'generation-run', 'normalize-generation-acceptance', 'containment-probe'].includes(String(base.kind))) throw new Error('Unknown utility request.');
   if (base.kind === 'validate-image') {
     assertValidateImageUtilityRequest(value);
     return value;
@@ -119,7 +119,11 @@ function validateRequest(value: unknown): UtilityRequest {
     if (typeof request.pixelMode !== 'boolean') throw new Error('Import utility requires an explicit target mode.');
     if (request.spriteSheet) {
       validateSpriteSheetSliceOptions(request.spriteSheet.options);
-      if (typeof request.spriteSheet.name !== 'string' || !request.spriteSheet.name || typeof request.spriteSheet.mimeType !== 'string' || !request.spriteSheet.mimeType.startsWith('image/') || !/^[a-f0-9]{64}$/i.test(request.spriteSheet.expectedSha256)) throw new Error('Invalid sprite-sheet utility metadata.');
+      const hasMime = request.spriteSheet.mimeType !== undefined;
+      const hasHash = request.spriteSheet.expectedSha256 !== undefined;
+      if (typeof request.spriteSheet.name !== 'string' || !request.spriteSheet.name || hasMime !== hasHash
+        || hasMime && (typeof request.spriteSheet.mimeType !== 'string' || !['image/png', 'image/jpeg', 'image/webp'].includes(request.spriteSheet.mimeType)
+          || typeof request.spriteSheet.expectedSha256 !== 'string' || !/^[a-f0-9]{64}$/i.test(request.spriteSheet.expectedSha256))) throw new Error('Invalid sprite-sheet utility metadata.');
     }
     if (request.e2eResultFault !== undefined && (!isFnd09ImportResultFault(request.e2eResultFault) || !isFnd09ImportResultE2eEnabled({
       nodeEnv: process.env.NODE_ENV,
@@ -127,6 +131,11 @@ function validateRequest(value: unknown): UtilityRequest {
     }) || request.pixelMode || request.spriteSheet !== undefined)) {
       throw new Error('The import-result probe is unavailable outside isolated packaged QA.');
     }
+    return request as UtilityRequest;
+  }
+  if (base.kind === 'inspect-sprite-sheet') {
+    const request = value as Partial<Extract<UtilityRequest, { kind: 'inspect-sprite-sheet' }>>;
+    if (typeof request.filePath !== 'string' || request.filePath.length < 1 || request.filePath.length > 32_768 || request.filePath.includes('\0') || !isAbsolute(request.filePath)) throw new Error('Sprite-sheet inspection requires one absolute approved path.');
     return request as UtilityRequest;
   }
   if (base.kind === 'export-document') {
@@ -230,6 +239,19 @@ process.parentPort.on('message', (event) => {
           warnings: returned.warnings,
           ...(!request.e2eResultFault && imported.fidelity !== undefined ? { fidelity: imported.fidelity } : {}),
         } as unknown as UtilityResponse);
+      } else if (request.kind === 'inspect-sprite-sheet') {
+        const { inspectSpriteSheetFile } = await import('./sprite-sheet-preview');
+        const inspected = await inspectSpriteSheetFile(request.filePath);
+        process.parentPort!.postMessage({
+          id,
+          ok: true,
+          kind: request.kind,
+          sha256: inspected.sha256,
+          mimeType: inspected.mimeType,
+          width: inspected.width,
+          height: inspected.height,
+          previewDataBase64: inspected.previewPng.toString('base64'),
+        } satisfies UtilityResponse);
       } else if (request.kind === 'capture-observation') {
         const { captureObservation } = await import('./capture-observation');
         let result = await captureObservation(request.document, request.request, request.maxPixels);

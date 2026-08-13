@@ -1,4 +1,6 @@
 export const MAX_SPRITE_SHEET_FRAMES = 4_096;
+export const MAX_SPRITE_SHEET_PREVIEW_WIDTH = 640;
+export const MAX_SPRITE_SHEET_PREVIEW_HEIGHT = 480;
 
 export interface SpriteSheetSliceOptions {
   frameWidth: number;
@@ -34,6 +36,18 @@ export interface SpriteSheetLayout {
 function boundedInteger(value: number, name: string, minimum: number, maximum: number): number {
   if (!Number.isInteger(value) || value < minimum || value > maximum) throw new Error(`${name} must be an integer from ${minimum} to ${maximum}.`);
   return value;
+}
+
+export function spriteSheetPreviewDimensions(imageWidth: number, imageHeight: number): { width: number; height: number } {
+  boundedInteger(imageWidth, 'Image width', 1, 8_192);
+  boundedInteger(imageHeight, 'Image height', 1, 8_192);
+  const scale = imageWidth >= imageHeight
+    ? Math.min(1, MAX_SPRITE_SHEET_PREVIEW_WIDTH / imageWidth)
+    : Math.min(1, MAX_SPRITE_SHEET_PREVIEW_HEIGHT / imageHeight);
+  return {
+    width: Math.max(1, Math.round(imageWidth * scale)),
+    height: Math.max(1, Math.round(imageHeight * scale)),
+  };
 }
 
 export function validateSpriteSheetSliceOptions(value: SpriteSheetSliceOptions): SpriteSheetSliceOptions {

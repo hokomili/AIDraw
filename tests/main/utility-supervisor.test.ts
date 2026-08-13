@@ -156,6 +156,37 @@ describe('RasterUtilitySupervisor', () => {
     supervisor.stop();
   });
 
+  it('admits bounded sprite-sheet previews and retires malformed inspection producers before caller use', async () => {
+    const workers = [new FakeUtility(), new FakeUtility()];
+    const fork = vi.fn(() => workers[fork.mock.calls.length - 1]);
+    const supervisor = new RasterUtilitySupervisor(fork);
+    const malformed = supervisor.inspectSpriteSheet('/tmp/sprite-sheet.png');
+    const recovered = supervisor.inspectSpriteSheet('/tmp/sprite-sheet.png');
+    await nextTurn();
+    const firstRequest = workers[0].messages[0] as { id: string; kind: string; filePath: string };
+    expect(firstRequest).toMatchObject({ kind: 'inspect-sprite-sheet', filePath: '/tmp/sprite-sheet.png' });
+    workers[0].respond({
+      id: firstRequest.id, ok: true, kind: 'inspect-sprite-sheet', sha256: 'a'.repeat(64), mimeType: 'image/png',
+      width: 8, height: 6, previewDataBase64: observationPng(7, 6),
+    });
+    await expect(malformed).rejects.toThrow('malformed sprite-sheet preview');
+    expect(workers[0].killed).toBe(true);
+
+    await nextTurn();
+    const secondRequest = workers[1].messages[0] as { id: string };
+    const previewData = observationPng(8, 6);
+    workers[1].respond({
+      id: secondRequest.id, ok: true, kind: 'inspect-sprite-sheet', sha256: 'b'.repeat(64), mimeType: 'image/png',
+      width: 8, height: 6, previewDataBase64: previewData,
+    });
+    await expect(recovered).resolves.toEqual({
+      sha256: 'b'.repeat(64), mimeType: 'image/png', width: 8, height: 6,
+      previewPng: Buffer.from(previewData, 'base64'),
+    });
+    expect(fork).toHaveBeenCalledTimes(2);
+    supervisor.stop();
+  });
+
   it('runs raster tasks one at a time through one supervised process', async () => {
     const worker = new FakeUtility();
     const supervisor = new RasterUtilitySupervisor(() => worker);
