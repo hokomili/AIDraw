@@ -29,7 +29,7 @@ import { paintTileCachePlan } from '../../common/paint-tile-cache';
 import { renderRasterStroke } from '../../common/raster-brush';
 import { renderStyledText } from '../../common/text-layout';
 import { snapObjectTransform } from '../../common/snapping';
-import { combineSelection, lassoSelectsBounds, type SelectionCombination } from '../../common/lasso';
+import { combineSelection, type SelectionCombination } from '../../common/lasso';
 import { approximateLocalObjectBounds } from '../../common/illustration-geometry';
 import { cropImageObject, normalizedDisplayCrop } from '../../common/image-crop';
 import {
@@ -731,7 +731,9 @@ export function IllustrationCanvas({ document }: { document: IllustrationDocumen
       return;
     }
     if (gesture.kind === 'lasso') {
-      const polygon = [...gesture.points, gesture.end]; const ids = Object.values(document.objects).filter((object) => object.visible && lassoSelectsBounds(polygon, objectWorldBounds(object), Boolean(gesture.containment))).map((object) => object.id);
+      const polygon = [...gesture.points, gesture.end];
+      const { lassoSelectsIllustrationObjects } = await import('../../common/illustration-lasso');
+      const ids = lassoSelectsIllustrationObjects(polygon, Object.values(document.objects), Boolean(gesture.containment));
       setSelectedIds(combineSelection(selectedIds, ids, gesture.selectionCombination ?? 'replace')); return;
     }
     if (gesture.kind === 'gradient' && gesture.object && (gesture.object.type === 'shape' || gesture.object.type === 'path')) {
