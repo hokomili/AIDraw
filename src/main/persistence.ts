@@ -387,7 +387,7 @@ function validateLoadedPaintTileCaches(document: AIDrawDocument, warnings: strin
   pruneUnreferencedPaintTiles(document);
 }
 
-function adoptPaintTileCaches(document: AIDrawDocument, persisted: AIDrawDocument): void {
+export function adoptPersistedPaintTileCaches(document: AIDrawDocument, persisted: AIDrawDocument): void {
   if (document.kind !== 'illustration' || persisted.kind !== 'illustration' || document.id !== persisted.id || document.artboard.width !== persisted.artboard.width || document.artboard.height !== persisted.artboard.height) return;
   for (const persistedLayer of Object.values(persisted.layers)) {
     if (persistedLayer.type !== 'paint' || !persistedLayer.tileCache) continue;
@@ -583,7 +583,7 @@ export async function writeNativeDocument(
     }
     const persisted = (await readNativeDocument(temp, imageDecoder)).document;
     await fileSystem.replace(temp, destination);
-    adoptPaintTileCaches(document, persisted);
+    adoptPersistedPaintTileCaches(document, persisted);
   } catch (error) {
     // Preserve the original failure. An OS-locked temp may remain as an uncommitted sibling, but it is never promoted or used for recovery implicitly.
     await fileSystem.remove(temp).catch(() => undefined);

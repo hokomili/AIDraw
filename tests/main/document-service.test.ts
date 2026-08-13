@@ -7,6 +7,7 @@ import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createId, createIllustrationDocument, 
 import { DocumentService, type NativeDocumentPreviewRenderer } from '@main/document-service';
 import { RecoveryJournal } from '@main/journal';
 import { writeNativeDocument } from '@main/persistence';
+import { TransactionTraceStore } from '@main/trace-store';
 import { createCanvas } from '@napi-rs/canvas';
 import { strFromU8, unzipSync } from 'fflate';
 
@@ -46,6 +47,144 @@ describe('document service collaboration semantics', () => {
     expect(JSON.parse(strFromU8(files['document.json']))).toMatchObject({ id: document.id, name: 'Saved preview source' });
     expect(service.getDocument(document.id)).toMatchObject({ name: 'Saved preview source', filePath: destination, dirty: false });
     expect(previewRenderer).toHaveBeenCalledOnce();
+  });
+
+  it('keeps edits committed during save out of that revision-bound archive and dirty in recovery', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-service-save-snapshot-'));
+    temporaryPaths.push(root);
+    const recoveryRoot = join(root, 'recovery');
+    let markTraceRead!: () => void;
+    let releaseTraceRead!: () => void;
+    const traceReadStarted = new Promise<void>((resolve) => { markTraceRead = resolve; });
+    const traceReadRelease = new Promise<void>((resolve) => { releaseTraceRead = resolve; });
+    class DelayedTraceStore extends TransactionTraceStore {
+      override async list(documentId: string, limit = Number.POSITIVE_INFINITY) {
+        markTraceRead();
+        await traceReadRelease;
+        return super.list(documentId, limit);
+      }
+    }
+    const canvas = createCanvas(3, 2);
+    const preview = canvas.toBuffer('image/png');
+    const previewNames: string[] = [];
+    const previewRenderer = vi.fn<NativeDocumentPreviewRenderer>(async (snapshot) => {
+      previewNames.push(snapshot.name);
+      return preview;
+    });
+    const service = new DocumentService(
+      new RecoveryJournal(recoveryRoot),
+      '1.0.0',
+      new DelayedTraceStore(join(root, 'trace')),
+      undefined,
+      previewRenderer,
+    );
+    services.push(service);
+    const document = service.create({ kind: 'illustration', name: 'Revision zero', width: 3, height: 2 }).activeDocument!;
+    const savedRevision = document.revision;
+    const destinationPath = join(root, 'revision-bound.aidraw');
+    const save = service.save(document.id, destinationPath);
+    await traceReadStarted;
+
+    const committed = await service.apply({
+      id: createId('tx'), clientOperationId: createId('op'), documentId: document.id, actor: HUMAN_ACTOR,
+      label: 'Edit during save', createdAt: nowIso(), operations: [{ kind: 'document.rename', name: 'Unsaved revision one' }],
+    });
+    expect(committed).toMatchObject({ status: 'committed', revision: savedRevision + 1 });
+    releaseTraceRead();
+    const destination = await save;
+
+    const archive = unzipSync(new Uint8Array(await readFile(destination)));
+    expect(JSON.parse(strFromU8(archive['document.json']))).toMatchObject({ name: 'Revision zero', revision: savedRevision });
+    expect(strFromU8(archive['trace/transactions.jsonl'])).toBe('');
+    expect(previewNames).toEqual(['Revision zero']);
+    expect(service.getDocument(document.id)).toMatchObject({
+      name: 'Unsaved revision one', revision: savedRevision + 1, filePath: destination, dirty: true,
+    });
+
+    await service.flushRecovery();
+    const recovered = (await new RecoveryJournal(recoveryRoot).recover()).find(({ id }) => id === document.id);
+    expect(recovered).toMatchObject({
+      name: 'Unsaved revision one', revision: savedRevision + 1, filePath: destination, dirty: true,
+    });
+  });
+
+  it('serializes saves in invocation order and continues after an earlier preview failure', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-service-save-queue-'));
+    temporaryPaths.push(root);
+    const canvas = createCanvas(3, 2);
+    const preview = canvas.toBuffer('image/png');
+    let previewCount = 0;
+    let markFirstPreview!: () => void;
+    let releaseFirstPreview!: () => void;
+    const firstPreviewStarted = new Promise<void>((resolve) => { markFirstPreview = resolve; });
+    const firstPreviewRelease = new Promise<void>((resolve) => { releaseFirstPreview = resolve; });
+    const previewRenderer = vi.fn<NativeDocumentPreviewRenderer>(async () => {
+      previewCount += 1;
+      if (previewCount === 1) {
+        markFirstPreview();
+        await firstPreviewRelease;
+        throw new Error('Injected first-save preview failure.');
+      }
+      return preview;
+    });
+    const service = new DocumentService(new RecoveryJournal(join(root, 'recovery')), '1.0.0', undefined, undefined, previewRenderer);
+    services.push(service);
+    const document = service.create({ kind: 'illustration', name: 'Serialized saves', width: 3, height: 2 }).activeDocument!;
+    const failedPath = join(root, 'failed.aidraw');
+    const successfulPath = join(root, 'successful.aidraw');
+
+    const firstSave = service.save(document.id, failedPath);
+    await firstPreviewStarted;
+    const secondSave = service.save(document.id, successfulPath);
+    await Promise.resolve();
+    expect(previewCount).toBe(1);
+    releaseFirstPreview();
+    await expect(firstSave).rejects.toThrow('Injected first-save preview failure.');
+    const destination = await secondSave;
+
+    expect(previewCount).toBe(2);
+    await expect(readFile(failedPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(JSON.parse(strFromU8(unzipSync(new Uint8Array(await readFile(destination)))['document.json']))).toMatchObject({ name: 'Serialized saves' });
+    expect(service.getDocument(document.id)).toMatchObject({ filePath: successfulPath, dirty: false });
+  });
+
+  it('does not let a stale save completion mutate or recover a replacement document incarnation', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-service-save-incarnation-'));
+    temporaryPaths.push(root);
+    const recoveryRoot = join(root, 'recovery');
+    const canvas = createCanvas(3, 2);
+    const preview = canvas.toBuffer('image/png');
+    let markPreview!: () => void;
+    let releasePreview!: () => void;
+    const previewStarted = new Promise<void>((resolve) => { markPreview = resolve; });
+    const previewRelease = new Promise<void>((resolve) => { releasePreview = resolve; });
+    const previewRenderer = vi.fn<NativeDocumentPreviewRenderer>(async () => {
+      markPreview();
+      await previewRelease;
+      return preview;
+    });
+    const service = new DocumentService(new RecoveryJournal(recoveryRoot), '1.0.0', undefined, undefined, previewRenderer);
+    services.push(service);
+    const original = service.create({ kind: 'illustration', name: 'Closing save source', width: 3, height: 2 }).activeDocument!;
+    const destinationPath = join(root, 'closed-source.aidraw');
+    const save = service.save(original.id, destinationPath);
+    await previewStarted;
+    await service.close(original.id, true);
+    const replacement = structuredClone(original);
+    replacement.name = 'Replacement incarnation';
+    replacement.filePath = join(root, 'replacement.aidraw');
+    replacement.dirty = true;
+    service.addDocument(replacement);
+    releasePreview();
+    await save;
+
+    expect(service.getDocument(original.id)).toMatchObject({
+      name: 'Replacement incarnation', filePath: replacement.filePath, dirty: true,
+    });
+    expect(JSON.parse(strFromU8(unzipSync(new Uint8Array(await readFile(destinationPath)))['document.json']))).toMatchObject({ name: 'Closing save source' });
+    await service.flushRecovery();
+    const recovered = (await new RecoveryJournal(recoveryRoot).recover()).find(({ id }) => id === original.id);
+    expect(recovered).toMatchObject({ name: 'Replacement incarnation', filePath: replacement.filePath, dirty: true });
   });
 
   it('rejects invalid or contradictory preview output before replacing an existing destination', async () => {

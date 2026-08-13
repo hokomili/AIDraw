@@ -33,7 +33,7 @@ import type {
 } from '../common/contracts';
 import { staticRasterDimensionsWithinLimits } from '../common/static-raster';
 import { RecoveryJournal } from './journal';
-import { readNativeDocument, writeNativeDocument } from './persistence';
+import { adoptPersistedPaintTileCaches, readNativeDocument, writeNativeDocument } from './persistence';
 import { renderDocument, renderDocumentDimensions } from './render-document';
 import { TransactionTraceStore } from './trace-store';
 import {
@@ -97,6 +97,8 @@ export class DocumentService extends EventEmitter {
   private readonly jobTimers = new Map<Id, NodeJS.Timeout>();
   private readonly presence = new Map<Id, AgentPresence>();
   private readonly acknowledgedAgentActivityCounts = new Map<Id, number>();
+  private readonly documentIncarnations = new Map<Id, symbol>();
+  private readonly saveQueues = new Map<Id, Promise<void>>();
   private editorAdvisory: EditorAdvisoryState = { advisory: true, attached: false, updatedAt: nowIso() };
   private activeDocumentId?: Id;
   private workspaceRevision = 0;
@@ -129,7 +131,7 @@ export class DocumentService extends EventEmitter {
         omittedPayloads += omitted;
         affectedDocuments += 1;
       }
-      this.documents.set(document.id, document); this.histories.set(document.id, new Map()); this.operationIds.set(document.id, new Map()); this.changes.set(document.id, []); this.checkpoints.set(document.id, new Map()); this.acknowledgedAgentActivityCounts.set(document.id, agentActivityEntries(document).length);
+      this.documents.set(document.id, document); this.documentIncarnations.set(document.id, Symbol(document.id)); this.histories.set(document.id, new Map()); this.operationIds.set(document.id, new Map()); this.changes.set(document.id, []); this.checkpoints.set(document.id, new Map()); this.acknowledgedAgentActivityCounts.set(document.id, agentActivityEntries(document).length);
     }
     if (omittedPayloads > 0) {
       this.recoveryWarnings.push(`Recovery omitted ${omittedPayloads} invalid embedded image payload${omittedPayloads === 1 ? '' : 's'} across ${affectedDocuments} recovered document${affectedDocuments === 1 ? '' : 's'}; the recovered document state and asset metadata were preserved.`);
@@ -303,6 +305,7 @@ export class DocumentService extends EventEmitter {
       }
     }
     this.documents.set(document.id, document);
+    this.documentIncarnations.set(document.id, Symbol(document.id));
     this.histories.set(document.id, new Map());
     this.operationIds.set(document.id, new Map());
     this.changes.set(document.id, []);
@@ -318,6 +321,7 @@ export class DocumentService extends EventEmitter {
   addDocument(document: AIDrawDocument): WorkspaceSnapshot {
     const cloned = structuredClone(document);
     this.documents.set(document.id, cloned);
+    this.documentIncarnations.set(document.id, Symbol(document.id));
     this.histories.set(document.id, new Map());
     this.operationIds.set(document.id, new Map());
     this.changes.set(document.id, []);
@@ -604,6 +608,7 @@ export class DocumentService extends EventEmitter {
           continue;
         }
         this.documents.set(loaded.document.id, loaded.document);
+        this.documentIncarnations.set(loaded.document.id, Symbol(loaded.document.id));
         this.histories.set(loaded.document.id, new Map());
         this.operationIds.set(loaded.document.id, new Map());
         this.changes.set(loaded.document.id, []);
@@ -628,38 +633,53 @@ export class DocumentService extends EventEmitter {
   async save(documentId: Id, filePath: string): Promise<string> {
     const document = this.documents.get(documentId);
     if (!document) throw new Error('Document is not open.');
-    const previewDocument = structuredClone(document);
+    const incarnation = this.documentIncarnations.get(documentId);
+    if (!incarnation) throw new Error('Document is not open.');
+    const savedDocument = structuredClone(document);
+    const previewDocument = structuredClone(savedDocument);
     const previewDimensions = renderDocumentDimensions(previewDocument);
-    const trace = await this.listTrace(documentId);
-    const destination = await writeNativeDocument(
-      filePath,
-      document,
-      this.appVersion,
-      async () => {
-        if (!staticRasterDimensionsWithinLimits(previewDimensions.width, previewDimensions.height)) return undefined;
-        const rendered = await this.nativePreviewRenderer(previewDocument);
-        if (!Buffer.isBuffer(rendered)) throw new Error('Native document preview renderer returned an invalid PNG.');
-        const preview = Buffer.from(rendered);
-        let header: ReturnType<typeof inspectImageHeader>;
-        try { header = inspectImageHeader(preview); }
-        catch { throw new Error('Native document preview renderer returned an invalid PNG.'); }
-        if (header.mimeType !== 'image/png') throw new Error('Native document preview renderer returned an invalid PNG.');
-        if (header.width !== previewDimensions.width || header.height !== previewDimensions.height) {
-          throw new Error('Native document preview renderer returned contradictory PNG dimensions.');
+    const checkpoints = this.listCheckpointRecords(documentId)
+      .filter((checkpoint) => checkpoint.sourceRevision <= savedDocument.revision);
+
+    return this.enqueueSave(documentId, async () => {
+      const trace = (await this.listTrace(documentId))
+        .filter((entry) => entry.revision <= savedDocument.revision);
+      const destination = await writeNativeDocument(
+        filePath,
+        savedDocument,
+        this.appVersion,
+        async () => {
+          if (!staticRasterDimensionsWithinLimits(previewDimensions.width, previewDimensions.height)) return undefined;
+          const rendered = await this.nativePreviewRenderer(previewDocument);
+          if (!Buffer.isBuffer(rendered)) throw new Error('Native document preview renderer returned an invalid PNG.');
+          const preview = Buffer.from(rendered);
+          let header: ReturnType<typeof inspectImageHeader>;
+          try { header = inspectImageHeader(preview); }
+          catch { throw new Error('Native document preview renderer returned an invalid PNG.'); }
+          if (header.mimeType !== 'image/png') throw new Error('Native document preview renderer returned an invalid PNG.');
+          if (header.width !== previewDimensions.width || header.height !== previewDimensions.height) {
+            throw new Error('Native document preview renderer returned contradictory PNG dimensions.');
+          }
+          return preview;
+        },
+        trace,
+        checkpoints,
+        undefined,
+        this.imageDecoder,
+      );
+      const current = this.documents.get(documentId);
+      if (current && this.documentIncarnations.get(documentId) === incarnation) {
+        adoptPersistedPaintTileCaches(current, savedDocument);
+        current.filePath = destination;
+        if (current.revision === savedDocument.revision) {
+          current.dirty = false;
+          current.updatedAt = nowIso();
         }
-        return preview;
-      },
-      trace,
-      this.listCheckpointRecords(documentId),
-      undefined,
-      this.imageDecoder,
-    );
-    document.filePath = destination;
-    document.dirty = false;
-    document.updatedAt = nowIso();
-    await this.journal.compact(document);
-    this.publish();
-    return destination;
+        await this.journal.compact(current);
+        this.publish();
+      }
+      return destination;
+    });
   }
 
   async close(documentId: Id, force = false): Promise<{ closed: boolean; reason?: string }> {
@@ -667,6 +687,7 @@ export class DocumentService extends EventEmitter {
     if (!document) return { closed: true };
     if (document.dirty && !force) return { closed: false, reason: 'unsaved' };
     this.documents.delete(documentId);
+    this.documentIncarnations.delete(documentId);
     this.histories.delete(documentId);
     this.operationIds.delete(documentId);
     this.changes.delete(documentId);
@@ -833,6 +854,17 @@ export class DocumentService extends EventEmitter {
 
   private listCheckpointRecords(documentId: Id): DocumentCheckpointRecord[] {
     return [...(this.checkpoints.get(documentId)?.values() ?? [])].map((checkpoint) => structuredClone(checkpoint));
+  }
+
+  private enqueueSave<T>(documentId: Id, operation: () => Promise<T>): Promise<T> {
+    const previous = this.saveQueues.get(documentId) ?? Promise.resolve();
+    const result = previous.then(operation, operation);
+    const completion = result.then(() => undefined, () => undefined);
+    this.saveQueues.set(documentId, completion);
+    void completion.then(() => {
+      if (this.saveQueues.get(documentId) === completion) this.saveQueues.delete(documentId);
+    });
+    return result;
   }
 
   private checkpointSummary(checkpoint: DocumentCheckpointRecord): DocumentCheckpointSummary {
