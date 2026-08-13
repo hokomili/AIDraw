@@ -337,14 +337,19 @@ function psdImagePixels(source: NonNullable<PsdLayer['imageData']>, label: strin
   return pixels;
 }
 
+function psdLayerIsGroup(layer: PsdLayer): layer is PsdLayer & { children: PsdLayer[] } {
+  return Array.isArray(layer.children);
+}
+
 function flattenPsdLayers(layers: PsdLayer[] | undefined, prefix = '', depth = 0, budget = { count: 0, pixels: 0 }): Array<{ layer: PsdLayer; name: string }> {
   if (depth > MAX_TILED_DEPTH) throw new Error('PSD layer nesting exceeds the 64-level safety limit.');
   const flattened: Array<{ layer: PsdLayer; name: string }> = [];
   for (const [index, layer] of (layers ?? []).entries()) {
     budget.count += 1; if (budget.count > MAX_PSD_LAYERS) throw new Error(`PSD exceeds the ${MAX_PSD_LAYERS.toLocaleString('en-US')}-layer safety limit.`);
     if (layer.imageData) { budget.pixels += psdImagePixels(layer.imageData, `PSD layer ${budget.count}`); if (budget.pixels > MAX_PSD_EXPANDED_PIXELS) throw new Error('PSD layer pixels exceed the 64-megapixel expanded safety budget.'); }
-    if (layer.children?.length) flattened.push(...flattenPsdLayers(layer.children, `${prefix}${layer.name ?? `Group ${index + 1}`}/`, depth + 1, budget));
-    else flattened.push({ layer, name: `${prefix}${layer.name ?? `Layer ${index + 1}`}` });
+    if (psdLayerIsGroup(layer)) {
+      if (layer.children.length) flattened.push(...flattenPsdLayers(layer.children, `${prefix}${layer.name ?? `Group ${index + 1}`}/`, depth + 1, budget));
+    } else flattened.push({ layer, name: `${prefix}${layer.name ?? `Layer ${index + 1}`}` });
   }
   return flattened;
 }
@@ -425,9 +430,9 @@ function importPsd(bytes: Buffer, name: string, pixelMode: boolean): ImportResul
   const stats = { groups: 0, text: 0, effects: 0, vector: 0, adjustments: 0 };
   const addLayers = (layers: PsdLayer[] | undefined, parentId?: string) => {
     for (const [index, source] of (layers ?? []).entries()) {
-      const timestamp = nowIso(); const id = createId('layer'); const layerName = source.name ?? `${source.children?.length ? 'Group' : 'Layer'} ${index + 1}`;
+      const timestamp = nowIso(); const id = createId('layer'); const isGroup = psdLayerIsGroup(source); const layerName = source.name ?? `${isGroup ? 'Group' : 'Layer'} ${index + 1}`;
       if (source.effects) stats.effects += 1; if (source.vectorMask || source.vectorFill || source.vectorStroke) stats.vector += 1; if (source.adjustment) stats.adjustments += 1;
-      if (source.children?.length) {
+      if (isGroup) {
         const group: IllustrationLayer = { id, revision: 0, name: layerName, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, parentId, visible: !source.hidden, locked: false, opacity: source.opacity ?? 1, blendMode: aidrawPsdBlendMode(source.blendMode), type: 'group', childIds: [] };
         document.layers[id] = group; stats.groups += 1;
         if (parentId) { const parent = document.layers[parentId]; if (parent?.type === 'group') parent.childIds.push(id); } else document.layerIds.push(id);

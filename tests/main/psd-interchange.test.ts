@@ -18,7 +18,8 @@ describe('PSD interchange', () => {
     const vector = Object.values(document.layers).find((layer) => layer.type === 'vector'); if (!vector || vector.type !== 'vector') throw new Error('Expected vector layer'); vector.name = 'Typography';
     const timestamp = nowIso(); const group: IllustrationLayer = { id: createId('layer'), revision: 0, name: 'Artwork', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, visible: true, locked: false, opacity: 0.8, blendMode: 'multiply', type: 'group', childIds: [vector.id] };
     vector.opacity = 0.6; vector.blendMode = 'screen';
-    vector.parentId = group.id; document.layerIds = [group.id, ...document.layerIds.filter((id) => id !== vector.id)]; document.layers[group.id] = group;
+    const emptyGroup: IllustrationLayer = { ...structuredClone(group), id: createId('layer'), name: 'Empty staging group', opacity: 0.2, blendMode: 'difference', childIds: [] };
+    vector.parentId = group.id; document.layerIds = [group.id, emptyGroup.id, ...document.layerIds.filter((id) => id !== vector.id)]; document.layers[group.id] = group; document.layers[emptyGroup.id] = emptyGroup;
     const text: TextObject = { id: createId('text'), revision: 0, name: 'Golden title', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, layerId: vector.id, type: 'text', text: 'Golden rail', width: 140, height: 32, transform: { ...IDENTITY_TRANSFORM, x: 12, y: 18, scaleX: 1.25, scaleY: 0.8, rotation: 17, skewX: 8, skewY: -3 }, visible: true, locked: false, opacity: 0.4, blendMode: 'overlay', align: 'center', lineHeight: 1.35, ranges: [{ start: 0, end: 6, fontFamily: 'ArialMT', fontSize: 22, fontWeight: 700, fontStyle: 'normal', color: '#c98e23', letterSpacing: 0.99 }, { start: 6, end: 11, fontFamily: 'ArialMT', fontSize: 22, fontWeight: 400, fontStyle: 'italic', color: '#3d2a10', letterSpacing: 0, underline: true }] };
     document.objects[text.id] = text; vector.objectIds.push(text.id);
     const emptyText: TextObject = { ...structuredClone(text), id: createId('text'), name: 'Empty placeholder', text: '', ranges: [] }; document.objects[emptyText.id] = emptyText; vector.objectIds.push(emptyText.id);
@@ -26,6 +27,7 @@ describe('PSD interchange', () => {
     const artifact = await exportDocument(document, 'psd'); const decoded = readPsd(artifact.data, { useImageData: true, logMissingFeatures: false }); const layers = flatten(decoded.children);
     const decodedGroup = decoded.children?.find((layer) => layer.name === 'Artwork'); const decodedTypography = decodedGroup?.children?.find((layer) => layer.name === 'Typography');
     expect(decodedGroup).toMatchObject({ opacity: 0.8, blendMode: 'multiply' }); expect(decodedTypography).toMatchObject({ opacity: 0.6, blendMode: 'screen' });
+    expect(decoded.children?.find((layer) => layer.name === 'Empty staging group')).toMatchObject({ opacity: 0.2, blendMode: 'difference', children: [] });
     const editable = layers.find((layer) => layer.text?.text === text.text); expect(editable?.hidden).toBe(true); expect(editable?.text?.styleRuns).toHaveLength(2); expect(editable?.text?.boxBounds).toEqual([0, 0, 140, 32]); expect(editable?.text?.style?.leading).toBeCloseTo(29.7, 8);
     expect(editable).toMatchObject({ opacity: 0.4, blendMode: 'overlay' });
     expect(layers.filter((layer) => layer.text)).toHaveLength(1);
@@ -38,6 +40,7 @@ describe('PSD interchange', () => {
       if (reopened.kind !== 'illustration') throw new Error('Expected illustration');
       const importedGroup = Object.values(reopened.layers).find((layer) => layer.type === 'group' && layer.name === 'Artwork'); expect(importedGroup).toMatchObject({ type: 'group', opacity: 0.8, blendMode: 'multiply' });
       const importedTypography = Object.values(reopened.layers).find((layer) => layer.type === 'group' && layer.name === 'Typography'); expect(importedTypography).toMatchObject({ type: 'group', opacity: 0.6, blendMode: 'screen' });
+      const importedEmpty = Object.values(reopened.layers).find((layer) => layer.name === 'Empty staging group'); expect(importedEmpty).toMatchObject({ type: 'group', opacity: 0.2, blendMode: 'difference', childIds: [] });
       const importedText = Object.values(reopened.objects).find((object) => object.type === 'text' && object.text === text.text); expect(importedText).toMatchObject({ visible: true, align: 'center', width: 140, height: 32 });
       if (!importedText || importedText.type !== 'text') throw new Error('Expected imported editable text');
       expect(importedText.lineHeight).toBeCloseTo(1.35, 10);

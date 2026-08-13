@@ -870,6 +870,18 @@ The complete formal **1/1 PASS** report records **874.39 MiB** RSS; 5,000-vector
 
 This checkpoint changes no canonical schema or opacity range, PDF/SVG/Tiled behavior, PSD blend mapping, external field support, pixel-mode import structure, or raster fallback. It does not prove external-producer appearance, Photoshop rendering, effects/adjustments/vector descriptors, uncommon color modes, packaged import/export/report presentation, byte identity, broad/lossless PSD compatibility, Level 3, RC, or stable-v1 readiness. IO-04 remains Partial and QA-03 remains Working.
 
+## Latest source/headless PSD empty-group checkpoint
+
+Source/headless IO-04/QA-03 evidence (2026-08-12): the pinned PSD reader reconstructs a folder by assigning a `children` array, including an exact empty `children: []`. AIDraw tested `children.length`, so a valid authored empty folder missed the group branch and re-imported as an unrelated vector leaf. The same truthy-length condition made pixel flattening treat it as a leaf candidate, although it ultimately had no image payload to emit.
+
+One shared adapter predicate now treats array presence as group-kind authority. Illustration import creates the same canonical group whether it is populated or empty, preserving source/root order, visibility, normalized opacity, blend, and parent relationship. Pixel flattening still visits/counts the group under the existing 2,048-layer and 64-level resource policy but emits no independent sprite for an empty folder. Empty children do not cause a needless deeper recursion, so the existing nesting ceiling is unchanged.
+
+**Material user-facing decision:** structural metadata, not content or a layer-name heuristic, defines the group. Synthesizing a child, dropping the empty group, guessing from “Group” in its name, or loosening the nesting/layer budgets were rejected. A generated AIDraw export→`ag-psd` decode→production import now proves one root-ordered empty group remains `type: group` with zero children, **0.2** opacity, and `difference` blend beside the populated opacity/text/fallback hierarchy.
+
+Focused pinned-Node-24 typecheck/targeted ESLint and **3 files / 64 tests** pass. The complete safe gate remains portability **369 tracked + 101 prospective** paths, TypeScript, full ESLint, and **165 files / 939 tests**. The complete formal **1/1 PASS** report records **821.53 MiB** RSS; 5,000-vector render **21.14 ms**; maximum-artboard illustration region **0.29 ms**; exact lasso **186.78 ms**; path-authoritative click **19.25 ms**; editable 4K paint **62.26 ms**; cold/warm materialized paint **207.96 / 182.46 ms**; 65,536 addressed maximum-sheet tiles **158.55 ms**; map/sprite sparse regions **1.32 / 0.33 ms**; 100,000-object filtering **40.76 ms**; overlay filtering **3.17 ms**; native save **124.17 ms**; PNG export **41.18 ms**; one-million-sample accounting **1.31 ms**; and flood **169.89 ms**. `/private/tmp/aidraw-psd-empty-group-performance-gate.json` is temporary self-authored diagnostics, not retained Photoshop/package evidence.
+
+This checkpoint changes no canonical schema/group semantics, populated-group behavior, group order, opacity/blend contract, resource ceiling, raster/composite fallback, PDF/SVG/Tiled adapter, or pixel-mode import model. It does not prove arbitrary external producer folders, Photoshop rendering, layer effects/adjustments/vector descriptors, packaged hierarchy UI, broad/lossless PSD compatibility, Level 3, RC, or stable-v1 readiness. IO-04 remains Partial and QA-03 remains Working.
+
 ## Failure severity and reruns
 
 | Severity | Meaning | Gate effect |
