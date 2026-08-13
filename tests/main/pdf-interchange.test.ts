@@ -114,7 +114,7 @@ describe('third-party PDF interchange', () => {
     unsupportedObject.text = '漢';
     unsupportedObject.ranges = [{ ...unsupportedObject.ranges[0], start: 0, end: 1 }];
     const unsupportedExport = await exportDocument(unsupported, 'pdf');
-    expect(unsupportedExport.report).toEqual({
+    expect(unsupportedExport.report).toMatchObject({
       warnings: [
         'Some imported PDF text could not remain searchable because it contains glyphs outside the built-in PDF font.',
         'PDF text remains searchable/editable but non-embedded document fonts are substituted with Helvetica.',
@@ -123,6 +123,12 @@ describe('third-party PDF interchange', () => {
       ],
       rasterized: [],
     });
+    expect(unsupportedExport.report.fidelity?.map((entry) => entry.code)).toEqual([
+      'searchable-text-omitted',
+      'searchable-text-retained', 'font-substitution',
+      'searchable-text-retained', 'font-substitution',
+    ]);
+    expect(unsupportedExport.report.fidelity?.[0]).toMatchObject({ subjectType: 'object', subjectId: unsupportedObject.id, subjectName: unsupportedObject.name });
     expect(await extractedPdfText(unsupportedExport.data)).toEqual([
       'CLIPPED TRANSPARENCY',
       'external producer fixture',
@@ -133,7 +139,7 @@ describe('third-party PDF interchange', () => {
     if (transformedLayer.type !== 'vector') throw new Error('Expected an imported PDF text layer.');
     transformed.objects[transformedLayer.objectIds[0]].transform.rotation = 1;
     const transformedExport = await exportDocument(transformed, 'pdf');
-    expect(transformedExport.report).toEqual({
+    expect(transformedExport.report).toMatchObject({
       warnings: [
         'Some imported PDF text could not remain searchable because its transform or effects require rasterization.',
         'PDF text remains searchable/editable but non-embedded document fonts are substituted with Helvetica.',
@@ -142,13 +148,18 @@ describe('third-party PDF interchange', () => {
       ],
       rasterized: [],
     });
+    expect(transformedExport.report.fidelity?.map((entry) => entry.code)).toEqual([
+      'searchable-text-omitted',
+      'searchable-text-retained', 'font-substitution',
+      'searchable-text-retained', 'font-substitution',
+    ]);
     expect(await extractedPdfText(transformedExport.data)).toEqual([
       'CLIPPED TRANSPARENCY',
       'external producer fixture',
     ]);
 
     const exported = await exportDocument(document, 'pdf');
-    expect(exported.report).toEqual({
+    expect(exported.report).toMatchObject({
       warnings: [
         'PDF text remains searchable/editable but non-embedded document fonts are substituted with Helvetica.',
         invisibleTextSafetyWarning,
@@ -156,6 +167,12 @@ describe('third-party PDF interchange', () => {
       ],
       rasterized: [],
     });
+    expect(exported.report.fidelity?.map((entry) => entry.code)).toEqual([
+      'searchable-text-retained', 'font-substitution',
+      'searchable-text-retained', 'font-substitution',
+      'searchable-text-retained', 'font-substitution',
+    ]);
+    expect(new Set(exported.report.fidelity?.map((entry) => entry.subjectId))).toEqual(new Set(importedTextLayer.type === 'vector' ? importedTextLayer.objectIds : []));
 
     expect(await extractedPdfText(exported.data)).toEqual([
       'LibreOffice PDF',
@@ -205,7 +222,7 @@ describe('third-party PDF interchange', () => {
     expectOpaqueBlackInterior(await renderDocument(document));
 
     const exported = await exportDocument(document, 'pdf');
-    expect(exported.report).toEqual({
+    expect(exported.report).toMatchObject({
       warnings: [
         'PDF text remains searchable/editable but non-embedded document fonts are substituted with Helvetica.',
         invisibleTextSafetyWarning,
@@ -213,6 +230,8 @@ describe('third-party PDF interchange', () => {
       ],
       rasterized: [],
     });
+    expect(exported.report.fidelity?.filter((entry) => entry.code === 'searchable-text-retained')).toHaveLength(3);
+    expect(exported.report.fidelity?.filter((entry) => entry.code === 'font-substitution')).toHaveLength(3);
     expect(await extractedPdfText(exported.data)).toEqual([
       'LibreOffice PDF',
       'CLIPPED TRANSPARENCY',

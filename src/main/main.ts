@@ -389,7 +389,7 @@ async function runApprovedFileJob(job: AsyncJob): Promise<void> {
       await Promise.all([target, ...plannedCompanions.map((entry) => entry.path)].map((path) => assertOverwriteAuthority(path, approvedOverwrites)));
       await writeApprovedTarget(target, artifact.data, approvedOverwrites);
       for (const entry of plannedCompanions) { await writeApprovedTarget(entry.path, companionBytes(entry.companion.data, String(request.format), target), approvedOverwrites); companionPaths.push(entry.path); }
-      const report = await recordInterchangeReport({ kind: 'export', status: 'completed', actor: job.actor, documentIds: [document.id], documentNames: [document.name], format: String(request.format), sourcePaths: [], destinationPaths: [target, ...companionPaths], warnings: artifact.report.warnings, rasterized: artifact.report.rasterized });
+      const report = await recordInterchangeReport({ kind: 'export', status: 'completed', actor: job.actor, documentIds: [document.id], documentNames: [document.name], format: String(request.format), sourcePaths: [], destinationPaths: [target, ...companionPaths], warnings: artifact.report.warnings, rasterized: artifact.report.rasterized, ...(artifact.report.fidelity ? { fidelity: artifact.report.fidelity } : {}) });
       output = { path: target, companionPaths, warnings: artifact.report.warnings, reportId: report.id };
     } else throw new Error('The approved file job has invalid or incomplete arguments.');
     service.upsertJob({ ...job, status: 'completed', progress: 1, updatedAt: nowIso(), message: `Approved ${job.kind} completed.`, result: { ...result, output } });
@@ -710,7 +710,7 @@ function registerIpc(): void {
     const approved = new Set([...(targetExisted ? [target] : []), ...existingCompanions].map(normalizedAuthorityPath));
     await writeApprovedTarget(target, artifact.data, approved);
     for (const entry of plannedCompanions) await writeApprovedTarget(entry.path, companionBytes(entry.companion.data, format, target), approved);
-    const report = await recordInterchangeReport({ kind: 'export', status: 'completed', actor: HUMAN_ACTOR, documentIds: [document.id], documentNames: [document.name], format, sourcePaths: [], destinationPaths: [target, ...plannedCompanions.map((entry) => entry.path)], warnings: artifact.report.warnings, rasterized: artifact.report.rasterized });
+    const report = await recordInterchangeReport({ kind: 'export', status: 'completed', actor: HUMAN_ACTOR, documentIds: [document.id], documentNames: [document.name], format, sourcePaths: [], destinationPaths: [target, ...plannedCompanions.map((entry) => entry.path)], warnings: artifact.report.warnings, rasterized: artifact.report.rasterized, ...(artifact.report.fidelity ? { fidelity: artifact.report.fidelity } : {}) });
     return { exported: true, filePath: target, warnings: artifact.report.warnings, reportId: report.id };
   });
   handle(IPC.copySelection, (_event, objectIds: string[]) => copySelection(Array.isArray(objectIds) ? objectIds : []));

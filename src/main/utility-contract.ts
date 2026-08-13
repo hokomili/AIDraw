@@ -8,6 +8,11 @@ import type { SpriteSheetSliceOptions } from '../common/sprite-sheet';
 import type { ObservationRequest } from './capture-observation';
 import { MAX_STATIC_RASTER_SIDE } from '../common/static-raster';
 import {
+  MAX_INTERCHANGE_FIDELITY_ENTRIES,
+  isInterchangeFidelityEntry,
+  type InterchangeFidelityEntry,
+} from '../common/interchange-fidelity';
+import {
   GENERATION_ACCEPTANCE_WEBP_QUALITIES,
   type GeneratedAcceptancePreparation,
   type GeneratedOutput,
@@ -172,7 +177,7 @@ export interface SerializedExportArtifact {
   dataBase64: string;
   mimeType: string;
   extension: string;
-  report: { warnings: string[]; rasterized: string[] };
+  report: { warnings: string[]; rasterized: string[]; fidelity?: InterchangeFidelityEntry[] };
   companion?: { dataBase64: string; extension: string; mimeType: string; name?: string };
   companions?: Array<{ dataBase64: string; extension: string; mimeType: string; name: string }>;
 }
@@ -810,9 +815,19 @@ export function assertExportUtilityResponse(
   const expected = expectedExportArtifactIdentity(request.document, request.format);
   if (!expected || !hasExportMemberIdentity(artifact, expected.primary)) throw new Error('Raster utility returned a malformed export artifact.');
   const decodedLengths = [assertSerializedExportMember(artifact, 'artifact', false)];
-  if (!isRecord(artifact.report) || !hasOnlyKeys(artifact.report, ['warnings', 'rasterized']) || !hasKeys(artifact.report, ['warnings', 'rasterized'])) throw new Error('Raster utility returned a malformed export artifact.');
+  if (!isRecord(artifact.report) || !hasOnlyKeys(artifact.report, ['warnings', 'rasterized', 'fidelity']) || !hasKeys(artifact.report, ['warnings', 'rasterized'])) throw new Error('Raster utility returned a malformed export artifact.');
   assertBoundedStringArray(artifact.report.warnings, 'Raster utility export warnings', 'Raster utility returned a malformed export artifact.');
   assertBoundedStringArray(artifact.report.rasterized, 'Raster utility export rasterization report', 'Raster utility returned a malformed export artifact.');
+  if (artifact.report.fidelity !== undefined) {
+    if (!Array.isArray(artifact.report.fidelity) || artifact.report.fidelity.length > MAX_INTERCHANGE_FIDELITY_ENTRIES
+      || artifact.report.fidelity.some((entry) => !isInterchangeFidelityEntry(entry))) throw new Error('Raster utility returned a malformed export artifact.');
+  }
+  assertUtilityJsonBudget(artifact.report, {
+    label: 'Raster utility export report',
+    maxBytes: MAX_UTILITY_REPORT_SERIALIZED_BYTES,
+    maxNodes: MAX_UTILITY_REPORT_ENTRIES * 8 + 4,
+    maxDepth: 3,
+  });
   if (artifact.companion !== undefined && artifact.companions !== undefined) throw new Error('Raster utility returned a malformed export companion.');
   if (expected.companion) {
     if (!artifact.companion || artifact.companions !== undefined) throw new Error('Raster utility returned a malformed export companion.');

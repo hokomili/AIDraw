@@ -169,6 +169,7 @@ export class BatchDocumentWorkflows {
           destinationPaths: [target, ...companionPaths],
           warnings: artifact.report.warnings,
           rasterized: artifact.report.rasterized,
+          ...(artifact.report.fidelity ? { fidelity: artifact.report.fidelity } : {}),
         });
         items.push({ documentId: tab.id, name: tab.name, status: 'exported', filePath: target, warnings: artifact.report.warnings, reportId: report.id });
       } catch (error) {

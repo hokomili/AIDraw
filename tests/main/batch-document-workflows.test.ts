@@ -128,7 +128,7 @@ describe('batch document workflows', () => {
       directories: [undefined, root],
       exportDocument: vi.fn(async (document: AIDrawDocument) => {
         if (document.id === failed.id) throw new Error('bounded export failure');
-        return { data: Buffer.from(document.id), mimeType: 'image/png', extension: 'png', report: { warnings: [], rasterized: [] } };
+        return { data: Buffer.from(document.id), mimeType: 'image/png', extension: 'png', report: { warnings: [], rasterized: [], fidelity: [{ code: 'raster-fallback' as const, subjectType: 'document' as const, subjectId: document.id, subjectName: document.name, detail: 'Fixture reason.' }] } };
       }),
     });
 
@@ -142,6 +142,10 @@ describe('batch document workflows', () => {
     ]);
     expect(harness.writeTarget).toHaveBeenCalledTimes(2);
     expect(harness.reports.map((report) => report.status)).toEqual(['completed', 'completed', 'failed']);
+    expect(harness.reports.slice(0, 2).map((report) => report.fidelity)).toEqual([
+      [{ code: 'raster-fallback', subjectType: 'document', subjectId: first.id, subjectName: first.name, detail: 'Fixture reason.' }],
+      [{ code: 'raster-fallback', subjectType: 'document', subjectId: second.id, subjectName: second.name, detail: 'Fixture reason.' }],
+    ]);
   });
 
   it('keeps all dirty documents open when Close All is cancelled', async () => {

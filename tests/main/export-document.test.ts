@@ -18,11 +18,26 @@ import {
   type TextObject,
 } from '@aidraw/core';
 import { MAX_PSD_LAYER_NESTING_DEPTH, MAX_PSD_LAYER_RECORDS, assertPsdLayerStructureBudget } from '@common/psd-limits';
-import { assertPsdLayerRasterBudget, exportDocument, illustrationToSvg, plannedExportCompanionPaths } from '@main/export-document';
+import { assertPsdLayerRasterBudget, boundedInterchangeExportReport, exportDocument, illustrationToSvg, plannedExportCompanionPaths } from '@main/export-document';
+import { MAX_UTILITY_REPORT_SERIALIZED_BYTES, MAX_UTILITY_TEXT_BYTES, assertUtilityJsonBudget } from '@main/utility-resource-policy';
 import { decompressFrames, parseGIF } from 'gifuct-js';
 import UPNG from 'upng-js';
 
 describe('interchange exporters', () => {
+  it('trims additive fidelity reasons to the aggregate utility envelope without displacing a valid legacy report', () => {
+    const reason = { code: 'raster-fallback' as const, subjectType: 'object' as const, subjectId: 'object-1', subjectName: 'x'.repeat(200), detail: 'x'.repeat(1_024) };
+    const report = boundedInterchangeExportReport([], [], Array.from({ length: 4_096 }, () => ({ ...reason })));
+    expect(report.fidelity?.length).toBeGreaterThan(0);
+    expect(report.fidelity?.length).toBeLessThan(4_096);
+    expect(report.warnings).toContainEqual(expect.stringMatching(/truncated at 4,096 entries/));
+    expect(() => assertUtilityJsonBudget(report, { label: 'test report', maxBytes: MAX_UTILITY_REPORT_SERIALIZED_BYTES, maxNodes: 4_096 * 8 + 4, maxDepth: 3 })).not.toThrow();
+
+    const legacyWarnings = Array(16).fill('x'.repeat(MAX_UTILITY_TEXT_BYTES - 10));
+    const legacy = boundedInterchangeExportReport(legacyWarnings, [], [reason]);
+    expect(legacy).toEqual({ warnings: legacyWarnings, rasterized: [] });
+    expect(() => assertUtilityJsonBudget(legacy, { label: 'legacy report', maxBytes: MAX_UTILITY_REPORT_SERIALIZED_BYTES, maxNodes: 4_096 * 8 + 4, maxDepth: 3 })).not.toThrow();
+  });
+
   it('rejects expanded PSD layer rasters before allocating their full canvases', async () => {
     expect(() => assertPsdLayerRasterBudget(8_192, 8_192, 1)).not.toThrow();
     expect(() => assertPsdLayerRasterBudget(4_096, 4_096, 4)).not.toThrow();

@@ -114,6 +114,7 @@ import { convertPathArcsToCubics } from "../common/path-conversion";
 import { joinPathObjects } from "../common/path-topology";
 import { alignIllustrationObjects, distributeIllustrationObjects, type AlignmentTarget, type DistributionMode } from "../common/alignment";
 import { actorClientLabel, actorIdentityLabel } from "../common/actor-identity";
+import { interchangeFidelityCodeLabel } from "../common/interchange-fidelity";
 import { AGENT_CLIENTS, type AgentClientId, type AgentClientSetupResult } from "../common/agent-clients";
 import { cropImageToAspect, resetImageCrop } from "../common/image-crop";
 import { BrushLibraryDialog } from "./components/BrushLibraryDialog";
@@ -4110,12 +4111,14 @@ function InterchangeReportDialog({ report, onClose }: { report: InterchangeRepor
         <div><dt>Documents</dt><dd>{report.documentNames.join(", ") || "No document created"}</dd></div>
         <div><dt>Warnings</dt><dd>{report.warnings.length}</dd></div>
         <div><dt>Raster fallbacks</dt><dd>{report.rasterized.length}</dd></div>
+        <div><dt>Structured reasons</dt><dd>{report.fidelity.length}</dd></div>
       </dl>
       {pathRows.length > 0 && <section><h4>Files</h4>{pathRows.map((entry, index) => <div className="interchange-path" key={`${entry.path}-${index}`}><span>{entry.label}</span><code>{entry.path}</code></div>)}</section>}
       {report.error && <section className="interchange-error"><h4>Failure</h4><p>{report.error}</p></section>}
       {report.warnings.length > 0 && <section><h4>Warnings and conversions</h4><ul>{report.warnings.map((warning, index) => <li key={`${warning}-${index}`}>{warning}</li>)}</ul></section>}
       {report.rasterized.length > 0 && <section><h4>Rasterized or flattened content</h4><ul>{report.rasterized.map((entry, index) => <li key={`${entry}-${index}`}>{entry}</li>)}</ul></section>}
-      {!report.error && report.warnings.length === 0 && report.rasterized.length === 0 && <div className="interchange-clean">No fidelity warnings were reported by this adapter.</div>}
+      {report.fidelity.length > 0 && <section><h4>Structured fidelity reasons</h4><ul>{report.fidelity.map((entry, index) => <li key={`${entry.code}-${entry.subjectId}-${index}`}><strong>{interchangeFidelityCodeLabel(entry.code)}</strong> · {entry.subjectType} “{entry.subjectName || entry.subjectId}”{entry.detail ? ` — ${entry.detail}` : ""}</li>)}</ul></section>}
+      {!report.error && report.warnings.length === 0 && report.rasterized.length === 0 && report.fidelity.length === 0 && <div className="interchange-clean">No fidelity warnings were reported by this adapter.</div>}
     </div>
     <footer className="modal-footer"><button onClick={onClose}>Close</button><button className="primary" onClick={async () => { const result = await window.aidraw.exportInterchangeReport(report.id); if (result.exported) notify(`Saved report to ${result.filePath}.`, "success"); }}>Export report JSON</button></footer>
   </ModalShell>;
@@ -4418,7 +4421,7 @@ function ActivityPanel() {
         <div className="interchange-report-list">
           {interchangeReports.slice(0, 12).map((report) => <button className={`interchange-report-row is-${report.status}`} key={report.id} onClick={() => setSelectedReport(report)}>
             <span className="interchange-report-icon">{report.kind === "import" ? <Upload size={12} /> : <Download size={12} />}</span>
-            <span><strong>{report.kind === "import" ? "Imported" : "Exported"} {report.format.toUpperCase()}</strong><small>{new Date(report.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} · {report.warnings.length + report.rasterized.length} note{report.warnings.length + report.rasterized.length === 1 ? "" : "s"}</small></span>
+            <span><strong>{report.kind === "import" ? "Imported" : "Exported"} {report.format.toUpperCase()}</strong><small>{new Date(report.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} · {report.fidelity.length} coded reason{report.fidelity.length === 1 ? "" : "s"} · {report.warnings.length + report.rasterized.length} note{report.warnings.length + report.rasterized.length === 1 ? "" : "s"}</small></span>
             <em>{report.status}</em>
           </button>)}
           {interchangeReports.length === 0 && <small className="checkpoint-empty">Completed imports and exports will keep their fidelity reports here.</small>}

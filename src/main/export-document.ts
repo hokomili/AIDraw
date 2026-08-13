@@ -25,9 +25,11 @@ import { AIDRAW_PSD_EDITABLE_TEXT_SUFFIX, aidrawPsdLockFields, aidrawPsdTextMatr
 import { MAX_PSD_EXPANDED_LAYER_PIXELS, MAX_PSD_LAYER_RECORDS, assertPsdLayerStructureBudget } from '../common/psd-limits';
 import { MAX_STATIC_RASTER_PIXELS } from '../common/static-raster';
 import { layoutStyledText } from '../common/text-layout';
+import { MAX_INTERCHANGE_FIDELITY_ENTRIES, tryAppendInterchangeFidelityEntry, type InterchangeFidelityEntry } from '../common/interchange-fidelity';
 import type { ExportFormat, ExportOptions } from '../common/contracts';
 import { safeTiledAssetName } from './export-artifact-policy';
 import { renderDocument, renderDocumentDimensions, renderIllustration, renderIllustrationLayerSource, renderSprite } from './render-document';
+import { MAX_UTILITY_REPORT_SERIALIZED_BYTES, assertUtilityJsonBudget } from './utility-resource-policy';
 
 initializePsdCanvas(createCanvas as unknown as (width: number, height: number) => HTMLCanvasElement);
 
@@ -111,13 +113,53 @@ function scaleWarnings(scale: number): string[] {
   return scale === 1 ? [] : [`Exported at ${scale}× using nearest-neighbor pixel scaling.`];
 }
 
+const FIDELITY_REPORT_TRUNCATION_WARNING = 'Structured fidelity reasons were truncated at 4,096 entries; human warnings and rasterized names remain available.';
+
 export interface ExportArtifact {
   data: Buffer;
   mimeType: string;
   extension: string;
-  report: { warnings: string[]; rasterized: string[] };
+  report: { warnings: string[]; rasterized: string[]; fidelity?: InterchangeFidelityEntry[] };
   companion?: { data: Buffer; extension: string; mimeType: string; name?: string };
   companions?: Array<{ data: Buffer; extension: string; mimeType: string; name: string }>;
+}
+
+function exportReportFitsUtilityEnvelope(report: ExportArtifact['report']): boolean {
+  try {
+    assertUtilityJsonBudget(report, {
+      label: 'Export report',
+      maxBytes: MAX_UTILITY_REPORT_SERIALIZED_BYTES,
+      maxNodes: MAX_INTERCHANGE_FIDELITY_ENTRIES * 8 + 4,
+      maxDepth: 3,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function boundedInterchangeExportReport(
+  warnings: string[],
+  rasterized: string[],
+  fidelity: readonly InterchangeFidelityEntry[],
+  producerTruncated = false,
+): ExportArtifact['report'] {
+  const base = { warnings, rasterized };
+  if (!fidelity.length && !producerTruncated) return base;
+  const complete = { ...base, fidelity: [...fidelity] };
+  if (!producerTruncated && exportReportFitsUtilityEnvelope(complete)) return complete;
+
+  const warned = warnings.includes(FIDELITY_REPORT_TRUNCATION_WARNING) ? warnings : [...warnings, FIDELITY_REPORT_TRUNCATION_WARNING];
+  const warnedBase = { warnings: warned, rasterized };
+  if (!exportReportFitsUtilityEnvelope(warnedBase)) return base;
+
+  let minimum = 0; let maximum = fidelity.length;
+  while (minimum < maximum) {
+    const candidate = Math.ceil((minimum + maximum) / 2);
+    if (exportReportFitsUtilityEnvelope({ ...warnedBase, fidelity: fidelity.slice(0, candidate) })) minimum = candidate;
+    else maximum = candidate - 1;
+  }
+  return minimum > 0 ? { ...warnedBase, fidelity: fidelity.slice(0, minimum) } : warnedBase;
 }
 
 function xml(value: string): string {
@@ -391,7 +433,9 @@ async function drawPdfImage(output: PDFDocument, page: PDFPage, document: Illust
 
 async function illustrationPdf(document: IllustrationDocument): Promise<ExportArtifact> {
   const output = await PDFDocument.create(); const page = output.addPage([document.artboard.width, document.artboard.height]);
-  const warnings = new Set<string>(); const rasterized: string[] = []; const fonts = new Map<StandardFonts, PDFFont>(); let searchableImportedTextRuns = 0;
+  const warnings = new Set<string>(); const rasterized: string[] = []; const fidelity: InterchangeFidelityEntry[] = []; const fonts = new Map<StandardFonts, PDFFont>(); let searchableImportedTextRuns = 0;
+  let fidelityTruncated = false;
+  const recordFidelity = (entry: InterchangeFidelityEntry) => { if (!tryAppendInterchangeFidelityEntry(fidelity, entry)) fidelityTruncated = true; };
   if (document.artboard.background) {
     const background = pdfColor(document.artboard.background);
     if (background) page.drawRectangle({ x: 0, y: 0, width: document.artboard.width, height: document.artboard.height, color: background.color, opacity: background.opacity });
@@ -404,8 +448,13 @@ async function illustrationPdf(document: IllustrationDocument): Promise<ExportAr
     const object = document.objects[objectId]; if (!object?.visible) return;
     if (invisibleText && object.type !== 'text') return;
     if (!pdfObjectCanRemainNative(document, object)) {
-      if (invisibleText) { warnings.add('Some imported PDF text could not remain searchable because its transform or effects require rasterization.'); return; }
+      if (invisibleText) {
+        warnings.add('Some imported PDF text could not remain searchable because its transform or effects require rasterization.');
+        recordFidelity({ code: 'searchable-text-omitted', subjectType: 'object', subjectId: object.id, subjectName: object.name, detail: 'The imported text transform or effects cannot be represented by the searchable PDF text path.' });
+        return;
+      }
       await drawFallback(object.name, await rasterizedPdfObject(document, layerId, objectId));
+      recordFidelity({ code: 'raster-fallback', subjectType: 'object', subjectId: object.id, subjectName: object.name, detail: 'The object uses a transform, paint, mask, blend mode, or effect outside the native PDF path.' });
       warnings.add('Unsupported object transforms, gradients, masks, blend modes, and effects are embedded as transparent raster fallbacks.');
       return;
     }
@@ -417,6 +466,7 @@ async function illustrationPdf(document: IllustrationDocument): Promise<ExportAr
     if (object.type === 'image') { await drawPdfImage(output, page, document, object); return; }
     if (object.type === 'text') {
       const ranges = object.ranges.length ? object.ranges : [{ start: 0, end: object.text.length, fontFamily: 'sans-serif', fontSize: 48, fontWeight: 500, fontStyle: 'normal' as const, color: '#27213c', letterSpacing: 0 }];
+      const substitutesFont = ranges.some((range) => !/^(arial|helvetica|sans-serif)$/i.test(range.fontFamily));
       try {
         const fontFor = async (weight: number, italic: boolean) => { const name = pdfFontName(weight, italic); let font = fonts.get(name); if (!font) { font = await output.embedFont(name); fonts.set(name, font); } return font; };
         for (const range of ranges) await fontFor(range.fontWeight, range.fontStyle === 'italic');
@@ -424,7 +474,11 @@ async function illustrationPdf(document: IllustrationDocument): Promise<ExportAr
           const style = ranges[0]; const font = fonts.get(pdfFontName(style.fontWeight, style.fontStyle === 'italic'))!;
           page.drawText(object.text, { x: object.transform.x, y: document.artboard.height - object.transform.y - style.fontSize, size: style.fontSize, font, color: rgb(0, 0, 0), opacity: 0 });
           searchableImportedTextRuns += 1;
-          if (ranges.some((range) => !/^(arial|helvetica|sans-serif)$/i.test(range.fontFamily))) warnings.add('PDF text remains searchable/editable but non-embedded document fonts are substituted with Helvetica.');
+          recordFidelity({ code: 'searchable-text-retained', subjectType: 'object', subjectId: object.id, subjectName: object.name, detail: 'Invisible searchable text remains selectable beneath covering artwork and must not be treated as redacted.' });
+          if (substitutesFont) {
+            warnings.add('PDF text remains searchable/editable but non-embedded document fonts are substituted with Helvetica.');
+            recordFidelity({ code: 'font-substitution', subjectType: 'object', subjectId: object.id, subjectName: object.name, detail: 'Helvetica replaces a non-embedded document font in the PDF text path.' });
+          }
           return;
         }
         const glyphs = layoutStyledText({ ...object, ranges }, (character, style) => fonts.get(pdfFontName(style.fontWeight, style.fontStyle === 'italic'))!.widthOfTextAtSize(character, style.fontSize));
@@ -433,10 +487,18 @@ async function illustrationPdf(document: IllustrationDocument): Promise<ExportAr
           page.drawText(glyph.character, { x: object.transform.x + glyph.x, y: document.artboard.height - object.transform.y - glyph.y - glyph.style.fontSize, size: glyph.style.fontSize, font, color: fill.color, opacity: fill.opacity * object.opacity });
           if (glyph.style.underline) page.drawLine({ start: { x: object.transform.x + glyph.x, y: document.artboard.height - object.transform.y - glyph.y - glyph.style.fontSize * 1.08 }, end: { x: object.transform.x + glyph.x + glyph.width, y: document.artboard.height - object.transform.y - glyph.y - glyph.style.fontSize * 1.08 }, thickness: Math.max(0.5, glyph.style.fontSize / 18), color: fill.color, opacity: fill.opacity * object.opacity });
         }
-        if (ranges.some((range) => !/^(arial|helvetica|sans-serif)$/i.test(range.fontFamily))) warnings.add('PDF text remains searchable/editable but non-embedded document fonts are substituted with Helvetica.');
+        if (substitutesFont) {
+          warnings.add('PDF text remains searchable/editable but non-embedded document fonts are substituted with Helvetica.');
+          recordFidelity({ code: 'font-substitution', subjectType: 'object', subjectId: object.id, subjectName: object.name, detail: 'Helvetica replaces a non-embedded document font in the PDF text path.' });
+        }
       } catch {
-        if (invisibleText) { warnings.add('Some imported PDF text could not remain searchable because it contains glyphs outside the built-in PDF font.'); return; }
+        if (invisibleText) {
+          warnings.add('Some imported PDF text could not remain searchable because it contains glyphs outside the built-in PDF font.');
+          recordFidelity({ code: 'searchable-text-omitted', subjectType: 'object', subjectId: object.id, subjectName: object.name, detail: 'The imported text contains glyphs outside the built-in PDF font.' });
+          return;
+        }
         await drawFallback(object.name, await rasterizedPdfObject(document, layerId, objectId));
+        recordFidelity({ code: 'raster-fallback', subjectType: 'object', subjectId: object.id, subjectName: object.name, detail: 'The text contains a glyph or paint outside the built-in PDF text path.' });
         warnings.add('Text containing glyphs outside the built-in PDF font was rasterized; the export report names the affected object.');
       }
       return;
@@ -456,11 +518,16 @@ async function illustrationPdf(document: IllustrationDocument): Promise<ExportAr
     }
     if (layer.opacity !== 1 || layer.blendMode !== 'normal' || layer.filters?.length || layer.maskLayerId) {
       await drawFallback(layer.name, (await renderIllustration(document, layerId, false)).toBuffer('image/png'));
+      recordFidelity({ code: 'raster-fallback', subjectType: 'layer', subjectId: layer.id, subjectName: layer.name, detail: 'Layer compositing, adjustment filters, or a layer mask requires a transparent PDF raster fallback.' });
       warnings.add('Layer compositing, adjustment filters, and layer masks are embedded as transparent raster fallbacks.');
       return;
     }
     if (layer.type === 'paint') {
-      if (layer.strokes.length || Object.keys(layer.tileAssetIds).length) { await drawFallback(layer.name, (await renderIllustration(document, layerId, false)).toBuffer('image/png')); warnings.add('Paint layers are embedded as transparent PNG fallbacks.'); }
+      if (layer.strokes.length || Object.keys(layer.tileAssetIds).length) {
+        await drawFallback(layer.name, (await renderIllustration(document, layerId, false)).toBuffer('image/png'));
+        recordFidelity({ code: 'raster-fallback', subjectType: 'layer', subjectId: layer.id, subjectName: layer.name, detail: 'Paint-layer content requires a transparent PDF raster fallback.' });
+        warnings.add('Paint layers are embedded as transparent PNG fallbacks.');
+      }
       return;
     }
     if (layer.type === 'group') { for (const childId of layer.childIds) await drawLayer(childId); return; }
@@ -472,7 +539,7 @@ async function illustrationPdf(document: IllustrationDocument): Promise<ExportAr
     warnings.add('Invisible imported PDF text remains searchable and selectable even when visible artwork covers it; do not treat covering artwork as redaction.');
     warnings.add(`${searchableImportedTextRuns} imported PDF text run${searchableImportedTextRuns === 1 ? ' was' : 's were'} retained as invisible searchable content.`);
   }
-  return { data: Buffer.from(await output.save()), mimeType: 'application/pdf', extension: 'pdf', report: { warnings: [...warnings], rasterized } };
+  return { data: Buffer.from(await output.save()), mimeType: 'application/pdf', extension: 'pdf', report: boundedInterchangeExportReport([...warnings], rasterized, fidelity, fidelityTruncated) };
 }
 
 async function pdf(document: AIDrawDocument, scale = 1): Promise<ExportArtifact> {
@@ -481,7 +548,14 @@ async function pdf(document: AIDrawDocument, scale = 1): Promise<ExportArtifact>
   assertScaledDimensions(dimensions.width, dimensions.height, scale);
   const canvas = nearestNeighborCanvas(await renderDocument(document), scale); const png = canvas.toBuffer('image/png'); const output = await PDFDocument.create(); const page = output.addPage([canvas.width, canvas.height]);
   page.drawImage(await output.embedPng(png), { x: 0, y: 0, width: canvas.width, height: canvas.height });
-  return { data: Buffer.from(await output.save()), mimeType: 'application/pdf', extension: 'pdf', report: { warnings: [...scaleWarnings(scale), 'Pixel PDF export embeds nearest-neighbor raster artwork.'], rasterized: ['composite'] } };
+  return {
+    data: Buffer.from(await output.save()), mimeType: 'application/pdf', extension: 'pdf',
+    report: {
+      warnings: [...scaleWarnings(scale), 'Pixel PDF export embeds nearest-neighbor raster artwork.'],
+      rasterized: ['composite'],
+      fidelity: [{ code: 'raster-fallback', subjectType: 'document', subjectId: document.id, subjectName: document.name, detail: 'Pixel PDF export embeds the document composite as nearest-neighbor raster artwork.' }],
+    },
+  };
 }
 
 function psdBlendMode(value: IllustrationDocument['layers'][string]['blendMode']): PsdLayer['blendMode'] {
@@ -591,6 +665,9 @@ function renderPsdPixelLayer(document: Extract<AIDrawDocument, { kind: 'pixel' }
 
 async function psd(document: AIDrawDocument): Promise<ExportArtifact> {
   const report = { warnings: [] as string[], rasterized: [] as string[] };
+  const fidelity: InterchangeFidelityEntry[] = [];
+  let fidelityTruncated = false;
+  const recordFidelity = (entry: InterchangeFidelityEntry) => { if (!tryAppendInterchangeFidelityEntry(fidelity, entry)) fidelityTruncated = true; };
   let width: number; let height: number; const children: PsdLayer[] = [];
   if (document.kind === 'illustration') {
     width = document.artboard.width; height = document.artboard.height;
@@ -605,8 +682,12 @@ async function psd(document: AIDrawDocument): Promise<ExportArtifact> {
         return { ...common, children: nested, opened: true };
       }
       const imageData = await renderPsdLayerFallback(document, layerId); report.rasterized.push(layer.name);
+      recordFidelity({ code: 'raster-fallback', subjectType: 'layer', subjectId: layer.id, subjectName: layer.name, detail: 'The illustration layer is represented by a visually faithful PSD raster fallback.' });
       if (layer.type !== 'vector') {
-        if (layer.type === 'group') report.warnings.push(`Layer group “${layer.name}” was flattened because its filter or mask cannot be represented safely in PSD.`);
+        if (layer.type === 'group') {
+          report.warnings.push(`Layer group “${layer.name}” was flattened because its filter or mask cannot be represented safely in PSD.`);
+          recordFidelity({ code: 'flattened-layer', subjectType: 'layer', subjectId: layer.id, subjectName: layer.name, detail: 'A group filter or mask prevents safe editable PSD child-layer representation.' });
+        }
         return { ...common, imageData };
       }
       const texts = textObjectsInLayer(document, layerId);
@@ -633,13 +714,17 @@ async function psd(document: AIDrawDocument): Promise<ExportArtifact> {
     };
     children.push(...asset.layerIds.map((layerId) => exportLayer(layerId)).filter((entry): entry is PsdLayer => Boolean(entry)));
     report.warnings.push('Pixel PSD export writes the current frame as a raster layer/group hierarchy; later animation frames are not included.');
+    if (asset.frameIds.length > 1) {
+      const omittedFrames = asset.frameIds.length - 1;
+      recordFidelity({ code: 'animation-frames-omitted', subjectType: 'document', subjectId: document.id, subjectName: document.name, detail: `${omittedFrames} later animation frame${omittedFrames === 1 ? '' : 's'} ${omittedFrames === 1 ? 'is' : 'are'} not included in the PSD.` });
+    }
   }
   const composite = await renderDocument(document);
   let compositeImageData: NonNullable<Psd['imageData']>;
   try { compositeImageData = composite.getContext('2d').getImageData(0, 0, width, height); }
   finally { composite.width = 1; composite.height = 1; }
   const value: Psd = { width, height, children, imageData: compositeImageData };
-  return { data: writePsdBuffer(value, { generateThumbnail: true }), mimeType: 'image/vnd.adobe.photoshop', extension: 'psd', report };
+  return { data: writePsdBuffer(value, { generateThumbnail: true }), mimeType: 'image/vnd.adobe.photoshop', extension: 'psd', report: boundedInterchangeExportReport(report.warnings, report.rasterized, fidelity, fidelityTruncated) };
 }
 
 function tiledPropertyJson(properties: Record<string, string | number | boolean>) {

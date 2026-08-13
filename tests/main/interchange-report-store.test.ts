@@ -10,8 +10,9 @@ describe('interchange report store', () => {
     const directory = await mkdtemp(join(tmpdir(), 'aidraw-reports-'));
     const path = join(directory, 'reports', 'interchange.json');
     const store = new InterchangeReportStore(path);
-    const report = await store.record({ kind: 'export', status: 'completed', actor: HUMAN_ACTOR, documentIds: ['doc-a'], documentNames: ['Poster'], format: 'psd', sourcePaths: [], destinationPaths: ['C:/art/poster.psd'], warnings: ['One effect was flattened.'], rasterized: ['Glow layer'] });
-    expect(report).toMatchObject({ kind: 'export', format: 'psd', warnings: ['One effect was flattened.'], rasterized: ['Glow layer'] });
+    const fidelity = [{ code: 'flattened-layer' as const, subjectType: 'layer' as const, subjectId: 'layer-glow', subjectName: 'Glow layer', detail: 'A group mask requires flattening.' }];
+    const report = await store.record({ kind: 'export', status: 'completed', actor: HUMAN_ACTOR, documentIds: ['doc-a'], documentNames: ['Poster'], format: 'psd', sourcePaths: [], destinationPaths: ['C:/art/poster.psd'], warnings: ['One effect was flattened.'], rasterized: ['Glow layer'], fidelity });
+    expect(report).toMatchObject({ kind: 'export', format: 'psd', warnings: ['One effect was flattened.'], rasterized: ['Glow layer'], fidelity });
     await expect(new InterchangeReportStore(path).list('doc-a')).resolves.toEqual([report]);
     await expect(new InterchangeReportStore(path).list('doc-b')).resolves.toEqual([]);
     expect(JSON.parse(await readFile(path, 'utf8'))).toMatchObject({ version: 1, reports: [{ id: report.id }] });
@@ -22,5 +23,12 @@ describe('interchange report store', () => {
     const path = join(directory, 'interchange.json');
     await writeFile(path, JSON.stringify({ version: 1, reports: [{ id: 'bad', kind: 'delete-everything' }] }));
     await expect(new InterchangeReportStore(path).list()).resolves.toEqual([]);
+  });
+
+  it('loads version-one reports created before structured reasons as an empty list', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'aidraw-reports-legacy-'));
+    const path = join(directory, 'interchange.json');
+    await writeFile(path, JSON.stringify({ version: 1, reports: [{ id: 'legacy', kind: 'export', status: 'completed', actor: HUMAN_ACTOR, createdAt: '2026-01-01T00:00:00.000Z', documentIds: ['doc-a'], documentNames: ['Poster'], format: 'png', sourcePaths: [], destinationPaths: ['poster.png'], warnings: [], rasterized: [] }] }));
+    await expect(new InterchangeReportStore(path).list()).resolves.toMatchObject([{ id: 'legacy', fidelity: [] }]);
   });
 });

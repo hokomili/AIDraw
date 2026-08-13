@@ -34,6 +34,7 @@ describe('PSD interchange', () => {
     expect(layers.filter((layer) => layer.text)).toHaveLength(1);
     expect(layers.some((layer) => layer.name === 'Typography · visual fallback' && layer.imageData)).toBe(true);
     expect(artifact.report.warnings).toContainEqual(expect.stringMatching(/hidden editable PSD text/));
+    expect(artifact.report.fidelity).toContainEqual({ code: 'raster-fallback', subjectType: 'layer', subjectId: vector.id, subjectName: vector.name, detail: expect.stringMatching(/PSD raster fallback/) });
 
     const directory = await mkdtemp(join(tmpdir(), 'aidraw-psd-'));
     try {
@@ -67,6 +68,7 @@ describe('PSD interchange', () => {
     const alphas = layer?.imageData ? [...layer.imageData.data].filter((_value, index) => index % 4 === 3) : [];
     expect(Math.max(...alphas)).toBe(255);
     expect(document).toEqual(before);
+    expect(artifact.report.fidelity).toContainEqual({ code: 'raster-fallback', subjectType: 'layer', subjectId: vector.id, subjectName: vector.name, detail: expect.any(String) });
   });
 
   it('writes the pixel layer hierarchy with raw source pixels and separate composite metadata', async () => {
@@ -77,6 +79,7 @@ describe('PSD interchange', () => {
     const emptyGroup: PixelLayer = { ...structuredClone(group), id: createId('layer'), name: 'Empty pixel folder', locked: false, opacity: 0.2, blendMode: 'difference', childIds: [] };
     layer.parentId = group.id; layer.name = 'Hidden ink'; layer.visible = false; layer.locked = true; layer.opacity = 0.25; layer.blendMode = 'screen';
     sprite.layers[group.id] = group; sprite.layers[emptyGroup.id] = emptyGroup; sprite.layerIds = [group.id, emptyGroup.id];
+    const secondFrameId = createId('frame'); sprite.frameIds.push(secondFrameId); sprite.frames[secondFrameId] = { id: secondFrameId, revision: 0, name: 'Later frame', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, durationMs: 100 };
     const artifact = await exportDocument(document, 'psd'); const decoded = readPsd(artifact.data, { useImageData: true, logMissingFeatures: false });
     const decodedGroup = decoded.children?.find((entry) => entry.name === group.name); const decodedLayer = decodedGroup?.children?.find((entry) => entry.name === layer.name);
     expect(decoded.children?.map((entry) => entry.name)).toEqual([group.name, emptyGroup.name]); expect(decodedGroup?.children?.map((entry) => entry.name)).toEqual([layer.name]);
@@ -85,6 +88,7 @@ describe('PSD interchange', () => {
     expect(decodedLayer?.imageData?.data[3]).toBe(255);
     expect(decoded.children?.find((entry) => entry.name === emptyGroup.name)).toMatchObject({ children: [], blendMode: 'difference' });
     expect(artifact.report.warnings).toContainEqual(expect.stringMatching(/current frame.*layer\/group hierarchy/i));
+    expect(artifact.report.fidelity).toEqual([{ code: 'animation-frames-omitted', subjectType: 'document', subjectId: document.id, subjectName: document.name, detail: '1 later animation frame is not included in the PSD.' }]);
   });
 
   it('reports partial PSD locks without widening them to AIDraw lock-all', async () => {

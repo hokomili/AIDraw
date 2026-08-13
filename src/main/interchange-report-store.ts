@@ -3,6 +3,7 @@ import { dirname } from 'node:path';
 import { createId, nowIso } from '@aidraw/core';
 import type { Actor } from '@aidraw/core';
 import type { InterchangeReport, InterchangeReportInput } from '../common/contracts';
+import { normalizeInterchangeFidelityEntries } from '../common/interchange-fidelity';
 
 interface PersistedReports { version: 1; reports: InterchangeReport[] }
 const MAX_REPORTS = 200;
@@ -39,6 +40,7 @@ function normalize(value: unknown): InterchangeReport | undefined {
     destinationPaths: strings(source.destinationPaths, 100),
     warnings: strings(source.warnings),
     rasterized: strings(source.rasterized),
+    fidelity: normalizeInterchangeFidelityEntries(source.fidelity),
     ...(typeof source.error === 'string' ? { error: source.error.slice(0, 10_000) } : {}),
   };
 }

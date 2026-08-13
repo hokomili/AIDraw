@@ -12,6 +12,7 @@ import type { PaletteFileFormat, PaletteImportMode } from './palette-interchange
 import type { SpriteSheetSliceOptions } from './sprite-sheet';
 import type { AgentClientId, AgentClientSetupResult } from './agent-clients';
 import type { DesktopPlatformInfo } from './platform';
+import type { InterchangeFidelityEntry } from './interchange-fidelity';
 
 export type NewDocumentKind = 'illustration' | 'sprite' | 'tilemap' | 'project';
 export type ExportFormat = 'png' | 'jpeg' | 'webp' | 'svg' | 'pdf' | 'psd' | 'gif' | 'apng' | 'sprite-sheet' | 'tiled-json' | 'tiled-xml';
@@ -254,10 +255,11 @@ export interface InterchangeReport {
   destinationPaths: string[];
   warnings: string[];
   rasterized: string[];
+  fidelity: InterchangeFidelityEntry[];
   error?: string;
 }
 
-export type InterchangeReportInput = Omit<InterchangeReport, 'id' | 'createdAt'>;
+export type InterchangeReportInput = Omit<InterchangeReport, 'id' | 'createdAt' | 'fidelity'> & { fidelity?: InterchangeFidelityEntry[] };
 
 export interface CheckpointComparisonResult {
   checkpoint: DocumentCheckpointSummary;

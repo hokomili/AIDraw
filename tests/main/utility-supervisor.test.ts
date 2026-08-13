@@ -5,7 +5,7 @@ import { createCanvas } from '@napi-rs/canvas';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createIllustrationDocument, createPixelDocument, type PaletteEntry } from '@aidraw/core';
 import { MAX_QUEUED_UTILITY_TASKS, RasterUtilitySupervisor, type UtilityProcessLike } from '@main/utility-supervisor';
-import { MAX_EXPORT_UTILITY_MEMBERS, MAX_GENERATED_OUTPUT_BYTES, MAX_GENERATION_PROGRESS_MESSAGE_BYTES, MAX_GENERATION_PROVIDER_METADATA_BYTES, MAX_IMPORT_UTILITY_DOCUMENTS, MAX_OBSERVATION_PNG_BYTES, MAX_OBSERVATION_UTILITY_RESULT_SERIALIZED_BYTES, MAX_QUANTIZE_UTILITY_BASE64_CHARACTERS, MAX_QUANTIZE_UTILITY_SOURCE_BYTES, MAX_UTILITY_ERROR_MESSAGE_BYTES, MAX_UTILITY_REPORT_SERIALIZED_BYTES, MAX_UTILITY_TEXT_BYTES, type UtilityResponse } from '@main/utility-contract';
+import { MAX_EXPORT_UTILITY_MEMBERS, MAX_GENERATED_OUTPUT_BYTES, MAX_GENERATION_PROGRESS_MESSAGE_BYTES, MAX_GENERATION_PROVIDER_METADATA_BYTES, MAX_IMPORT_UTILITY_DOCUMENTS, MAX_OBSERVATION_PNG_BYTES, MAX_OBSERVATION_UTILITY_RESULT_SERIALIZED_BYTES, MAX_QUANTIZE_UTILITY_BASE64_CHARACTERS, MAX_QUANTIZE_UTILITY_SOURCE_BYTES, MAX_UTILITY_ERROR_MESSAGE_BYTES, MAX_UTILITY_REPORT_SERIALIZED_BYTES, MAX_UTILITY_TEXT_BYTES, assertExportUtilityResponse, type UtilityResponse } from '@main/utility-contract';
 import type { GeneratedOutput, GenerationRequest } from '../../src/common/generation';
 import { normalizeGeneratedOutputForAcceptance } from '../../src/main/normalize-generation-output';
 import { validateUtilityImage } from '../../src/main/utility-image-validation';
@@ -183,11 +183,27 @@ describe('RasterUtilitySupervisor', () => {
     await nextTurn();
     const request = worker.messages[0] as { id: string; kind: string; document: { name: string } };
     expect(request).toMatchObject({ kind: 'export-document', document: { name: 'Worker export' } });
-    worker.respond({ id: request.id, ok: true, kind: 'export-document', artifact: { dataBase64: Buffer.from('png').toString('base64'), mimeType: 'image/png', extension: 'png', report: { warnings: [], rasterized: [] }, companion: { dataBase64: Buffer.from('{}').toString('base64'), extension: 'json', mimeType: 'application/json' } } });
+    const fidelity = [{ code: 'raster-fallback' as const, subjectType: 'layer' as const, subjectId: 'layer-1', subjectName: 'Paint', detail: 'Paint was rasterized.' }];
+    worker.respond({ id: request.id, ok: true, kind: 'export-document', artifact: { dataBase64: Buffer.from('png').toString('base64'), mimeType: 'image/png', extension: 'png', report: { warnings: [], rasterized: [], fidelity }, companion: { dataBase64: Buffer.from('{}').toString('base64'), extension: 'json', mimeType: 'application/json' } } });
     const artifact = await pending;
     expect(artifact.data.toString()).toBe('png');
     expect(artifact.companion?.data.toString()).toBe('{}');
+    expect(artifact.report.fidelity).toEqual(fidelity);
     supervisor.stop();
+  });
+
+  it('rejects unknown structured fidelity reasons and aggregate report envelopes', () => {
+    const document = createIllustrationDocument('Guarded report');
+    const request = { id: 'report-contract', kind: 'export-document' as const, document, format: 'png' as const, options: {} };
+    const artifact = {
+      dataBase64: Buffer.from('png').toString('base64'), mimeType: 'image/png', extension: 'png',
+      report: { warnings: [], rasterized: [], fidelity: [{ code: 'unknown-reason', subjectType: 'layer', subjectId: 'layer-1', subjectName: 'Paint' }] },
+    };
+    expect(() => assertExportUtilityResponse(request, { id: request.id, ok: true, kind: request.kind, artifact })).toThrow('malformed export artifact');
+
+    const reportEntry = 'x'.repeat(MAX_UTILITY_TEXT_BYTES - 16);
+    const aggregate = { ...artifact, report: { warnings: Array(9).fill(reportEntry), rasterized: Array(9).fill(reportEntry), fidelity: [] } };
+    expect(() => assertExportUtilityResponse(request, { id: request.id, ok: true, kind: request.kind, artifact: aggregate })).toThrow(`${MAX_UTILITY_REPORT_SERIALIZED_BYTES}-byte serialized limit`);
   });
 
   it('rejects malformed export artifact and companion envelopes before base64 coercion and recovers queued work', async () => {
