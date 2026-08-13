@@ -50,6 +50,11 @@ const OperationKindSchema = z.enum([
 const IdSchema = z.string().min(1);
 const ExpectedRevisionSchema = z.number().int().nonnegative().optional();
 const FiniteNumberSchema = z.number().refine(Number.isFinite, 'Expected a finite number');
+const ColorInputSchema = z.string().regex(/^#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?$/);
+const BlendModeInputSchema = z.enum([
+  'normal', 'multiply', 'screen', 'overlay', 'darken', 'lighten', 'color-dodge', 'color-burn',
+  'hard-light', 'soft-light', 'difference', 'exclusion',
+]);
 const TransformInputSchema = z.object({
   x: FiniteNumberSchema.min(-1_000_000).max(1_000_000),
   y: FiniteNumberSchema.min(-1_000_000).max(1_000_000),
@@ -170,7 +175,6 @@ function validateRuns(runs: Array<{ x: number; y: number; length: number }>, con
     }
   }
 }
-const PointSchema = z.object({ x: FiniteNumberSchema, y: FiniteNumberSchema }).loose();
 const RasterBrushDynamicsSchema = z.object({
   tip: z.enum(['round', 'flat', 'chalk', 'watercolor']),
   spacing: FiniteNumberSchema.min(0.01).max(4),
@@ -193,6 +197,172 @@ const RasterBrushPresetInputSchema = z.object({
   flow: FiniteNumberSchema.min(0.01).max(1),
   dynamics: RasterBrushDynamicsSchema.omit({ seed: true }),
 }).strict();
+const PointSampleInputSchema = z.object({
+  x: FiniteNumberSchema,
+  y: FiniteNumberSchema,
+  pressure: FiniteNumberSchema.min(0).max(1),
+  time: FiniteNumberSchema.optional(),
+}).strict();
+const RasterStrokeInputSchema = z.object({
+  id: IdSchema,
+  actorId: IdSchema,
+  points: z.array(PointSampleInputSchema).min(1).max(1_000_000),
+  color: ColorInputSchema,
+  size: FiniteNumberSchema.min(1).max(500),
+  opacity: FiniteNumberSchema.min(0.01).max(1),
+  hardness: FiniteNumberSchema.min(0).max(1),
+  flow: FiniteNumberSchema.min(0.01).max(1),
+  mode: z.enum(['paint', 'erase']),
+  preset: z.enum(['hard-round', 'soft-round', 'pencil', 'marker', 'airbrush', 'eraser', 'watercolor', 'custom']),
+  brushPresetId: IdSchema.optional(),
+  dynamics: RasterBrushDynamicsSchema.optional(),
+}).strict();
+const ImageFilterInputSchema = z.object({
+  type: z.enum(['brightness', 'contrast', 'saturation', 'hue', 'blur']),
+  value: FiniteNumberSchema,
+}).strict().superRefine((filter, context) => {
+  const valid = filter.type === 'hue'
+    ? filter.value >= -180 && filter.value <= 180
+    : filter.type === 'blur'
+      ? filter.value >= 0 && filter.value <= 40
+      : filter.value >= -1 && filter.value <= 1;
+  if (!valid) context.addIssue({ code: 'custom', path: ['value'], message: `Filter value is outside the supported ${filter.type} range` });
+});
+const ImageFiltersInputSchema = z.array(ImageFilterInputSchema).max(64);
+const ColorStopInputSchema = z.object({
+  offset: FiniteNumberSchema.min(0).max(1),
+  color: ColorInputSchema,
+  opacity: FiniteNumberSchema.min(0).max(1).optional(),
+}).strict();
+const PaintStyleInputSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('none') }).strict(),
+  z.object({ kind: z.literal('solid'), color: ColorInputSchema }).strict(),
+  z.object({
+    kind: z.enum(['linear-gradient', 'radial-gradient']),
+    stops: z.array(ColorStopInputSchema).min(2).max(32),
+    x1: FiniteNumberSchema,
+    y1: FiniteNumberSchema,
+    x2: FiniteNumberSchema,
+    y2: FiniteNumberSchema,
+  }).strict(),
+]);
+const StrokeStyleInputSchema = z.object({
+  paint: PaintStyleInputSchema,
+  width: FiniteNumberSchema.min(0).max(10_000),
+  opacity: FiniteNumberSchema.min(0).max(1),
+  lineCap: z.enum(['butt', 'round', 'square']),
+  lineJoin: z.enum(['miter', 'round', 'bevel']),
+  dash: z.array(FiniteNumberSchema.min(0).max(1_000_000)).max(256),
+}).strict();
+const IllustrationLayerBaseInputShape = {
+  ...EntityBaseInputShape,
+  parentId: IdSchema.optional(),
+  interchangeRole: z.literal('pdf-extracted-text').optional(),
+  visible: z.boolean(),
+  locked: z.boolean(),
+  opacity: FiniteNumberSchema.min(0).max(1),
+  blendMode: BlendModeInputSchema,
+  maskLayerId: IdSchema.optional(),
+  filters: ImageFiltersInputSchema.optional(),
+};
+const IllustrationLayerInputSchema = z.discriminatedUnion('type', [
+  z.object({ ...IllustrationLayerBaseInputShape, type: z.literal('group'), childIds: z.array(IdSchema).max(1_000_000) }).strict(),
+  z.object({ ...IllustrationLayerBaseInputShape, type: z.literal('vector'), objectIds: z.array(IdSchema).max(1_000_000) }).strict(),
+  z.object({
+    ...IllustrationLayerBaseInputShape,
+    type: z.literal('paint'),
+    tileSize: z.literal(256),
+    tileAssetIds: z.record(z.string(), IdSchema),
+    tileCache: z.object({ version: z.literal(1), strokeCount: FiniteNumberSchema.int().nonnegative(), strokesSha256: z.string().regex(/^[0-9a-fA-F]{64}$/) }).strict().optional(),
+    strokes: z.array(RasterStrokeInputSchema).max(1_000_000),
+  }).strict(),
+]).superRefine((layer, context) => {
+  const ids = layer.type === 'group' ? layer.childIds : layer.type === 'vector' ? layer.objectIds : layer.strokes.map((stroke) => stroke.id);
+  if (new Set(ids).size !== ids.length) context.addIssue({ code: 'custom', path: [layer.type === 'group' ? 'childIds' : layer.type === 'vector' ? 'objectIds' : 'strokes'], message: 'Illustration layer membership IDs must be unique' });
+  if (layer.type !== 'paint') return;
+  const tiles = Object.entries(layer.tileAssetIds);
+  if (tiles.length > 16_384 || tiles.some(([key]) => !/^-?\d+,-?\d+$/.test(key))) context.addIssue({ code: 'custom', path: ['tileAssetIds'], message: 'Paint tile indexes must contain at most 16,384 coordinate keys' });
+  if (layer.tileCache && layer.tileCache.strokeCount > layer.strokes.length) context.addIssue({ code: 'custom', path: ['tileCache', 'strokeCount'], message: 'Paint tile cache cannot cover more strokes than the layer contains' });
+});
+const IllustrationObjectBaseInputShape = {
+  ...EntityBaseInputShape,
+  layerId: IdSchema,
+  visible: z.boolean(),
+  locked: z.boolean(),
+  opacity: FiniteNumberSchema.min(0).max(1),
+  blendMode: BlendModeInputSchema,
+  transform: TransformInputSchema,
+  blur: FiniteNumberSchema.min(0).max(4_096).optional(),
+  filters: ImageFiltersInputSchema.optional(),
+  maskObjectId: IdSchema.optional(),
+  shadow: z.object({ color: ColorInputSchema, blur: FiniteNumberSchema.min(0).max(4_096), offsetX: FiniteNumberSchema, offsetY: FiniteNumberSchema }).strict().optional(),
+};
+const TextStyleRangeInputSchema = z.object({
+  start: FiniteNumberSchema.int().nonnegative().max(100_000),
+  end: FiniteNumberSchema.int().nonnegative().max(100_000),
+  fontFamily: z.string().trim().min(1).max(200),
+  fontSize: FiniteNumberSchema.min(1).max(500),
+  fontWeight: FiniteNumberSchema.int().min(100).max(900),
+  fontStyle: z.enum(['normal', 'italic']),
+  color: ColorInputSchema,
+  letterSpacing: FiniteNumberSchema.min(-20).max(100),
+  underline: z.boolean().optional(),
+}).strict().refine((range) => range.end >= range.start, { path: ['end'], message: 'Text range end must not precede its start' });
+const IllustrationObjectInputSchema = z.discriminatedUnion('type', [
+  z.object({
+    ...IllustrationObjectBaseInputShape,
+    type: z.literal('vector-stroke'),
+    points: z.array(PointSampleInputSchema).min(1).max(1_000_000),
+    brush: z.object({
+      size: FiniteNumberSchema.min(1).max(500),
+      thinning: FiniteNumberSchema.min(-1).max(1),
+      smoothing: FiniteNumberSchema.min(0).max(1),
+      streamline: FiniteNumberSchema.min(0).max(1),
+      simulatePressure: z.boolean(),
+      color: ColorInputSchema,
+    }).strict(),
+    pathData: z.string().max(2_000_000).optional(),
+  }).strict(),
+  z.object({ ...IllustrationObjectBaseInputShape, type: z.literal('path'), pathData: z.string().min(1).max(2_000_000), closed: z.boolean(), fill: PaintStyleInputSchema, stroke: StrokeStyleInputSchema, fillRule: z.enum(['nonzero', 'evenodd']) }).strict(),
+  z.object({
+    ...IllustrationObjectBaseInputShape,
+    type: z.literal('shape'),
+    shape: z.enum(['rectangle', 'ellipse', 'line', 'arrow', 'polygon', 'star']),
+    width: FiniteNumberSchema.min(0).max(1_000_000),
+    height: FiniteNumberSchema.min(0).max(1_000_000),
+    sides: FiniteNumberSchema.int().min(3).max(1_000).optional(),
+    innerRadius: FiniteNumberSchema.min(0).max(1).optional(),
+    fill: PaintStyleInputSchema,
+    stroke: StrokeStyleInputSchema,
+    cornerRadius: FiniteNumberSchema.min(0).max(1_000_000).optional(),
+  }).strict(),
+  z.object({
+    ...IllustrationObjectBaseInputShape,
+    type: z.literal('text'),
+    text: z.string().max(100_000),
+    width: FiniteNumberSchema.min(0).max(1_000_000),
+    height: FiniteNumberSchema.min(0).max(1_000_000),
+    align: z.enum(['left', 'center', 'right', 'justify']),
+    lineHeight: FiniteNumberSchema.min(0.1).max(10),
+    ranges: z.array(TextStyleRangeInputSchema).max(100_000),
+  }).strict(),
+  z.object({
+    ...IllustrationObjectBaseInputShape,
+    type: z.literal('image'),
+    assetId: IdSchema,
+    width: FiniteNumberSchema.positive().max(1_000_000),
+    height: FiniteNumberSchema.positive().max(1_000_000),
+    sourceWidth: FiniteNumberSchema.positive().max(1_000_000).optional(),
+    sourceHeight: FiniteNumberSchema.positive().max(1_000_000).optional(),
+    crop: z.object({ x: FiniteNumberSchema.nonnegative(), y: FiniteNumberSchema.nonnegative(), width: FiniteNumberSchema.positive(), height: FiniteNumberSchema.positive() }).strict().optional(),
+    filters: ImageFiltersInputSchema,
+  }).strict(),
+  z.object({ ...IllustrationObjectBaseInputShape, type: z.literal('group'), childIds: z.array(IdSchema).max(1_000_000) }).strict(),
+]).superRefine((object, context) => {
+  if (object.type === 'group' && new Set(object.childIds).size !== object.childIds.length) context.addIssue({ code: 'custom', path: ['childIds'], message: 'Object-group child IDs must be unique' });
+  if (object.type === 'text' && object.ranges.some((range) => range.end > object.text.length)) context.addIssue({ code: 'custom', path: ['ranges'], message: 'Text style ranges must fit inside the text' });
+  if (object.type === 'image' && object.crop && object.sourceWidth !== undefined && object.sourceHeight !== undefined && (object.crop.x + object.crop.width > object.sourceWidth || object.crop.y + object.crop.height > object.sourceHeight)) context.addIssue({ code: 'custom', path: ['crop'], message: 'Image crop must fit inside source geometry' });
+});
 const BitmapGlyphInputSchema = z.object({ width: FiniteNumberSchema.int().min(1).max(64), advance: FiniteNumberSchema.int().min(1).max(128), rows: z.array(z.string().regex(/^[.#]{1,64}$/)).min(1).max(64) }).strict().superRefine((glyph, context) => { glyph.rows.forEach((row, index) => { if (row.length !== glyph.width) context.addIssue({ code: 'custom', path: ['rows', index], message: 'Every bitmap glyph row must match its width' }); }); });
 const BitmapFontInputSchema = z.object({ id: IdSchema, name: z.string().trim().min(1).max(200), lineHeight: FiniteNumberSchema.int().min(1).max(128), glyphs: z.record(z.string().min(1).max(4), BitmapGlyphInputSchema) }).strict();
 const IllustrationGuideInputSchema = z.object({ id: IdSchema, orientation: z.enum(['horizontal', 'vertical']), position: FiniteNumberSchema.min(-1_000_000).max(1_000_000), color: z.string().regex(/^#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?$/), locked: z.boolean() }).strict();
@@ -337,7 +507,7 @@ const PixelAssetInputSchema = z.object({
   }
 });
 
-const TargetedOperationSchemas: Partial<Record<z.infer<typeof OperationKindSchema>, z.ZodType>> = {
+const TargetedOperationSchemas: Record<z.infer<typeof OperationKindSchema>, z.ZodType> = {
   'document.rename': z.object({ name: z.string().min(1).max(200) }).loose(),
   'illustration.artboard.replace': z.object({
     artboard: z.object({
@@ -364,32 +534,27 @@ const TargetedOperationSchemas: Partial<Record<z.infer<typeof OperationKindSchem
   }).strict(),
   'asset.add': z.object({ asset: DocumentAssetInputSchema }).loose(),
   'asset.delete': z.object({ assetId: IdSchema }).loose(),
-  'provenance.add': z.object({ provenance: ProvenanceInputSchema }).loose(),
+  'provenance.add': z.object({ provenance: ProvenanceInputSchema, index: z.number().int().nonnegative().optional() }).loose(),
   'provenance.delete': z.object({ provenanceId: IdSchema }).loose(),
+  'illustration.layer.add': z.object({ kind: z.literal('illustration.layer.add'), layer: IllustrationLayerInputSchema, index: FiniteNumberSchema.int().nonnegative().max(1_000_000).optional() }).strict(),
+  'illustration.layer.replace': z.object({ kind: z.literal('illustration.layer.replace'), layer: IllustrationLayerInputSchema, expectedRevision: ExpectedRevisionSchema }).strict(),
+  'illustration.layer.move': z.object({ kind: z.literal('illustration.layer.move'), layerId: IdSchema, parentId: IdSchema.optional(), index: FiniteNumberSchema.int().nonnegative().max(1_000_000).optional(), expectedRevision: ExpectedRevisionSchema }).strict(),
+  'illustration.layer.delete': z.object({ kind: z.literal('illustration.layer.delete'), layerId: IdSchema, expectedRevision: ExpectedRevisionSchema }).strict(),
+  'illustration.object.add': z.object({ kind: z.literal('illustration.object.add'), object: IllustrationObjectInputSchema, index: FiniteNumberSchema.int().nonnegative().max(1_000_000).optional(), parentGroupId: IdSchema.optional(), groupIndex: FiniteNumberSchema.int().nonnegative().max(1_000_000).optional() }).strict(),
+  'illustration.object.replace': z.object({ kind: z.literal('illustration.object.replace'), object: IllustrationObjectInputSchema, expectedRevision: ExpectedRevisionSchema }).strict(),
   'illustration.object.move': z.object({
+    kind: z.literal('illustration.object.move'),
     objectId: IdSchema,
     layerId: IdSchema,
     index: z.number().int().nonnegative().optional(),
     parentGroupId: IdSchema.optional(),
     groupIndex: z.number().int().nonnegative().optional(),
     expectedRevision: ExpectedRevisionSchema,
-  }).loose(),
+  }).strict(),
+  'illustration.object.delete': z.object({ kind: z.literal('illustration.object.delete'), objectId: IdSchema, expectedRevision: ExpectedRevisionSchema }).strict(),
   'illustration.paint.stroke': z.object({
     layerId: IdSchema,
-    stroke: z.object({
-      id: IdSchema,
-      actorId: IdSchema,
-      points: z.array(PointSchema).min(1).max(1_000_000),
-      color: z.string().regex(/^#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?$/),
-      size: FiniteNumberSchema.min(1).max(500),
-      opacity: FiniteNumberSchema.min(0.01).max(1),
-      hardness: FiniteNumberSchema.min(0).max(1),
-      flow: FiniteNumberSchema.min(0.01).max(1),
-      mode: z.enum(['paint', 'erase']),
-      preset: z.enum(['hard-round', 'soft-round', 'pencil', 'marker', 'airbrush', 'eraser', 'watercolor', 'custom']),
-      brushPresetId: IdSchema.optional(),
-      dynamics: RasterBrushDynamicsSchema.optional(),
-    }).strict(),
+    stroke: RasterStrokeInputSchema,
     expectedRevision: ExpectedRevisionSchema,
   }).loose(),
   'illustration.brush-presets.replace': z.object({ kind: z.literal('illustration.brush-presets.replace'), presets: z.array(RasterBrushPresetInputSchema).max(256) }).strict().superRefine((operation, context) => {
@@ -505,13 +670,6 @@ export const CanvasOperationSchema = z
   .loose()
   .superRefine((value, context) => {
     const validator = TargetedOperationSchemas[value.kind];
-    if (!validator) {
-      if ((value.kind === 'illustration.object.add' || value.kind === 'illustration.object.replace') && typeof value.object === 'object' && value.object !== null && (value.object as { type?: unknown }).type === 'vector-stroke') {
-        const result = z.object({ object: z.object({ points: z.array(PointSchema).max(1_000_000) }).loose() }).loose().safeParse(value);
-        if (!result.success) for (const issue of result.error.issues) context.addIssue({ code: 'custom', path: issue.path, message: issue.message });
-      }
-      return;
-    }
     const result = validator.safeParse(value);
     if (!result.success) for (const issue of result.error.issues) context.addIssue({ code: 'custom', path: issue.path, message: issue.message });
   })

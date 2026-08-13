@@ -58,7 +58,7 @@ export type CanvasOperation =
   | { kind: 'illustration.animation.keyframe.delete'; keyframeId: Id; expectedRevision?: number }
   | { kind: 'asset.add'; asset: DocumentAsset }
   | { kind: 'asset.delete'; assetId: Id }
-  | { kind: 'provenance.add'; provenance: Provenance }
+  | { kind: 'provenance.add'; provenance: Provenance; index?: number }
   | { kind: 'provenance.delete'; provenanceId: Id }
   | { kind: 'pixel.palette.replace'; palette: PaletteEntry[] }
   | { kind: 'pixel.palette.reorder'; entryIds: Id[]; expectedRevision?: number }

@@ -131,7 +131,12 @@ function createPixelWriter(cel: PixelCel) {
       entry.values[offset] = Math.max(0, Math.min(255, Math.round(index)));
       return previous;
     },
-    flush(): void { for (const { chunk, values } of decoded.values()) chunk.data = encodeBytes(values); },
+    flush(): void {
+      for (const [key, { chunk, values }] of decoded) {
+        if (values.some((value) => value !== 0)) chunk.data = encodeBytes(values);
+        else delete cel.chunks[key];
+      }
+    },
   };
 }
 
@@ -237,7 +242,12 @@ function createTileWriter(chunks: Record<string, TilemapChunk>) {
       entry.values[offset] = Math.max(0, Math.round(gid));
       return previous;
     },
-    flush(): void { for (const { chunk, values } of decoded.values()) chunk.data = encodeUint32(values); },
+    flush(): void {
+      for (const [key, { chunk, values }] of decoded) {
+        if (values.some((value) => value !== 0)) chunk.data = encodeUint32(values);
+        else delete chunks[key];
+      }
+    },
   };
 }
 

@@ -4,7 +4,9 @@ import {
   CanvasTransactionSchema,
   ActorSchema,
   HUMAN_ACTOR,
+  IDENTITY_TRANSFORM,
   NewDocumentOptionsSchema,
+  createIllustrationDocument,
   createId,
   createPixelSprite,
   nowIso,
@@ -98,6 +100,37 @@ describe('canvas operation schemas', () => {
       layerId: 'layer-b',
       index: -1,
     }).success).toBe(false);
+  });
+
+  it('fully validates every canonical illustration layer and object payload', () => {
+    const document = createIllustrationDocument();
+    const layer = Object.values(document.layers).find((entry) => entry.type === 'vector');
+    if (!layer || layer.type !== 'vector') throw new Error('Expected vector layer');
+    const object = {
+      id: 'schema-shape', revision: 0, name: 'Schema shape', createdAt: nowIso(), updatedAt: nowIso(), createdBy: HUMAN_ACTOR.id,
+      layerId: layer.id, visible: true, locked: false, opacity: 1, blendMode: 'normal' as const, transform: { ...IDENTITY_TRANSFORM },
+      type: 'shape' as const, shape: 'rectangle' as const, width: 12, height: 8, fill: { kind: 'solid' as const, color: '#ff6b7a' },
+      stroke: { paint: { kind: 'none' as const }, width: 0, opacity: 1, lineCap: 'round' as const, lineJoin: 'round' as const, dash: [] },
+    };
+    const valid = [
+      { kind: 'illustration.layer.add', layer },
+      { kind: 'illustration.layer.replace', layer, expectedRevision: 0 },
+      { kind: 'illustration.layer.move', layerId: layer.id, expectedRevision: 0 },
+      { kind: 'illustration.layer.delete', layerId: layer.id, expectedRevision: 0 },
+      { kind: 'illustration.object.add', object },
+      { kind: 'illustration.object.replace', object, expectedRevision: 0 },
+      { kind: 'illustration.object.delete', objectId: object.id, expectedRevision: 0 },
+    ];
+    for (const operation of valid) expect(CanvasOperationSchema.safeParse(operation).success).toBe(true);
+
+    const malformed = [
+      { kind: 'illustration.layer.add', layer: { ...layer, objectIds: ['duplicate', 'duplicate'] } },
+      { kind: 'illustration.layer.replace', layer: { ...layer, opacity: 2 } },
+      { kind: 'illustration.object.add', object: { ...object, transform: { ...object.transform, x: Number.NaN } } },
+      { kind: 'illustration.object.replace', object: { ...object, stroke: { ...object.stroke, width: -1 } } },
+      { kind: 'illustration.object.add', object: { ...object, surprise: true } },
+    ];
+    for (const operation of malformed) expect(CanvasOperationSchema.safeParse(operation).success).toBe(false);
   });
 
   it('strictly validates revision-checked artboard updates', () => {

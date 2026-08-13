@@ -8,6 +8,7 @@ import {
   createDocument,
   createId,
   nowIso,
+  rebaseTransactionExpectedRevisions,
   type AIDrawDocument,
   type Actor,
   type AsyncJob,
@@ -37,10 +38,23 @@ import { TransactionTraceStore } from './trace-store';
 import { prepareTransactionForCommit } from './transaction-policy';
 import { rebaseRestoredEntityRevisions } from '../common/document-branch';
 import { checkpointMergeCandidates, checkpointMergeOperations } from '../common/checkpoint-merge';
+import { committedHistoryTargets, historyTargetsIntersect, mutationHistoryTargets } from './history-policy';
+
+interface HistoryInvalidation {
+  actorId: Id;
+  actorName: string;
+  transactionId: Id;
+}
+
+interface HistoryEntry {
+  transaction: CanvasTransaction;
+  targets: string[];
+  invalidatedBy?: HistoryInvalidation;
+}
 
 interface HistoryState {
-  undo: CanvasTransaction[];
-  redo: CanvasTransaction[];
+  undo: HistoryEntry[];
+  redo: HistoryEntry[];
 }
 
 interface HumanLock extends HumanLockRequest {
@@ -52,6 +66,11 @@ const MAX_REQUEST_BYTES = 2 * 1024 * 1024;
 
 function agentActivityEntries(document: AIDrawDocument) {
   return document.activity.filter((entry) => entry.actor.kind === 'agent');
+}
+
+function historyActionAvailable(entries: HistoryEntry[]): boolean {
+  const entry = entries.at(-1);
+  return Boolean(entry && !entry.invalidatedBy);
 }
 
 export class DocumentService extends EventEmitter {
@@ -203,11 +222,11 @@ export class DocumentService extends EventEmitter {
       activeDocument: active ? structuredClone(active) : undefined,
       jobs: [...this.jobs.values()].map((job) => structuredClone(job)),
       mcp: this.getMcpInfo(),
-      canUndo: Boolean(history?.undo.length),
-      canRedo: Boolean(history?.redo.length),
+      canUndo: Boolean(history && historyActionAvailable(history.undo)),
+      canRedo: Boolean(history && historyActionAvailable(history.redo)),
       agentHistories: [...agentActors.values()].map((actor) => {
         const state = active ? this.histories.get(active.id)?.get(actor.id) : undefined;
-        return { actor: structuredClone(actor), canUndo: Boolean(state?.undo.length), canRedo: Boolean(state?.redo.length) };
+        return { actor: structuredClone(actor), canUndo: Boolean(state && historyActionAvailable(state.undo)), canRedo: Boolean(state && historyActionAvailable(state.redo)) };
       }),
       checkpoints: active ? this.listCheckpoints(active.id) : [],
     };
@@ -303,20 +322,22 @@ export class DocumentService extends EventEmitter {
     try {
       transaction = await prepareTransactionForCommit(current, transaction, nowIso(), { trustedProvenance: options.trustedProvenance });
       const result = applyTransaction(current, transaction, { status: options.activityStatus });
+      const historyTargets = committedHistoryTargets(current, transaction, result.document, result.inverse);
       this.comparisons.set(current.id, { transactionId: transaction.id, before: structuredClone(current), afterRevision: result.document.revision });
       this.documents.set(current.id, result.document);
       dedupe.set(transaction.clientOperationId, result.document.revision);
       if (dedupe.size > 10_000) dedupe.delete(dedupe.keys().next().value as string);
 
+      this.invalidateConflictingHistories(current.id, transaction.actor, transaction.id, mutationHistoryTargets(historyTargets), options.recordHistory === false);
       if (options.recordHistory !== false) {
         const history = this.getHistory(current.id, transaction.actor.id);
-        history.undo.push(result.inverse);
+        history.undo.push({ transaction: result.inverse, targets: historyTargets });
         history.redo.length = 0;
+      } else {
+        const history = this.histories.get(current.id)?.get(transaction.actor.id);
+        if (history) history.redo.length = 0;
       }
-      const changeLog = this.changes.get(current.id) ?? [];
-      changeLog.push({ revision: result.document.revision, transaction: structuredClone(transaction) });
-      if (changeLog.length > 2_000) changeLog.splice(0, changeLog.length - 2_000);
-      this.changes.set(current.id, changeLog);
+      this.recordChange(current.id, result.document.revision, transaction);
       await this.journal.append(current.id, transaction);
       await this.recordTrace(transaction, result.document.revision, options.activityStatus === 'partial' ? 'partial' : 'committed');
       this.publish();
@@ -343,22 +364,29 @@ export class DocumentService extends EventEmitter {
     const current = this.documents.get(documentId);
     if (!current) return { status: 'conflict', message: 'Document is not open.' };
     const history = this.getHistory(documentId, actor.id);
-    const transaction = history.undo.pop();
-    if (!transaction) return { status: 'conflict', message: 'Nothing to undo.' };
-    transaction.actor = actor;
+    const entry = history.undo.at(-1);
+    if (!entry) return { status: 'conflict', message: 'Nothing to undo.' };
+    if (entry.invalidatedBy) return { status: 'conflict', message: `Cannot undo because ${entry.invalidatedBy.actorName} changed overlapping content afterward.` };
+    let transaction: CanvasTransaction;
+    let result: ReturnType<typeof applyTransaction>;
     try {
-      const result = applyTransaction(current, transaction);
-      this.comparisons.set(documentId, { transactionId: transaction.id, before: structuredClone(current), afterRevision: result.document.revision });
-      this.documents.set(documentId, result.document);
-      history.redo.push(result.inverse);
-      await this.journal.append(documentId, transaction);
-      await this.recordTrace(transaction, result.document.revision, 'undo');
-      this.publish();
-      return { status: 'committed', revision: result.document.revision, transactionId: transaction.id };
+      transaction = rebaseTransactionExpectedRevisions(current, { ...structuredClone(entry.transaction), actor: structuredClone(actor) });
+      result = applyTransaction(current, transaction);
     } catch (error) {
-      history.undo.push(transaction);
       return { status: 'conflict', message: error instanceof Error ? error.message : 'Undo failed.' };
     }
+    const appliedTargets = committedHistoryTargets(current, transaction, result.document, result.inverse);
+    const historyTargets = [...new Set([...entry.targets, ...appliedTargets])].sort();
+    history.undo.pop();
+    this.comparisons.set(documentId, { transactionId: transaction.id, before: structuredClone(current), afterRevision: result.document.revision });
+    this.documents.set(documentId, result.document);
+    this.invalidateConflictingHistories(documentId, actor, transaction.id, mutationHistoryTargets(appliedTargets));
+    history.redo.push({ transaction: result.inverse, targets: historyTargets });
+    this.recordChange(documentId, result.document.revision, transaction);
+    await this.journal.append(documentId, transaction);
+    await this.recordTrace(transaction, result.document.revision, 'undo');
+    this.publish();
+    return { status: 'committed', revision: result.document.revision, transactionId: transaction.id };
   }
 
   async redo(documentId = this.activeDocumentId, actor: Actor = HUMAN_ACTOR): Promise<ApplyTransactionResponse> {
@@ -366,22 +394,29 @@ export class DocumentService extends EventEmitter {
     const current = this.documents.get(documentId);
     if (!current) return { status: 'conflict', message: 'Document is not open.' };
     const history = this.getHistory(documentId, actor.id);
-    const transaction = history.redo.pop();
-    if (!transaction) return { status: 'conflict', message: 'Nothing to redo.' };
-    transaction.actor = actor;
+    const entry = history.redo.at(-1);
+    if (!entry) return { status: 'conflict', message: 'Nothing to redo.' };
+    if (entry.invalidatedBy) return { status: 'conflict', message: `Cannot redo because ${entry.invalidatedBy.actorName} changed overlapping content afterward.` };
+    let transaction: CanvasTransaction;
+    let result: ReturnType<typeof applyTransaction>;
     try {
-      const result = applyTransaction(current, transaction);
-      this.comparisons.set(documentId, { transactionId: transaction.id, before: structuredClone(current), afterRevision: result.document.revision });
-      this.documents.set(documentId, result.document);
-      history.undo.push(result.inverse);
-      await this.journal.append(documentId, transaction);
-      await this.recordTrace(transaction, result.document.revision, 'redo');
-      this.publish();
-      return { status: 'committed', revision: result.document.revision, transactionId: transaction.id };
+      transaction = rebaseTransactionExpectedRevisions(current, { ...structuredClone(entry.transaction), actor: structuredClone(actor) });
+      result = applyTransaction(current, transaction);
     } catch (error) {
-      history.redo.push(transaction);
       return { status: 'conflict', message: error instanceof Error ? error.message : 'Redo failed.' };
     }
+    const appliedTargets = committedHistoryTargets(current, transaction, result.document, result.inverse);
+    const historyTargets = [...new Set([...entry.targets, ...appliedTargets])].sort();
+    history.redo.pop();
+    this.comparisons.set(documentId, { transactionId: transaction.id, before: structuredClone(current), afterRevision: result.document.revision });
+    this.documents.set(documentId, result.document);
+    this.invalidateConflictingHistories(documentId, actor, transaction.id, mutationHistoryTargets(appliedTargets));
+    history.undo.push({ transaction: result.inverse, targets: historyTargets });
+    this.recordChange(documentId, result.document.revision, transaction);
+    await this.journal.append(documentId, transaction);
+    await this.recordTrace(transaction, result.document.revision, 'redo');
+    this.publish();
+    return { status: 'committed', revision: result.document.revision, transactionId: transaction.id };
   }
 
   async undoAgent(documentId: Id, actorId: Id): Promise<ApplyTransactionResponse> {
@@ -682,6 +717,25 @@ export class DocumentService extends EventEmitter {
 
   broadcastPlayback(event: Extract<WorkspaceEvent, { type: 'playback' }>): void {
     this.emitEvent(event);
+  }
+
+  private recordChange(documentId: Id, revision: number, transaction: CanvasTransaction): void {
+    const changeLog = this.changes.get(documentId) ?? [];
+    changeLog.push({ revision, transaction: structuredClone(transaction) });
+    if (changeLog.length > 2_000) changeLog.splice(0, changeLog.length - 2_000);
+    this.changes.set(documentId, changeLog);
+  }
+
+  private invalidateConflictingHistories(documentId: Id, actor: Actor, transactionId: Id, targets: ReadonlySet<string>, invalidateActor = false): void {
+    const histories = this.histories.get(documentId);
+    if (!histories) return;
+    const invalidation: HistoryInvalidation = { actorId: actor.id, actorName: actor.name, transactionId };
+    for (const [actorId, history] of histories) {
+      if (!invalidateActor && actorId === actor.id) continue;
+      for (const entry of [...history.undo, ...history.redo]) {
+        if (!entry.invalidatedBy && historyTargetsIntersect(entry.targets, targets)) entry.invalidatedBy = structuredClone(invalidation);
+      }
+    }
   }
 
   private getHistory(documentId: Id, actorId: Id): HistoryState {

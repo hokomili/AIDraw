@@ -120,7 +120,7 @@ The public tools are `session_manage`, `canvas_observe`, `canvas_apply`, `histor
 ## Important boundaries
 
 - Canvas and document-model operations require no open window or per-operation approval. Explicit file paths outside prior or launch-time trust, document closes that discard state, every overwrite, and potentially paid generation remain approval boundaries; pending approval jobs wait safely for an editor to attach.
-- Human undo/redo never rewinds agent history. An agent can only undo its own session, while the Activity panel can target attributed work.
+- Human undo/redo never rewinds agent history. An agent can only undo its own session, while the Activity panel can target attributed work. Disjoint actor targets remain independently undoable; later overlapping work creates a non-crossable history conflict instead of silently rebasing through another actor's state.
 - A cancelled animated transaction retains only its visible prefix as one undoable partial transaction.
 - Ambiguous chargeable provider requests are never automatically retried and providers are never silently substituted.
 - Addressed imports are parsed in a supervised utility process under byte/dimension/expansion budgets. Sprite-sheet and Tiled companion paths must remain inside the approved root folder after canonical resolution; SVG/Tiled DTD and entity declarations are rejected.

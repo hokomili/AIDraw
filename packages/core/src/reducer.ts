@@ -126,12 +126,16 @@ function removeObjectFromGroups(document: IllustrationDocument, objectId: string
   }
 }
 
+function sameOrderedIds(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((id, index) => id === right[index]);
+}
+
 function applyOperation(
   document: AIDrawDocument,
   operation: CanvasOperation,
   operationIndex: number,
   timestamp: string,
-): CanvasOperation {
+): CanvasOperation | CanvasOperation[] {
   switch (operation.kind) {
     case 'document.rename': {
       const previous = document.name;
@@ -206,14 +210,15 @@ function applyOperation(
       ];
       const missingAssetId = referencedAssetIds.find((assetId) => !document.assets[assetId]);
       if (missingAssetId) throw new Error(`Provenance references missing asset ${missingAssetId}`);
-      document.provenance.push(structuredClone(operation.provenance));
+      const index = Math.max(0, Math.min(operation.index ?? document.provenance.length, document.provenance.length));
+      document.provenance.splice(index, 0, structuredClone(operation.provenance));
       return { kind: 'provenance.delete', provenanceId: operation.provenance.id };
     }
     case 'provenance.delete': {
       const index = document.provenance.findIndex((entry) => entry.id === operation.provenanceId);
       if (index < 0) throw new Error(`Provenance ${operation.provenanceId} does not exist`);
       const [provenance] = document.provenance.splice(index, 1);
-      return { kind: 'provenance.add', provenance };
+      return { kind: 'provenance.add', provenance, index };
     }
     case 'illustration.layer.add': {
       const illustration = requireIllustration(document, operationIndex);
@@ -225,6 +230,8 @@ function applyOperation(
           retryable: false,
         });
       }
+      if (operation.layer.type === 'group' && operation.layer.childIds.length > 0) throw new Error('Use illustration.layer.move after adding an empty group layer');
+      if (operation.layer.type === 'vector' && operation.layer.objectIds.length > 0) throw new Error('Use object add or move operations after adding an empty vector layer');
       illustration.layers[operation.layer.id] = sanitizePaintCache(operation.layer);
       const parent = operation.layer.parentId ? illustration.layers[operation.layer.parentId] : undefined;
       if (operation.layer.parentId && (!parent || parent.type !== 'group')) throw new Error('Layer parent must be a group layer');
@@ -243,6 +250,9 @@ function applyOperation(
       if (!current) throw new Error(`Layer ${operation.layer.id} does not exist`);
       assertRevision(current, operation.expectedRevision, operationIndex);
       if (current.type !== operation.layer.type) throw new Error('A layer replacement cannot change the layer type');
+      if (current.parentId !== operation.layer.parentId) throw new Error('Use illustration.layer.move to change layer parentage');
+      if (current.type === 'vector' && operation.layer.type === 'vector' && !sameOrderedIds(current.objectIds, operation.layer.objectIds)) throw new Error('Use object add, move, or delete operations to change vector-layer membership');
+      if (current.type === 'group' && operation.layer.type === 'group' && !sameOrderedIds(current.childIds, operation.layer.childIds)) throw new Error('Use illustration.layer.move to change group-layer membership');
       if (operation.layer.maskLayerId) {
         const mask = illustration.layers[operation.layer.maskLayerId];
         if (!mask || mask.type !== 'vector' || mask.id === operation.layer.id) throw new Error('A clipping mask must reference another vector layer');
@@ -299,6 +309,15 @@ function applyOperation(
         const mask = illustration.objects[operation.object.maskObjectId];
         if (!mask || mask.id === operation.object.id || mask.layerId !== operation.object.layerId || !['shape', 'path', 'vector-stroke'].includes(mask.type)) throw new Error('An object mask must reference another path-capable object in the same vector layer');
       }
+      if (operation.object.type === 'group') {
+        if (new Set(operation.object.childIds).size !== operation.object.childIds.length) throw new Error('Object group members must be unique');
+        for (const childId of operation.object.childIds) {
+          const child = illustration.objects[childId];
+          if (!child || child.layerId !== layer.id) throw new Error('Object group members must already exist in the same vector layer');
+          if (child.id === operation.object.id || groupContainsObject(illustration, child.id, operation.object.id)) throw new Error('Object grouping cannot create a cycle');
+          if (findObjectParentGroup(illustration, child.id)) throw new Error(`Object ${child.name} already belongs to a group`);
+        }
+      }
       illustration.objects[operation.object.id] = structuredClone(operation.object);
       const index = Math.max(0, Math.min(operation.index ?? layer.objectIds.length, layer.objectIds.length));
       layer.objectIds.splice(index, 0, operation.object.id);
@@ -322,25 +341,15 @@ function applyOperation(
       const current = illustration.objects[operation.object.id];
       if (!current) throw new Error(`Object ${operation.object.id} does not exist`);
       assertRevision(current, operation.expectedRevision, operationIndex);
+      if (current.layerId !== operation.object.layerId) throw new Error('Use illustration.object.move to change an object layer');
+      const currentChildIds = current.type === 'group' ? current.childIds : [];
+      const incomingChildIds = operation.object.type === 'group' ? operation.object.childIds : [];
+      if (!sameOrderedIds(currentChildIds, incomingChildIds)) throw new Error('Use illustration.object.move to change object-group membership');
       if (operation.object.maskObjectId) {
         const mask = illustration.objects[operation.object.maskObjectId];
         if (!mask || mask.id === operation.object.id || mask.layerId !== operation.object.layerId || !['shape', 'path', 'vector-stroke'].includes(mask.type)) throw new Error('An object mask must reference another path-capable object in the same vector layer');
       }
       const previous = structuredClone(current);
-      if (current.layerId !== operation.object.layerId) {
-        const dependent = Object.values(illustration.objects).find((entry) => entry.maskObjectId === current.id);
-        if (dependent) throw new TransactionConflictError({ operationIndex, entityId: current.id, message: `Clear the object mask from ${dependent.name} before moving ${current.name} to another layer`, retryable: true });
-        const oldLayer = illustration.layers[current.layerId];
-        const newLayer = illustration.layers[operation.object.layerId];
-        if (!oldLayer || oldLayer.type !== 'vector' || !newLayer || newLayer.type !== 'vector') {
-          throw new Error('Object layer move requires vector layers');
-        }
-        oldLayer.objectIds = oldLayer.objectIds.filter((id) => id !== current.id);
-        newLayer.objectIds.push(current.id);
-        removeObjectFromGroups(illustration, current.id, timestamp);
-        touch(oldLayer, timestamp);
-        touch(newLayer, timestamp);
-      }
       illustration.objects[current.id] = structuredClone(operation.object);
       touch(illustration.objects[current.id], timestamp);
       return {
@@ -651,10 +660,12 @@ function applyOperation(
       assertRevision(asset, operation.expectedRevision, operationIndex);
       if (pixel.assetIds.length === 1) throw new Error('A pixel document must retain at least one asset');
       const index = pixel.assetIds.indexOf(asset.id);
+      const wasActive = pixel.activeAssetId === asset.id;
       delete pixel.pixelAssets[asset.id];
       pixel.assetIds = pixel.assetIds.filter((id) => id !== asset.id);
-      if (pixel.activeAssetId === asset.id) pixel.activeAssetId = pixel.assetIds[0];
-      return { kind: 'pixel.asset.add', asset: structuredClone(asset), index };
+      if (wasActive) pixel.activeAssetId = pixel.assetIds[0];
+      const restore: CanvasOperation = { kind: 'pixel.asset.add', asset: structuredClone(asset), index };
+      return wasActive ? [restore, { kind: 'pixel.active-asset.set', assetId: asset.id }] : restore;
     }
     case 'pixel.cel.set': {
       const pixel = requirePixel(document, operationIndex);
@@ -762,6 +773,21 @@ function rebaseInverseRevisions(document: AIDrawDocument, operations: CanvasOper
   return rebased;
 }
 
+/**
+ * Rebind revision-guarded operations to the current canonical entities while
+ * preserving their order. Callers must first establish that no conflicting
+ * foreign edit touched the transaction's logical targets.
+ */
+export function rebaseTransactionExpectedRevisions(
+  source: AIDrawDocument,
+  transaction: CanvasTransaction,
+): CanvasTransaction {
+  if (source.id !== transaction.documentId) throw new Error('Transaction document ID does not match');
+  const value = structuredClone(transaction);
+  value.operations = rebaseInverseRevisions(source, value.operations, nowIso());
+  return value;
+}
+
 export function applyTransaction(
   source: AIDrawDocument,
   transaction: CanvasTransaction,
@@ -774,7 +800,7 @@ export function applyTransaction(
 
   for (let index = 0; index < transaction.operations.length; index += 1) {
     const inverse = applyOperation(document, transaction.operations[index], index, timestamp);
-    inverseOperations.unshift(inverse);
+    inverseOperations.unshift(...(Array.isArray(inverse) ? inverse : [inverse]));
   }
 
   document.revision += 1;

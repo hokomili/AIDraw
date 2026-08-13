@@ -13,6 +13,7 @@ describe('chunked indexed pixels and sparse tiles', () => {
     expect(readPixel(cel, -1, -1)).toBe(3);
     writePixels(cel, inverse);
     expect(readPixel(cel, 32, 32)).toBe(0);
+    expect(cel.chunks).toEqual({});
   });
 
   it('stores 32-bit tile GIDs in sparse chunks', () => {
@@ -21,7 +22,7 @@ describe('chunked indexed pixels and sparse tiles', () => {
     const chunk = Object.values(chunks)[0];
     expect(readTile(chunk, 34, 2)).toBe(0xf000_0042);
     writeTiles(chunks, inverse);
-    expect(readTile(chunk, 34, 2)).toBe(0);
+    expect(chunks).toEqual({});
   });
 
   it('round-trips Tiled flip and diagonal flags as unsigned GIDs', () => {
@@ -45,7 +46,7 @@ describe('chunked indexed pixels and sparse tiles', () => {
     const tileInverse = writeTileRuns(chunks, [{ x: 31, y: -2, length: 4, gid: 0xe000_0003 }]);
     expect([31, 32, 33, 34].map((x) => readTile(chunks[`${Math.floor(x / 32)},-1`], x, -2))).toEqual(new Array(4).fill(0xe000_0003));
     writeTileRuns(chunks, tileInverse);
-    expect([31, 32, 33, 34].map((x) => readTile(chunks[`${Math.floor(x / 32)},-1`], x, -2))).toEqual(new Array(4).fill(0));
+    expect(chunks).toEqual({});
   });
 
   it('undoes repeated writes to the same cell in reverse write order', () => {
@@ -55,6 +56,7 @@ describe('chunked indexed pixels and sparse tiles', () => {
     expect(readPixel(cel, 1, 1)).toBe(8);
     writePixels(cel, inverse);
     expect(readPixel(cel, 1, 1)).toBe(0);
+    expect(cel.chunks).toEqual({});
   });
 
   it('treats a legacy cel with no chunk table as empty and repairs it on write', () => {

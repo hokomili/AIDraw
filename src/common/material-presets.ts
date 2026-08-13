@@ -156,7 +156,8 @@ export function buildPolishedGoldMaterial(
     operations: [
       { kind: 'illustration.layer.add', layer: groupLayer, index: sourceLayerIndex + 1 },
       { kind: 'illustration.layer.add', layer: materialLayer },
-      { kind: 'illustration.object.replace', object: base, expectedRevision: source.revision },
+      { kind: 'illustration.object.replace', object: { ...base, layerId: source.layerId }, expectedRevision: source.revision },
+      { kind: 'illustration.object.move', objectId: source.id, layerId: materialLayerId, expectedRevision: source.revision + 1 },
       ...overlays.map((object): CanvasOperation => ({ kind: 'illustration.object.add', object })),
     ],
     selectedObjectIds: [source.id, ...overlays.map((object) => object.id)],

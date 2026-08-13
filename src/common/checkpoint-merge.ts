@@ -40,9 +40,12 @@ function orderedIllustrationObjects(source: IllustrationDocument, layers: Illust
   const result: IllustrationObject[] = []; const visiting = new Set<string>(); const visited = new Set<string>();
   const visit = (id: string) => {
     if (visited.has(id) || !included.has(id)) return;
-    if (visiting.has(id)) throw new Error('Checkpoint object masks contain a cycle.');
+    if (visiting.has(id)) throw new Error('Checkpoint object dependencies contain a cycle.');
     const object = source.objects[id]; if (!object) throw new Error(`Checkpoint object ${id} does not exist.`);
-    visiting.add(id); if (object.maskObjectId) visit(object.maskObjectId); visiting.delete(id); visited.add(id); result.push(object);
+    visiting.add(id);
+    if (object.maskObjectId) visit(object.maskObjectId);
+    if (object.type === 'group') for (const childId of object.childIds) visit(childId);
+    visiting.delete(id); visited.add(id); result.push(object);
   };
   for (const layer of layers) if (layer.type === 'vector') for (const id of layer.objectIds) visit(id);
   return result;
