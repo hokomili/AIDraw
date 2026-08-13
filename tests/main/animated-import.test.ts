@@ -293,6 +293,12 @@ describe('animated pixel import', () => {
     expect(renderedFrames(imported).map((rgba) => Buffer.from(rgba))).toEqual(fixture.expectedFrames.map((rgba) => Buffer.from(rgba))); expect(Object.values(document.assets)[0].data).toBe(fixture.bytes.toString('base64'));
   });
 
+  it('re-exports an imported single-layer GIF through its exact indexed frame palettes', async () => {
+    const fixture = frameLocalPaletteGif(); const imported = importGifBytes(fixture.bytes, 'Exact GIF re-export'); const document = imported.documents[0]; if (document.kind !== 'pixel') throw new Error('Expected pixel');
+    const exported = await exportDocument(document, 'gif'); const roundTrip = importGifBytes(exported.data, 'Exact GIF round trip'); const next = roundTrip.documents[0]; if (next.kind !== 'pixel') throw new Error('Expected pixel'); const sprite = next.pixelAssets[next.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('Expected sprite');
+    expect(roundTrip.warnings).toEqual([]); expect(sprite.frameIds.map((frameId) => sprite.frames[frameId].durationMs)).toEqual([50, 70]); expect(renderedFrames(roundTrip).map((rgba) => Buffer.from(rgba))).toEqual(fixture.expectedFrames.map((rgba) => Buffer.from(rgba))); expect([next.palette[1].color, next.palette[2].color]).toEqual(['#010203', '#040506']); expect([sprite.paletteOverrides[sprite.frameIds[1]][1].color, sprite.paletteOverrides[sprite.frameIds[1]][2].color]).toEqual(['#070809', '#0a0b0c']); expect(Object.values(next.assets)[0].data).toBe(exported.data.toString('base64'));
+  });
+
   it('warns and retains document-palette quantization above 255 visible colors in one frame', () => {
     const bytes = overExactPaletteLimitApng(); const imported = importApngBytes(bytes, '256-color APNG')!; const document = imported.documents[0]; if (document.kind !== 'pixel') throw new Error('Expected pixel'); const sprite = document.pixelAssets[document.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('Expected sprite');
     expect(imported.warnings).toEqual([expect.stringMatching(/more than 255 visible RGBA colors.*quantized to the document palette/)]); expect(document.palette).toEqual(DEFAULT_PALETTE); expect(sprite.paletteOverrides).toEqual({}); expect(Object.values(document.assets)[0].data).toBe(bytes.toString('base64'));

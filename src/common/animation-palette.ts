@@ -164,41 +164,44 @@ export function exactAnimationFrameChanges(
   return changes;
 }
 
+interface SingleLayerAnimationFrame {
+  colors: Array<readonly [number, number, number, number]>;
+  indexes: Uint8Array;
+}
+
 /**
- * Returns raw indexed RGBA for the simple single-pixel-layer shape produced by
- * GIF/APNG import. Avoiding a Canvas readback preserves stored partial-alpha
- * channels during APNG re-export; more complex layer composites keep using the
- * established renderer.
+ * Resolves the simple single-pixel-layer shape produced by GIF/APNG import.
+ * More complex layer composites keep using the established renderer.
  */
-export function exactSingleLayerAnimationFrame(
+function singleLayerAnimationFrame(
   palette: PaletteEntry[],
   sprite: PixelSprite,
   frameId: string,
-): Uint8ClampedArray | undefined {
+): SingleLayerAnimationFrame | undefined {
   if (sprite.layerIds.length !== 1 || Object.keys(sprite.layers).length !== 1) return undefined;
   const layer = sprite.layers[sprite.layerIds[0]];
   if (!layer || layer.type !== 'pixel' || layer.opacity !== 1 || layer.blendMode !== 'normal') return undefined;
-  const output = new Uint8ClampedArray(sprite.width * sprite.height * 4);
-  if (!layer.visible) return output;
-  const cel = pixelCelForFrame(sprite, layer.id, frameId);
-  if (!cel) return output;
-  const colors = sprite.paletteOverrides?.[frameId] ?? palette;
-  const rgba = colors.map(({ color }) => {
+  const indexes = new Uint8Array(sprite.width * sprite.height);
+  const sourcePalette = sprite.paletteOverrides?.[frameId] ?? palette;
+  if (sourcePalette.length < 2 || sourcePalette.length > 256) return undefined;
+  const colors = sourcePalette.map(({ color }) => {
     const packed = paletteColor(color);
     return [packed >>> 24, packed >>> 16 & 0xff, packed >>> 8 & 0xff, packed & 0xff] as const;
   });
+  if (!layer.visible) return { colors, indexes };
+  const cel = pixelCelForFrame(sprite, layer.id, frameId);
+  if (!cel) return { colors, indexes };
   const chunks = cel.chunks ?? {};
   const writeChunk = (chunk: (typeof chunks)[string]): boolean => {
     if (chunk.x >= sprite.width || chunk.y >= sprite.height || chunk.x + chunk.width <= 0 || chunk.y + chunk.height <= 0) return true;
-    const indexes = decodePixelChunk(chunk);
+    const decoded = decodePixelChunk(chunk);
     for (let y = 0; y < chunk.height; y += 1) for (let x = 0; x < chunk.width; x += 1) {
       const documentX = chunk.x + x; const documentY = chunk.y + y;
       if (documentX < 0 || documentY < 0 || documentX >= sprite.width || documentY >= sprite.height) continue;
-      const index = indexes[y * chunk.width + x] ?? 0;
+      const index = decoded[y * chunk.width + x] ?? 0;
       if (!index) continue;
-      const color = rgba[index];
-      if (!color) return false;
-      output.set(color, (documentY * sprite.width + documentX) * 4);
+      if (!colors[index]) return false;
+      indexes[documentY * sprite.width + documentX] = index;
     }
     return true;
   };
@@ -211,5 +214,33 @@ export function exactSingleLayerAnimationFrame(
   } else {
     for (const chunk of Object.values(chunks)) if (!writeChunk(chunk)) return undefined;
   }
+  return { colors, indexes };
+}
+
+/**
+ * Returns raw indexed RGBA for a simple imported animation shape. Avoiding a
+ * Canvas readback preserves stored partial-alpha channels during APNG export.
+ */
+export function exactSingleLayerAnimationFrame(
+  palette: PaletteEntry[],
+  sprite: PixelSprite,
+  frameId: string,
+): Uint8ClampedArray | undefined {
+  const frame = singleLayerAnimationFrame(palette, sprite, frameId);
+  if (!frame) return undefined;
+  const output = new Uint8ClampedArray(sprite.width * sprite.height * 4);
+  frame.indexes.forEach((index, pixel) => { if (index) output.set(frame.colors[index], pixel * 4); });
   return output;
+}
+
+/** Returns exact opaque RGB/index data suitable for a GIF local color table. */
+export function exactSingleLayerGifFrame(
+  palette: PaletteEntry[],
+  sprite: PixelSprite,
+  frameId: string,
+): { indexes: Uint8Array; palette: number[][] } | undefined {
+  const frame = singleLayerAnimationFrame(palette, sprite, frameId);
+  if (!frame) return undefined;
+  for (const index of frame.indexes) if (index && frame.colors[index]?.[3] !== 255) return undefined;
+  return { indexes: frame.indexes, palette: frame.colors.map(([red, green, blue]) => [red, green, blue]) };
 }

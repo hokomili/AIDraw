@@ -19,7 +19,7 @@ import {
   type PixelTilemap,
   type PixelTileset,
 } from '@aidraw/core';
-import { exactSingleLayerAnimationFrame } from '../common/animation-palette';
+import { exactSingleLayerAnimationFrame, exactSingleLayerGifFrame } from '../common/animation-palette';
 import { splitColorAlpha } from '../common/color';
 import { MAX_STATIC_RASTER_PIXELS } from '../common/static-raster';
 import { layoutStyledText } from '../common/text-layout';
@@ -81,6 +81,19 @@ function nearestNeighborFrame(source: Uint8Array | Uint8ClampedArray, width: num
         const targetOffset = (targetY * scaledWidth + sourceX * scale + repeatX) * 4;
         output[targetOffset] = source[sourceOffset]; output[targetOffset + 1] = source[sourceOffset + 1]; output[targetOffset + 2] = source[sourceOffset + 2]; output[targetOffset + 3] = source[sourceOffset + 3];
       }
+    }
+  }
+  return output;
+}
+
+function nearestNeighborIndexes(source: Uint8Array, width: number, height: number, scale: number): Uint8Array {
+  if (scale === 1) return Uint8Array.from(source);
+  assertScaledDimensions(width, height, scale);
+  const scaledWidth = width * scale; const output = new Uint8Array(scaledWidth * height * scale);
+  for (let sourceY = 0; sourceY < height; sourceY += 1) for (let repeatY = 0; repeatY < scale; repeatY += 1) {
+    const targetY = sourceY * scale + repeatY;
+    for (let sourceX = 0; sourceX < width; sourceX += 1) for (let repeatX = 0; repeatX < scale; repeatX += 1) {
+      output[targetY * scaledWidth + sourceX * scale + repeatX] = source[sourceY * width + sourceX];
     }
   }
   return output;
@@ -646,13 +659,14 @@ async function spriteSheet(document: PixelDocument, sprite: PixelSprite, scale =
 async function animatedImage(document: PixelDocument, sprite: PixelSprite, format: 'gif' | 'apng', scale = 1, tagId?: string): Promise<ExportArtifact> {
   assertScaledDimensions(sprite.width, sprite.height, scale);
   const width = sprite.width * scale; const height = sprite.height * scale;
-  const frameIds = pixelAnimationSequence(sprite, tagId); const frames = frameIds.map((frameId) => {
-    const exact = format === 'apng' ? exactSingleLayerAnimationFrame(document.palette, sprite, frameId) : undefined;
-    const rgba = exact ?? renderSprite(document, sprite, frameId).getContext('2d').getImageData(0, 0, sprite.width, sprite.height).data;
-    return nearestNeighborFrame(rgba, sprite.width, sprite.height, scale);
-  });
+  const frameIds = pixelAnimationSequence(sprite, tagId);
   const delays = frameIds.map((frameId) => sprite.frames[frameId]?.durationMs ?? 100); const warnings = animationExportWarnings(sprite, tagId, scale);
   if (format === 'apng') {
+    const frames = frameIds.map((frameId) => {
+      const exact = exactSingleLayerAnimationFrame(document.palette, sprite, frameId);
+      const rgba = exact ?? renderSprite(document, sprite, frameId).getContext('2d').getImageData(0, 0, sprite.width, sprite.height).data;
+      return nearestNeighborFrame(rgba, sprite.width, sprite.height, scale);
+    });
     // upng-js sizes its output buffer from the first raw frame and only adds 100
     // bytes total, which truncates tiny animations where per-frame chunk overhead
     // is larger than the pixel payload. A small per-frame reserve on frame zero
@@ -663,7 +677,17 @@ async function animatedImage(document: PixelDocument, sprite: PixelSprite, forma
     const encodeApng = UPNG.encode as unknown as (images: ArrayBuffer[], frameWidth: number, frameHeight: number, colors: number, frameDelays?: number[], forbidPalette?: boolean) => ArrayBuffer;
     return { data: Buffer.from(encodeApng(inputs, width, height, 0, delays, true)), mimeType: 'image/apng', extension: 'apng', report: { warnings, rasterized: [] } };
   }
-  const encoder = GIFEncoder(); frames.forEach((frame, index) => { const palette = quantize(frame, 256, { format: 'rgba4444', oneBitAlpha: true, clearAlpha: true }); encoder.writeFrame(applyPalette(frame, palette, 'rgba4444'), width, height, { palette, transparent: true, transparentIndex: 0, delay: delays[index], repeat: 0 }); }); encoder.finish();
+  const exactFrames = frameIds.map((frameId) => exactSingleLayerGifFrame(document.palette, sprite, frameId));
+  const encoder = GIFEncoder();
+  if (exactFrames.every((frame): frame is NonNullable<typeof frame> => frame !== undefined)) {
+    exactFrames.forEach((frame, index) => encoder.writeFrame(nearestNeighborIndexes(frame.indexes, sprite.width, sprite.height, scale), width, height, { palette: frame.palette, transparent: true, transparentIndex: 0, delay: delays[index], repeat: 0 }));
+  } else {
+    frameIds.forEach((frameId, index) => {
+      const frame = nearestNeighborFrame(renderSprite(document, sprite, frameId).getContext('2d').getImageData(0, 0, sprite.width, sprite.height).data, sprite.width, sprite.height, scale);
+      const palette = quantize(frame, 256, { format: 'rgba4444', oneBitAlpha: true, clearAlpha: true }); encoder.writeFrame(applyPalette(frame, palette, 'rgba4444'), width, height, { palette, transparent: true, transparentIndex: 0, delay: delays[index], repeat: 0 });
+    });
+  }
+  encoder.finish();
   return { data: Buffer.from(encoder.bytes()), mimeType: 'image/gif', extension: 'gif', report: { warnings, rasterized: [] } };
 }
 

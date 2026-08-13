@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_PALETTE } from '@aidraw/core';
-import { createExactAnimationPalettePlanner, exactAnimationFrameChanges } from '../../src/common/animation-palette';
+import { DEFAULT_PALETTE, createPixelDocument, writePixels } from '@aidraw/core';
+import { createExactAnimationPalettePlanner, exactAnimationFrameChanges, exactSingleLayerGifFrame } from '../../src/common/animation-palette';
 
 describe('exact animation frame palettes', () => {
   it('keeps reference indexes and assigns frame-local RGBA colors deterministically', () => {
@@ -38,5 +38,11 @@ describe('exact animation frame palettes', () => {
     const planner = createExactAnimationPalettePlanner(DEFAULT_PALETTE, 0.5);
     expect(planner.addFrame(rgba)).toBe(false);
     expect(planner.finish()).toBeUndefined();
+  });
+
+  it('offers exact GIF indexes only for opaque ordinary single-layer frames', () => {
+    const document = createPixelDocument('sprite', 'Exact GIF guard'); const sprite = document.pixelAssets[document.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('Expected sprite'); sprite.width = 2; sprite.height = 1; const cel = Object.values(sprite.cels)[0]; writePixels(cel, [{ x: 0, y: 0, index: 1 }, { x: 1, y: 0, index: 2 }]);
+    document.palette[1].color = '#010203'; document.palette[2].color = '#040506'; const exact = exactSingleLayerGifFrame(document.palette, sprite, sprite.frameIds[0]); expect(Array.from(exact!.indexes)).toEqual([1, 2]); expect(exact!.palette.slice(1, 3)).toEqual([[1, 2, 3], [4, 5, 6]]);
+    document.palette[1].color = '#01020380'; expect(exactSingleLayerGifFrame(document.palette, sprite, sprite.frameIds[0])).toBeUndefined(); document.palette[1].color = '#010203'; sprite.layers[sprite.layerIds[0]].opacity = 0.5; expect(exactSingleLayerGifFrame(document.palette, sprite, sprite.frameIds[0])).toBeUndefined();
   });
 });
