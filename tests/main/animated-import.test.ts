@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { DEFAULT_PALETTE, HUMAN_ACTOR, createPixelDocument, nowIso, readPixel, writePixels } from '@aidraw/core';
 import { GIFEncoder } from 'gifenc';
 import { crc32, deflateSync } from 'node:zlib';
+import UPNG from 'upng-js';
 
 vi.mock('electron', () => ({ nativeImage: { createFromBuffer: () => ({ isEmpty: () => true }) } }));
 
@@ -285,6 +286,12 @@ describe('animated pixel import', () => {
     const cels = sprite.frameIds.map((frameId) => Object.values(sprite.cels).find((cel) => cel.frameId === frameId)!);
     expect(cels.map((cel) => [readPixel(cel, 0, 0), readPixel(cel, 1, 0)])).toEqual([[1, 2], [1, 2]]); expect(Object.values(document.assets)[0].data).toBe(fixture.bytes.toString('base64'));
     const exported = await exportDocument(document, 'apng'); const decoded = decodeApng(exported.data)!; expect(decoded.frames.map(({ rgba }) => Buffer.from(rgba))).toEqual(fixture.expectedFrames.map((rgba) => Buffer.from(rgba)));
+  });
+
+  it('exports exact partial-alpha colors to PNG and a frame-local sprite sheet', async () => {
+    const fixture = frameLocalPaletteApng(); const imported = importApngBytes(fixture.bytes, 'Exact PNG surfaces')!; const document = imported.documents[0]; if (document.kind !== 'pixel') throw new Error('Expected pixel'); const sprite = document.pixelAssets[document.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('Expected sprite');
+    const png = await exportDocument(document, 'png'); const decodedPng = UPNG.decode(Uint8Array.from(png.data).buffer); expect([decodedPng.width, decodedPng.height]).toEqual([2, 1]); expect(Buffer.from(UPNG.toRGBA8(decodedPng)[0])).toEqual(Buffer.from(fixture.expectedFrames[0]));
+    const sheet = await exportDocument(document, 'sprite-sheet'); const decodedSheet = UPNG.decode(Uint8Array.from(sheet.data).buffer); expect([decodedSheet.width, decodedSheet.height]).toEqual([4, 1]); expect(Buffer.from(UPNG.toRGBA8(decodedSheet)[0])).toEqual(Buffer.concat(fixture.expectedFrames.map((frame) => Buffer.from(frame)))); const metadata = JSON.parse(sheet.companion!.data.toString()); expect(metadata.meta.frameOrder).toEqual(sprite.frameIds); expect(metadata.meta.size).toEqual({ w: 4, h: 1 });
   });
 
   it('imports exact GIF local color tables as frame palette overrides', () => {

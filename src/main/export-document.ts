@@ -99,6 +99,12 @@ function nearestNeighborIndexes(source: Uint8Array, width: number, height: numbe
   return output;
 }
 
+function encodeLosslessRgbaPng(source: Uint8Array | Uint8ClampedArray, width: number, height: number): Buffer {
+  const input = Uint8Array.from(source).buffer;
+  const encodePng = UPNG.encode as unknown as (images: ArrayBuffer[], imageWidth: number, imageHeight: number, colors: number, frameDelays?: number[], forbidPalette?: boolean) => ArrayBuffer;
+  return Buffer.from(encodePng([input], width, height, 0, undefined, true));
+}
+
 function scaleWarnings(scale: number): string[] {
   return scale === 1 ? [] : [`Exported at ${scale}× using nearest-neighbor pixel scaling.`];
 }
@@ -248,6 +254,16 @@ async function illustrationSvg(document: IllustrationDocument): Promise<ExportAr
 async function raster(document: AIDrawDocument, format: 'png' | 'jpeg' | 'webp', scale = 1): Promise<ExportArtifact> {
   const dimensions = renderDocumentDimensions(document);
   assertScaledDimensions(dimensions.width, dimensions.height, scale);
+  if (format === 'png' && document.kind === 'pixel') {
+    const sprite = document.pixelAssets[document.activeAssetId];
+    if (sprite?.type === 'sprite') {
+      const exact = exactSingleLayerAnimationFrame(document.palette, sprite, sprite.frameIds[0]);
+      if (exact) {
+        const scaled = nearestNeighborFrame(exact, sprite.width, sprite.height, scale);
+        return { data: encodeLosslessRgbaPng(scaled, dimensions.width * scale, dimensions.height * scale), mimeType: 'image/png', extension: 'png', report: { warnings: scaleWarnings(scale), rasterized: [] } };
+      }
+    }
+  }
   const canvas = nearestNeighborCanvas(await renderDocument(document), scale);
   const mime = format === 'png' ? 'image/png' : format === 'jpeg' ? 'image/jpeg' : 'image/webp';
   const data = format === 'png'
@@ -646,14 +662,26 @@ async function spriteSheet(document: PixelDocument, sprite: PixelSprite, scale =
   const frameIds = pixelAnimationSequence(sprite, tagId); const columns = Math.ceil(Math.sqrt(frameIds.length)); const rows = Math.ceil(frameIds.length / columns);
   assertScaledDimensions(columns * sprite.width, rows * sprite.height, scale);
   const frameWidth = sprite.width * scale; const frameHeight = sprite.height * scale;
-  const canvas = createCanvas(columns * frameWidth, rows * frameHeight); const context = canvas.getContext('2d'); context.imageSmoothingEnabled = false;
+  const sheetWidth = columns * frameWidth; const sheetHeight = rows * frameHeight;
   const frames: Record<string, unknown> = {};
   frameIds.forEach((frameId, index) => {
     const x = index % columns * frameWidth; const y = Math.floor(index / columns) * frameHeight;
-    context.drawImage(renderSprite(document, sprite, frameId), x, y, frameWidth, frameHeight);
     const key = frames[frameId] ? `${frameId}#${index}` : frameId; frames[key] = { frame: { x, y, w: frameWidth, h: frameHeight }, sourceFrameId: frameId, sourceSize: { w: sprite.width, h: sprite.height }, scale, duration: sprite.frames[frameId]?.durationMs ?? 100 };
   });
-  return { data: canvas.toBuffer('image/png'), mimeType: 'image/png', extension: 'png', companion: { data: Buffer.from(JSON.stringify({ frames, meta: { app: 'AIDraw', image: `${sprite.name}.png`, size: { w: canvas.width, h: canvas.height }, scale, frameOrder: frameIds, selectedTagId: tagId, tags: sprite.tags } }, null, 2)), extension: 'json', mimeType: 'application/json' }, report: { warnings: animationExportWarnings(sprite, tagId, scale), rasterized: [] } };
+  const firstExact = exactSingleLayerAnimationFrame(document.palette, sprite, frameIds[0]); let exactSheet = firstExact ? new Uint8Array(sheetWidth * sheetHeight * 4) : undefined;
+  if (exactSheet) for (let index = 0; index < frameIds.length; index += 1) {
+    const frame = index === 0 ? firstExact : exactSingleLayerAnimationFrame(document.palette, sprite, frameIds[index]);
+    if (!frame) { exactSheet = undefined; break; }
+    const scaled = nearestNeighborFrame(frame, sprite.width, sprite.height, scale); const targetX = index % columns * frameWidth; const targetY = Math.floor(index / columns) * frameHeight;
+    for (let y = 0; y < frameHeight; y += 1) exactSheet.set(scaled.subarray(y * frameWidth * 4, (y + 1) * frameWidth * 4), ((targetY + y) * sheetWidth + targetX) * 4);
+  }
+  let data: Buffer;
+  if (exactSheet) data = encodeLosslessRgbaPng(exactSheet, sheetWidth, sheetHeight);
+  else {
+    const canvas = createCanvas(sheetWidth, sheetHeight); const context = canvas.getContext('2d'); context.imageSmoothingEnabled = false;
+    frameIds.forEach((frameId, index) => context.drawImage(renderSprite(document, sprite, frameId), index % columns * frameWidth, Math.floor(index / columns) * frameHeight, frameWidth, frameHeight)); data = canvas.toBuffer('image/png');
+  }
+  return { data, mimeType: 'image/png', extension: 'png', companion: { data: Buffer.from(JSON.stringify({ frames, meta: { app: 'AIDraw', image: `${sprite.name}.png`, size: { w: sheetWidth, h: sheetHeight }, scale, frameOrder: frameIds, selectedTagId: tagId, tags: sprite.tags } }, null, 2)), extension: 'json', mimeType: 'application/json' }, report: { warnings: animationExportWarnings(sprite, tagId, scale), rasterized: [] } };
 }
 
 async function animatedImage(document: PixelDocument, sprite: PixelSprite, format: 'gif' | 'apng', scale = 1, tagId?: string): Promise<ExportArtifact> {
