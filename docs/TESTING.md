@@ -616,6 +616,18 @@ The formal performance fixture adds 4,096 canonical 32×32 chunks across a 2,048
 
 This checkpoint changes no pixels, object-layer traversal, nominal or signed stored bounds, map origin, chunks or GIDs, transform behavior, Tiled bytes, or infinite-map policy. It adds no interactive spatial index or viewport-performance claim. Packaged/native behavior, broad Tiled fidelity, Level 3, RC, and stable-v1 readiness remain unclaimed.
 
+## Latest source/headless editor tilemap viewport checkpoint
+
+Source/headless MAP-07/MAP-08/FND-12 editor evidence (2026-08-12): the editor previously decoded and visited every stored tile cell on every paint, pan, animation tick, selection update, or collaboration advisory update, relying on Canvas to clip the final pixels. Orthogonal grid rendering also emitted every nominal row and column whenever grid-visible zoom was active. Large sparse maps therefore retained traversal cost even after headless regional observation became bounded.
+
+The editor now converts its fractional CSS viewport through the exact uniform projection scale (`view.scale / tileWidth`), including the rounded fit/zoom offset and each layer's fractional wheel-pan/parallax translation. A pure helper rounds all four edges outward to the smallest safe-integer canonical map-pixel region. The shared conservative chunk envelope then filters before payload access in both orientations; retained orthogonal record order and isometric right-down ordering do not change. A second pure helper bounds orthogonal grid-line indexes to that base viewport with one neighboring line on each side, preserving clipped one-pixel stroke coverage without iterating nominal dimensions.
+
+Pure tests cover fractional negative/positive transforms, safe-coordinate rejection, bounded grid indexes, off-map viewports, and the existing orthogonal/isometric candidate/order/rectangular-transform cases. Source wiring requires fractional parallax and uniform scale to reach the filter, both decode loops to consume `candidateChunks`, and the orthogonal grid to consume the bounded range. Focused pinned-Node-24 typecheck/targeted ESLint and **4 files / 10 tests** pass. The complete safe gate passes portability for **369 tracked + 75 prospective** paths, TypeScript, full ESLint, and **150 files / 866 tests**.
+
+The unchanged formal performance gate passes 1/1 at **861.42 MiB** RSS growth; the shared 4,096-chunk regional filter/render is **1.45 ms** under 100 ms, 65,536 addressed maximum-sheet tiles **147.82 ms**, native save **137.38 ms**, PNG export **43.11 ms**, one-million-sample accounting **1.43 ms**, and flood **169.68 ms**. `/private/tmp/aidraw-editor-tilemap-viewport-performance-gate.json` is temporary self-authored diagnostics. It exercises the shared filter in the production headless renderer, not browser paint or packaged frame pacing.
+
+This checkpoint deliberately keeps an O(total chunks) geometry scan rather than adding mutable index state or changing canonical records. Canvas pixels and clipping, grid phase, signed chunks, nominal bounds, map origin, GIDs/transforms, Tiled bytes, and infinite-map policy are unchanged. Checker-pattern cell iteration, object/selection/replay traversal, native-size overhang policy, packaged pacing/visual acceptance, broad Tiled fidelity, Level 3, RC, and stable-v1 readiness remain unclaimed.
+
 ## Failure severity and reruns
 
 | Severity | Meaning | Gate effect |

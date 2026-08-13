@@ -68,6 +68,7 @@ import { drawMapObjectOverlay } from '../../common/map-object-render';
 import { orthogonalCellRect, orthogonalCoordinateDeltaFromScreen, orthogonalObjectMatrix, orthogonalProjectionExtent } from '../../common/orthogonal-projection';
 import { TILE_VARIANT_SEED_PROPERTY, chooseTileVariant, nextTileVariantSeed, tileVariantCandidates, tileVariantGroup } from '../../common/tile-variants';
 import { isometricTileRenderCells } from '../../common/tile-render-order';
+import { coveringRasterViewportRegion, tilemapChunksIntersectingRegion, tilemapGridLineRange } from '../../common/tilemap-region';
 import { DEFAULT_ONION_SKIN_SETTINGS, onionSkinLayers, type OnionSkinSettings } from '../../common/onion-skin';
 import { tileAnimationFrameAt, tilesetTileSourceRect } from '../../common/tile-animation';
 import { parseBitmapFontJson } from '../../common/bitmap-font-interchange';
@@ -454,6 +455,15 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     context.shadowColor = 'transparent';
     const isometricCellHeight = tilemap?.orientation === 'isometric' ? view.scale * tilemap.tileHeight / tilemap.tileWidth : view.scale;
     const orthogonalCellHeight = tilemap?.orientation === 'orthogonal' ? view.scale * tilemap.tileHeight / tilemap.tileWidth : view.scale;
+    const baseTilemapViewportRegion = tilemap ? coveringRasterViewportRegion({
+      viewportWidth: size.width,
+      viewportHeight: size.height,
+      viewOffsetX: view.offsetX,
+      viewOffsetY: view.offsetY,
+      layerOffsetX: 0,
+      layerOffsetY: 0,
+      projectionScale: view.scale / tilemap.tileWidth,
+    }) : undefined;
     const gridCellRect = (point: PixelPoint): IsometricCellRect => tilemap?.orientation === 'isometric'
       ? isometricCellRect(point.x, point.y, tilemap.height, view.scale, isometricCellHeight)
       : tilemap?.orientation === 'orthogonal'
@@ -534,7 +544,8 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       const visibleLayers: Array<{ layer: typeof tilemap.layers[string]; opacity: number }> = []; const visit = (id: string, opacity = 1) => { const layer = tilemap.layers[id]; if (!layer?.visible) return; const combined = opacity * layer.opacity; if (layer.type === 'group') for (const childId of layer.childIds ?? []) visit(childId, combined); else visibleLayers.push({ layer, opacity: combined }); }; for (const id of tilemap.layerIds) visit(id);
       try { for (const entry of visibleLayers) {
         const { layer } = entry;
-        context.save(); context.translate(pan.x * (layer.parallaxX - 1), pan.y * (layer.parallaxY - 1));
+        const layerOffsetX = pan.x * (layer.parallaxX - 1); const layerOffsetY = pan.y * (layer.parallaxY - 1);
+        context.save(); context.translate(layerOffsetX, layerOffsetY);
         if (layer.type === 'object') {
           context.globalAlpha = entry.opacity;
           for (const source of layer.objects ?? []) {
@@ -554,6 +565,21 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
         }
         if (layer.type !== 'tile' || !layer.chunks) { context.restore(); continue; }
         const hiddenCells = replayMasks.tileCells.get(replayTileLayerKey(tilemap.id, layer.id));
+        const layerViewportRegion = layerOffsetX === 0 && layerOffsetY === 0 ? baseTilemapViewportRegion! : coveringRasterViewportRegion({
+          viewportWidth: size.width,
+          viewportHeight: size.height,
+          viewOffsetX: view.offsetX,
+          viewOffsetY: view.offsetY,
+          layerOffsetX,
+          layerOffsetY,
+          projectionScale: view.scale / tilemap.tileWidth,
+        });
+        const candidateChunks = tilemapChunksIntersectingRegion(Object.values(layer.chunks), {
+          orientation: tilemap.orientation,
+          rows: tilemap.height,
+          tileWidth: tilemap.tileWidth,
+          tileHeight: tilemap.tileHeight,
+        }, layerViewportRegion);
         context.globalAlpha = entry.opacity;
         const drawCell = (x: number, y: number, raw: number) => {
           const decoded = decodeTiledGid(raw); if (!decoded.gid || hiddenCells?.has(replayPointKey(x, y))) return;
@@ -576,8 +602,8 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
             }
           } finally { mapSource?.release(); }
         };
-        if (tilemap.orientation === 'isometric') for (const cell of isometricTileRenderCells(Object.values(layer.chunks), safeDecodeTilemapChunk)) drawCell(cell.x, cell.y, cell.raw);
-        else for (const chunk of Object.values(layer.chunks)) {
+        if (tilemap.orientation === 'isometric') for (const cell of isometricTileRenderCells(candidateChunks, safeDecodeTilemapChunk)) drawCell(cell.x, cell.y, cell.raw);
+        else for (const chunk of candidateChunks) {
           const values = safeDecodeTilemapChunk(chunk); if (!values) continue;
           for (let localY = 0; localY < 32; localY += 1) for (let localX = 0; localX < 32; localX += 1) drawCell(chunk.x + localX, chunk.y + localY, values[localY * 32 + localX] ?? 0);
         }
@@ -670,8 +696,9 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       const rowHeight = tilemap?.orientation === 'orthogonal' ? orthogonalCellHeight : view.scale;
       const columnCount = tilemap?.orientation === 'orthogonal' ? tilemap.width : logical.gridWidth;
       const rowCount = tilemap?.orientation === 'orthogonal' ? tilemap.height : logical.gridHeight;
-      for (let x = 0; x <= columnCount; x += 1) { context.moveTo(x * columnWidth + 0.5, 0); context.lineTo(x * columnWidth + 0.5, rowCount * rowHeight); }
-      for (let y = 0; y <= rowCount; y += 1) { context.moveTo(0, y * rowHeight + 0.5); context.lineTo(columnCount * columnWidth, y * rowHeight + 0.5); }
+      const gridRange = tilemap?.orientation === 'orthogonal' && baseTilemapViewportRegion ? tilemapGridLineRange(baseTilemapViewportRegion, { columns: tilemap.width, rows: tilemap.height, tileWidth: tilemap.tileWidth, tileHeight: tilemap.tileHeight }) : { columnStart: 0, columnEnd: columnCount, rowStart: 0, rowEnd: rowCount };
+      for (let x = gridRange.columnStart; x <= gridRange.columnEnd; x += 1) { context.moveTo(x * columnWidth + 0.5, 0); context.lineTo(x * columnWidth + 0.5, rowCount * rowHeight); }
+      for (let y = gridRange.rowStart; y <= gridRange.rowEnd; y += 1) { context.moveTo(0, y * rowHeight + 0.5); context.lineTo(columnCount * columnWidth, y * rowHeight + 0.5); }
       context.stroke();
     }
     context.restore();
