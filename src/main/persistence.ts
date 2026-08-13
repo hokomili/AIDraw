@@ -17,6 +17,12 @@ import {
 import type { DocumentCheckpointRecord, TransactionTraceEntry } from '../common/contracts';
 import { paintTileCachePlan, parsePaintTileKey } from '../common/paint-tile-cache';
 import { renderRasterStroke } from '../common/raster-brush';
+import {
+  checkpointDocumentMatchesMetadata,
+  checkpointMetadataMatches,
+  parseCheckpointRecord,
+  parseCheckpointSummary,
+} from './checkpoint-policy';
 import { inspectImageHeader } from './transaction-policy';
 import { parseTransactionTraceEntry, parseTransactionTraceJsonl } from './trace-policy';
 
@@ -391,7 +397,13 @@ function buildArchive(document: AIDrawDocument, appVersion: string, preview?: Ui
   };
   externalizeAssets(persisted);
 
+  const checkpointIds = new Set<string>();
   const persistedCheckpoints = checkpoints.slice(-32).map((checkpoint) => {
+    const parsed = parseCheckpointRecord(checkpoint, persisted.id);
+    if (!parsed || checkpointIds.has(parsed.id) || !checkpointDocumentMatchesMetadata(parsed, parsed.document)) {
+      throw new Error('AIDraw checkpoint contains invalid or inconsistent metadata.');
+    }
+    checkpointIds.add(parsed.id);
     const copy = structuredClone(checkpoint);
     copy.document.dirty = false;
     delete copy.document.filePath;
@@ -455,15 +467,19 @@ export async function readNativeDocument(filePath: string): Promise<LoadedNative
   validateLoadedPaintTileCaches(document, warnings);
   if (archive['checkpoints/index.json']) {
     try {
-      const summaries = JSON.parse(strFromU8(archive['checkpoints/index.json'])) as Array<{ id?: unknown }>;
+      const summaries = JSON.parse(strFromU8(archive['checkpoints/index.json'])) as unknown;
       if (!Array.isArray(summaries)) throw new Error('Checkpoint index is not an array.');
-      for (const summary of summaries.slice(-32)) {
-        if (typeof summary?.id !== 'string' || !/^[a-z0-9][a-z0-9._:-]{0,199}$/i.test(summary.id)) { warnings.push('An invalid checkpoint entry was ignored.'); continue; }
+      const checkpointIds = new Set<string>();
+      for (const value of summaries.slice(-32)) {
+        const summary = parseCheckpointSummary(value, document.id);
+        if (!summary || checkpointIds.has(summary.id)) { warnings.push('An invalid checkpoint entry was ignored.'); continue; }
+        checkpointIds.add(summary.id);
         const bytes = archive[`checkpoints/${summary.id}.json`]; if (!bytes) { warnings.push(`Checkpoint “${summary.id}” is missing.`); continue; }
         try {
-          const parsed = JSON.parse(strFromU8(bytes)) as DocumentCheckpointRecord;
+          const parsed = parseCheckpointRecord(JSON.parse(strFromU8(bytes)), document.id);
+          if (!parsed || !checkpointMetadataMatches(summary, parsed)) throw new Error('Checkpoint metadata is inconsistent.');
           const checkpointDocument = migrateDocument(parsed.document);
-          if (parsed.id !== summary.id || parsed.documentId !== document.id || checkpointDocument.id !== document.id || typeof parsed.name !== 'string' || !parsed.name.trim() || !parsed.createdBy || !Number.isInteger(parsed.sourceRevision)) throw new Error('Checkpoint metadata is inconsistent.');
+          if (!checkpointDocumentMatchesMetadata(parsed, checkpointDocument)) throw new Error('Checkpoint metadata is inconsistent.');
           hydrateNativeAssets(checkpointDocument, archive, warnings, true);
           validateLoadedPaintTileCaches(checkpointDocument, warnings);
           checkpoints.push({ ...parsed, document: checkpointDocument });

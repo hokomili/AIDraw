@@ -224,6 +224,85 @@ describe('.aidraw persistence', () => {
     if (isolated.document.kind !== 'pixel') throw new Error('Expected isolated pixel document'); const isolatedSprite = isolated.document.pixelAssets[sprite.id]; if (isolatedSprite.type !== 'sprite') throw new Error('Expected isolated sprite'); expect(readPixel(Object.values(isolatedSprite.cels)[0], 9, 10)).toBe(17);
   });
 
+  it('reconciles checkpoint index metadata with each payload and its captured document revision', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-persistence-checkpoint-reconciliation-')); temporaryPaths.push(root);
+    const document = createIllustrationDocument('Checkpoint reconciliation fixture');
+    const checkpoints = ['Retained checkpoint', 'Selected checkpoint'].map((name, index) => {
+      const checkpointDocument = structuredClone(document); checkpointDocument.name = `${name} document`; checkpointDocument.revision = index + 3;
+      return {
+        id: `checkpoint-reconciliation-${index + 1}`, documentId: document.id, name,
+        createdAt: `2026-08-12T04:0${index}:00.000Z`, createdBy: HUMAN_ACTOR,
+        sourceRevision: checkpointDocument.revision, kind: 'manual' as const, document: checkpointDocument,
+      };
+    });
+    const validPath = await writeNativeDocument(join(root, 'valid'), document, '1.0.0', undefined, [], checkpoints);
+    const validArchive = unzipSync(new Uint8Array(await readFile(validPath)));
+    const valid = await readNativeDocument(validPath); expect(valid.warnings).toEqual([]); expect(valid.checkpoints).toHaveLength(2);
+    const validMain = structuredClone(valid.document); delete validMain.filePath;
+    const retainedCheckpoint = structuredClone(valid.checkpoints[0]);
+    const selectedEntry = `checkpoints/${checkpoints[1].id}.json`;
+    type CheckpointJson = Record<string, unknown> & { document: Record<string, unknown> };
+    type ReconciliationMutation = {
+      name: string;
+      warning: string;
+      mutate(index: Array<Record<string, unknown>>, payload: CheckpointJson): void;
+    };
+    const corruptWarning = `Checkpoint “${checkpoints[1].id}” is corrupt and was ignored.`;
+    const mutations: ReconciliationMutation[] = [
+      { name: 'index-name-mismatch', warning: corruptWarning, mutate: (index) => { index[1].name = 'Different indexed name'; } },
+      { name: 'payload-created-at-mismatch', warning: corruptWarning, mutate: (_index, payload) => { payload.createdAt = '2026-08-12T05:00:00.000Z'; } },
+      { name: 'payload-actor-mismatch', warning: corruptWarning, mutate: (_index, payload) => { payload.createdBy = { ...HUMAN_ACTOR, id: 'human-other' }; } },
+      { name: 'payload-kind-mismatch', warning: corruptWarning, mutate: (_index, payload) => { payload.kind = 'automatic'; } },
+      { name: 'payload-invalid-timestamp', warning: corruptWarning, mutate: (_index, payload) => { payload.createdAt = '2026-08-12T04:01:00Z'; } },
+      { name: 'payload-expanded-envelope', warning: corruptWarning, mutate: (_index, payload) => { payload.untrusted = true; } },
+      { name: 'document-revision-mismatch', warning: corruptWarning, mutate: (_index, payload) => { payload.document.revision = checkpoints[1].sourceRevision + 1; } },
+      { name: 'invalid-index-actor', warning: 'An invalid checkpoint entry was ignored.', mutate: (index) => { index[1].createdBy = { ...HUMAN_ACTOR, color: 'pink' }; } },
+    ];
+
+    for (const mutation of mutations) {
+      const twinArchive: Record<string, Uint8Array> = Object.fromEntries(Object.entries(validArchive).map(([name, bytes]) => [name, Uint8Array.from(bytes)]));
+      const index = JSON.parse(strFromU8(twinArchive['checkpoints/index.json'])) as Array<Record<string, unknown>>;
+      const payload = JSON.parse(strFromU8(twinArchive[selectedEntry])) as CheckpointJson;
+      mutation.mutate(index, payload);
+      twinArchive['checkpoints/index.json'] = strToU8(JSON.stringify(index));
+      twinArchive[selectedEntry] = strToU8(JSON.stringify(payload));
+      const twinPath = join(root, `${mutation.name}.aidraw`); await writeFile(twinPath, zipSync(twinArchive, { level: 6 }));
+
+      const isolated = await readNativeDocument(twinPath); const isolatedMain = structuredClone(isolated.document); delete isolatedMain.filePath;
+      expect(isolatedMain).toEqual(validMain); expect(isolated.document.filePath).toBe(twinPath);
+      expect(isolated.checkpoints).toEqual([retainedCheckpoint]); expect(isolated.warnings).toEqual([mutation.warning]);
+    }
+
+    const duplicateArchive: Record<string, Uint8Array> = Object.fromEntries(Object.entries(validArchive).map(([name, bytes]) => [name, Uint8Array.from(bytes)]));
+    const duplicateIndex = JSON.parse(strFromU8(duplicateArchive['checkpoints/index.json'])) as Array<Record<string, unknown>>;
+    duplicateIndex.push(structuredClone(duplicateIndex[1])); duplicateArchive['checkpoints/index.json'] = strToU8(JSON.stringify(duplicateIndex));
+    const duplicatePath = join(root, 'duplicate-index-id.aidraw'); await writeFile(duplicatePath, zipSync(duplicateArchive, { level: 6 }));
+    const duplicate = await readNativeDocument(duplicatePath);
+    expect(duplicate.checkpoints.map((checkpoint) => checkpoint.id)).toEqual(checkpoints.map((checkpoint) => checkpoint.id));
+    expect(duplicate.warnings).toEqual(['An invalid checkpoint entry was ignored.']);
+  });
+
+  it('rejects inconsistent or duplicate checkpoints before replacing an existing destination', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-persistence-checkpoint-save-policy-')); temporaryPaths.push(root);
+    const document = createIllustrationDocument('Checkpoint save policy fixture');
+    const destination = await writeNativeDocument(join(root, 'drawing'), document, '1.0.0');
+    const destinationBytes = await readFile(destination);
+    const checkpointDocument = structuredClone(document);
+    const checkpoint = {
+      id: 'checkpoint-save-policy', documentId: document.id, name: 'Save policy checkpoint',
+      createdAt: '2026-08-12T05:00:00.000Z', createdBy: HUMAN_ACTOR,
+      sourceRevision: checkpointDocument.revision, kind: 'manual' as const, document: checkpointDocument,
+    };
+    const inconsistent = structuredClone(checkpoint); inconsistent.sourceRevision += 1;
+    await expect(writeNativeDocument(destination, document, '1.0.1', undefined, [], [inconsistent]))
+      .rejects.toThrow('AIDraw checkpoint contains invalid or inconsistent metadata.');
+    await expect(writeNativeDocument(destination, document, '1.0.1', undefined, [], [checkpoint, structuredClone(checkpoint)]))
+      .rejects.toThrow('AIDraw checkpoint contains invalid or inconsistent metadata.');
+    expect(await readFile(destination)).toEqual(destinationBytes);
+    expect((await readNativeDocument(destination)).document.name).toBe(document.name);
+    expect(await readdir(root)).toEqual(['drawing.aidraw']);
+  });
+
   it('drops a stale paint cache while preserving its editable strokes', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aidraw-persistence-')); temporaryPaths.push(root);
     const document = createIllustrationDocument('Stale cache');
