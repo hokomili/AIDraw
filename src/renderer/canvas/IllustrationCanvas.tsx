@@ -31,7 +31,7 @@ import { renderRasterStroke } from '../../common/raster-brush';
 import { renderStyledText } from '../../common/text-layout';
 import { snapObjectTransform } from '../../common/snapping';
 import { combineSelection, type SelectionCombination } from '../../common/lasso';
-import { approximateLocalObjectBounds } from '../../common/illustration-geometry';
+import { approximateLocalObjectBounds, illustrationGroupRequiresIsolation, illustrationObjectHasTransform } from '../../common/illustration-geometry';
 import { cropImageObject, normalizedDisplayCrop } from '../../common/image-crop';
 import {
   hitSelectionHandle,
@@ -402,9 +402,13 @@ export function IllustrationCanvas({ document }: { document: IllustrationDocumen
         target.save(); const mask = object.maskObjectId ? document.objects[object.maskObjectId] : undefined; const maskPath = mask ? transformedObjectPath(mask) : undefined; if (maskPath) target.clip(maskPath); drawObject(target, object, tool !== 'select' && selectedIds.includes(object.id), imageCacheRef.current); target.restore(); return;
       }
       const nextVisiting = new Set(visiting); nextVisiting.add(objectId);
-      const transformed = object.transform.x !== 0 || object.transform.y !== 0 || object.transform.scaleX !== 1 || object.transform.scaleY !== 1 || object.transform.rotation !== 0 || object.transform.skewX !== 0 || object.transform.skewY !== 0;
-      const isolate = transformed || object.opacity !== 1 || object.blendMode !== 'normal' || Boolean(object.blur || object.shadow || object.maskObjectId || object.filters?.length);
-      if (!isolate) { for (const childId of object.childIds) drawObjectEntry(target, childId, nextVisiting); return; }
+      const transformed = illustrationObjectHasTransform(object); const isolate = illustrationGroupRequiresIsolation(object);
+      if (!isolate) {
+        target.save();
+        try { if (transformed) applyObjectTransform(target, object); for (const childId of object.childIds) drawObjectEntry(target, childId, nextVisiting); }
+        finally { target.restore(); }
+        return;
+      }
       const buffer = surface(); const bufferContext = buffer.getContext('2d'); if (!bufferContext) return;
       for (const childId of object.childIds) drawObjectEntry(bufferContext, childId, nextVisiting);
       target.save(); const mask = object.maskObjectId ? document.objects[object.maskObjectId] : undefined; const maskPath = mask ? transformedObjectPath(mask) : undefined; if (maskPath) target.clip(maskPath); applyObjectTransform(target, object); target.filter = objectFilter(object); target.drawImage(buffer, 0, 0); target.restore();

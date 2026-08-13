@@ -1,10 +1,19 @@
-import type { IllustrationObject } from '@aidraw/core';
+import type { GroupObject, IllustrationObject } from '@aidraw/core';
 
 export interface LocalObjectBounds {
   x: number;
   y: number;
   width: number;
   height: number;
+}
+
+export function illustrationObjectHasTransform(object: Pick<IllustrationObject, 'transform'>): boolean {
+  const transform = object.transform;
+  return transform.x !== 0 || transform.y !== 0 || transform.scaleX !== 1 || transform.scaleY !== 1 || transform.rotation !== 0 || transform.skewX !== 0 || transform.skewY !== 0;
+}
+
+export function illustrationGroupRequiresIsolation(group: GroupObject): boolean {
+  return group.opacity !== 1 || group.blendMode !== 'normal' || Boolean(group.blur || group.shadow || group.maskObjectId || group.filters?.length);
 }
 
 function numericPathBounds(pathData: string): LocalObjectBounds | undefined {

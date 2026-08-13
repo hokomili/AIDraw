@@ -35,6 +35,7 @@ interface SvgNode {
 
 interface CssRule { selectors: string[]; declarations: Style }
 interface Bounds { x: number; y: number; width: number; height: number }
+interface SvgViewBox { minX: number; minY: number; width: number; height: number }
 
 const IDENTITY_MATRIX: Matrix = [1, 0, 0, 1, 0, 0];
 const inheritedProperties = new Set(['color', 'fill', 'fill-rule', 'font-family', 'font-size', 'font-style', 'font-weight', 'letter-spacing', 'stroke', 'stroke-dasharray', 'stroke-linecap', 'stroke-linejoin', 'stroke-width', 'text-anchor', 'visibility']);
@@ -138,6 +139,44 @@ function multiply(left: Matrix, right: Matrix): Matrix {
 }
 
 function translate(x: number, y: number): Matrix { return [1, 0, 0, 1, x, y]; }
+
+function svgViewBox(value: unknown, warnings: Set<string>): SvgViewBox | undefined {
+  if (value === undefined) return undefined;
+  const source = String(value).trim();
+  const pattern = /[-+]?(?:\d*\.\d+|\d+\.?)(?:e[-+]?\d+)?/gi;
+  const values = [...source.matchAll(pattern)].map((match) => Number(match[0]));
+  const residue = source.replace(pattern, '').replace(/[\s,]+/g, '');
+  if (residue || values.length !== 4 || !values.every(Number.isFinite) || values[2] <= 0 || values[3] <= 0) {
+    warnings.add('Invalid SVG viewBox was ignored.');
+    return undefined;
+  }
+  return { minX: values[0], minY: values[1], width: values[2], height: values[3] };
+}
+
+function svgViewportMatrix(attributes: Attributes, viewportWidth: number, viewportHeight: number, viewBox: SvgViewBox | undefined, warnings: Set<string>): Matrix {
+  if (!viewBox) return IDENTITY_MATRIX;
+  const defaultAlignment = { x: 0.5, y: 0.5, mode: 'meet' as const };
+  const source = String(attributes.preserveAspectRatio ?? '').trim();
+  let alignment: { x: number; y: number; mode: 'meet' | 'slice' | 'none' } = defaultAlignment;
+  if (source) {
+    const tokens = source.split(/\s+/); if (tokens[0] === 'defer') tokens.shift();
+    if (tokens[0] === 'none' && tokens.length === 1) alignment = { x: 0, y: 0, mode: 'none' };
+    else {
+      const match = /^x(Min|Mid|Max)Y(Min|Mid|Max)$/.exec(tokens[0] ?? '');
+      const mode = tokens[1] ?? 'meet';
+      if (match && tokens.length <= 2 && (mode === 'meet' || mode === 'slice')) {
+        const factor = (value: string) => value === 'Min' ? 0 : value === 'Mid' ? 0.5 : 1;
+        alignment = { x: factor(match[1]), y: factor(match[2]), mode };
+      } else warnings.add('Invalid SVG preserveAspectRatio was reduced to the default xMidYMid meet behavior.');
+    }
+  }
+  const scaleX = viewportWidth / viewBox.width; const scaleY = viewportHeight / viewBox.height;
+  if (alignment.mode === 'none') return [scaleX, 0, 0, scaleY, -viewBox.minX * scaleX, -viewBox.minY * scaleY];
+  const scale = alignment.mode === 'slice' ? Math.max(scaleX, scaleY) : Math.min(scaleX, scaleY);
+  const x = (viewportWidth - viewBox.width * scale) * alignment.x - viewBox.minX * scale;
+  const y = (viewportHeight - viewBox.height * scale) * alignment.y - viewBox.minY * scale;
+  return [scale, 0, 0, scale, x, y];
+}
 
 function svgTransform(value: unknown): Matrix {
   let output = IDENTITY_MATRIX;
@@ -248,10 +287,11 @@ export function importEditableSvg(source: string, name: string): SvgImportResult
   const root = parsed.map(nodeFromOrdered).find((node) => node?.tag === 'svg');
   if (!root) throw new Error('SVG root element was not found.');
   const warnings = new Set<string>();
-  const viewBox = numberList(root.attributes.viewBox);
-  const width = Math.ceil(positiveLength(root.attributes.width, viewBox[2] || 1920));
-  const height = Math.ceil(positiveLength(root.attributes.height, viewBox[3] || 1080));
+  const viewBox = svgViewBox(root.attributes.viewBox, warnings);
+  const width = Math.ceil(positiveLength(root.attributes.width, viewBox?.width || 1920));
+  const height = Math.ceil(positiveLength(root.attributes.height, viewBox?.height || 1080));
   if (width > MAX_INLINE_IMAGE_DIMENSION || height > MAX_INLINE_IMAGE_DIMENSION || width * height > MAX_INLINE_IMAGE_PIXELS) throw new Error(`SVG artboard dimensions ${width}×${height} exceed AIDraw's 8192px/16MP import limit.`);
+  const viewportMatrix = svgViewportMatrix(root.attributes, width, height, viewBox, warnings);
 
   const document = createIllustrationDocument(name);
   document.artboard = { ...document.artboard, width, height, background: null };
@@ -485,10 +525,10 @@ export function importEditableSvg(source: string, name: string): SvgImportResult
 
   const rootStyle = styleFor(root, {}, rules);
   const topLevel = root.children.flatMap((child) => process(child, rootStyle, 0));
-  const minX = viewBox[0] ?? 0; const minY = viewBox[1] ?? 0;
-  if ((minX || minY) && topLevel.length) {
+  const differsFromIdentity = viewportMatrix.some((value, index) => Math.abs(value - IDENTITY_MATRIX[index]) > Number.EPSILON * 16 * Math.max(1, Math.abs(value), Math.abs(IDENTITY_MATRIX[index])));
+  if (differsFromIdentity && topLevel.length) {
     const wrapperNode: SvgNode = { tag: 'g', attributes: {}, children: [] };
-    const wrapper: GroupObject = { ...base(wrapperNode, rootStyle, translate(-minX, -minY), 'ViewBox'), type: 'group', childIds: topLevel };
+    const wrapper: GroupObject = { ...base(wrapperNode, rootStyle, viewportMatrix, 'ViewBox'), type: 'group', childIds: topLevel };
     finish(wrapper, rootStyle, false);
   }
   document.dirty = true;

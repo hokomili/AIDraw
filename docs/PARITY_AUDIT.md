@@ -22,6 +22,8 @@ Human and headless agent path booleans share the exact Paper.js kernel in [`src/
 
 Human and approved-agent SVG export share the same standards-first image-crop adapter. AIDraw re-import restores canonical crop controls only when its bounded versioned metadata still agrees with the ordinary clip/image geometry; edited or foreign wrappers keep the general editable group/image/mask interpretation rather than letting private state override visible content.
 
+Interactive and headless illustration rendering also share one transform/isolation classification for object groups. A transform by itself is applied while traversing the group's children directly, so geometry outside the nominal artboard can move or scale into view without a premature artboard-sized buffer clip; opacity, blend, filters, masks, blur, or shadow still require one isolated composite. This parity statement does not certify effect-bearing transformed-group overhang or packaged Canvas behavior.
+
 ## Closed parity gaps
 
 | Area | Current contract and evidence |

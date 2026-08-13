@@ -47,6 +47,37 @@ describe('editable SVG interchange', () => {
     expect(Object.values(reopened.objects).some((object) => Boolean(object.maskObjectId))).toBe(true);
   });
 
+  it('applies the outer SVG viewBox scale and preserveAspectRatio alignment before editable geometry', async () => {
+    const source = (preserveAspectRatio?: string) => `<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100" viewBox="10 20 100 100"${preserveAspectRatio ? ` preserveAspectRatio="${preserveAspectRatio}"` : ''}><rect id="top" x="10" y="20" width="100" height="50" fill="#ff0000"/><rect id="bottom" x="10" y="70" width="100" height="50" fill="#0000ff"/></svg>`;
+    const inspect = async (preserveAspectRatio?: string) => {
+      const result = importEditableSvg(source(preserveAspectRatio), preserveAspectRatio ?? 'default meet');
+      const viewport = Object.values(result.document.objects).find((object) => object.name === 'ViewBox');
+      const canvas = await renderIllustration(result.document); const pixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+      const pixel = (x: number, y: number) => [...pixels.subarray((y * canvas.width + x) * 4, (y * canvas.width + x) * 4 + 4)];
+      return { result, viewport, canvas, pixel };
+    };
+
+    const meet = await inspect();
+    expect(meet.viewport).toMatchObject({ type: 'group', transform: { x: 40, y: -20, scaleX: 1, scaleY: 1 } });
+    expect(meet.pixel(25, 25)).toEqual([0, 0, 0, 0]); expect(meet.pixel(75, 25)).toEqual([255, 0, 0, 255]); expect(meet.pixel(75, 75)).toEqual([0, 0, 255, 255]);
+    meet.canvas.width = 1; meet.canvas.height = 1;
+
+    const stretched = await inspect('none');
+    expect(stretched.viewport).toMatchObject({ type: 'group', transform: { x: -20, y: -20, scaleX: 2, scaleY: 1 } });
+    expect(stretched.pixel(25, 25)).toEqual([255, 0, 0, 255]); expect(stretched.pixel(175, 75)).toEqual([0, 0, 255, 255]);
+    stretched.canvas.width = 1; stretched.canvas.height = 1;
+
+    const sliced = await inspect('xMidYMax slice');
+    expect(sliced.viewport).toMatchObject({ type: 'group', transform: { x: -20, y: -140, scaleX: 2, scaleY: 2 } });
+    expect(sliced.pixel(25, 25)).toEqual([0, 0, 255, 255]); expect(sliced.pixel(175, 75)).toEqual([0, 0, 255, 255]);
+    sliced.canvas.width = 1; sliced.canvas.height = 1;
+
+    const invalid = await inspect('xSidewaysYMid crop');
+    expect(invalid.result.warnings).toContain('Invalid SVG preserveAspectRatio was reduced to the default xMidYMid meet behavior.');
+    expect(invalid.viewport).toMatchObject({ type: 'group', transform: { x: 40, y: -20, scaleX: 1, scaleY: 1 } });
+    invalid.canvas.width = 1; invalid.canvas.height = 1;
+  });
+
   it('preserves centered and right-aligned AIDraw text boxes without shifting their transforms', () => {
     const document = createIllustrationDocument('SVG text boxes'); document.artboard = { ...document.artboard, width: 320, height: 180, background: null };
     const vector = Object.values(document.layers).find((layer) => layer.type === 'vector'); if (!vector || vector.type !== 'vector') throw new Error('Expected vector layer');

@@ -17,6 +17,7 @@ import {
 import { BoundedResourceCache } from '../common/bounded-resource-cache';
 import { applyCanvasStrokeStyle } from '../common/canvas-stroke';
 import { colorWithOpacity } from '../common/color';
+import { illustrationGroupRequiresIsolation, illustrationObjectHasTransform } from '../common/illustration-geometry';
 import { illustrationRegionBacking, illustrationRegionCanRenderLocally, type IllustrationRasterRegion } from '../common/illustration-region';
 import { isometricCellRect, isometricObjectMatrix, isometricProjectionExtent } from '../common/isometric-projection';
 import { drawMapObjectOverlay, mapObjectsIntersectingRasterRegion } from '../common/map-object-render';
@@ -217,9 +218,15 @@ async function renderIllustrationSurface(document: IllustrationDocument, region:
     const object = document.objects[objectId]; if (!object?.visible) return;
     if (object.type !== 'group') { target.save(); const mask = object.maskObjectId ? document.objects[object.maskObjectId] : undefined; const maskPath = mask ? transformedObjectPath(mask) : undefined; if (maskPath) target.clip(maskPath); await drawIllustrationObject(target, document, object); target.restore(); return; }
     const nextVisiting = new Set(visiting); nextVisiting.add(objectId);
-    const transformed = object.transform.x !== 0 || object.transform.y !== 0 || object.transform.scaleX !== 1 || object.transform.scaleY !== 1 || object.transform.rotation !== 0 || object.transform.skewX !== 0 || object.transform.skewY !== 0;
-    const isolate = transformed || object.opacity !== 1 || object.blendMode !== 'normal' || Boolean(object.blur || object.shadow || object.maskObjectId || object.filters?.length);
-    if (!isolate) { for (const childId of object.childIds) await drawObjectEntry(target, childId, nextVisiting); return; }
+    const transformed = illustrationObjectHasTransform(object); const isolate = illustrationGroupRequiresIsolation(object);
+    if (!isolate) {
+      target.save();
+      try {
+        if (transformed) { target.translate(object.transform.x, object.transform.y); target.rotate(object.transform.rotation * Math.PI / 180); target.transform(object.transform.scaleX, Math.tan(object.transform.skewY * Math.PI / 180), Math.tan(object.transform.skewX * Math.PI / 180), object.transform.scaleY, 0, 0); }
+        for (const childId of object.childIds) await drawObjectEntry(target, childId, nextVisiting);
+      } finally { target.restore(); }
+      return;
+    }
     const buffer = acquireScratchCanvas(region.width, region.height); const bufferContext = buffer.getContext('2d'); bufferContext.translate(-region.x, -region.y);
     try {
       for (const childId of object.childIds) await drawObjectEntry(bufferContext, childId, nextVisiting);
