@@ -1,4 +1,5 @@
 import {
+  createPixelCelReader,
   decodePixelChunk,
   pixelCelForFrame,
   type PixelCel,
@@ -63,6 +64,40 @@ export function drawSpriteRegion(
         if (!index) continue;
         context.fillStyle = (sprite.paletteOverrides?.[frameId] ?? palette)[index]?.color ?? '#ff00ff';
         context.fillRect(chunk.x + x - source.x, chunk.y + y - source.y, 1, 1);
+      }
+    }
+  }
+  context.restore();
+}
+
+export function drawSpriteThumbnail(
+  context: CanvasRenderingContext2D,
+  sprite: PixelSprite,
+  frameId: string,
+  palette: PixelDocument['palette'],
+  outputWidth: number,
+  outputHeight: number,
+): void {
+  if (!Number.isInteger(outputWidth) || outputWidth < 1 || !Number.isInteger(outputHeight) || outputHeight < 1) throw new Error('Sprite thumbnail dimensions must be positive integers.');
+  context.save();
+  context.clearRect(0, 0, outputWidth, outputHeight);
+  context.imageSmoothingEnabled = false;
+  const colors = sprite.paletteOverrides?.[frameId] ?? palette;
+  for (const { layer, opacity } of visibleSpriteLayers(sprite)) {
+    if (layer.type !== 'pixel') continue;
+    const cel = pixelCelForFrame(sprite, layer.id, frameId);
+    if (!cel) continue;
+    const read = createPixelCelReader(cel);
+    context.globalAlpha = opacity;
+    context.globalCompositeOperation = layer.blendMode === 'normal' ? 'source-over' : layer.blendMode;
+    for (let y = 0; y < outputHeight; y += 1) {
+      const sourceY = Math.min(sprite.height - 1, Math.floor(y * sprite.height / outputHeight));
+      for (let x = 0; x < outputWidth; x += 1) {
+        const sourceX = Math.min(sprite.width - 1, Math.floor(x * sprite.width / outputWidth));
+        const index = read(sourceX, sourceY);
+        if (!index) continue;
+        context.fillStyle = colors[index]?.color ?? '#ff00ff';
+        context.fillRect(x, y, 1, 1);
       }
     }
   }

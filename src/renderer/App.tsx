@@ -139,6 +139,7 @@ import { EditorDialog } from "./components/EditorDialog";
 import { CollisionShapeEditor } from "./components/CollisionShapeEditor";
 import { IllustrationAnimationPanel } from "./components/IllustrationAnimationPanel";
 import { TileAnimationEditor } from "./components/TileAnimationEditor";
+import { TilesetSliceEditor } from "./components/TilesetSliceEditor";
 
 type Icon = ComponentType<{ size?: number; strokeWidth?: number }>;
 
@@ -3524,31 +3525,6 @@ function TilesetPanel({
     next.tiles[selectedTileId] = { ...structuredClone(selectedTile), ...patch };
     replace(next, label);
   };
-  const reslice = (patch: Partial<Pick<PixelTileset, "tileWidth" | "tileHeight" | "margin" | "spacing">>) => {
-    const next = { ...structuredClone(tileset), ...patch };
-    if (sourceSprite?.type === "sprite") {
-      next.columns = Math.max(1, Math.floor((sourceSprite.width - next.margin * 2 + next.spacing) / (next.tileWidth + next.spacing)));
-      next.rows = Math.max(1, Math.floor((sourceSprite.height - next.margin * 2 + next.spacing) / (next.tileHeight + next.spacing)));
-    }
-    const nextTiles: PixelTileset["tiles"] = {};
-    for (let id = 0; id < next.columns * next.rows; id += 1) {
-      const existing = next.tiles[id];
-      nextTiles[id] = {
-        id,
-        sourceX: next.margin + id % next.columns * (next.tileWidth + next.spacing),
-        sourceY: next.margin + Math.floor(id / next.columns) * (next.tileHeight + next.spacing),
-        probability: existing?.probability ?? 1,
-        animation: structuredClone(existing?.animation ?? []),
-        collisions: structuredClone(existing?.collisions ?? []),
-        properties: structuredClone(existing?.properties ?? {}),
-      };
-    }
-    const dropped = Object.keys(next.tiles).filter((id) => Number(id) >= next.columns * next.rows && (next.tiles[Number(id)].animation.length || next.tiles[Number(id)].collisions.length || Object.keys(next.tiles[Number(id)].properties).length)).length;
-    next.tiles = nextTiles;
-    if (dropped) notify(dropped + " metadata-bearing tile" + (dropped === 1 ? " was" : "s were") + " removed by the new slice.", "warning");
-    replace(next, "Re-slice tileset");
-    setSelectedTileId(Math.min(selectedTileId, next.columns * next.rows - 1));
-  };
   const addTerrain = () => {
     const terrainId = tileset.wangSets.length + 1;
     const wangSet: WangSet = {
@@ -3629,31 +3605,12 @@ function TilesetPanel({
           </small>
         </span>
       </div>
-      <div className="tileset-slice-grid">
-        <label className="field">
-          <span>Tile width</span>
-          <input
-            key={"tile-width-" + tileset.tileWidth}
-            type="number"
-            min="1"
-            defaultValue={tileset.tileWidth}
-            onBlur={(event) => { const value = Math.max(1, Math.round(Number(event.target.value))); if (value !== tileset.tileWidth) reslice({ tileWidth: value }); }}
-          />
-        </label>
-        <label className="field">
-          <span>Tile height</span>
-          <input
-            key={"tile-height-" + tileset.tileHeight}
-            type="number"
-            min="1"
-            defaultValue={tileset.tileHeight}
-            onBlur={(event) => { const value = Math.max(1, Math.round(Number(event.target.value))); if (value !== tileset.tileHeight) reslice({ tileHeight: value }); }}
-          />
-        </label>
-        <label className="field"><span>Margin</span><input key={"margin-" + tileset.margin} type="number" min="0" defaultValue={tileset.margin} onBlur={(event) => { const value = Math.max(0, Math.round(Number(event.target.value))); if (value !== tileset.margin) reslice({ margin: value }); }} /></label>
-        <label className="field"><span>Spacing</span><input key={"spacing-" + tileset.spacing} type="number" min="0" defaultValue={tileset.spacing} onBlur={(event) => { const value = Math.max(0, Math.round(Number(event.target.value))); if (value !== tileset.spacing) reslice({ spacing: value }); }} /></label>
-      </div>
-      <small className="tileset-slice-summary">{tileset.columns} columns × {tileset.rows} rows · {tileCount} tiles from {sourceSprite?.type === "sprite" ? sourceSprite.width + " × " + sourceSprite.height + "px source" : "missing source"}</small>
+      <TilesetSliceEditor key={`${tileset.id}:${tileset.revision}`} palette={document.palette} tileset={tileset} sourceSprite={sourceSprite?.type === "sprite" ? sourceSprite : undefined} selectedTileId={selectedTileId} onCommit={(next, nextSelectedTileId, impact) => {
+        const droppedEntries = impact.droppedAnimationFrames + impact.droppedCollisionShapes + impact.droppedCustomProperties + impact.droppedWangColors + impact.droppedWangTiles;
+        if (impact.droppedMetadataTiles > 0 || droppedEntries > 0) notify(`Re-sliced after explicit review; ${impact.droppedMetadataTiles} metadata-addressed tile${impact.droppedMetadataTiles === 1 ? "" : "s"} and ${droppedEntries} metadata entr${droppedEntries === 1 ? "y" : "ies"} no longer fit.`, "warning");
+        replace(next, "Re-slice tileset");
+        setSelectedTileId(nextSelectedTileId);
+      }} />
       <div className="section-heading"><span>Tiles</span><small>Select one to edit metadata</small></div>
       <div className="tile-definition-grid">{Array.from({ length: Math.min(tileCount, 256) }, (_, id) => <button key={id} className={selectedTileId === id ? "is-active" : ""} onClick={() => { setSelectedTileId(id); setSelectedCollisionId(undefined); }}>{id}</button>)}</div>
       {tileCount > 256 && <small className="tileset-slice-summary">Showing the first 256 of {tileCount} tiles.</small>}
