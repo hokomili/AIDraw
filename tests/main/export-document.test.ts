@@ -20,7 +20,7 @@ import {
 } from '@aidraw/core';
 import { MAX_PSD_LAYER_NESTING_DEPTH, MAX_PSD_LAYER_RECORDS, assertPsdLayerStructureBudget } from '@common/psd-limits';
 import { assertAnimationExpandedPixelBudget, assertPsdLayerRasterBudget, boundedInterchangeExportReport, exportDocument, illustrationToSvg, plannedExportCompanionPaths } from '@main/export-document';
-import { MAX_TILED_EXPORT_COMPANIONS } from '@main/export-artifact-policy';
+import { MAX_TILED_TILESETS } from '@common/tiled-resource-policy';
 import { renderIllustrationLayerSource } from '@main/render-document';
 import { MAX_UTILITY_REPORT_SERIALIZED_BYTES, MAX_UTILITY_TEXT_BYTES, assertUtilityJsonBudget } from '@main/utility-resource-policy';
 import { decompressFrames, parseGIF } from 'gifuct-js';
@@ -290,11 +290,11 @@ describe('interchange exporters', () => {
     }
   });
 
-  it('rejects over-budget Tiled companion sets before source rendering', async () => {
+  it('rejects over-budget Tiled map tileset sets before source rendering', async () => {
     const document = createPixelDocument('project', 'Tiled companion preflight'); document.assetIds = []; document.pixelAssets = {};
     const sprite = createPixelSprite('Unreachable companion source', 1, 1);
     const map = createPixelTilemap('Over-budget companion map');
-    const tilesets = Array.from({ length: MAX_TILED_EXPORT_COMPANIONS + 1 }, (_, index) => {
+    const tilesets = Array.from({ length: MAX_TILED_TILESETS + 1 }, (_, index) => {
       const tileset = createPixelTileset(`Companion ${index}`, sprite.id, 1, 1, 1, 1); tileset.id = `companion-${index}`; tileset.firstGid = index + 1; return tileset;
     });
     map.tilesetIds = tilesets.map((tileset) => tileset.id);
@@ -302,7 +302,45 @@ describe('interchange exporters', () => {
     document.pixelAssets = { [sprite.id]: sprite, ...Object.fromEntries(tilesets.map((tileset) => [tileset.id, tileset])), [map.id]: map }; document.assetIds = [sprite.id, ...map.tilesetIds, map.id]; document.activeAssetId = map.id;
 
     for (const format of ['tiled-json', 'tiled-xml'] as const) {
-      await expect(exportDocument(document, format)).rejects.toThrow('4,096-companion-image safety limit');
+      await expect(exportDocument(document, format)).rejects.toThrow('1,024-tileset safety limit');
+    }
+  });
+
+  it('rejects incomplete or ambiguous Tiled references before source rendering', async () => {
+    const document = createPixelDocument('project', 'Tiled reference preflight'); document.assetIds = []; document.pixelAssets = {};
+    const sprite = createPixelSprite('Unreachable reference source', 2, 1);
+    const first = createPixelTileset('First range', sprite.id, 1, 1, 2, 1); first.firstGid = 17;
+    const second = createPixelTileset('Second range', sprite.id, 1, 1, 2, 1); second.firstGid = 18;
+    const map = createPixelTilemap('Ambiguous map'); map.tilesetIds = [first.id, second.id];
+    Object.defineProperty(sprite, 'width', { configurable: true, get() { throw new Error('Tiled companion rendering started before reference preflight.'); } });
+    document.pixelAssets = { [sprite.id]: sprite, [first.id]: first, [second.id]: second, [map.id]: map }; document.assetIds = [sprite.id, first.id, second.id, map.id]; document.activeAssetId = map.id;
+
+    for (const format of ['tiled-json', 'tiled-xml'] as const) {
+      await expect(exportDocument(document, format)).rejects.toThrow('“First range” and “Second range” have overlapping GID ranges');
+    }
+    map.tilesetIds = ['missing-tileset'];
+    for (const format of ['tiled-json', 'tiled-xml'] as const) {
+      await expect(exportDocument(document, format)).rejects.toThrow('references missing tileset missing-tileset');
+    }
+    map.tilesetIds = [first.id];
+    delete document.pixelAssets[sprite.id];
+    for (const format of ['tiled-json', 'tiled-xml'] as const) {
+      await expect(exportDocument(document, format)).rejects.toThrow('tileset “First range” is missing its source sprite');
+    }
+  });
+
+  it('rejects unresolved emitted Tiled GIDs before source rendering', async () => {
+    const document = createPixelDocument('project', 'Tiled GID preflight'); document.assetIds = []; document.pixelAssets = {};
+    const sprite = createPixelSprite('Unreachable GID source', 1, 1);
+    const tileset = createPixelTileset('Only range', sprite.id, 1, 1, 1, 1); tileset.firstGid = 17;
+    const map = createPixelTilemap('Unresolved map'); map.infinite = true; map.tilesetIds = [tileset.id];
+    const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile' || !layer.chunks) throw new Error('Expected tile layer');
+    writeTiles(layer.chunks, [{ x: -33, y: 7, gid: 99 }]);
+    Object.defineProperty(sprite, 'width', { configurable: true, get() { throw new Error('Tiled companion rendering started before GID preflight.'); } });
+    document.pixelAssets = { [sprite.id]: sprite, [tileset.id]: tileset, [map.id]: map }; document.assetIds = [sprite.id, tileset.id, map.id]; document.activeAssetId = map.id;
+
+    for (const format of ['tiled-json', 'tiled-xml'] as const) {
+      await expect(exportDocument(document, format)).rejects.toThrow('layer “Ground” uses unresolved tile GID 99 at (-33, 7)');
     }
   });
 

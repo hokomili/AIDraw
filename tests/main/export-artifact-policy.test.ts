@@ -6,6 +6,7 @@ import {
   planTiledExportCompanions,
   plannedExportCompanionPaths,
 } from '@main/export-artifact-policy';
+import { MAX_TILED_TILESETS } from '@common/tiled-resource-policy';
 
 function tiledDocument(names: string[]) {
   const document = createPixelDocument('project', 'Tiled companion policy');
@@ -41,16 +42,17 @@ describe('Tiled export artifact policy', () => {
     expect(plannedExportCompanionPaths(document, 'tiled-json', '/exports/map.tmj')).toEqual(names.map((name) => `/exports/${name}`));
   });
 
-  it('admits the exact utility-member boundary and rejects the next image without rendering', () => {
-    const names = Array.from({ length: MAX_TILED_EXPORT_COMPANIONS }, (_, index) => `Tileset ${index}`);
+  it('admits the exact import-compatible map-tileset boundary and retains the utility-member defense', () => {
+    const names = Array.from({ length: MAX_TILED_TILESETS }, (_, index) => `Tileset ${index}`);
     const { document, map, sprite, tilesets } = tiledDocument(names);
-    expect(planTiledExportCompanions(document)).toHaveLength(MAX_TILED_EXPORT_COMPANIONS);
+    expect(MAX_TILED_EXPORT_COMPANIONS).toBe(4_096);
+    expect(planTiledExportCompanions(document)).toHaveLength(MAX_TILED_TILESETS);
 
     const excess = createPixelTileset('Excess tileset', sprite.id, 1, 1, 1, 1);
     excess.id = 'tileset-excess';
     document.pixelAssets[excess.id] = excess;
     document.assetIds.splice(-1, 0, excess.id);
     map.tilesetIds = [...tilesets.map((tileset) => tileset.id), excess.id];
-    expect(() => planTiledExportCompanions(document)).toThrow('4,096-companion-image safety limit');
+    expect(() => planTiledExportCompanions(document)).toThrow('1,024-tileset safety limit');
   });
 });

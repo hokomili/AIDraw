@@ -1,6 +1,7 @@
 import { dirname, extname, join } from 'node:path';
 import type { AIDrawDocument, PixelTileset } from '@aidraw/core';
 import type { ExportFormat } from '../common/contracts';
+import { planTiledExportReferences } from '../common/tiled-export-integrity';
 import { MAX_EXPORT_UTILITY_MEMBERS } from './utility-resource-policy';
 
 export interface ExportArtifactMemberIdentity {
@@ -30,11 +31,8 @@ export function safeTiledAssetName(name: string, extension: string): string {
 function tiledTilesets(document: AIDrawDocument): PixelTileset[] | undefined {
   if (document.kind !== 'pixel') return undefined;
   const active = document.pixelAssets[document.activeAssetId];
-  if (active?.type === 'tileset') return [active];
-  if (active?.type !== 'tilemap') return undefined;
-  return active.tilesetIds
-    .map((id) => document.pixelAssets[id])
-    .filter((asset): asset is PixelTileset => asset?.type === 'tileset');
+  if (active?.type !== 'tilemap' && active?.type !== 'tileset') return undefined;
+  return planTiledExportReferences(document, active).tilesets.map(({ tileset }) => tileset);
 }
 
 function foldedTiledAssetKey(name: string): string {
@@ -53,7 +51,6 @@ export function planTiledExportCompanions(document: AIDrawDocument): PlannedTile
   const reserved = new Set<string>();
   const nextSuffix = new Map<string, number>();
   for (const tileset of tilesets) {
-    if (document.kind !== 'pixel' || document.pixelAssets[tileset.spriteAssetId]?.type !== 'sprite') continue;
     if (companions.length >= MAX_TILED_EXPORT_COMPANIONS) {
       throw new RangeError(`Tiled export exceeds the ${MAX_TILED_EXPORT_COMPANIONS.toLocaleString('en-US')}-companion-image safety limit.`);
     }

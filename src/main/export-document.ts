@@ -5,7 +5,6 @@ import { GIFEncoder, applyPalette, quantize } from 'gifenc';
 import UPNG from 'upng-js';
 import { getStroke } from 'perfect-freehand';
 import {
-  decodeTilemapChunk,
   illustrationAnimationSamples,
   illustrationAtTime,
   normalizeTextStyleRanges,
@@ -24,12 +23,12 @@ import { splitColorAlpha } from '../common/color';
 import { AIDRAW_PSD_EDITABLE_TEXT_SUFFIX, aidrawPsdLockFields, aidrawPsdTextMatrix } from '../common/psd-text';
 import { MAX_PSD_EXPANDED_LAYER_PIXELS, MAX_PSD_LAYER_RECORDS, assertPsdLayerStructureBudget } from '../common/psd-limits';
 import { MAX_STATIC_RASTER_PIXELS } from '../common/static-raster';
-import { assertTiledExportResourceBudget } from '../common/tiled-resource-policy';
+import { planTiledExportReferences, planTiledMapExport, type TiledExportReferencePlan, type TiledMapExportPlan } from '../common/tiled-export-integrity';
 import { createTiledObjectIdAllocator, type TiledObjectIdAllocator } from '../common/tiled-object-ids';
 import { layoutStyledText } from '../common/text-layout';
 import { MAX_INTERCHANGE_FIDELITY_ENTRIES, tryAppendInterchangeFidelityEntry, type InterchangeFidelityEntry } from '../common/interchange-fidelity';
 import type { ExportFormat, ExportOptions } from '../common/contracts';
-import { planTiledExportCompanions, safeTiledAssetName } from './export-artifact-policy';
+import { planTiledExportCompanions } from './export-artifact-policy';
 import { renderDocument, renderDocumentDimensions, renderIllustration, renderIllustrationLayerSource, renderSprite } from './render-document';
 import { MAX_UTILITY_REPORT_SERIALIZED_BYTES, assertUtilityJsonBudget } from './utility-resource-policy';
 
@@ -800,42 +799,35 @@ function *tiledMapObjects(map: PixelTilemap) {
   for (const id of map.layerIds) yield* walk(id);
 }
 
-function tiledObjectIds(document: PixelDocument, active: PixelTilemap | PixelTileset): TiledObjectIdAllocator {
+function tiledObjectIds(active: PixelTilemap | PixelTileset, references: TiledExportReferencePlan): TiledObjectIdAllocator {
   function *sourceIds() {
-    const tilesets = active.type === 'tilemap'
-      ? active.tilesetIds.map((id) => document.pixelAssets[id]).filter((asset): asset is PixelTileset => asset?.type === 'tileset')
-      : [active];
-    for (const tileset of tilesets) for (const shape of tiledTilesetObjects(tileset)) yield shape.id;
+    for (const { tileset } of references.tilesets) for (const shape of tiledTilesetObjects(tileset)) yield shape.id;
     if (active.type === 'tilemap') for (const shape of tiledMapObjects(active)) yield shape.id;
   }
   return createTiledObjectIdAllocator(sourceIds());
 }
 
-function tilemapToTiledWithObjectIds(document: PixelDocument, map: PixelTilemap, images: Record<string, string>, objectIds: TiledObjectIdAllocator) {
+function tilemapToTiledWithObjectIds(document: PixelDocument, map: PixelTilemap, images: Record<string, string>, objectIds: TiledObjectIdAllocator, plan: TiledMapExportPlan) {
   let nextLayerId = 1;
   const layerJson = (id: string): Record<string, unknown> => {
     const layer = map.layers[id]; const common = { id: nextLayerId++, name: layer.name, visible: layer.visible, opacity: layer.opacity, parallaxx: layer.parallaxX, parallaxy: layer.parallaxY };
     if (layer.type === 'group') return { ...common, type: 'group', layers: (layer.childIds ?? []).map(layerJson) };
     if (layer.type === 'object') return { ...common, type: 'objectgroup', objects: (layer.objects ?? []).map((shape) => tiledObjectJson(shape, objectIds)) };
-    const chunks = Object.values(layer.chunks ?? {}).map((chunk) => ({ x: chunk.x, y: chunk.y, width: chunk.width, height: chunk.height, data: Array.from(decodeTilemapChunk(chunk)) })); const data = Array<number>(map.width * map.height).fill(0);
-    if (!map.infinite) for (const chunk of chunks) for (let localY = 0; localY < chunk.height; localY += 1) for (let localX = 0; localX < chunk.width; localX += 1) { const x = chunk.x + localX; const y = chunk.y + localY; if (x >= 0 && y >= 0 && x < map.width && y < map.height) data[y * map.width + x] = chunk.data[localY * chunk.width + localX] ?? 0; }
-    return { ...common, type: 'tilelayer', ...(map.infinite ? { chunks } : { width: map.width, height: map.height, data }) };
+    const data = plan.tileLayers.get(id); if (!data) throw new Error(`Tiled export tile layer ${id} was not planned.`);
+    return { ...common, type: 'tilelayer', ...(data.infinite ? { chunks: data.chunks } : { width: map.width, height: map.height, data: data.data }) };
   };
   return {
     type: 'map', version: '1.10', tiledversion: '1.11.2', orientation: map.orientation, renderorder: 'right-down', infinite: map.infinite,
     width: map.width, height: map.height, tilewidth: map.tileWidth, tileheight: map.tileHeight,
     properties: tiledPropertyJson(map.properties),
-    tilesets: map.tilesetIds.map((id, index) => {
-      const asset = document.pixelAssets[id];
-      return asset?.type === 'tileset' ? { firstgid: asset.firstGid || index * 1_000_000 + 1, ...tilesetJson(document, asset, images[id], objectIds) } : { firstgid: index * 1_000_000 + 1 };
-    }),
+    tilesets: plan.tilesets.map(({ tileset }) => ({ firstgid: tileset.firstGid, ...tilesetJson(document, tileset, images[tileset.id], objectIds) })),
     layers: map.layerIds.map(layerJson),
   };
 }
 
 export function tilemapToTiled(document: PixelDocument, map: PixelTilemap, images: Record<string, string> = {}) {
-  assertTiledExportResourceBudget(map);
-  return tilemapToTiledWithObjectIds(document, map, images, tiledObjectIds(document, map));
+  const references = planTiledMapExport(document, map);
+  return tilemapToTiledWithObjectIds(document, map, images, tiledObjectIds(map, references), references);
 }
 
 function tiledPropertyXml(properties: Record<string, string | number | boolean>): string {
@@ -856,34 +848,41 @@ function tilesetXml(document: PixelDocument, tileset: PixelTileset, image: strin
   return `<tileset version="1.10" tiledversion="1.11.2" name="${xml(tileset.name)}" tilewidth="${tileset.tileWidth}" tileheight="${tileset.tileHeight}" margin="${tileset.margin}" spacing="${tileset.spacing}" tilecount="${tileset.columns * tileset.rows}" columns="${tileset.columns}"><image source="${xml(image)}" width="${sprite?.type === 'sprite' ? sprite.width : tileset.columns * tileset.tileWidth}" height="${sprite?.type === 'sprite' ? sprite.height : tileset.rows * tileset.tileHeight}"/><transformations hflip="${Number(tileset.transformations.hFlip)}" vflip="${Number(tileset.transformations.vFlip)}" rotate="${Number(tileset.transformations.rotate)}" preferuntransformed="0"/>${tiles}${wangsets}</tileset>`;
 }
 
-function tilemapXml(document: PixelDocument, map: PixelTilemap, images: Record<string, string>, objectIds: TiledObjectIdAllocator): string {
+function tilemapXml(document: PixelDocument, map: PixelTilemap, images: Record<string, string>, objectIds: TiledObjectIdAllocator, plan: TiledMapExportPlan): string {
   let nextLayerId = 1;
   const layerXml = (id: string): string => {
     const layer = map.layers[id]; if (!layer) return '';
     const common = `id="${nextLayerId++}" name="${xml(layer.name)}" visible="${Number(layer.visible)}" opacity="${layer.opacity}" parallaxx="${layer.parallaxX}" parallaxy="${layer.parallaxY}"`;
     if (layer.type === 'group') return `<group ${common}>${(layer.childIds ?? []).map(layerXml).join('')}</group>`;
     if (layer.type === 'object') return `<objectgroup ${common}>${(layer.objects ?? []).map((shape) => collisionXml(shape, objectIds)).join('')}</objectgroup>`;
-    const chunks = Object.values(layer.chunks ?? {}).map((chunk) => ({ ...chunk, values: Array.from(decodeTilemapChunk(chunk)) }));
-    if (map.infinite) return `<layer ${common} width="${map.width}" height="${map.height}"><data encoding="csv">${chunks.map((chunk) => `<chunk x="${chunk.x}" y="${chunk.y}" width="${chunk.width}" height="${chunk.height}">${chunk.values.join(',')}</chunk>`).join('')}</data></layer>`;
-    const values = Array<number>(map.width * map.height).fill(0); for (const chunk of chunks) for (let y = 0; y < chunk.height; y += 1) for (let x = 0; x < chunk.width; x += 1) { const targetX = chunk.x + x; const targetY = chunk.y + y; if (targetX >= 0 && targetY >= 0 && targetX < map.width && targetY < map.height) values[targetY * map.width + targetX] = chunk.values[y * chunk.width + x] ?? 0; }
-    return `<layer ${common} width="${map.width}" height="${map.height}"><data encoding="csv">${values.join(',')}</data></layer>`;
+    const data = plan.tileLayers.get(id); if (!data) throw new Error(`Tiled export tile layer ${id} was not planned.`);
+    if (data.infinite) return `<layer ${common} width="${map.width}" height="${map.height}"><data encoding="csv">${data.chunks.map((chunk) => `<chunk x="${chunk.x}" y="${chunk.y}" width="${chunk.width}" height="${chunk.height}">${chunk.data.join(',')}</chunk>`).join('')}</data></layer>`;
+    return `<layer ${common} width="${map.width}" height="${map.height}"><data encoding="csv">${data.data.join(',')}</data></layer>`;
   };
-  const tilesets = map.tilesetIds.map((id) => { const tileset = document.pixelAssets[id]; return tileset?.type === 'tileset' ? tilesetXml(document, tileset, images[id], objectIds).replace('<tileset ', `<tileset firstgid="${tileset.firstGid}" `) : ''; }).join('');
+  const tilesets = plan.tilesets.map(({ tileset }) => tilesetXml(document, tileset, images[tileset.id], objectIds).replace('<tileset ', `<tileset firstgid="${tileset.firstGid}" `)).join('');
   return `<?xml version="1.0" encoding="UTF-8"?><map version="1.10" tiledversion="1.11.2" orientation="${map.orientation}" renderorder="right-down" infinite="${Number(map.infinite)}" width="${map.width}" height="${map.height}" tilewidth="${map.tileWidth}" tileheight="${map.tileHeight}">${tiledPropertyXml(map.properties)}${tilesets}${map.layerIds.map(layerXml).join('')}</map>`;
 }
 
 async function tiled(document: PixelDocument, format: 'tiled-json' | 'tiled-xml'): Promise<ExportArtifact> {
   const active = document.pixelAssets[document.activeAssetId]; if (active?.type !== 'tilemap' && active?.type !== 'tileset') throw new Error('Choose a tilemap or tileset before Tiled export.');
-  if (active.type === 'tilemap') assertTiledExportResourceBudget(active);
-  const objectIds = tiledObjectIds(document, active);
+  const mapPlan = active.type === 'tilemap' ? planTiledMapExport(document, active) : undefined;
+  const references = mapPlan ?? planTiledExportReferences(document, active);
+  const objectIds = tiledObjectIds(active, references);
   const companionPlan = planTiledExportCompanions(document) ?? []; const images: Record<string, string> = {}; const companions: NonNullable<ExportArtifact['companions']> = [];
-  for (const planned of companionPlan) { const tileset = document.pixelAssets[planned.tilesetId]; if (tileset?.type !== 'tileset') continue; const sprite = document.pixelAssets[tileset.spriteAssetId]; if (sprite?.type !== 'sprite') continue; images[tileset.id] = planned.name; companions.push({ name: planned.name, extension: planned.extension, mimeType: planned.mimeType, data: renderSprite(document, sprite).toBuffer('image/png') }); }
+  for (const planned of companionPlan) images[planned.tilesetId] = planned.name;
+  let body: string;
   if (active.type === 'tileset') {
-    const body = format === 'tiled-json' ? JSON.stringify(tilesetJson(document, active, images[active.id], objectIds), null, 2) : `<?xml version="1.0" encoding="UTF-8"?>${tilesetXml(document, active, images[active.id] ?? safeTiledAssetName(active.name, 'png'), objectIds)}`;
-    return { data: Buffer.from(body), mimeType: format === 'tiled-json' ? 'application/json' : 'application/xml', extension: format === 'tiled-json' ? 'tsj' : 'tsx', companions, report: { warnings: [], rasterized: [] } };
+    body = format === 'tiled-json' ? JSON.stringify(tilesetJson(document, active, images[active.id], objectIds), null, 2) : `<?xml version="1.0" encoding="UTF-8"?>${tilesetXml(document, active, images[active.id], objectIds)}`;
+  } else {
+    body = format === 'tiled-json' ? JSON.stringify(tilemapToTiledWithObjectIds(document, active, images, objectIds, mapPlan!), null, 2) : tilemapXml(document, active, images, objectIds, mapPlan!);
   }
-  const body = format === 'tiled-json' ? JSON.stringify(tilemapToTiledWithObjectIds(document, active, images, objectIds), null, 2) : tilemapXml(document, active, images, objectIds);
-  return { data: Buffer.from(body), mimeType: format === 'tiled-json' ? 'application/json' : 'application/xml', extension: format === 'tiled-json' ? 'tmj' : 'tmx', companions, report: { warnings: [], rasterized: [] } };
+  for (const planned of companionPlan) {
+    const reference = references.tilesets.find(({ tileset }) => tileset.id === planned.tilesetId);
+    if (!reference) throw new Error(`Tiled export map references missing tileset ${planned.tilesetId}.`);
+    companions.push({ name: planned.name, extension: planned.extension, mimeType: planned.mimeType, data: renderSprite(document, reference.sprite).toBuffer('image/png') });
+  }
+  const map = active.type === 'tilemap';
+  return { data: Buffer.from(body), mimeType: format === 'tiled-json' ? 'application/json' : 'application/xml', extension: map ? (format === 'tiled-json' ? 'tmj' : 'tmx') : (format === 'tiled-json' ? 'tsj' : 'tsx'), companions, report: { warnings: [], rasterized: [] } };
 }
 
 function animationExportWarnings(sprite: PixelSprite, tagId: string | undefined, scale: number): string[] {

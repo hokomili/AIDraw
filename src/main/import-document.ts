@@ -41,7 +41,7 @@ import { createExactAnimationPalettePlanner, exactAnimationFrameChanges, exactSh
 import { tryAppendInterchangeFidelityEntry, type InterchangeFidelityEntry } from '../common/interchange-fidelity';
 import { aidrawPsdTextGeometry, aidrawPsdTextObjectName, psdLayerHasPartialLock, psdLayerIsLockedAll } from '../common/psd-text';
 import { MAX_PSD_EXPANDED_LAYER_PIXELS, MAX_PSD_LAYER_NESTING_DEPTH, MAX_PSD_LAYER_RECORDS } from '../common/psd-limits';
-import { MAX_TILED_DEPTH, MAX_TILED_LAYERS, MAX_TILED_LAYER_CELLS, MAX_TILED_OBJECTS, MAX_TILED_TOTAL_CELLS } from '../common/tiled-resource-policy';
+import { MAX_TILED_DEPTH, MAX_TILED_LAYERS, MAX_TILED_LAYER_CELLS, MAX_TILED_OBJECTS, MAX_TILED_TILESETS, MAX_TILED_TOTAL_CELLS } from '../common/tiled-resource-policy';
 import { displayImageDimensions, inspectImageHeader, MAX_INLINE_ASSET_BYTES, MAX_INLINE_IMAGE_DIMENSION, MAX_INLINE_IMAGE_PIXELS } from './transaction-policy';
 import { importEditableSvg } from './svg-import';
 import { MAX_IMPORT_UTILITY_DOCUMENTS, MAX_IMPORT_UTILITY_SERIALIZED_BYTES } from './utility-contract';
@@ -722,7 +722,7 @@ function normalizeTiledMapStructure(tiled: any): void {
   const infinite = Boolean(tiled.infinite); const mapWidth = integerInRange(tiled.width ?? 0, infinite ? 0 : 1, 16_777_216, 'Tiled map width'); const mapHeight = integerInRange(tiled.height ?? 0, infinite ? 0 : 1, 16_777_216, 'Tiled map height');
   const tileWidth = integerInRange(tiled.tilewidth ?? 16, 1, MAX_INLINE_IMAGE_DIMENSION, 'Tiled map tile width'); const tileHeight = integerInRange(tiled.tileheight ?? 16, 1, MAX_INLINE_IMAGE_DIMENSION, 'Tiled map tile height'); assertImageDimensions(tileWidth, tileHeight, 'Tiled map tile');
   if (!infinite) tiledCellCount(mapWidth, mapHeight, 'Tiled map');
-  const tilesets = arrayify(tiled.tilesets); if (tilesets.length > 1_024) throw new Error('Tiled map exceeds the 1,024-tileset limit.');
+  const tilesets = arrayify(tiled.tilesets); if (tilesets.length > MAX_TILED_TILESETS) throw new Error(`Tiled map exceeds the ${MAX_TILED_TILESETS.toLocaleString('en-US')}-tileset limit.`);
   let layerCount = 0; let totalCells = 0; let objectCount = 0;
   const walk = (source: any, depth: number): void => {
     if (depth > MAX_TILED_DEPTH) throw new Error('Tiled group nesting exceeds the 64-level safety limit.');

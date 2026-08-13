@@ -2,6 +2,7 @@ import type { PixelTilemap } from '@aidraw/core';
 
 export const MAX_TILED_LAYERS = 4_096;
 export const MAX_TILED_DEPTH = 64;
+export const MAX_TILED_TILESETS = 1_024;
 export const MAX_TILED_LAYER_CELLS = 4_194_304;
 export const MAX_TILED_TOTAL_CELLS = 16_777_216;
 export const MAX_TILED_OBJECTS = 100_000;
