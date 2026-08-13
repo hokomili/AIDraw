@@ -2,9 +2,10 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createId, nowIso, type Actor, type CanvasTransaction, type ShapeObject } from '@aidraw/core';
+import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createId, createIllustrationDocument, nowIso, type Actor, type CanvasTransaction, type ShapeObject } from '@aidraw/core';
 import { DocumentService } from '@main/document-service';
 import { RecoveryJournal } from '@main/journal';
+import { writeNativeDocument } from '@main/persistence';
 
 const temporaryPaths: string[] = [];
 const services: DocumentService[] = [];
@@ -79,6 +80,22 @@ describe('document service collaboration semantics', () => {
       { id: cleanProject.id, dirty: false, filePath: undefined },
       { id: dirtyIllustration.id, dirty: true, filePath: undefined },
     ]);
+  });
+
+  it('seeds recovery before an immediately edited native document can be returned to the caller', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-service-open-recovery-')); temporaryPaths.push(root);
+    const source = createIllustrationDocument('Opened native source'); const sourcePath = await writeNativeDocument(join(root, 'source'), source, '1.0.0');
+    const recoveryRoot = join(root, 'recovery'); const service = new DocumentService(new RecoveryJournal(recoveryRoot), '1.0.0'); services.push(service);
+    await expect(service.open([sourcePath])).resolves.toEqual({ opened: [sourcePath], warnings: [] });
+    expect(await service.apply({
+      id: 'immediate-open-recovery-transaction', clientOperationId: 'immediate-open-recovery-operation', documentId: source.id,
+      actor: HUMAN_ACTOR, label: 'Immediate edit after open', createdAt: nowIso(), operations: [{ kind: 'document.rename', name: 'Recovered immediate edit' }],
+    })).toMatchObject({ status: 'committed', revision: 1 });
+    await service.flushRecovery();
+
+    const restarted = new DocumentService(new RecoveryJournal(recoveryRoot), '1.0.0'); services.push(restarted);
+    expect(await restarted.recover()).toBe(1);
+    expect(restarted.snapshot()).toMatchObject({ activeDocumentId: source.id, activeDocument: { id: source.id, name: 'Recovered immediate edit', revision: 1, dirty: true, filePath: sourcePath } });
   });
 
   it('keeps the attached editor advisory on the canonical active document and rejects stale tab updates', async () => {

@@ -260,7 +260,7 @@ export class DocumentService extends EventEmitter {
     this.checkpoints.set(document.id, new Map());
     this.comparisons.delete(document.id);
     this.acknowledgedAgentActivityCounts.set(document.id, agentActivityEntries(document).length);
-    void this.journal.compact(document);
+    void this.journal.compact(document).catch((error) => this.emit('recovery-error', error));
     this.setActiveDocument(document.id);
     this.publish();
     return this.snapshot();
@@ -275,7 +275,7 @@ export class DocumentService extends EventEmitter {
     this.checkpoints.set(document.id, new Map());
     this.comparisons.delete(document.id);
     this.acknowledgedAgentActivityCounts.set(document.id, agentActivityEntries(cloned).length);
-    void this.journal.compact(document);
+    void this.journal.compact(document).catch((error) => this.emit('recovery-error', error));
     this.setActiveDocument(document.id);
     this.publish();
     return this.snapshot();
@@ -558,6 +558,7 @@ export class DocumentService extends EventEmitter {
         this.checkpoints.set(loaded.document.id, new Map(loaded.checkpoints.map((checkpoint) => [checkpoint.id, checkpoint])));
         this.comparisons.delete(loaded.document.id);
         this.acknowledgedAgentActivityCounts.set(loaded.document.id, agentActivityEntries(loaded.document).length);
+        void this.journal.compact(loaded.document).catch((error) => this.emit('recovery-error', error));
         await this.traceStore?.import(loaded.document.id, loaded.trace);
         this.activeDocumentId = loaded.document.id;
         opened.push(filePath);
