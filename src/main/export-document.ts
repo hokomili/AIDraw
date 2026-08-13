@@ -230,8 +230,10 @@ function svgObject(document: IllustrationDocument, object: IllustrationObject, g
   }
   if (object.type === 'text') {
     const ranges = object.ranges.length ? object.ranges : [{ start: 0, end: object.text.length, fontFamily: 'sans-serif', fontSize: 48, fontWeight: 500, fontStyle: 'normal' as const, color: '#27213c', letterSpacing: 0 }];
-    const content = ranges.map((range, index) => `<tspan${index === 0 ? ` x="0" y="${range.fontSize}"` : ''} fill="${xml(range.color)}" font-family="${xml(range.fontFamily)}" font-size="${range.fontSize}" font-weight="${range.fontWeight}" font-style="${range.fontStyle}" letter-spacing="${range.letterSpacing}"${range.underline ? ' text-decoration="underline"' : ''}>${xml(object.text.slice(range.start, range.end))}</tspan>`).join('');
-    return `<text ${common} text-anchor="${object.align === 'center' ? 'middle' : object.align === 'right' ? 'end' : 'start'}">${content}</text>`;
+    const content = ranges.map((range) => `<tspan fill="${xml(range.color)}" font-family="${xml(range.fontFamily)}" font-size="${range.fontSize}" font-weight="${range.fontWeight}" font-style="${range.fontStyle}" letter-spacing="${range.letterSpacing}"${range.underline ? ' text-decoration="underline"' : ''}>${xml(object.text.slice(range.start, range.end))}</tspan>`).join('');
+    const anchor = object.align === 'center' ? 'middle' : object.align === 'right' ? 'end' : 'start';
+    const x = object.align === 'center' ? object.width / 2 : object.align === 'right' ? object.width : 0;
+    return `<text ${common} x="${x}" y="${ranges[0].fontSize}" text-anchor="${anchor}" data-aidraw-text-box="1" data-aidraw-text-width="${object.width}" data-aidraw-text-height="${object.height}" data-aidraw-line-height="${object.lineHeight}">${content}</text>`;
   }
   if (object.type === 'image') {
     const asset = document.assets[object.assetId];

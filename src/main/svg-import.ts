@@ -42,6 +42,9 @@ const blendModes = new Set<BlendMode>(['normal', 'multiply', 'screen', 'overlay'
 const supportedGeometry = new Set(['circle', 'ellipse', 'line', 'path', 'polygon', 'polyline', 'rect', 'text', 'image']);
 const MAX_EDITABLE_OBJECTS = 100_000;
 const MAX_EMBEDDED_IMAGE_BYTES = 16 * 1024 * 1024;
+const MAX_ILLUSTRATION_TEXT_BOX_SIZE = 1_000_000;
+
+interface AIDrawSvgTextBox { width: number; height: number; lineHeight: number }
 
 function nodeFromOrdered(value: Record<string, unknown>): SvgNode | undefined {
   const tag = Object.keys(value).find((key) => key !== ':@');
@@ -69,6 +72,23 @@ function finite(value: unknown, fallback = 0): number {
 function positiveLength(value: unknown, fallback: number): number {
   const parsed = finite(value, fallback);
   return parsed > 0 ? parsed : fallback;
+}
+
+function aidrawSvgTextBox(attributes: Attributes, warnings: Set<string>): AIDrawSvgTextBox | undefined {
+  const marker = attributes['data-aidraw-text-box'];
+  const fields = [attributes['data-aidraw-text-width'], attributes['data-aidraw-text-height'], attributes['data-aidraw-line-height']];
+  if (marker === undefined && fields.every((value) => value === undefined)) return undefined;
+  const exactNumber = (value: unknown): number | undefined => {
+    if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
+    if (typeof value !== 'string' || !value.trim()) return undefined;
+    const parsed = Number(value); return Number.isFinite(parsed) ? parsed : undefined;
+  };
+  const width = exactNumber(fields[0]); const height = exactNumber(fields[1]); const lineHeight = exactNumber(fields[2]);
+  if ((marker !== 1 && marker !== '1') || width === undefined || height === undefined || lineHeight === undefined || width < 0 || width > MAX_ILLUSTRATION_TEXT_BOX_SIZE || height < 0 || height > MAX_ILLUSTRATION_TEXT_BOX_SIZE || lineHeight < 0.1 || lineHeight > 10) {
+    warnings.add('Invalid AIDraw SVG text-box metadata was ignored.');
+    return undefined;
+  }
+  return { width, height, lineHeight };
 }
 
 function multiply(left: Matrix, right: Matrix): Matrix {
@@ -349,8 +369,9 @@ export function importEditableSvg(source: string, name: string): SvgImportResult
       node.children.forEach((child) => collect(child, style));
       if (!content) content = textContent(node);
       const fontSize = ranges[0]?.fontSize ?? Math.max(1, finite(style['font-size'], 48)); if (!ranges.length) appendText(content, style);
-      const textWidth = positiveLength(node.attributes.width, Math.max(1, content.length * fontSize * 0.62)); const textHeight = positiveLength(node.attributes.height, fontSize * 1.3); const anchor = style['text-anchor']; const x = finite(node.attributes.x) - (anchor === 'middle' ? textWidth / 2 : anchor === 'end' ? textWidth : 0);
-      const object: TextObject = { ...base(node, style, multiply(matrix, translate(x, finite(node.attributes.y) - fontSize)), 'Text'), type: 'text', text: content, width: textWidth, height: textHeight, align: anchor === 'middle' ? 'center' : anchor === 'end' ? 'right' : 'left', lineHeight: 1.2, ranges };
+      const aidrawBox = aidrawSvgTextBox(node.attributes, warnings);
+      const textWidth = aidrawBox?.width ?? positiveLength(node.attributes.width, Math.max(1, content.length * fontSize * 0.62)); const textHeight = aidrawBox?.height ?? positiveLength(node.attributes.height, fontSize * 1.3); const anchor = style['text-anchor']; const x = finite(node.attributes.x) - (anchor === 'middle' ? textWidth / 2 : anchor === 'end' ? textWidth : 0);
+      const object: TextObject = { ...base(node, style, multiply(matrix, translate(x, finite(node.attributes.y) - fontSize)), 'Text'), type: 'text', text: content, width: textWidth, height: textHeight, align: anchor === 'middle' ? 'center' : anchor === 'end' ? 'right' : 'left', lineHeight: aidrawBox?.lineHeight ?? 1.2, ranges };
       if (node.children.some((child) => child.tag === 'tspan' && (child.attributes.x !== undefined || child.attributes.y !== undefined || child.attributes.dx !== undefined || child.attributes.dy !== undefined))) warnings.add('Per-tspan SVG positioning was reduced to contiguous styled text ranges.');
       return finish(object, style, asMask);
     }

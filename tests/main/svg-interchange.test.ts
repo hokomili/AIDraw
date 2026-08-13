@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { importDocument } from '@main/import-document';
 import { illustrationToSvg } from '@main/export-document';
 import { importEditableSvg } from '@main/svg-import';
+import { createIllustrationDocument, HUMAN_ACTOR, IDENTITY_TRANSFORM, nowIso, type TextObject } from '@aidraw/core';
 
 const fixture = join(process.cwd(), 'tests', 'fixtures', 'svg', 'structured-editor.svg');
 
@@ -41,5 +42,36 @@ describe('editable SVG interchange', () => {
     expect(Object.values(reopened.objects).some((object) => object.type === 'text' && object.ranges.length >= 2)).toBe(true);
     expect(Object.values(reopened.objects).some((object) => object.type === 'image')).toBe(true);
     expect(Object.values(reopened.objects).some((object) => Boolean(object.maskObjectId))).toBe(true);
+  });
+
+  it('preserves centered and right-aligned AIDraw text boxes without shifting their transforms', () => {
+    const document = createIllustrationDocument('SVG text boxes'); document.artboard = { ...document.artboard, width: 320, height: 180, background: null };
+    const vector = Object.values(document.layers).find((layer) => layer.type === 'vector'); if (!vector || vector.type !== 'vector') throw new Error('Expected vector layer');
+    const timestamp = nowIso();
+    const text = (id: string, align: 'center' | 'right', x: number, y: number, width: number, height: number, lineHeight: number): TextObject => ({
+      id, revision: 0, name: `${align} label`, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, layerId: vector.id,
+      visible: true, locked: false, opacity: 1, blendMode: 'normal', transform: { ...IDENTITY_TRANSFORM, x, y }, type: 'text', text: align === 'center' ? 'Centered' : 'Right', width, height, align, lineHeight,
+      ranges: [{ start: 0, end: align === 'center' ? 8 : 5, fontFamily: 'Arial', fontSize: 20, fontWeight: 400, fontStyle: 'normal', color: '#224466', letterSpacing: 0 }],
+    });
+    const centered = text('centered-text', 'center', 30, 24, 180, 48, 1.4); const right = text('right-text', 'right', 45, 96, 120, 36, 1.1);
+    document.objects[centered.id] = centered; document.objects[right.id] = right; vector.objectIds.push(centered.id, right.id);
+
+    const svg = illustrationToSvg(document);
+    expect(svg).toContain('x="90" y="20" text-anchor="middle" data-aidraw-text-box="1" data-aidraw-text-width="180" data-aidraw-text-height="48" data-aidraw-line-height="1.4"');
+    expect(svg).toContain('x="120" y="20" text-anchor="end" data-aidraw-text-box="1" data-aidraw-text-width="120" data-aidraw-text-height="36" data-aidraw-line-height="1.1"');
+    const reopened = importEditableSvg(svg, 'Reopened text boxes').document;
+    const reopenedByText = (text: string) => Object.values(reopened.objects).find((object): object is TextObject => object.type === 'text' && object.text === text);
+    expect(reopenedByText(centered.text)).toMatchObject({ width: 180, height: 48, align: 'center', lineHeight: 1.4, transform: { x: 30, y: 24 } });
+    expect(reopenedByText(right.text)).toMatchObject({ width: 120, height: 36, align: 'right', lineHeight: 1.1, transform: { x: 45, y: 96 } });
+
+    for (const [from, to] of [
+      ['data-aidraw-line-height="1.4"', 'data-aidraw-line-height="99"'],
+      ['data-aidraw-text-box="1"', 'data-aidraw-text-box="2"'],
+      ['data-aidraw-text-width="180"', 'data-aidraw-text-width="true"'],
+    ]) {
+      const invalid = importEditableSvg(svg.replace(from, to), 'Invalid text metadata');
+      expect(invalid.warnings).toContain('Invalid AIDraw SVG text-box metadata was ignored.');
+      expect(Object.values(invalid.document.objects).find((object) => object.type === 'text' && object.text === centered.text)).toMatchObject({ lineHeight: 1.2 });
+    }
   });
 });
