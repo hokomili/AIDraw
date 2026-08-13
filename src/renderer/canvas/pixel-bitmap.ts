@@ -25,6 +25,12 @@ export function visibleSpriteLayers(sprite: PixelSprite): Array<{ layer: PixelSp
   return result;
 }
 
+export function editableSpriteLayer(sprite: PixelSprite, selectedLayerId?: string): PixelSprite['layers'][string] | undefined {
+  const selected = selectedLayerId ? sprite.layers[selectedLayerId] : undefined;
+  if (selected?.type === 'pixel') return selected.visible && !selected.locked ? selected : undefined;
+  return [...visibleSpriteLayers(sprite)].reverse().map((entry) => entry.layer).find((layer) => layer.type === 'pixel' && !layer.locked);
+}
+
 export function safeDecodePixelChunk(value: unknown): Uint8Array | undefined {
   if (!value || typeof value !== 'object') return undefined;
   const chunk = value as PixelCel['chunks'][string];

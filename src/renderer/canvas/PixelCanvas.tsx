@@ -20,6 +20,7 @@ import {
   paintWangTerrain,
   pixelAnimationFrames,
   pixelCelForFrame,
+  pixelRawCelForFrame,
   pixelPerfectStrokePoints,
   placePixelStamp,
   placeTileStamp,
@@ -28,6 +29,7 @@ import {
   replacePixelRegion,
   reorderPixelFrame,
   resolveTilesetForGid,
+  setPixelCelLinked,
   setPixelFrameCelsLinked,
   setPixelFramePaletteOverride,
   stepPaletteByLuminance,
@@ -48,8 +50,9 @@ import {
   type TileStamp,
   type TilemapChunk,
 } from '@aidraw/core';
-import { ArrowLeft, ArrowRight, ChevronLeft, ChevronRight, ClipboardPaste, Copy, Dices, Eraser, Eye, FlipHorizontal2, FlipVertical2, Grid3X3, Link2, Move, Palette, Pause, Play, Repeat2, RotateCcw, RotateCw, Scaling, Scissors, Trash2, Unlink2 } from 'lucide-react';
+import { ArrowLeft, ArrowRight, ChevronLeft, ChevronRight, ClipboardPaste, Copy, Dices, Eraser, Eye, FlipHorizontal2, FlipVertical2, Grid3X3, Link2, Move, Palette, Pause, Play, Repeat2, RotateCcw, RotateCw, Scaling, Scissors, Table2, Trash2, Unlink2 } from 'lucide-react';
 import { useEditorStore } from '../store';
+import { CelExposureGrid } from '../components/CelExposureGrid';
 import { PlaybackLanes } from '../components/PlaybackLanes';
 import { collectReplayMasks, replayPointKey, replayTileLayerKey } from '../replay';
 import { EditorDialog, EntryDialog } from '../components/EditorDialog';
@@ -61,7 +64,7 @@ import { deleteMapObjectPoint, insertMapObjectPoint, mapObjectAtPoint, mapObject
 import { TILE_VARIANT_SEED_PROPERTY, chooseTileVariant, nextTileVariantSeed, tileVariantCandidates, tileVariantGroup } from '../../common/tile-variants';
 import { parseBitmapFontJson } from '../../common/bitmap-font-interchange';
 import { cancelPixelGesture, releasePendingPixelLocks } from '../../common/pixel-gesture';
-import { recordValues, safeDecodePixelChunk, spriteBitmap, visibleSpriteLayers } from './pixel-bitmap';
+import { editableSpriteLayer, recordValues, safeDecodePixelChunk, spriteBitmap, visibleSpriteLayers } from './pixel-bitmap';
 
 interface PixelPoint { x: number; y: number }
 interface PixelView { scale: number; offsetX: number; offsetY: number; logicalWidth: number; logicalHeight: number }
@@ -87,8 +90,6 @@ function previewMapObject(gesture: MapObjectGesture): CollisionShape {
 }
 
 const celFor = pixelCelForFrame;
-
-function editableSpriteLayer(sprite: PixelSprite): PixelSprite['layers'][string] | undefined { return [...visibleSpriteLayers(sprite)].reverse().map((entry) => entry.layer).find((layer) => layer.type === 'pixel' && !layer.locked); }
 
 function safeDecodeTilemapChunk(value: unknown): Uint32Array | undefined {
   if (!value || typeof value !== 'object') return undefined;
@@ -254,6 +255,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const [tileTransforms, setTileTransforms] = useState({ hFlip: false, vFlip: false, diagonal: false });
   const [bitmapTextPoint, setBitmapTextPoint] = useState<PixelPoint>();
   const [durationFrameId, setDurationFrameId] = useState<string>();
+  const [exposureGridOpen, setExposureGridOpen] = useState(false);
   const [tagDraft, setTagDraft] = useState<TagDraft>();
   const [selectedTagId, setSelectedTagId] = useState<string>();
   const setCanvasViewport = useEditorStore((state) => state.setCanvasViewport);
@@ -627,7 +629,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       return;
     }
     if (!sprite || !activeFrameId) return;
-    const layerId = editableSpriteLayer(sprite)?.id; const cel = layerId ? celFor(sprite, layerId, activeFrameId) : undefined;
+    const layerId = editableSpriteLayer(sprite, selectedEntityId)?.id; const cel = layerId ? celFor(sprite, layerId, activeFrameId) : undefined;
     if (!cel) return;
     const result = transformPixelSelection(selection, (x, y) => readPixel(cel, x, y), transform, { width: sprite.width, height: sprite.height }, offset);
     const destination = result.destinationBounds; const source = result.sourceBounds;
@@ -660,7 +662,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       return;
     }
     if (!sprite || !activeFrameId) return;
-    const layerId = editableSpriteLayer(sprite)?.id; const cel = layerId ? celFor(sprite, layerId, activeFrameId) : undefined; const bounds = pixelSelectionBounds(selection);
+    const layerId = editableSpriteLayer(sprite, selectedEntityId)?.id; const cel = layerId ? celFor(sprite, layerId, activeFrameId) : undefined; const bounds = pixelSelectionBounds(selection);
     if (!cel || !bounds) return;
     const lock = await window.aidraw.acquireHumanLock({ documentId: document.id, region: { kind: 'pixel', assetId: sprite.id, ...bounds } });
     if (!lock.acquired) return;
@@ -678,7 +680,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       notify(`Copied ${selection.length} selected tile${selection.length === 1 ? '' : 's'} to the AIDraw clipboard.`, 'success'); return true;
     }
     if (!sprite || !activeFrameId) return false;
-    const layerId = editableSpriteLayer(sprite)?.id; const cel = layerId ? celFor(sprite, layerId, activeFrameId) : undefined; if (!cel) return false;
+    const layerId = editableSpriteLayer(sprite, selectedEntityId)?.id; const cel = layerId ? celFor(sprite, layerId, activeFrameId) : undefined; if (!cel) return false;
     const activePalette = sprite.paletteOverrides?.[activeFrameId] ?? document.palette;
     localSelectionClipboard = { kind: 'pixel', sourceDocumentId: document.id, grid: captureGridSelection(selection, (x, y) => readPixel(cel, x, y)), palette: activePalette.map((entry) => entry.color) };
     setClipboardAvailable(true);
@@ -702,7 +704,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       return;
     }
     if (!sprite || !activeFrameId || clipboard.kind !== 'pixel') { notify('Tile selections cannot be pasted into a sprite.', 'warning'); return; }
-    const layerId = editableSpriteLayer(sprite)?.id; const cel = layerId ? celFor(sprite, layerId, activeFrameId) : undefined; if (!cel) return;
+    const layerId = editableSpriteLayer(sprite, selectedEntityId)?.id; const cel = layerId ? celFor(sprite, layerId, activeFrameId) : undefined; if (!cel) return;
     const placed = placeGridClipboard(clipboard.grid, origin, { width: sprite.width, height: sprite.height }); const bounds = pixelSelectionBounds(placed.selection);
     if (!bounds) { notify('The pasted pixel selection falls outside this sprite.', 'warning'); return; }
     const palette = structuredClone(document.palette); const remap = new Map<number, number>([[0, 0]]);
@@ -734,7 +736,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       finally { if (lock.lockId) await window.aidraw.releaseHumanLock(lock.lockId); }
       if (result.dropped) notify(`${result.dropped} scaled tile${result.dropped === 1 ? '' : 's'} fell outside the finite map.`, 'warning'); return;
     }
-    if (!sprite || !activeFrameId) return; const layerId = editableSpriteLayer(sprite)?.id; const cel = layerId ? celFor(sprite, layerId, activeFrameId) : undefined; if (!cel) return;
+    if (!sprite || !activeFrameId) return; const layerId = editableSpriteLayer(sprite, selectedEntityId)?.id; const cel = layerId ? celFor(sprite, layerId, activeFrameId) : undefined; if (!cel) return;
     const result = scaleGridSelection(selection, (x, y) => readPixel(cel, x, y), scaleX, scaleY, { width: sprite.width, height: sprite.height }, 0); const bounds = pixelSelectionBounds([...selection, ...result.selection]); if (!bounds) return;
     const lock = await window.aidraw.acquireHumanLock({ documentId: document.id, region: { kind: 'pixel', assetId: sprite.id, ...bounds } }); if (!lock.acquired) return;
     try { if (await apply(`Scale pixel selection ${scaleX}×${scaleY}`, [{ kind: 'pixel.cel.set', spriteId: sprite.id, celId: cel.id, changes: result.changes.map((entry) => ({ x: entry.x, y: entry.y, index: entry.value })), expectedRevision: cel.revision }])) { setSelection(result.selection); setSelectionScaleOpen(false); } }
@@ -752,7 +754,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       return;
     }
     if (!sprite || !activeFrameId) return;
-    const layerId = editableSpriteLayer(sprite)?.id; const cel = layerId ? celFor(sprite, layerId, activeFrameId) : undefined;
+    const layerId = editableSpriteLayer(sprite, selectedEntityId)?.id; const cel = layerId ? celFor(sprite, layerId, activeFrameId) : undefined;
     if (!cel) return;
     const stamp = capturePixelStamp(createId('stamp'), name, selection, (x, y) => readPixel(cel, x, y));
     if (await apply('Save reusable pixel stamp', [{ kind: 'pixel.stamps.replace', stamps: [...document.stamps, stamp] }])) { setActiveStampId(stamp.id); setStampCaptureOpen(false); }
@@ -904,7 +906,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     setLockPromise(undefined);
     if (gestureEpoch !== gestureEpochRef.current || !lock?.acquired) return;
     try { if (sprite && activeFrameId) {
-      const layerId = editableSpriteLayer(sprite)?.id;
+      const layerId = editableSpriteLayer(sprite, selectedEntityId)?.id;
       const cel = layerId ? celFor(sprite, layerId, activeFrameId) : undefined;
       if (cel) {
         if (pendingRuns.length) await apply(tool === 'fill' ? 'Fill pixels' : 'Replace pixel color', [{ kind: 'pixel.cel.region', spriteId: sprite.id, celId: cel.id, runs: pendingRuns, expectedRevision: cel.revision }]);
@@ -996,6 +998,16 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     await apply(linked ? 'Unlink frame cels' : 'Link frame cels', [{ kind: 'pixel.asset.replace', asset: next, expectedRevision: sprite.revision }]);
   };
 
+  const toggleCelExposureLink = async (layerId: string, targetFrameId: string) => {
+    if (!sprite) return;
+    const layer = sprite.layers[layerId]; const raw = pixelRawCelForFrame(sprite, layerId, targetFrameId); const linked = Boolean(raw?.linkedToCelId);
+    if (!layer || layer.type !== 'pixel' || !raw) { notify('That cel exposure is unavailable.', 'warning'); return; }
+    if (layer.locked) { notify('Unlock the pixel layer before changing its cel exposure.', 'warning'); return; }
+    if (!linked && sprite.frameIds.indexOf(targetFrameId) <= 0) { notify('The first frame has no previous cel to link.', 'warning'); return; }
+    const next = setPixelCelLinked(sprite, layerId, targetFrameId, !linked);
+    if (await apply(linked ? `Unlink ${layer.name} cel` : `Link ${layer.name} cel`, [{ kind: 'pixel.asset.replace', asset: next, expectedRevision: sprite.revision }])) { setFrameId(targetFrameId); setSelectedEntity(layerId); }
+  };
+
   const togglePaletteOverride = async () => {
     if (!sprite || !activeFrameId) return;
     const next = setPixelFramePaletteOverride(sprite, activeFrameId, sprite.paletteOverrides[activeFrameId] ? undefined : document.palette);
@@ -1020,7 +1032,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     const lock = await window.aidraw.acquireHumanLock({ documentId: document.id, region: { kind: 'pixel', assetId: sprite.id, x: Math.min(...xs), y: Math.min(...ys), width: Math.max(...xs) - Math.min(...xs) + 1, height: Math.max(...ys) - Math.min(...ys) + 1 } });
     if (!lock.acquired) return;
     try {
-      const layerId = editableSpriteLayer(sprite)?.id;
+      const layerId = editableSpriteLayer(sprite, selectedEntityId)?.id;
       const cel = layerId ? celFor(sprite, layerId, frame) : undefined;
       if (cel && await apply('Add bitmap text', [{ kind: 'pixel.cel.set', spriteId: sprite.id, celId: cel.id, changes: uniqueChanges(points, pixelIndex), expectedRevision: cel.revision }])) setBitmapTextPoint(undefined);
     } finally {
@@ -1146,6 +1158,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
             <button onClick={() => void moveFrame(1)} disabled={sprite.frameIds.indexOf(activeFrameId ?? '') >= sprite.frameIds.length - 1} title="Move active frame right"><ArrowRight size={12} /></button>
             <button onClick={() => void duplicateFrame()} title="Duplicate active frame"><Copy size={12} /></button>
             <button className={activeFrameLinked ? 'is-active' : ''} onClick={() => void toggleCelLink()} title={activeFrameLinked ? 'Unlink active frame cels' : 'Link active frame cels to previous frame'}>{activeFrameLinked ? <Unlink2 size={12} /> : <Link2 size={12} />}</button>
+            <button className={exposureGridOpen ? 'is-active' : ''} onClick={() => setExposureGridOpen((open) => !open)} title="Open layer-by-frame cel exposure grid"><Table2 size={12} /></button>
             <button className={activePaletteOverride ? 'is-active' : ''} onClick={() => void togglePaletteOverride()} title={activePaletteOverride ? 'Use document palette' : 'Create per-frame palette override'}><Palette size={12} /></button>
             {activePaletteOverride?.[pixelIndex] && <input aria-label="Active frame palette color" type="color" value={activePaletteOverride[pixelIndex].color.slice(0, 7)} onChange={(event) => void changeOverrideColor(event.target.value)} />}
             <button onClick={() => void deleteFrame()} disabled={sprite.frameIds.length <= 1} title="Delete active frame"><Trash2 size={12} /></button>
@@ -1157,6 +1170,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
           </div>
         </div>
       )}
+      {exposureGridOpen && sprite && activeFrameId && <CelExposureGrid key={`${sprite.id}:${sprite.revision}:${activeFrameId}:${selectedEntityId ?? ''}`} sprite={sprite} activeFrameId={activeFrameId} activeLayerId={selectedEntityId} onSelect={(nextFrameId, layerId) => { setFrameId(nextFrameId); setSelectedEntity(layerId); }} onToggleLink={(layerId, nextFrameId) => void toggleCelExposureLink(layerId, nextFrameId)} onClose={() => setExposureGridOpen(false)} />}
       {bitmapTextPoint && sprite && <BitmapTextDialog fonts={document.bitmapFonts} origin={bitmapTextPoint} spriteSize={{ width: sprite.width, height: sprite.height }} paletteIndex={pixelIndex} onSubmit={addBitmapText} onFontsReplace={(fonts) => apply('Replace bitmap font library', [{ kind: 'pixel.bitmap-fonts.replace', fonts }])} onClose={() => setBitmapTextPoint(undefined)} />}
       {stampCaptureOpen && (sprite || tilemap) && <EntryDialog
         title="Save reusable stamp"

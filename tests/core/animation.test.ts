@@ -5,9 +5,11 @@ import {
   duplicatePixelFrame,
   pixelAnimationFrames,
   pixelCelForFrame,
+  pixelRawCelForFrame,
   readPixel,
   reorderPixelFrame,
   resolvePixelCel,
+  setPixelCelLinked,
   setPixelFrameCelsLinked,
   setPixelFramePaletteOverride,
   upsertPixelAnimationTag,
@@ -60,6 +62,37 @@ describe('pixel animation kernel', () => {
     expect(rawUnlinked.linkedToCelId).toBeUndefined();
     writePixels(unlinked.cels[firstCel.id], [{ x: 3, y: 4, index: 2 }]);
     expect(readPixel(rawUnlinked, 3, 4)).toBe(7);
+  });
+
+  it('links or snapshots one layer/frame exposure without changing sibling cels', () => {
+    const sprite = spriteFixture();
+    const firstLayerId = sprite.layerIds[0];
+    const firstFrameId = sprite.frameIds[0];
+    const firstCel = pixelRawCelForFrame(sprite, firstLayerId, firstFrameId)!;
+    const secondLayer = { ...structuredClone(sprite.layers[firstLayerId]), id: 'layer-two', name: 'Layer two' };
+    const secondCel = { ...structuredClone(firstCel), id: 'cel-layer-two', name: 'Layer two · Frame 1', layerId: secondLayer.id };
+    sprite.layers[secondLayer.id] = secondLayer;
+    sprite.layerIds.push(secondLayer.id);
+    sprite.cels[secondCel.id] = secondCel;
+    writePixels(firstCel, [{ x: 1, y: 1, index: 3 }]);
+    writePixels(secondCel, [{ x: 2, y: 2, index: 6 }]);
+    const duplicate = duplicatePixelFrame(sprite, firstFrameId, { actorId: 'agent-animation', timestamp: '2026-08-04T00:00:00.000Z', createId: deterministicIds('frame-two', 'cel-one-two', 'cel-two-two') });
+    installFrame(sprite, duplicate);
+
+    const linked = setPixelCelLinked(sprite, firstLayerId, 'frame-two', true);
+    expect(pixelRawCelForFrame(linked, firstLayerId, 'frame-two')).toMatchObject({ linkedToCelId: firstCel.id, chunks: {} });
+    expect(pixelRawCelForFrame(linked, secondLayer.id, 'frame-two')).toEqual(pixelRawCelForFrame(sprite, secondLayer.id, 'frame-two'));
+    expect(pixelRawCelForFrame(sprite, firstLayerId, 'frame-two')?.linkedToCelId).toBeUndefined();
+    writePixels(linked.cels[firstCel.id], [{ x: 1, y: 1, index: 7 }]);
+    expect(readPixel(pixelCelForFrame(linked, firstLayerId, 'frame-two')!, 1, 1)).toBe(7);
+    expect(readPixel(pixelCelForFrame(linked, secondLayer.id, 'frame-two')!, 2, 2)).toBe(6);
+
+    const unlinked = setPixelCelLinked(linked, firstLayerId, 'frame-two', false);
+    expect(pixelRawCelForFrame(unlinked, firstLayerId, 'frame-two')?.linkedToCelId).toBeUndefined();
+    writePixels(unlinked.cels[firstCel.id], [{ x: 1, y: 1, index: 2 }]);
+    expect(readPixel(pixelCelForFrame(unlinked, firstLayerId, 'frame-two')!, 1, 1)).toBe(7);
+    expect(() => setPixelCelLinked(sprite, firstLayerId, firstFrameId, true)).toThrow(/first frame/);
+    expect(() => setPixelCelLinked(sprite, 'missing', firstFrameId, true)).toThrow(/does not exist/);
   });
 
   it('keeps tag ranges ordered when frames move and exposes the exact tagged sequence', () => {

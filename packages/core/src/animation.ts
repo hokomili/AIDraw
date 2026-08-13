@@ -102,7 +102,7 @@ export interface DuplicatedPixelFrame {
   index: number;
 }
 
-function rawCelForFrame(sprite: PixelSprite, layerId: Id, frameId: Id): PixelCel | undefined {
+export function pixelRawCelForFrame(sprite: PixelSprite, layerId: Id, frameId: Id): PixelCel | undefined {
   return Object.values(sprite.cels).find((cel) => cel.layerId === layerId && cel.frameId === frameId);
 }
 
@@ -118,7 +118,7 @@ export function resolvePixelCel(sprite: PixelSprite, celId: Id): PixelCel | unde
 }
 
 export function pixelCelForFrame(sprite: PixelSprite, layerId: Id, frameId: Id): PixelCel | undefined {
-  const cel = rawCelForFrame(sprite, layerId, frameId);
+  const cel = pixelRawCelForFrame(sprite, layerId, frameId);
   return cel ? resolvePixelCel(sprite, cel.id) : undefined;
 }
 
@@ -191,6 +191,30 @@ export function setPixelFrameCelsLinked(sprite: PixelSprite, frameId: Id, linked
       cel.chunks = structuredClone(resolved.chunks);
       delete cel.linkedToCelId;
     }
+  }
+  return next;
+}
+
+export function setPixelCelLinked(sprite: PixelSprite, layerId: Id, frameId: Id, linked: boolean): PixelSprite {
+  const layer = sprite.layers[layerId];
+  if (!layer || layer.type !== 'pixel') throw new Error(`Pixel layer ${layerId} does not exist.`);
+  const frameIndex = sprite.frameIds.indexOf(frameId);
+  if (frameIndex < 0) throw new Error(`Frame ${frameId} does not exist.`);
+  if (linked && frameIndex === 0) throw new Error('The first frame has no previous cel to link.');
+  const raw = pixelRawCelForFrame(sprite, layerId, frameId);
+  if (!raw) throw new Error(`Frame ${frameId} has no cel for layer ${layerId}.`);
+  const next = structuredClone(sprite);
+  const cel = next.cels[raw.id];
+  if (linked) {
+    const source = pixelCelForFrame(sprite, layerId, sprite.frameIds[frameIndex - 1]);
+    if (!source) throw new Error(`Previous frame has no resolvable cel for layer ${layerId}.`);
+    cel.linkedToCelId = source.id;
+    cel.chunks = {};
+  } else {
+    const resolved = resolvePixelCel(sprite, raw.id);
+    if (!resolved) throw new Error(`Cel ${raw.id} has a cyclic or missing link.`);
+    cel.chunks = structuredClone(resolved.chunks);
+    delete cel.linkedToCelId;
   }
   return next;
 }
