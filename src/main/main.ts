@@ -20,7 +20,7 @@ import { buildRendererDiagnostics, type RendererFailureDetail } from './renderer
 import { embedPixelLink, externalizePixelLink } from '../common/pixel-links';
 import { MAX_PROJECT_LINK_BYTES, portableProjectAssetPath, preparePixelLinkRelink, projectLinkFileExtension, verifiedPixelLinkCache } from './pixel-link-files';
 import { agentClientDescriptor, isAgentClientId, type AgentClientId, type AgentClientSetupResult } from '../common/agent-clients';
-import { configureAgentClientFile } from './agent-client-config';
+import { completeAgentClientSetup, configureAgentClientFile } from './agent-client-config';
 import { secureStorageStatus } from './secure-storage';
 import { getStartAtLoginStatus, setStartAtLogin, wasOpenedAtLogin } from './start-at-login';
 import { resolveRendererRecoveryE2eConfiguration, sanitizedMalformedRendererRecoveryEvent } from './renderer-recovery-e2e';
@@ -777,18 +777,17 @@ async function configureAgentClient(value: unknown): Promise<AgentClientSetupRes
     });
     if (decision.response !== 0) return { ...base, status: 'cancelled', message: `${descriptor.name} configuration was not changed.`, restartRequired: false };
   }
+  let result: AgentClientSetupResult;
   try {
-    const result = await configureAgentClientFile(clientId, { url: credentials.url, token: credentials.token });
-    const status = isolatedE2eApproval ? engineStatus() : await setEngineStartAtLogin(true);
-    const startup = isolatedE2eApproval
-      ? ' Start-at-login was intentionally unchanged by this isolated packaged validation.'
-      : status.startsAtLogin
-        ? ` The headless engine will start at ${platform.label} sign-in.`
-        : ' Start-at-login becomes available in a packaged desktop build.';
-    return { ...result, message: `${result.message}${startup}` };
+    result = await configureAgentClientFile(clientId, { url: credentials.url, token: credentials.token });
   } catch (error) {
     return { ...base, status: 'manual', message: `Could not configure ${descriptor.name}: ${error instanceof Error ? error.message : String(error)}`, restartRequired: false };
   }
+  return completeAgentClientSetup(result, {
+    isolated: isolatedE2eApproval,
+    platformLabel: platform.label,
+    enableStartAtLogin: () => setEngineStartAtLogin(true),
+  });
 }
 
 function createMenu(): void {

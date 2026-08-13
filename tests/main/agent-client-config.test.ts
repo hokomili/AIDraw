@@ -1,9 +1,9 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parse } from 'jsonc-parser';
-import { afterEach, describe, expect, it } from 'vitest';
-import { configureAgentClientFile, genericSetupSnippet, updateCodexToml } from '@main/agent-client-config';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { completeAgentClientSetup, configureAgentClientFile, genericSetupSnippet, updateCodexToml } from '@main/agent-client-config';
 
 const temporaryDirectories: string[] = [];
 const connection = { url: 'http://127.0.0.1:49152/mcp', token: 'private-test-token' };
@@ -40,6 +40,86 @@ describe('cross-agent MCP configuration', () => {
     expect(result).toMatchObject({ status: 'configured', clientId: 'codex', configPath, restartRequired: true });
     expect(await readFile(result.backupPath!, 'utf8')).toBe(original);
     expect(await readFile(configPath, 'utf8')).toContain('[model]\nname = "keep-me"');
+  });
+
+  it('serializes automatic updates and preserves each same-timestamp config version in a private backup', async () => {
+    const home = await temporaryHome();
+    const configDirectory = join(home, '.codex');
+    const configPath = join(configDirectory, 'config.toml');
+    const original = '[model]\nname = "keep-me"\n';
+    await mkdir(configDirectory, { recursive: true });
+    await writeFile(configPath, original, 'utf8');
+
+    let releaseFirstReplacement!: () => void;
+    const firstReplacementRelease = new Promise<void>((resolve) => { releaseFirstReplacement = resolve; });
+    let markFirstReplacementStarted!: () => void;
+    const firstReplacementStarted = new Promise<void>((resolve) => { markFirstReplacementStarted = resolve; });
+    const replacements: Array<{ source: string; destination: string }> = [];
+    const replaceFile = async (source: string, destination: string): Promise<void> => {
+      replacements.push({ source, destination });
+      if (replacements.length === 1) {
+        markFirstReplacementStarted();
+        await firstReplacementRelease;
+      }
+      await rename(source, destination);
+    };
+
+    const first = configureAgentClientFile('codex', { ...connection, token: 'first-token' }, {
+      homeDirectory: home, environment: {}, now, replaceFile,
+    });
+    await firstReplacementStarted;
+    const second = configureAgentClientFile('codex', { ...connection, token: 'second-token' }, {
+      homeDirectory: home, environment: {}, now, replaceFile,
+    });
+    await new Promise<void>((resolve) => { setImmediate(resolve); });
+    expect(replacements).toHaveLength(1);
+    releaseFirstReplacement();
+
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+    expect(firstResult.backupPath).toBeTruthy();
+    expect(secondResult.backupPath).toBeTruthy();
+    expect(secondResult.backupPath).not.toBe(firstResult.backupPath);
+    await expect(readFile(firstResult.backupPath!, 'utf8')).resolves.toBe(original);
+    await expect(readFile(secondResult.backupPath!, 'utf8')).resolves.toContain('first-token');
+    const final = await readFile(configPath, 'utf8');
+    expect(final).toContain('second-token');
+    expect(final).not.toContain('first-token');
+    if (process.platform !== 'win32') {
+      for (const filePath of [configPath, firstResult.backupPath!, secondResult.backupPath!]) {
+        expect((await stat(filePath)).mode & 0o777).toBe(0o600);
+      }
+    }
+    expect((await readdir(configDirectory)).filter((entry) => entry.endsWith('.tmp'))).toEqual([]);
+  });
+
+  it('preserves prior bytes after replacement failure and does not poison the update queue', async () => {
+    const home = await temporaryHome();
+    const configDirectory = join(home, '.codex');
+    const configPath = join(configDirectory, 'config.toml');
+    const original = '[model]\nname = "keep-me"\n';
+    await mkdir(configDirectory, { recursive: true });
+    await writeFile(configPath, original, 'utf8');
+    let replacements = 0;
+    const replaceFile = async (source: string, destination: string): Promise<void> => {
+      replacements += 1;
+      if (replacements === 1) throw new Error('simulated replacement failure');
+      await rename(source, destination);
+    };
+
+    await expect(configureAgentClientFile('codex', { ...connection, token: 'failed-token' }, {
+      homeDirectory: home, environment: {}, now, replaceFile,
+    })).rejects.toThrow('simulated replacement failure');
+    await expect(readFile(configPath, 'utf8')).resolves.toBe(original);
+    expect((await readdir(configDirectory)).filter((entry) => entry.endsWith('.tmp'))).toEqual([]);
+
+    const recovered = await configureAgentClientFile('codex', { ...connection, token: 'recovery-token' }, {
+      homeDirectory: home, environment: {}, now, replaceFile,
+    });
+    expect(replacements).toBe(2);
+    await expect(readFile(configPath, 'utf8')).resolves.toContain('recovery-token');
+    expect(recovered.backupPath).toBeTruthy();
+    if (process.platform !== 'win32') expect((await stat(configPath)).mode & 0o777).toBe(0o600);
+    expect((await readdir(configDirectory)).filter((entry) => entry.endsWith('.tmp'))).toEqual([]);
   });
 
   it('preserves unrelated Claude Code user settings', async () => {
@@ -113,5 +193,50 @@ describe('cross-agent MCP configuration', () => {
     await writeFile(configPath, '{ invalid', 'utf8');
     await expect(configureAgentClientFile('claude-code', connection, { homeDirectory: home, environment: {}, now })).rejects.toThrow(/invalid JSON/);
     await expect(readFile(configPath, 'utf8')).resolves.toBe('{ invalid');
+  });
+
+  it('reports a saved client configuration truthfully when start-at-login enablement fails', async () => {
+    const configured = {
+      status: 'configured' as const,
+      clientId: 'codex' as const,
+      clientName: 'Codex',
+      message: 'AIDraw saved the client configuration.',
+      restartRequired: true,
+      restartInstruction: 'Restart Codex.',
+      documentationUrl: 'https://example.test/codex',
+      configPath: '/private/config.toml',
+      backupPath: '/private/config.toml.backup',
+    };
+    const enableStartAtLogin = vi.fn(async () => { throw new Error('simulated login-item failure'); });
+    const result = await completeAgentClientSetup(configured, {
+      isolated: false,
+      platformLabel: 'macOS',
+      enableStartAtLogin,
+    });
+    expect(result).toMatchObject({
+      status: 'configured',
+      restartRequired: true,
+      configPath: configured.configPath,
+      backupPath: configured.backupPath,
+    });
+    expect(result.message).toContain('client configuration was saved');
+    expect(result.message).toContain('simulated login-item failure');
+    expect(result.message).toContain('Start AIDraw manually');
+    expect(enableStartAtLogin).toHaveBeenCalledOnce();
+  });
+
+  it('keeps isolated packaged validation from changing start-at-login', async () => {
+    const enableStartAtLogin = vi.fn(async () => ({ startsAtLogin: true }));
+    const result = await completeAgentClientSetup({
+      status: 'configured', clientId: 'opencode', clientName: 'OpenCode', message: 'Configured.',
+      restartRequired: true, restartInstruction: 'Restart OpenCode.',
+      documentationUrl: 'https://example.test/opencode',
+    }, {
+      isolated: true,
+      platformLabel: 'macOS',
+      enableStartAtLogin,
+    });
+    expect(result.message).toBe('Configured. Start-at-login was intentionally unchanged by this isolated packaged validation.');
+    expect(enableStartAtLogin).not.toHaveBeenCalled();
   });
 });
