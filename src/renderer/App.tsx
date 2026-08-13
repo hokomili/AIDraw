@@ -147,6 +147,7 @@ import { TilesetSliceEditor } from "./components/TilesetSliceEditor";
 import { TileVariantPreview } from "./components/TileVariantPreview";
 import { ShortcutReferenceDialog } from "./components/ShortcutReferenceDialog";
 import { documentTabFocusIndex } from "./document-tabs";
+import { menuFocusIndex } from "./popover-navigation";
 import { shortcutHelpRequested, toolRailFocusIndex } from "./shortcuts";
 
 type Icon = ComponentType<{ size?: number; strokeWidth?: number }>;
@@ -820,10 +821,18 @@ function DocumentTabs() {
   const [batchExporting, setBatchExporting] = useState(false);
   const [batchReport, setBatchReport] = useState<{ title: string; result: BatchDocumentResult }>();
   const [scrollState, setScrollState] = useState({ left: false, right: false });
+  const [allTabsFocusIndex, setAllTabsFocusIndex] = useState(0);
   const viewportRef = useRef<HTMLDivElement>(null);
   const allTabsRef = useRef<HTMLDivElement>(null);
+  const allTabsButtonRef = useRef<HTMLButtonElement>(null);
+  const allTabsMenuRef = useRef<HTMLDivElement>(null);
   const focusAfterCloseRef = useRef(false);
+  const allTabsMenuId = useId();
   const documents = snapshot?.documents ?? [];
+  const resolvedAllTabsFocusIndex = Math.min(
+    allTabsFocusIndex,
+    Math.max(0, documents.length + 2),
+  );
 
   useEffect(
     () =>
@@ -915,20 +924,31 @@ function DocumentTabs() {
 
   useEffect(() => {
     if (!showAll) return;
+    const focusFrame = window.requestAnimationFrame(() => {
+      const items = allTabsMenuRef.current?.querySelectorAll<HTMLButtonElement>(
+        '[role="menuitem"]',
+      );
+      items?.[resolvedAllTabsFocusIndex]?.focus();
+    });
     const onPointerDown = (event: PointerEvent) => {
       if (!allTabsRef.current?.contains(event.target as Node))
         setShowAll(false);
     };
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setShowAll(false);
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      setShowAll(false);
+      allTabsButtonRef.current?.focus();
     };
     window.addEventListener("pointerdown", onPointerDown);
-    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keydown", onKeyDown, true);
     return () => {
+      window.cancelAnimationFrame(focusFrame);
       window.removeEventListener("pointerdown", onPointerDown);
-      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keydown", onKeyDown, true);
     };
-  }, [showAll]);
+  }, [resolvedAllTabsFocusIndex, showAll]);
 
   const scrollTabs = (direction: -1 | 1) => {
     const viewport = viewportRef.current;
@@ -943,6 +963,47 @@ function DocumentTabs() {
     if (restoreFocus) focusAfterCloseRef.current = true;
     const result = await window.aidraw.closeDocument(documentId);
     if (!result.closed && restoreFocus) focusAfterCloseRef.current = false;
+  };
+
+  const closeAllTabs = (restoreFocus: boolean) => {
+    if (restoreFocus) allTabsButtonRef.current?.focus();
+    setShowAll(false);
+  };
+
+  const toggleAllTabs = () => {
+    if (showAll) {
+      setShowAll(false);
+      return;
+    }
+    setAllTabsFocusIndex(
+      Math.max(
+        0,
+        documents.findIndex(
+          (document) => document.id === snapshot?.activeDocumentId,
+        ),
+      ),
+    );
+    setShowAll(true);
+  };
+
+  const handleAllTabsMenuKeys = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (
+      event.altKey ||
+      event.ctrlKey ||
+      event.metaKey ||
+      event.shiftKey
+    )
+      return;
+    const items = allTabsMenuRef.current?.querySelectorAll<HTMLButtonElement>(
+      '[role="menuitem"]',
+    );
+    if (!items?.length) return;
+    const currentIndex = [...items].findIndex((item) => item === event.target);
+    const nextIndex = menuFocusIndex(event.key, currentIndex, items.length);
+    if (nextIndex === undefined) return;
+    event.preventDefault();
+    setAllTabsFocusIndex(nextIndex);
+    items[nextIndex].focus();
   };
 
   return (
@@ -1031,29 +1092,36 @@ function DocumentTabs() {
       </button>
       <div className="all-tabs-wrap" ref={allTabsRef}>
         <button
+          ref={allTabsButtonRef}
           className={`all-tabs-button ${showAll ? "is-active" : ""}`}
           aria-label="All open documents"
+          aria-haspopup="menu"
           aria-expanded={showAll}
+          aria-controls={allTabsMenuId}
           title={`${documents.length} open documents`}
-          onClick={() => setShowAll((value) => !value)}
+          onClick={toggleAllTabs}
         >
           <span>{documents.length}</span>
           <ChevronDown size={13} />
         </button>
         {showAll && (
           <div
+            id={allTabsMenuId}
+            ref={allTabsMenuRef}
             className="all-tabs-menu popover"
             role="menu"
             aria-label="All open documents"
+            onKeyDown={handleAllTabsMenuKeys}
           >
             <div className="popover-title">
               {documents.length} open documents
             </div>
             <div className="all-tabs-list">
-              {documents.map((document) => (
+              {documents.map((document, index) => (
                 <button
                   type="button"
                   role="menuitem"
+                  tabIndex={resolvedAllTabsFocusIndex === index ? 0 : -1}
                   className={
                     document.id === snapshot?.activeDocumentId
                       ? "is-active"
@@ -1062,7 +1130,7 @@ function DocumentTabs() {
                   key={document.id}
                   title={document.name}
                   onClick={() => {
-                    setShowAll(false);
+                    closeAllTabs(true);
                     void activate(document.id);
                   }}
                 >
@@ -1075,7 +1143,7 @@ function DocumentTabs() {
                 </button>
               ))}
             </div>
-            <div className="all-tabs-batch-actions"><button type="button" onClick={async () => { setShowAll(false); const result = await window.aidraw.saveAllDocuments(); if (!result.cancelled) setBatchReport({ title: "Save All complete", result }); }}><Save size={13} /> Save all</button><button type="button" onClick={() => { setShowAll(false); setBatchExporting(true); }}><Download size={13} /> Batch export</button><button type="button" className="is-danger" onClick={async () => { setShowAll(false); const result = await window.aidraw.closeAllDocuments(); if (!result.cancelled) setBatchReport({ title: "Close All complete", result }); }}><X size={13} /> Close all</button></div>
+            <div className="all-tabs-batch-actions" role="group" aria-label="All-document actions"><button type="button" role="menuitem" tabIndex={resolvedAllTabsFocusIndex === documents.length ? 0 : -1} onClick={async () => { closeAllTabs(true); const result = await window.aidraw.saveAllDocuments(); if (!result.cancelled) setBatchReport({ title: "Save All complete", result }); }}><Save size={13} /> Save all</button><button type="button" role="menuitem" tabIndex={resolvedAllTabsFocusIndex === documents.length + 1 ? 0 : -1} onClick={() => { closeAllTabs(true); setBatchExporting(true); }}><Download size={13} /> Batch export</button><button type="button" role="menuitem" tabIndex={resolvedAllTabsFocusIndex === documents.length + 2 ? 0 : -1} className="is-danger" onClick={async () => { closeAllTabs(true); const result = await window.aidraw.closeAllDocuments(); if (!result.cancelled) setBatchReport({ title: "Close All complete", result }); }}><X size={13} /> Close all</button></div>
           </div>
         )}
       </div>
@@ -1150,6 +1218,10 @@ function TopBar({ onOpenShortcuts }: { onOpenShortcuts: () => void }) {
   const [exportScale, setExportScale] = useState(1);
   const [exportTagId, setExportTagId] = useState("");
   const [spriteSheetSelection, setSpriteSheetSelection] = useState<SpriteSheetSelection>();
+  const exportWrapRef = useRef<HTMLDivElement>(null);
+  const exportButtonRef = useRef<HTMLButtonElement>(null);
+  const exportMenuRef = useRef<HTMLDivElement>(null);
+  const exportMenuId = useId();
   const document = snapshot?.activeDocument;
   const exportSprite = document?.kind === "pixel" && document.pixelAssets[document.activeAssetId]?.type === "sprite" ? document.pixelAssets[document.activeAssetId] as PixelSprite : undefined;
   const exportChoices =
@@ -1171,6 +1243,33 @@ function TopBar({ onOpenShortcuts }: { onOpenShortcuts: () => void }) {
             : []),
         ]
       : ["png", "jpeg", "webp", "svg", "pdf", "psd", ...(document?.animation.keyframeIds.length ? ["gif", "apng"] : [])];
+
+  useEffect(() => {
+    if (!exporting) return;
+    const focusFrame = window.requestAnimationFrame(() => {
+      exportMenuRef.current
+        ?.querySelector<HTMLElement>('select, button:not(:disabled)')
+        ?.focus();
+    });
+    const onPointerDown = (event: PointerEvent) => {
+      if (!exportWrapRef.current?.contains(event.target as Node))
+        setExporting(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      setExporting(false);
+      exportButtonRef.current?.focus();
+    };
+    window.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown, true);
+    };
+  }, [exporting]);
 
   return (
     <header className="topbar">
@@ -1221,18 +1320,27 @@ function TopBar({ onOpenShortcuts }: { onOpenShortcuts: () => void }) {
         >
           <Save size={17} />
         </button>
-        <div className="export-menu-wrap">
+        <div className="export-menu-wrap" ref={exportWrapRef}>
           <button
+            ref={exportButtonRef}
             className="icon-button"
             title="Export"
             aria-label="Export document"
+            aria-haspopup="dialog"
             aria-expanded={exporting}
+            aria-controls={exportMenuId}
             onClick={() => setExporting((value) => !value)}
           >
             <Download size={16} />
           </button>
           {exporting && (
-            <div className="export-menu popover">
+            <div
+              id={exportMenuId}
+              ref={exportMenuRef}
+              className="export-menu popover"
+              role="dialog"
+              aria-label="Export active document"
+            >
               <div className="popover-title">Export active document</div>
               {document?.kind === "pixel" && (
                 <label className="export-scale-control">
@@ -1267,6 +1375,7 @@ function TopBar({ onOpenShortcuts }: { onOpenShortcuts: () => void }) {
                     key={format}
                     onClick={async () => {
                       setExporting(false);
+                      exportButtonRef.current?.focus();
                       const result = await window.aidraw.exportActiveDocument(
                         format as Parameters<
                           typeof window.aidraw.exportActiveDocument

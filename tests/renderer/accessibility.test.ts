@@ -12,6 +12,8 @@ describe('editor accessibility baseline', () => {
     expect(styles).toContain('@media (forced-colors: active)');
     expect(styles).toMatch(/:focus-visible/);
     expect(app).toContain('role="tablist"');
+    expect(app).toContain('aria-haspopup="menu"');
+    expect(app).toContain('aria-haspopup="dialog"');
     expect(app).toContain('role="tabpanel"');
     expect(app).toContain('aria-selected={visiblePanel ===');
     expect(app).toContain('aria-label="Canvas zoom"');

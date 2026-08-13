@@ -52,6 +52,7 @@ const fixedShortcutSections: ShortcutSection[] = [
     entries: [
       { id: 'shortcut-guide', label: 'Open this shortcut guide', keys: ['F1', '?'] },
       { id: 'document-tabs', label: 'Move through focused document tabs', keys: ['Arrow Left / Right', 'Home / End'] },
+      { id: 'all-documents-menu', label: 'Move through the open All documents menu', keys: ['Arrow Up / Down', 'Home / End'] },
       { id: 'tool-rail', label: 'Move through the focused tool rail', keys: ['Arrow Up / Down', 'Home / End'] },
       { id: 'inspector-tabs', label: 'Move through focused inspector tabs', keys: ['Arrow Left / Right', 'Home / End'] },
       { id: 'skip-canvas', label: 'Use the focus-visible Skip to canvas control', keys: ['Tab', 'Enter'] },
