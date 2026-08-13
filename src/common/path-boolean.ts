@@ -1,5 +1,13 @@
 import paper from 'paper';
-import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createId, nowIso, type IllustrationObject, type PathObject, type ShapeObject } from '@aidraw/core';
+import {
+  HUMAN_ACTOR,
+  IDENTITY_TRANSFORM,
+  createId,
+  nowIso,
+  type IllustrationObject,
+  type PathObject,
+  type ShapeObject,
+} from '@aidraw/core';
 
 export type BooleanMode = 'union' | 'subtract' | 'intersect' | 'exclude';
 
@@ -15,19 +23,45 @@ function shapeItem(scope: paper.PaperScope, object: ShapeObject): paper.PathItem
 function pathItem(scope: paper.PaperScope, object: IllustrationObject): paper.PathItem | undefined {
   const item = object.type === 'shape' ? shapeItem(scope, object) : object.type === 'path' ? scope.PathItem.create(object.pathData) : undefined;
   if (!item) return undefined;
+  if (object.type === 'path') item.fillRule = object.fillRule;
   const transform = object.transform; const matrix = new scope.Matrix(); matrix.translate(transform.x, transform.y); matrix.rotate(transform.rotation, 0, 0); matrix.append(new scope.Matrix(transform.scaleX, Math.tan(transform.skewY * Math.PI / 180), Math.tan(transform.skewX * Math.PI / 180), transform.scaleY, 0, 0)); item.transform(matrix);
   return item;
 }
 
 export function createBooleanPath(first: IllustrationObject, second: IllustrationObject, mode: BooleanMode): PathObject {
-  const scope = new paper.PaperScope(); scope.setup(new scope.Size(1, 1)); const a = pathItem(scope, first); const b = pathItem(scope, second);
-  if (!a || !b) throw new Error('Boolean operations require two selected paths, rectangles, ellipses, polygons, or stars.');
-  const result = mode === 'union' ? a.unite(b) : mode === 'subtract' ? a.subtract(b) : mode === 'intersect' ? a.intersect(b) : a.exclude(b);
-  const source = first.type === 'shape' || first.type === 'path' ? first : undefined; const timestamp = nowIso();
-  const object: PathObject = {
-    id: createId('path'), revision: 0, name: `${mode[0].toUpperCase()}${mode.slice(1)}`, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
-    layerId: first.layerId, visible: true, locked: false, opacity: first.opacity, blendMode: first.blendMode, transform: structuredClone(IDENTITY_TRANSFORM), type: 'path', pathData: result.pathData, closed: true, fillRule: 'nonzero',
-    fill: source?.fill ?? { kind: 'solid', color: '#8268dd' }, stroke: source?.stroke ?? { paint: { kind: 'none' }, width: 0, opacity: 1, lineCap: 'round', lineJoin: 'round', dash: [] },
-  };
-  scope.project.remove(); return object;
+  const scope = new paper.PaperScope();
+  scope.setup(new scope.Size(1, 1));
+  try {
+    const a = pathItem(scope, first);
+    const b = pathItem(scope, second);
+    if (!a || !b) throw new Error('Boolean operations require two selected paths, rectangles, ellipses, polygons, or stars.');
+    const result = mode === 'union' ? a.unite(b) : mode === 'subtract' ? a.subtract(b) : mode === 'intersect' ? a.intersect(b) : a.exclude(b);
+    const pathData = result.pathData.trim();
+    if (result.isEmpty() || !pathData) throw new Error('Boolean operation produced no filled geometry.');
+
+    const source = first.type === 'shape' || first.type === 'path' ? first : undefined;
+    const timestamp = nowIso();
+    return {
+      id: createId('path'),
+      revision: 0,
+      name: `${mode[0].toUpperCase()}${mode.slice(1)}`,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      createdBy: HUMAN_ACTOR.id,
+      layerId: first.layerId,
+      visible: true,
+      locked: false,
+      opacity: first.opacity,
+      blendMode: first.blendMode,
+      transform: structuredClone(IDENTITY_TRANSFORM),
+      type: 'path',
+      pathData,
+      closed: true,
+      fillRule: result.fillRule === 'evenodd' ? 'evenodd' : 'nonzero',
+      fill: structuredClone(source?.fill ?? { kind: 'solid', color: '#8268dd' }),
+      stroke: structuredClone(source?.stroke ?? { paint: { kind: 'none' }, width: 0, opacity: 1, lineCap: 'round', lineJoin: 'round', dash: [] }),
+    };
+  } finally {
+    scope.project.remove();
+  }
 }

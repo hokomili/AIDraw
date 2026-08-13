@@ -22,6 +22,7 @@ import {
   type ShapeObject,
 } from '@aidraw/core';
 import { renderIllustration, renderSprite, renderTilemap } from '@main/render-document';
+import { createBooleanPath } from '../../src/common/path-boolean';
 
 function rgbaHash(canvas: Awaited<ReturnType<typeof renderIllustration>>): string {
   const rgba = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
@@ -57,6 +58,22 @@ async function illustrationStrokeGolden(): Promise<string> {
   rectangle.cornerRadius = 4;
   rectangle.stroke = { paint: { kind: 'solid', color: '#31a6a0' }, width: 5, opacity: 0.35, lineCap: 'round', lineJoin: 'round', dash: [6, 4] };
   document.objects = { [path.id]: path, [rectangle.id]: rectangle }; layer.objectIds = [path.id, rectangle.id];
+  return rgbaHash(await renderIllustration(document));
+}
+
+async function illustrationBooleanGolden(): Promise<string> {
+  const document = createIllustrationDocument('Boolean golden'); document.artboard = { ...document.artboard, width: 64, height: 64, background: null };
+  const layer = Object.values(document.layers).find((entry) => entry.type === 'vector'); if (!layer || layer.type !== 'vector') throw new Error('Missing vector layer');
+  const timestamp = nowIso();
+  const donut: PathObject = {
+    id: 'donut', revision: 0, name: 'Donut', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
+    layerId: layer.id, visible: true, locked: false, opacity: 1, blendMode: 'normal', transform: IDENTITY_TRANSFORM,
+    type: 'path', pathData: 'M4 4H60V60H4Z M18 18H46V46H18Z', closed: true, fillRule: 'evenodd', fill: { kind: 'solid', color: '#ff6b7a' },
+    stroke: { paint: { kind: 'none' }, width: 0, opacity: 1, lineCap: 'round', lineJoin: 'round', dash: [] },
+  };
+  const island = shape('island', layer.id, 28, 28, 8, 8, '#31a6a0');
+  const result = createBooleanPath(donut, island, 'union');
+  document.objects = { [result.id]: result }; layer.objectIds = [result.id];
   return rgbaHash(await renderIllustration(document));
 }
 
@@ -108,6 +125,7 @@ async function animationGolden(): Promise<string> {
 const GOLDEN_HASHES = {
   illustrationComposite: '623e92216930debf11a73466c4d34b888bd9c3c1a57dfce863694784eafd3ac6',
   illustrationStrokes: '28318fc1cc7f7442de0d63d098ca7d7f2579dad6363c07c925304638c32db284',
+  illustrationBoolean: 'e0309ac1a79db64b45171ceb4cc991b3612061d820edcd0d4f66099537a16083',
   naturalBrushes: process.platform === 'darwin' && process.arch === 'arm64'
     ? '24d10ac55affbf827b91e0c7336cef4914c99cb08466a40b3c940551b4668bfa'
     : '1ec4a2d01fa69b61bc9f6706abee685b6e207cfa2a9bcffd33a1eea9569bae00',
@@ -120,7 +138,7 @@ const GOLDEN_HASHES = {
 
 describe('deterministic raw-RGBA rendering goldens', () => {
   it('matches the maintained cross-mode corpus', async () => {
-    const actual = { illustrationComposite: await illustrationCompositeGolden(), illustrationStrokes: await illustrationStrokeGolden(), naturalBrushes: await brushGolden(), indexedSprite: spriteGolden(), orthogonalMap: mapGolden('orthogonal'), isometricMap: mapGolden('isometric'), tileTransforms: tileTransformGolden(), illustrationAnimation: await animationGolden() };
+    const actual = { illustrationComposite: await illustrationCompositeGolden(), illustrationStrokes: await illustrationStrokeGolden(), illustrationBoolean: await illustrationBooleanGolden(), naturalBrushes: await brushGolden(), indexedSprite: spriteGolden(), orthogonalMap: mapGolden('orthogonal'), isometricMap: mapGolden('isometric'), tileTransforms: tileTransformGolden(), illustrationAnimation: await animationGolden() };
     expect(actual).toEqual(GOLDEN_HASHES);
   });
 });
