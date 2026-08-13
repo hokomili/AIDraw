@@ -1,5 +1,5 @@
 import { createCanvas, loadImage } from '@napi-rs/canvas';
-import { createPixelDocument, createPixelSprite, createPixelTilemap, createPixelTileset, writePixels, writeTiles } from '@aidraw/core';
+import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createIllustrationDocument, createPixelDocument, createPixelSprite, createPixelTilemap, createPixelTileset, nowIso, writePixels, writeTiles, type ShapeObject } from '@aidraw/core';
 import { describe, expect, it } from 'vitest';
 
 import { captureObservation, MAX_OBSERVATION_SIDE } from '../../src/main/capture-observation';
@@ -44,5 +44,29 @@ describe('bounded tilemap observation', () => {
     await expect(captureObservation(document, fullRequest)).resolves.toMatchObject({ error: 'observation_too_large', limit: { pixels: 4_194_304 } });
     expect(() => renderTilemap(document, map)).toThrow(/Tilemap raster exceeds the 64-megapixel safety limit/);
     await expect(exportDocument(document, 'png')).rejects.toThrow(/Scaled export exceeds the 64-megapixel safety limit/);
+  });
+});
+
+describe('bounded illustration observation', () => {
+  it('observes a tiny far-edge region without allocating the full maximum artboard', async () => {
+    const document = createIllustrationDocument('Maximum regional illustration');
+    document.artboard = { ...document.artboard, width: 8_192, height: 8_192, background: null };
+    const layer = Object.values(document.layers).find((entry) => entry.type === 'vector');
+    if (!layer || layer.type !== 'vector') throw new Error('Expected vector layer');
+    const timestamp = nowIso(); const object: ShapeObject = {
+      id: 'far-edge', revision: 0, name: 'Far edge', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
+      layerId: layer.id, visible: true, locked: false, opacity: 1, blendMode: 'normal', transform: { ...IDENTITY_TRANSFORM, x: 8_191, y: 8_191 },
+      type: 'shape', shape: 'rectangle', width: 1, height: 1, fill: { kind: 'solid', color: '#ff3366' },
+      stroke: { paint: { kind: 'none' }, width: 0, opacity: 1, lineCap: 'round', lineJoin: 'round', dash: [] },
+    };
+    document.objects[object.id] = object; layer.objectIds.push(object.id);
+    const region = { x: 8_191, y: 8_191, width: 1, height: 1 };
+
+    const observed = await captureObservation(document, { region, scale: 1, background: 'transparent' });
+    expect(observed).toMatchObject({ available: true, width: 1, height: 1, region });
+    const image = await loadImage(Buffer.from(String(observed.data), 'base64')); const canvas = createCanvas(1, 1); canvas.getContext('2d').drawImage(image, 0, 0);
+    expect([...canvas.getContext('2d').getImageData(0, 0, 1, 1).data]).toEqual([255, 51, 102, 255]);
+
+    await expect(captureObservation(document, { scale: 1, background: 'transparent' })).resolves.toMatchObject({ error: 'observation_too_large', limit: { pixels: 4_194_304 } });
   });
 });

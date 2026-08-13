@@ -96,3 +96,7 @@ In addition to the canonical reducer kinds, MCP accepts these validated semantic
 Path booleans use the same exact shared Paper.js kernel in renderer and headless execution. Large multi-stage work should remain semantically partitioned so progress, cancellation, undo, and attribution are understandable.
 
 `aidraw:variantGroup` (tile property) and `aidraw:variantSeed` (map property) are AIDraw-namespaced custom properties, not standard Tiled random-brush behavior. Tiled JSON/XML export retains them as ordinary typed properties, but no external editor interpretation is promised. UI and `pixel.tile-variants.paint` use the same coordinate-stable weighted choice; advancing the persisted seed changes subsequent choices only, while already painted GIDs remain exact.
+
+### Illustration observation allocation boundary
+
+An illustration PNG region avoids the complete artboard only when every visible dependency is in the exact integer-aligned solid-rectangle subset. It uses a four-pixel-expanded local backing and raw crop. Curves, paths, text, images, gradients, strokes, rounded/fractional/transformed geometry, masks, paint content or cache, opacity/blend isolation, and effects retain full-artboard rendering plus raw crop so canonical pixels do not change. This is an internal allocation choice under the existing observation request/output limits, not a generic region-rendering, save/export, interchange, redaction, or foreign-format promise.

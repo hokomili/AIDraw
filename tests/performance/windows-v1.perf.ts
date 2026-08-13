@@ -27,7 +27,7 @@ import {
 import { exportDocument } from '@main/export-document';
 import { transactionSamples, visibleOperations } from '@main/playback-scheduler';
 import { materializePaintTiles, writeNativeDocument } from '@main/persistence';
-import { renderIllustration, renderTilemap, renderTilemapRegion } from '@main/render-document';
+import { renderIllustration, renderIllustrationRegion, renderTilemap, renderTilemapRegion } from '@main/render-document';
 import { mapObjectsIntersectingRasterRegion } from '@common/map-object-render';
 import { drawPixelSpriteRegion } from '@common/pixel-sprite-render';
 import { lassoSelectsIllustrationObjects } from '@common/illustration-lasso';
@@ -37,6 +37,7 @@ Object.assign(globalThis, { DOMMatrix, DOMPoint, Path2D });
 
 const budgets = {
   vector5000RenderMs: 3_000,
+  illustration8192RegionRenderMs: 100,
   illustrationLasso5000Ms: 1_000,
   illustrationHitTest5000Ms: 500,
   four4kPaintRenderMs: 8_000,
@@ -144,6 +145,22 @@ function sparseMapRegionFixture() {
   return { document, map, region: { x: 2_016, y: 2_016, width: 1, height: 1 } };
 }
 
+function sparseIllustrationRegionFixture() {
+  const document = createIllustrationDocument('Maximum-artboard regional performance fixture');
+  document.artboard = { ...document.artboard, width: 8_192, height: 8_192, background: null };
+  const layer = Object.values(document.layers).find((entry) => entry.type === 'vector');
+  if (!layer || layer.type !== 'vector') throw new Error('Sparse regional illustration layer is missing.');
+  const timestamp = nowIso();
+  const object: ShapeObject = {
+    id: 'perf-far-edge-rectangle', revision: 0, name: 'Far edge rectangle', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
+    layerId: layer.id, visible: true, locked: false, opacity: 1, blendMode: 'normal', transform: { ...IDENTITY_TRANSFORM, x: 8_191, y: 8_191 },
+    type: 'shape', shape: 'rectangle', width: 1, height: 1, fill: { kind: 'solid', color: '#ff3366' },
+    stroke: { paint: { kind: 'none' }, width: 0, opacity: 1, lineCap: 'round', lineJoin: 'round', dash: [] },
+  };
+  document.objects[object.id] = object; layer.objectIds.push(object.id);
+  return { document, region: { x: 8_191, y: 8_191, width: 1, height: 1 } };
+}
+
 function sparseSpriteRegionFixture() {
   const document = createPixelDocument('sprite', '4,096-chunk sprite viewport fixture');
   const sprite = document.pixelAssets[document.activeAssetId];
@@ -181,6 +198,12 @@ describe('Windows v1 non-GUI performance gate', () => {
     const afterVectorRss = process.memoryUsage().rss;
     memoryProfile.push(memorySnapshot('after-vector-render', startingRss));
     releaseMeasuredCanvas(vectorRender.value);
+    const sparseIllustrationRegionFixtureValue = sparseIllustrationRegionFixture();
+    const sparseIllustrationRegionRender = await measured(() => renderIllustrationRegion(sparseIllustrationRegionFixtureValue.document, sparseIllustrationRegionFixtureValue.region));
+    const afterSparseIllustrationRegionRss = process.memoryUsage().rss;
+    memoryProfile.push(memorySnapshot('after-8192-illustration-region-render', startingRss));
+    expect([...sparseIllustrationRegionRender.value.getContext('2d').getImageData(0, 0, 1, 1).data]).toEqual([255, 51, 102, 255]);
+    releaseMeasuredCanvas(sparseIllustrationRegionRender.value);
     const vectorLasso = await measured(() => lassoSelectsIllustrationObjects(
       [{ x: -10, y: -10 }, { x: 1_400, y: -10 }, { x: 1_400, y: 800 }, { x: -10, y: 800 }],
       Object.values(vector.objects),
@@ -243,9 +266,10 @@ describe('Windows v1 non-GUI performance gate', () => {
     memoryProfile.push(memorySnapshot('after-million-cell-flood-fixture', startingRss));
     const floodFill = await measured(() => floodPixelRegion({ width: floodFixture.sprite.width, height: floodFixture.sprite.height, start: { x: 0, y: 0 }, read: floodFixture.read }));
     memoryProfile.push(memorySnapshot('after-million-cell-flood-fill', startingRss));
-    const peakRss = Math.max(afterVectorRss, afterVectorLassoRss, afterVectorHitTestRss, afterPaintRss, afterMapRss, afterSparseMapRegionRss, afterSparseSpriteRegionRss, afterMapObjectFilterRss, process.memoryUsage().rss);
+    const peakRss = Math.max(afterVectorRss, afterSparseIllustrationRegionRss, afterVectorLassoRss, afterVectorHitTestRss, afterPaintRss, afterMapRss, afterSparseMapRegionRss, afterSparseSpriteRegionRss, afterMapObjectFilterRss, process.memoryUsage().rss);
     const metrics = {
       vector5000RenderMs: vectorRender.durationMs,
+      illustration8192RegionRenderMs: sparseIllustrationRegionRender.durationMs,
       illustrationLasso5000Ms: vectorLasso.durationMs,
       illustrationHitTest5000Ms: vectorHitTest.durationMs,
       four4kPaintRenderMs: paintRender.durationMs,
@@ -261,7 +285,7 @@ describe('Windows v1 non-GUI performance gate', () => {
       millionCellFloodFillMs: floodFill.durationMs,
       rssGrowthMiB: Number(((peakRss - startingRss) / 1024 / 1024).toFixed(2)),
     };
-    const report = { version: 1, createdAt: new Date().toISOString(), build: process.env.GITHUB_SHA ?? 'local', machine: { hostname: hostname(), platform: platform(), release: release(), arch: process.arch, cpu: cpus()[0]?.model, logicalCpus: cpus().length, totalMemoryMiB: Math.round(totalmem() / 1024 / 1024), freeMemoryMiB: Math.round(freemem() / 1024 / 1024), node: process.version }, coverage: { automated: ['5,000 vector render', 'exact canonical lasso selection across 5,000 vector objects', 'path-authoritative click hit testing across 5,000 vector objects', 'four 4096×4096 editable paint layers', 'cold and warm four-layer 4096×4096 materialized sparse paint render', '65,536 addressed tiles from an 8192×8192 sparse source sheet', 'one-pixel regional render across 4,096 stored map chunks', 'one-pixel regional sprite composite across 4,096 stored cel chunks', 'regional projected-bounds filter across 100,000 map objects', 'native save', 'PNG export', 'one-million-sample compact accounting', 'one-million-cell bounded flood fill', 'RSS growth'], deferredToPackagedComputerUse: ['pointer-to-preview latency', 'requestAnimationFrame pacing', 'human input during four visible agent lanes', '200% display scaling and tablet latency'] }, budgets, metrics, diagnostics: { memoryProfile } };
+    const report = { version: 1, createdAt: new Date().toISOString(), build: process.env.GITHUB_SHA ?? 'local', machine: { hostname: hostname(), platform: platform(), release: release(), arch: process.arch, cpu: cpus()[0]?.model, logicalCpus: cpus().length, totalMemoryMiB: Math.round(totalmem() / 1024 / 1024), freeMemoryMiB: Math.round(freemem() / 1024 / 1024), node: process.version }, coverage: { automated: ['5,000 vector render', 'one-pixel regional render on an 8192×8192 illustration', 'exact canonical lasso selection across 5,000 vector objects', 'path-authoritative click hit testing across 5,000 vector objects', 'four 4096×4096 editable paint layers', 'cold and warm four-layer 4096×4096 materialized sparse paint render', '65,536 addressed tiles from an 8192×8192 sparse source sheet', 'one-pixel regional render across 4,096 stored map chunks', 'one-pixel regional sprite composite across 4,096 stored cel chunks', 'regional projected-bounds filter across 100,000 map objects', 'native save', 'PNG export', 'one-million-sample compact accounting', 'one-million-cell bounded flood fill', 'RSS growth'], deferredToPackagedComputerUse: ['pointer-to-preview latency', 'requestAnimationFrame pacing', 'human input during four visible agent lanes', '200% display scaling and tablet latency'] }, budgets, metrics, diagnostics: { memoryProfile } };
     const reportPath = process.env.AIDRAW_PERFORMANCE_REPORT ?? join(process.cwd(), 'test-results', 'performance-gate.json');
     await mkdir(dirname(reportPath), { recursive: true }); await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
     expect(queueAccounting.value.samples).toBe(1_000_000); expect((queueAccounting.value.midpoint[0] as Extract<CanvasOperation, { kind: 'pixel.cel.region' }>).runs.reduce((sum, run) => sum + run.length, 0)).toBe(500_000);

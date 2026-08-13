@@ -1,7 +1,7 @@
 import { createCanvas, type Canvas } from '@napi-rs/canvas';
 import { illustrationAtTime, type AIDrawDocument } from '@aidraw/core';
 import { MAX_STATIC_RASTER_SIDE } from '../common/static-raster';
-import { renderIllustration, renderPixelAsset, renderTilemapRegion } from './render-document';
+import { renderIllustrationRegion, renderPixelAsset, renderTilemapRegion } from './render-document';
 import { MAX_OBSERVATION_PNG_BYTES } from './utility-contract';
 
 export const MAX_OBSERVATION_PIXELS = 4_194_304;
@@ -43,7 +43,9 @@ export const captureObservation: CaptureObservation = async (
     if (layerId && !document.layers[layerId]) return { error: 'layer_not_found', layerId };
     sourceWidth = document.artboard.width;
     sourceHeight = document.artboard.height;
-    renderSource = () => renderIllustration(request.illustrationTimeMs === undefined ? document : illustrationAtTime(document, request.illustrationTimeMs), layerId, request.background === 'document');
+    const illustration = request.illustrationTimeMs === undefined ? document : illustrationAtTime(document, request.illustrationTimeMs);
+    renderRegionSource = (region) => renderIllustrationRegion(illustration, region, layerId, request.background === 'document');
+    renderSource = () => renderIllustrationRegion(illustration, { x: 0, y: 0, width: sourceWidth, height: sourceHeight }, layerId, request.background === 'document');
   } else {
     if (request.illustrationTimeMs !== undefined) return { error: 'invalid_observation_target', message: 'Pixel observations do not accept illustrationTimeMs.' };
     assetId = request.assetId ?? document.activeAssetId;

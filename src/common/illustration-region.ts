@@ -1,0 +1,135 @@
+import type { IllustrationDocument, IllustrationObject, Transform } from '@aidraw/core';
+
+export interface IllustrationRasterRegion {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export const ILLUSTRATION_REGION_OVERSCAN_PIXELS = 4;
+
+function isIdentityTransform(transform: Transform): boolean {
+  return transform.x === 0
+    && transform.y === 0
+    && transform.scaleX === 1
+    && transform.scaleY === 1
+    && transform.rotation === 0
+    && transform.skewX === 0
+    && transform.skewY === 0;
+}
+
+function isIntegerTranslation(transform: Transform): boolean {
+  return Number.isSafeInteger(transform.x)
+    && Number.isSafeInteger(transform.y)
+    && transform.scaleX === 1
+    && transform.scaleY === 1
+    && transform.rotation === 0
+    && transform.skewX === 0
+    && transform.skewY === 0;
+}
+
+function objectCanRenderPhaseExactly(object: IllustrationObject): boolean {
+  if (object.opacity !== 1
+    || object.blendMode !== 'normal'
+    || object.maskObjectId
+    || (object.blur ?? 0) !== 0
+    || object.shadow
+    || object.filters?.length) return false;
+  if (object.type === 'group') return isIdentityTransform(object.transform);
+  if (object.type !== 'shape'
+    || object.shape !== 'rectangle'
+    || (object.cornerRadius ?? 0) !== 0
+    || !isIntegerTranslation(object.transform)
+    || !Number.isSafeInteger(object.width)
+    || !Number.isSafeInteger(object.height)
+    || object.width < 0
+    || object.height < 0
+    || (object.fill.kind !== 'none' && object.fill.kind !== 'solid')) return false;
+  return object.stroke.paint.kind === 'none' || object.stroke.width <= 0;
+}
+
+/**
+ * Canvas coverage is not generally invariant when identical geometry is
+ * translated onto a differently sized backing surface. The regional path is
+ * therefore limited to integer-aligned solid rectangles and empty structural
+ * containers. Richer vector/raster content retains the established full-
+ * artboard render and raw-crop path.
+ */
+export function illustrationRegionCanRenderLocally(document: IllustrationDocument, onlyLayerId?: string): boolean {
+  const objectChildren = new Set(Object.values(document.objects).flatMap((object) => object.type === 'group' ? object.childIds : []));
+  const visitedLayers = new Set<string>();
+  const visitingLayers = new Set<string>();
+  const visitedObjects = new Set<string>();
+  const visitingObjects = new Set<string>();
+  const graphVisitedObjects = new Set<string>();
+  const graphVisitingObjects = new Set<string>();
+
+  const visitObjectGraph = (objectId: string): boolean => {
+    if (graphVisitedObjects.has(objectId)) return true;
+    if (graphVisitingObjects.has(objectId)) return false;
+    const object = document.objects[objectId];
+    if (!object) return false;
+    graphVisitingObjects.add(objectId);
+    const valid = object.type !== 'group' || object.childIds.every(visitObjectGraph);
+    graphVisitingObjects.delete(objectId);
+    if (valid) graphVisitedObjects.add(objectId);
+    return valid;
+  };
+
+  const visitObject = (objectId: string): boolean => {
+    if (visitedObjects.has(objectId)) return true;
+    if (visitingObjects.has(objectId)) return false;
+    const object = document.objects[objectId];
+    if (!object) return false;
+    if (!object.visible) { visitedObjects.add(objectId); return true; }
+    if (!objectCanRenderPhaseExactly(object)) return false;
+    visitingObjects.add(objectId);
+    const local = object.type !== 'group' || object.childIds.every(visitObject);
+    visitingObjects.delete(objectId);
+    if (local) visitedObjects.add(objectId);
+    return local;
+  };
+
+  const visitLayer = (layerId: string): boolean => {
+    if (visitedLayers.has(layerId)) return true;
+    if (visitingLayers.has(layerId)) return false;
+    const layer = document.layers[layerId];
+    if (!layer) return false;
+    if (!layer.visible) { visitedLayers.add(layerId); return true; }
+    if (layer.opacity !== 1 || layer.blendMode !== 'normal' || layer.maskLayerId || layer.filters?.length) return false;
+    visitingLayers.add(layerId);
+    const local = layer.type === 'paint'
+      ? layer.strokes.length === 0 && Object.keys(layer.tileAssetIds).length === 0
+      : layer.type === 'vector'
+        ? layer.objectIds.every(visitObjectGraph)
+          && layer.objectIds.filter((objectId) => !objectChildren.has(objectId)).every(visitObject)
+        : layer.childIds.every(visitLayer);
+    visitingLayers.delete(layerId);
+    if (local) visitedLayers.add(layerId);
+    return local;
+  };
+
+  return onlyLayerId ? visitLayer(onlyLayerId) : document.layerIds.every(visitLayer);
+}
+
+export function illustrationRegionBacking(
+  document: IllustrationDocument,
+  region: IllustrationRasterRegion,
+): IllustrationRasterRegion {
+  if (![region.x, region.y, region.width, region.height].every(Number.isSafeInteger)
+    || region.x < 0 || region.y < 0 || region.width < 1 || region.height < 1) {
+    throw new RangeError('Illustration raster regions must use nonnegative safe-integer coordinates and positive safe-integer dimensions.');
+  }
+  const right = region.x + region.width;
+  const bottom = region.y + region.height;
+  if (!Number.isSafeInteger(right) || !Number.isSafeInteger(bottom)
+    || right > document.artboard.width || bottom > document.artboard.height) {
+    throw new RangeError('Illustration raster region falls outside the artboard bounds.');
+  }
+  const x = Math.max(0, region.x - ILLUSTRATION_REGION_OVERSCAN_PIXELS);
+  const y = Math.max(0, region.y - ILLUSTRATION_REGION_OVERSCAN_PIXELS);
+  const expandedRight = Math.min(document.artboard.width, right + ILLUSTRATION_REGION_OVERSCAN_PIXELS);
+  const expandedBottom = Math.min(document.artboard.height, bottom + ILLUSTRATION_REGION_OVERSCAN_PIXELS);
+  return { x, y, width: expandedRight - x, height: expandedBottom - y };
+}

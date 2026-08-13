@@ -17,6 +17,7 @@ import {
 import { BoundedResourceCache } from '../common/bounded-resource-cache';
 import { applyCanvasStrokeStyle } from '../common/canvas-stroke';
 import { colorWithOpacity } from '../common/color';
+import { illustrationRegionBacking, illustrationRegionCanRenderLocally, type IllustrationRasterRegion } from '../common/illustration-region';
 import { isometricCellRect, isometricObjectMatrix, isometricProjectionExtent } from '../common/isometric-projection';
 import { drawMapObjectOverlay, mapObjectsIntersectingRasterRegion } from '../common/map-object-render';
 import { orthogonalCellRect, orthogonalObjectMatrix, orthogonalProjectionExtent } from '../common/orthogonal-projection';
@@ -203,11 +204,13 @@ async function drawIllustrationObject(context: Context, document: IllustrationDo
   context.restore();
 }
 
-export async function renderIllustration(document: IllustrationDocument, onlyLayerId?: string, includeBackground = true): Promise<Canvas> {
-  const canvas = createCanvas(document.artboard.width, document.artboard.height);
+async function renderIllustrationSurface(document: IllustrationDocument, region: IllustrationRasterRegion, onlyLayerId?: string, includeBackground = true): Promise<Canvas> {
+  const canvas = createCanvas(region.width, region.height);
   const context = canvas.getContext('2d');
+  context.save();
+  context.translate(-region.x, -region.y);
   const paintTileImages = new Map<string, LoadedImage>();
-  if (includeBackground && document.artboard.background) { context.fillStyle = document.artboard.background; context.fillRect(0, 0, canvas.width, canvas.height); }
+  if (includeBackground && document.artboard.background) { context.fillStyle = document.artboard.background; context.fillRect(0, 0, document.artboard.width, document.artboard.height); }
   const objectChildren = new Set(Object.values(document.objects).flatMap((object) => object.type === 'group' ? object.childIds : []));
   const drawObjectEntry = async (target: Context, objectId: string, visiting = new Set<string>()): Promise<void> => {
     if (visiting.has(objectId)) return;
@@ -217,11 +220,11 @@ export async function renderIllustration(document: IllustrationDocument, onlyLay
     const transformed = object.transform.x !== 0 || object.transform.y !== 0 || object.transform.scaleX !== 1 || object.transform.scaleY !== 1 || object.transform.rotation !== 0 || object.transform.skewX !== 0 || object.transform.skewY !== 0;
     const isolate = transformed || object.opacity !== 1 || object.blendMode !== 'normal' || Boolean(object.blur || object.shadow || object.maskObjectId || object.filters?.length);
     if (!isolate) { for (const childId of object.childIds) await drawObjectEntry(target, childId, nextVisiting); return; }
-    const buffer = acquireScratchCanvas(document.artboard.width, document.artboard.height); const bufferContext = buffer.getContext('2d');
+    const buffer = acquireScratchCanvas(region.width, region.height); const bufferContext = buffer.getContext('2d'); bufferContext.translate(-region.x, -region.y);
     try {
       for (const childId of object.childIds) await drawObjectEntry(bufferContext, childId, nextVisiting);
       target.save(); const mask = object.maskObjectId ? document.objects[object.maskObjectId] : undefined; const maskPath = mask ? transformedObjectPath(mask) : undefined; if (maskPath) target.clip(maskPath);
-      target.translate(object.transform.x, object.transform.y); target.rotate(object.transform.rotation * Math.PI / 180); target.transform(object.transform.scaleX, Math.tan(object.transform.skewY * Math.PI / 180), Math.tan(object.transform.skewX * Math.PI / 180), object.transform.scaleY, 0, 0); target.globalAlpha *= object.opacity; target.globalCompositeOperation = composite(object.blendMode); target.filter = objectFilter(object); if (object.shadow) { target.shadowColor = object.shadow.color; target.shadowBlur = object.shadow.blur; target.shadowOffsetX = object.shadow.offsetX; target.shadowOffsetY = object.shadow.offsetY; } target.drawImage(buffer, 0, 0); target.restore();
+      target.translate(object.transform.x, object.transform.y); target.rotate(object.transform.rotation * Math.PI / 180); target.transform(object.transform.scaleX, Math.tan(object.transform.skewY * Math.PI / 180), Math.tan(object.transform.skewX * Math.PI / 180), object.transform.scaleY, 0, 0); target.globalAlpha *= object.opacity; target.globalCompositeOperation = composite(object.blendMode); target.filter = objectFilter(object); if (object.shadow) { target.shadowColor = object.shadow.color; target.shadowBlur = object.shadow.blur; target.shadowOffsetX = object.shadow.offsetX; target.shadowOffsetY = object.shadow.offsetY; } target.drawImage(buffer, region.x, region.y); target.restore();
     } finally { releaseScratchCanvas(buffer); }
   };
   const drawLayer = async (layerId: string, target: Context = context): Promise<void> => {
@@ -257,14 +260,45 @@ export async function renderIllustration(document: IllustrationDocument, onlyLay
     const maskLayer = layer.maskLayerId ? document.layers[layer.maskLayerId] : undefined;
     if (maskLayer?.type === 'vector') { const maskPath = new Path2D(); for (const objectId of maskLayer.objectIds) { const path = document.objects[objectId] ? transformedObjectPath(document.objects[objectId]) : undefined; if (path) maskPath.addPath(path); } target.clip(maskPath); }
     if (layer.opacity !== 1 || layer.blendMode !== 'normal' || layer.filters?.length) {
-      const buffer = acquireScratchCanvas(document.artboard.width, document.artboard.height);
-      try { await drawContents(buffer.getContext('2d')); target.globalAlpha *= layer.opacity; target.globalCompositeOperation = composite(layer.blendMode); target.filter = adjustmentFilter(layer.filters); target.drawImage(buffer, 0, 0); }
+      const buffer = acquireScratchCanvas(region.width, region.height); const bufferContext = buffer.getContext('2d'); bufferContext.translate(-region.x, -region.y);
+      try { await drawContents(bufferContext); target.globalAlpha *= layer.opacity; target.globalCompositeOperation = composite(layer.blendMode); target.filter = adjustmentFilter(layer.filters); target.drawImage(buffer, region.x, region.y); }
       finally { releaseScratchCanvas(buffer); }
     } else await drawContents(target);
     target.restore();
   };
   if (onlyLayerId) await drawLayer(onlyLayerId); else for (const layerId of document.layerIds) await drawLayer(layerId);
+  context.restore();
   return canvas;
+}
+
+function sameRegion(left: IllustrationRasterRegion, right: IllustrationRasterRegion): boolean {
+  return left.x === right.x && left.y === right.y && left.width === right.width && left.height === right.height;
+}
+
+function cropIllustrationSurface(source: Canvas, x: number, y: number, width: number, height: number): Canvas {
+  const canvas = createCanvas(width, height);
+  const pixels = source.getContext('2d').getImageData(x, y, width, height);
+  canvas.getContext('2d').putImageData(pixels, 0, 0);
+  return canvas;
+}
+
+export async function renderIllustration(document: IllustrationDocument, onlyLayerId?: string, includeBackground = true): Promise<Canvas> {
+  return renderIllustrationSurface(document, { x: 0, y: 0, width: document.artboard.width, height: document.artboard.height }, onlyLayerId, includeBackground);
+}
+
+export async function renderIllustrationRegion(document: IllustrationDocument, requested: IllustrationRasterRegion, onlyLayerId?: string, includeBackground = true): Promise<Canvas> {
+  const backing = illustrationRegionBacking(document, requested);
+  assertStaticRasterDimensions(backing.width, backing.height, 'Illustration raster region');
+  if (!illustrationRegionCanRenderLocally(document, onlyLayerId)) {
+    const full = await renderIllustration(document, onlyLayerId, includeBackground);
+    if (requested.x === 0 && requested.y === 0 && requested.width === full.width && requested.height === full.height) return full;
+    try { return cropIllustrationSurface(full, requested.x, requested.y, requested.width, requested.height); }
+    finally { releaseCanvas(full); }
+  }
+  const source = await renderIllustrationSurface(document, backing, onlyLayerId, includeBackground);
+  if (sameRegion(requested, backing)) return source;
+  try { return cropIllustrationSurface(source, requested.x - backing.x, requested.y - backing.y, requested.width, requested.height); }
+  finally { releaseCanvas(source); }
 }
 
 export function renderSprite(document: PixelDocument, sprite: PixelSprite, frameId = sprite.frameIds[0], onlyLayerId?: string): Canvas {

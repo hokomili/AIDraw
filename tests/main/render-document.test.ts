@@ -3,9 +3,55 @@ import { createCanvas, loadImage } from '@napi-rs/canvas';
 import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createIllustrationDocument, createPixelDocument, createPixelSprite, createPixelTilemap, createPixelTileset, encodeTiledGid, nowIso, writePixels, writeTiles, type CollisionShape, type GroupObject, type ShapeObject } from '@aidraw/core';
 import { exportDocument } from '@main/export-document';
 import { materializePaintTiles } from '@main/persistence';
-import { renderIllustration, renderSprite, renderSpriteRegion, renderTilemap, renderTilemapRegion } from '@main/render-document';
+import { renderIllustration, renderIllustrationRegion, renderSprite, renderSpriteRegion, renderTilemap, renderTilemapRegion } from '@main/render-document';
 
 describe('native document rendering', () => {
+  it('renders locality-safe illustration regions byte-exactly against full-raster crops', async () => {
+    const document = createIllustrationDocument('Illustration region parity');
+    document.artboard = { ...document.artboard, width: 96, height: 72, background: '#f8efe5' };
+    const layer = Object.values(document.layers).find((entry) => entry.type === 'vector');
+    if (!layer || layer.type !== 'vector') throw new Error('Expected vector layer');
+    const timestamp = nowIso();
+    const shape = (id: string, x: number, y: number, color: string): ShapeObject => ({
+      id, revision: 0, name: id, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
+      layerId: layer.id, visible: true, locked: false, opacity: 1, blendMode: 'normal', transform: { ...IDENTITY_TRANSFORM, x, y },
+      type: 'shape', shape: 'rectangle', width: 34, height: 26, fill: { kind: 'solid', color },
+      stroke: { paint: { kind: 'none' }, width: 0, opacity: 1, lineCap: 'round', lineJoin: 'round', dash: [] },
+    });
+    const first = shape('rectangle', 8, 7, '#ff6b7a'); const second = shape('overlap', 29, 20, '#31a6a0');
+    const group: GroupObject = {
+      id: 'group', revision: 0, name: 'group', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
+      layerId: layer.id, visible: true, locked: false, opacity: 1, blendMode: 'normal', transform: structuredClone(IDENTITY_TRANSFORM),
+      type: 'group', childIds: [first.id, second.id],
+    };
+    document.objects = { [first.id]: first, [second.id]: second, [group.id]: group }; layer.objectIds = [first.id, second.id, group.id];
+    const region = { x: 17, y: 13, width: 37, height: 31 };
+
+    const full = await renderIllustration(document); const actual = await renderIllustrationRegion(document, region);
+    expect({ width: actual.width, height: actual.height }).toEqual({ width: region.width, height: region.height });
+    expect(Buffer.from(actual.getContext('2d').getImageData(0, 0, region.width, region.height).data)).toEqual(Buffer.from(full.getContext('2d').getImageData(region.x, region.y, region.width, region.height).data));
+    full.width = 1; full.height = 1; actual.width = 1; actual.height = 1;
+  });
+
+  it('retains exact full-crop fallback for spatial illustration effects', async () => {
+    const document = createIllustrationDocument('Illustration regional fallback');
+    document.artboard = { ...document.artboard, width: 64, height: 48, background: null };
+    const layer = Object.values(document.layers).find((entry) => entry.type === 'vector');
+    if (!layer || layer.type !== 'vector') throw new Error('Expected vector layer');
+    const timestamp = nowIso(); const object: ShapeObject = {
+      id: 'blurred', revision: 0, name: 'Blurred', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
+      layerId: layer.id, visible: true, locked: false, opacity: 1, blendMode: 'normal', blur: 6, transform: { ...IDENTITY_TRANSFORM, x: 20, y: 12 },
+      type: 'shape', shape: 'rectangle', width: 20, height: 20, fill: { kind: 'solid', color: '#8268dd' },
+      stroke: { paint: { kind: 'none' }, width: 0, opacity: 1, lineCap: 'round', lineJoin: 'round', dash: [] },
+    };
+    document.objects[object.id] = object; layer.objectIds.push(object.id);
+    const region = { x: 13, y: 9, width: 31, height: 27 };
+
+    const full = await renderIllustration(document); const actual = await renderIllustrationRegion(document, region);
+    expect(Buffer.from(actual.getContext('2d').getImageData(0, 0, region.width, region.height).data)).toEqual(Buffer.from(full.getContext('2d').getImageData(region.x, region.y, region.width, region.height).data));
+    full.width = 1; full.height = 1; actual.width = 1; actual.height = 1;
+  });
+
   it('renders a rectangular orthogonal cell at its authored aspect without resampling drift', async () => {
     const document = createPixelDocument('project', 'Orthogonal rectangular cell'); document.assetIds = []; document.pixelAssets = {};
     const sprite = createPixelSprite('Rectangular tile', 3, 5); const cel = Object.values(sprite.cels)[0];
