@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -293,6 +294,107 @@ describe('.aidraw persistence', () => {
     const legacyPath = join(root, 'legacy.aidraw'); await writeFile(legacyPath, zipSync(files));
     const loaded = await readNativeDocument(legacyPath); expect(loaded.manifest.schemaVersion).toBe(1); expect(loaded.document.schemaVersion).toBe(2);
     if (loaded.document.kind !== 'illustration') throw new Error('Expected illustration'); expect(loaded.document.animation.keyframeIds).toEqual([]);
+  });
+
+  it('rejects malformed manifests and manifest/document contradictions before returning native content', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-persistence-manifest-')); temporaryPaths.push(root);
+    const sourcePath = await writeNativeDocument(join(root, 'source.aidraw'), createIllustrationDocument('Manifest fixture'), '1.0.0');
+    const files = unzipSync(new Uint8Array(await readFile(sourcePath)));
+    const validManifest = JSON.parse(strFromU8(files['manifest.json'])) as Record<string, unknown>;
+
+    const contradictions: Array<[string, unknown]> = [
+      ['schemaVersion', 1],
+      ['documentId', 'document-other'],
+      ['documentKind', 'pixel'],
+      ['name', 'Contradictory name'],
+      ['revision', 1],
+      ['createdAt', '2000-01-01T00:00:00.000Z'],
+      ['updatedAt', '2000-01-02T00:00:00.000Z'],
+      ['assetCount', 1],
+    ];
+    for (const [field, value] of contradictions) {
+      const manifest = { ...validManifest, [field]: value };
+      const path = join(root, `contradictory-${field}.aidraw`);
+      await writeFile(path, zipSync({ ...files, 'manifest.json': strToU8(JSON.stringify(manifest)) }));
+      await expect(readNativeDocument(path)).rejects.toThrow(`AIDraw manifest is inconsistent with document.json: ${field}.`);
+    }
+
+    const malformed: Array<[string, unknown, string]> = [
+      ['not-an-object', null, 'AIDraw manifest is malformed.'],
+      ['wrong-format', { ...validManifest, format: 'Other' }, 'This file is not a valid AIDraw container.'],
+      ['future-schema', { ...validManifest, schemaVersion: 3 }, 'Unsupported AIDraw schema version: 3'],
+      ['unsafe-revision', { ...validManifest, revision: Number.MAX_SAFE_INTEGER + 1 }, 'AIDraw manifest is malformed.'],
+      ['negative-asset-count', { ...validManifest, assetCount: -1 }, 'AIDraw manifest is malformed.'],
+      ['missing-saver', { ...validManifest, savedBy: undefined }, 'AIDraw manifest is malformed.'],
+      ['wrong-saver', { ...validManifest, savedBy: { application: 'Other', version: '1.0.0' } }, 'AIDraw manifest is malformed.'],
+    ];
+    for (const [name, manifest, error] of malformed) {
+      const path = join(root, `malformed-${name}.aidraw`);
+      await writeFile(path, zipSync({ ...files, 'manifest.json': strToU8(JSON.stringify(manifest)) }));
+      await expect(readNativeDocument(path)).rejects.toThrow(error);
+    }
+    const invalidJsonPath = join(root, 'malformed-invalid-json.aidraw');
+    await writeFile(invalidJsonPath, zipSync({ ...files, 'manifest.json': strToU8('{"format":') }));
+    await expect(readNativeDocument(invalidJsonPath)).rejects.toThrow('AIDraw manifest is malformed.');
+  });
+
+  it('hydrates only hash- and length-matched native asset entries and never trusts inline document bytes', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-persistence-assets-')); temporaryPaths.push(root);
+    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const sha256 = createHash('sha256').update(bytes).digest('hex');
+    const document = createIllustrationDocument('Asset integrity fixture');
+    document.assets['asset-integrity'] = {
+      id: 'asset-integrity', name: 'Integrity asset', mimeType: 'image/png', byteLength: bytes.byteLength,
+      sha256, source: 'imported', data: bytes.toString('base64'),
+    };
+    const sourcePath = await writeNativeDocument(join(root, 'source.aidraw'), document, '1.0.0');
+    const valid = await readNativeDocument(sourcePath);
+    expect(valid.document.assets['asset-integrity'].data).toBe(bytes.toString('base64'));
+    expect(valid.warnings).toEqual([]);
+
+    const sourceArchiveBytes = await readFile(sourcePath);
+    const invalidSave = structuredClone(document);
+    const invalidSaveBytes = Buffer.from(bytes); invalidSaveBytes[0] ^= 0xff;
+    invalidSave.assets['asset-integrity'].data = invalidSaveBytes.toString('base64');
+    await expect(writeNativeDocument(sourcePath, invalidSave, '1.0.1')).rejects.toThrow('AIDraw asset data does not match its content metadata.');
+    expect(await readFile(sourcePath)).toEqual(sourceArchiveBytes);
+
+    const sourceFiles = unzipSync(new Uint8Array(sourceArchiveBytes));
+    const corruptBytes = Uint8Array.from(sourceFiles[`assets/${sha256}`]); corruptBytes[0] ^= 0xff;
+    const corruptPath = join(root, 'corrupt-hash.aidraw');
+    await writeFile(corruptPath, zipSync({ ...sourceFiles, [`assets/${sha256}`]: corruptBytes }));
+    const corrupt = await readNativeDocument(corruptPath);
+    expect(corrupt.document.assets['asset-integrity'].data).toBeUndefined();
+    expect(corrupt.warnings).toContain('Embedded data for asset “Integrity asset” is corrupt and was ignored.');
+
+    const wrongLengthFiles = { ...sourceFiles };
+    const wrongLengthDocument = JSON.parse(strFromU8(wrongLengthFiles['document.json'])) as typeof document;
+    wrongLengthDocument.assets['asset-integrity'].byteLength += 1;
+    wrongLengthFiles['document.json'] = strToU8(JSON.stringify(wrongLengthDocument));
+    const wrongLengthPath = join(root, 'wrong-length.aidraw');
+    await writeFile(wrongLengthPath, zipSync(wrongLengthFiles));
+    const wrongLength = await readNativeDocument(wrongLengthPath);
+    expect(wrongLength.document.assets['asset-integrity'].data).toBeUndefined();
+    expect(wrongLength.warnings).toContain('Embedded data for asset “Integrity asset” is corrupt and was ignored.');
+
+    const inlineFiles = { ...sourceFiles };
+    delete inlineFiles[`assets/${sha256}`];
+    const inlineDocument = JSON.parse(strFromU8(inlineFiles['document.json'])) as typeof document;
+    inlineDocument.assets['asset-integrity'].data = bytes.toString('base64');
+    inlineFiles['document.json'] = strToU8(JSON.stringify(inlineDocument));
+    const inlinePath = join(root, 'inline-bypass.aidraw');
+    await writeFile(inlinePath, zipSync(inlineFiles));
+    const inline = await readNativeDocument(inlinePath);
+    expect(inline.document.assets['asset-integrity'].data).toBeUndefined();
+    expect(inline.warnings).toContain('Embedded data for asset “Integrity asset” is missing.');
+
+    const invalidMetadataFiles = { ...sourceFiles };
+    const invalidMetadataDocument = JSON.parse(strFromU8(invalidMetadataFiles['document.json'])) as typeof document;
+    invalidMetadataDocument.assets['asset-integrity'].sha256 = 'not-a-content-hash';
+    invalidMetadataFiles['document.json'] = strToU8(JSON.stringify(invalidMetadataDocument));
+    const invalidMetadataPath = join(root, 'invalid-asset-metadata.aidraw');
+    await writeFile(invalidMetadataPath, zipSync(invalidMetadataFiles));
+    await expect(readNativeDocument(invalidMetadataPath)).rejects.toThrow('AIDraw document contains invalid asset metadata.');
   });
 
   it('rejects unsafe ZIP paths and oversized metadata before native extraction', async () => {

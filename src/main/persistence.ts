@@ -32,6 +32,7 @@ const MAX_NATIVE_ENTRY_BYTES = 128 * 1024 * 1024;
 const MAX_NATIVE_METADATA_BYTES = 64 * 1024 * 1024;
 const MAX_NATIVE_MANIFEST_BYTES = 1024 * 1024;
 const MAX_NATIVE_ENTRIES = 20_000;
+const NATIVE_ASSET_SOURCES = new Set(['imported', 'generated', 'embedded', 'rendered']);
 
 function safeArchiveEntryName(name: string): boolean {
   return Boolean(name) && !name.includes('\\') && !name.includes('\0') && !name.startsWith('/') && !/^[a-z]:/i.test(name) && !name.split('/').some((part) => part === '..' || part === '.');
@@ -121,6 +122,46 @@ export interface LoadedNativeDocument {
   warnings: string[];
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function parseNativeManifest(value: unknown): NativeManifest {
+  if (!isRecord(value)) throw new Error('AIDraw manifest is malformed.');
+  if (value.format !== 'AIDraw') throw new Error('This file is not a valid AIDraw container.');
+  if (typeof value.schemaVersion !== 'number' || !Number.isInteger(value.schemaVersion) || value.schemaVersion !== 1 && value.schemaVersion !== CURRENT_SCHEMA_VERSION) {
+    if (typeof value.schemaVersion === 'number' && Number.isInteger(value.schemaVersion)) throw new Error(`Unsupported AIDraw schema version: ${String(value.schemaVersion)}`);
+    throw new Error('AIDraw manifest is malformed.');
+  }
+  if (typeof value.documentId !== 'string' || !value.documentId
+    || value.documentKind !== 'illustration' && value.documentKind !== 'pixel'
+    || typeof value.name !== 'string' || !value.name
+    || typeof value.revision !== 'number' || !Number.isSafeInteger(value.revision) || value.revision < 0
+    || typeof value.createdAt !== 'string' || typeof value.updatedAt !== 'string'
+    || typeof value.assetCount !== 'number' || !Number.isSafeInteger(value.assetCount) || value.assetCount < 0
+    || !isRecord(value.savedBy) || value.savedBy.application !== 'AIDraw' || typeof value.savedBy.version !== 'string') {
+    throw new Error('AIDraw manifest is malformed.');
+  }
+  return value as unknown as NativeManifest;
+}
+
+function assertNativeManifestMatchesDocument(manifest: NativeManifest, value: unknown): void {
+  if (!isRecord(value)) return;
+  const comparisons: Array<[keyof NativeManifest, unknown]> = [
+    ['schemaVersion', value.schemaVersion],
+    ['documentId', value.id],
+    ['documentKind', value.kind],
+    ['name', value.name],
+    ['revision', value.revision],
+    ['createdAt', value.createdAt],
+    ['updatedAt', value.updatedAt],
+    ['assetCount', isRecord(value.assets) ? Object.keys(value.assets).length : undefined],
+  ];
+  for (const [field, documentValue] of comparisons) {
+    if (manifest[field] !== documentValue) throw new Error(`AIDraw manifest is inconsistent with document.json: ${field}.`);
+  }
+}
+
 function normalizePath(filePath: string): string {
   return extname(filePath).toLowerCase() === '.aidraw' ? filePath : `${filePath}.aidraw`;
 }
@@ -174,6 +215,41 @@ function comparePaintTileKeys(left: string, right: string): number {
 function pruneUnreferencedPaintTiles(document: AIDrawDocument): void {
   for (const [assetId, asset] of Object.entries(document.assets)) {
     if (asset.source === 'rendered' && assetId.startsWith('paint-tile-') && findDocumentAssetReferences(document, assetId).length === 0) delete document.assets[assetId];
+  }
+}
+
+function nativeAssetMetadata(assetId: string, candidate: unknown): DocumentAsset {
+  if (!isRecord(candidate) || candidate.id !== assetId || typeof candidate.name !== 'string' || !candidate.name
+    || typeof candidate.mimeType !== 'string' || !candidate.mimeType
+    || typeof candidate.byteLength !== 'number' || !Number.isSafeInteger(candidate.byteLength) || candidate.byteLength < 0
+    || typeof candidate.sha256 !== 'string' || !/^[0-9a-f]{64}$/i.test(candidate.sha256)
+    || typeof candidate.source !== 'string' || !NATIVE_ASSET_SOURCES.has(candidate.source)
+    || candidate.data !== undefined && typeof candidate.data !== 'string') {
+    throw new Error('AIDraw document contains invalid asset metadata.');
+  }
+  return candidate as unknown as DocumentAsset;
+}
+
+function hydrateNativeAssets(
+  document: AIDrawDocument,
+  archive: ReturnType<typeof unzipSync>,
+  warnings: string[],
+  checkpoint = false,
+): void {
+  for (const [assetId, candidate] of Object.entries(document.assets)) {
+    const asset = nativeAssetMetadata(assetId, candidate);
+    delete asset.data;
+    const bytes = archive[`assets/${asset.sha256}`];
+    const label = checkpoint ? 'checkpoint asset' : 'asset';
+    if (!bytes) {
+      if (asset.byteLength > 0) warnings.push(`Embedded data for ${label} “${asset.name}” is missing.`);
+      continue;
+    }
+    if (bytes.byteLength !== asset.byteLength || createHash('sha256').update(bytes).digest('hex') !== asset.sha256.toLowerCase()) {
+      warnings.push(`Embedded data for ${label} “${asset.name}” is corrupt and was ignored.`);
+      continue;
+    }
+    asset.data = Buffer.from(bytes).toString('base64');
   }
 }
 
@@ -297,10 +373,15 @@ function buildArchive(document: AIDrawDocument, appVersion: string, preview?: Ui
   const files: Record<string, Uint8Array> = {};
   const externalizeAssets = (value: AIDrawDocument) => {
     const assetMetadata: Record<string, DocumentAsset> = {};
-    for (const asset of Object.values(value.assets)) {
+    for (const [assetId, candidate] of Object.entries(value.assets)) {
+      const asset = nativeAssetMetadata(assetId, candidate);
       const metadata = structuredClone(asset);
-      if (metadata.data) {
-        files[`assets/${metadata.sha256}`] ??= Uint8Array.from(Buffer.from(metadata.data, 'base64'));
+      if (metadata.data !== undefined) {
+        const bytes = Buffer.from(metadata.data, 'base64');
+        if (bytes.toString('base64') !== metadata.data || bytes.byteLength !== metadata.byteLength || createHash('sha256').update(bytes).digest('hex') !== metadata.sha256.toLowerCase()) {
+          throw new Error('AIDraw asset data does not match its content metadata.');
+        }
+        files[`assets/${metadata.sha256}`] ??= Uint8Array.from(bytes);
         delete metadata.data;
       }
       assetMetadata[metadata.id] = metadata;
@@ -349,11 +430,12 @@ export async function readNativeDocument(filePath: string): Promise<LoadedNative
   if (!archive['manifest.json'] || !archive['document.json']) {
     throw new Error('This file is not a valid AIDraw container.');
   }
-  const manifest = JSON.parse(strFromU8(archive['manifest.json'])) as NativeManifest;
-  if (manifest.format !== 'AIDraw' || ![1, CURRENT_SCHEMA_VERSION].includes(manifest.schemaVersion)) {
-    throw new Error(`Unsupported AIDraw schema version: ${String(manifest.schemaVersion)}`);
-  }
-  const document = migrateDocument(JSON.parse(strFromU8(archive['document.json'])));
+  let manifestValue: unknown;
+  try { manifestValue = JSON.parse(strFromU8(archive['manifest.json'])); } catch { throw new Error('AIDraw manifest is malformed.'); }
+  const manifest = parseNativeManifest(manifestValue);
+  const documentValue: unknown = JSON.parse(strFromU8(archive['document.json']));
+  assertNativeManifestMatchesDocument(manifest, documentValue);
+  const document = migrateDocument(documentValue);
   const warnings: string[] = [];
   const trace: TransactionTraceEntry[] = [];
   const checkpoints: DocumentCheckpointRecord[] = [];
@@ -366,11 +448,7 @@ export async function readNativeDocument(filePath: string): Promise<LoadedNative
       } catch { warnings.push('A corrupt transaction trace entry was ignored.'); }
     }
   }
-  for (const asset of Object.values(document.assets)) {
-    const bytes = archive[`assets/${asset.sha256}`];
-    if (bytes) asset.data = Buffer.from(bytes).toString('base64');
-    else if (asset.byteLength > 0) warnings.push(`Embedded data for asset “${asset.name}” is missing.`);
-  }
+  hydrateNativeAssets(document, archive, warnings);
   validateLoadedPaintTileCaches(document, warnings);
   if (archive['checkpoints/index.json']) {
     try {
@@ -383,11 +461,7 @@ export async function readNativeDocument(filePath: string): Promise<LoadedNative
           const parsed = JSON.parse(strFromU8(bytes)) as DocumentCheckpointRecord;
           const checkpointDocument = migrateDocument(parsed.document);
           if (parsed.id !== summary.id || parsed.documentId !== document.id || checkpointDocument.id !== document.id || typeof parsed.name !== 'string' || !parsed.name.trim() || !parsed.createdBy || !Number.isInteger(parsed.sourceRevision)) throw new Error('Checkpoint metadata is inconsistent.');
-          for (const asset of Object.values(checkpointDocument.assets)) {
-            const assetBytes = archive[`assets/${asset.sha256}`];
-            if (assetBytes) asset.data = Buffer.from(assetBytes).toString('base64');
-            else if (asset.byteLength > 0) warnings.push(`Embedded data for checkpoint asset “${asset.name}” is missing.`);
-          }
+          hydrateNativeAssets(checkpointDocument, archive, warnings, true);
           validateLoadedPaintTileCaches(checkpointDocument, warnings);
           checkpoints.push({ ...parsed, document: checkpointDocument });
         } catch { warnings.push(`Checkpoint “${summary.id}” is corrupt and was ignored.`); }
