@@ -1,4 +1,5 @@
 import type { IllustrationDocument, IllustrationObject, PointSample } from '@aidraw/core';
+import { CANVAS_STROKE_MITER_LIMIT } from '../../common/canvas-stroke';
 import { objectWorldBounds } from '../../common/selection-transform';
 import { outlinePath, pressureOutline } from './geometry';
 
@@ -96,6 +97,7 @@ export function hitTestAll(document: IllustrationDocument, point: PointSample, c
         if (hasStroke) {
           context.lineWidth = object.stroke.width + localTolerance * 2;
           context.lineCap = object.stroke.lineCap; context.lineJoin = object.stroke.lineJoin; context.setLineDash(object.stroke.dash);
+          context.miterLimit = CANVAS_STROKE_MITER_LIMIT;
           if (context.isPointInStroke(localPath, local.x, local.y)) return true;
         }
         return false;

@@ -25,6 +25,7 @@ import { collectReplayMasks } from '../replay';
 import { EntryDialog } from '../components/EditorDialog';
 import { PlaybackLanes } from '../components/PlaybackLanes';
 import { colorWithOpacity } from '../../common/color';
+import { applyCanvasStrokeStyle } from '../../common/canvas-stroke';
 import { paintTileCachePlan } from '../../common/paint-tile-cache';
 import { renderRasterStroke } from '../../common/raster-brush';
 import { renderStyledText } from '../../common/text-layout';
@@ -169,11 +170,7 @@ function drawShape(context: CanvasRenderingContext2D, object: ShapeObject): void
   const stroke = paintValue(object.stroke.paint, context);
   if (stroke && object.stroke.width > 0) {
     context.strokeStyle = stroke;
-    context.lineWidth = object.stroke.width;
-    context.lineCap = object.stroke.lineCap;
-    context.lineJoin = object.stroke.lineJoin;
-    context.setLineDash(object.stroke.dash);
-    context.globalAlpha *= object.stroke.opacity;
+    applyCanvasStrokeStyle(context, object.stroke);
     context.stroke(path);
   }
 }
@@ -192,7 +189,7 @@ function drawObject(context: CanvasRenderingContext2D, object: IllustrationObjec
     const fill = paintValue(object.fill, context);
     if (fill) { context.fillStyle = fill; context.fill(path, object.fillRule); }
     const stroke = paintValue(object.stroke.paint, context);
-    if (stroke) { context.strokeStyle = stroke; context.lineWidth = object.stroke.width; context.stroke(path); }
+    if (stroke && object.stroke.width > 0) { context.strokeStyle = stroke; applyCanvasStrokeStyle(context, object.stroke); context.stroke(path); }
   } else if (object.type === 'text') {
     renderStyledText(context, object);
   } else if (object.type === 'image') {

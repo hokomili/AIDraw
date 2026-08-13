@@ -15,6 +15,7 @@ import {
   type PixelTilemap,
 } from '@aidraw/core';
 import { BoundedResourceCache } from '../common/bounded-resource-cache';
+import { applyCanvasStrokeStyle } from '../common/canvas-stroke';
 import { colorWithOpacity } from '../common/color';
 import { isometricCellRect, isometricObjectMatrix, isometricProjectionExtent } from '../common/isometric-projection';
 import { drawMapObjectOverlay, mapObjectsIntersectingRasterRegion } from '../common/map-object-render';
@@ -166,7 +167,7 @@ async function drawIllustrationObject(context: Context, document: IllustrationDo
     const fill = paint(context, object.fill);
     if (fill) { context.fillStyle = fill; context.fill(path, object.fillRule); }
     const stroke = paint(context, object.stroke.paint);
-    if (stroke && object.stroke.width > 0) { context.strokeStyle = stroke; context.lineWidth = object.stroke.width; context.setLineDash(object.stroke.dash); context.stroke(path); }
+    if (stroke && object.stroke.width > 0) { context.strokeStyle = stroke; applyCanvasStrokeStyle(context, object.stroke); context.stroke(path); }
   } else if (object.type === 'shape') {
     const path = new Path2D();
     if (object.shape === 'rectangle') path.roundRect(0, 0, object.width, object.height, object.cornerRadius ?? 0);
@@ -192,7 +193,7 @@ async function drawIllustrationObject(context: Context, document: IllustrationDo
     const fill = paint(context, object.fill);
     if (fill) { context.fillStyle = fill; context.fill(path); }
     const stroke = paint(context, object.stroke.paint);
-    if (stroke && object.stroke.width > 0) { context.strokeStyle = stroke; context.lineWidth = object.stroke.width; context.lineCap = object.stroke.lineCap; context.lineJoin = object.stroke.lineJoin; context.setLineDash(object.stroke.dash); context.stroke(path); }
+    if (stroke && object.stroke.width > 0) { context.strokeStyle = stroke; applyCanvasStrokeStyle(context, object.stroke); context.stroke(path); }
   } else if (object.type === 'text') {
     renderStyledText(context, object);
   } else if (object.type === 'image') {
