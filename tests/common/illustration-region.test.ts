@@ -6,7 +6,7 @@ import {
   type GroupObject,
   type ShapeObject,
 } from '@aidraw/core';
-import { illustrationRegionBacking, illustrationRegionCanRenderLocally } from '../../src/common/illustration-region';
+import { illustrationRegionBacking, illustrationRegionCanRenderLocally, paintTileCacheEntriesForIllustrationRegion } from '../../src/common/illustration-region';
 
 const timestamp = '2026-08-12T00:00:00.000Z';
 
@@ -42,6 +42,18 @@ describe('bounded illustration raster regions', () => {
     expect(illustrationRegionBacking(document, { x: 8_191, y: 8_191, width: 1, height: 1 })).toEqual({ x: 8_187, y: 8_187, width: 5, height: 5 });
     expect(() => illustrationRegionBacking(document, { x: 8_192, y: 0, width: 1, height: 1 })).toThrow('Illustration raster region falls outside the artboard bounds.');
     expect(() => illustrationRegionBacking(document, { x: 0.5, y: 0, width: 1, height: 1 })).toThrow('Illustration raster regions must use nonnegative safe-integer coordinates');
+  });
+
+  it('retains only materialized tiles intersecting the regional backing', () => {
+    const asset = { id: 'tile', name: 'Tile', mimeType: 'image/png' as const, byteLength: 1, sha256: 'a'.repeat(64), source: 'rendered' as const, data: 'AA==' };
+    const entries = [
+      { asset, assetId: asset.id, key: '-1,0', tileX: -1, tileY: 0 },
+      { asset, assetId: asset.id, key: '0,0', tileX: 0, tileY: 0 },
+      { asset, assetId: asset.id, key: '1,0', tileX: 1, tileY: 0 },
+      { asset, assetId: asset.id, key: '1,1', tileX: 1, tileY: 1 },
+    ];
+    expect(paintTileCacheEntriesForIllustrationRegion(entries, 256, { x: 256, y: 4, width: 1, height: 248 }).map(({ key }) => key)).toEqual(['1,0']);
+    expect(paintTileCacheEntriesForIllustrationRegion(entries, 256, { x: 255, y: 255, width: 2, height: 2 }).map(({ key }) => key)).toEqual(['0,0', '1,0', '1,1']);
   });
 
   it('admits integer-phase closed primitives but rejects richer raster dependencies', () => {
@@ -99,6 +111,13 @@ describe('bounded illustration raster regions', () => {
     expect(illustrationRegionCanRenderLocally(document)).toBe(false);
     paint.tileAssetIds = {};
     paint.strokes.push({ id: 'soft', actorId: HUMAN_ACTOR.id, points: [{ x: 0, y: 0, pressure: 1 }], color: '#111111', size: 20, opacity: 1, hardness: 0, flow: 1, mode: 'paint', preset: 'soft-round' });
+    expect(illustrationRegionCanRenderLocally(document)).toBe(false);
+    const cachedAsset = { id: 'cached-paint', name: 'Cached paint', mimeType: 'image/png' as const, byteLength: 1, sha256: 'a'.repeat(64), source: 'rendered' as const, data: 'AA==' };
+    document.assets[cachedAsset.id] = cachedAsset;
+    paint.tileAssetIds = { '0,0': cachedAsset.id };
+    paint.tileCache = { version: 1, strokeCount: 1, strokesSha256: 'b'.repeat(64) };
+    expect(illustrationRegionCanRenderLocally(document)).toBe(true);
+    paint.tileCache.strokeCount = 0;
     expect(illustrationRegionCanRenderLocally(document)).toBe(false);
     expect(illustrationRegionCanRenderLocally(document, vector.id)).toBe(true);
   });

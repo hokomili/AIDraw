@@ -1,4 +1,5 @@
-import type { IllustrationDocument, IllustrationObject, Transform } from '@aidraw/core';
+import type { IllustrationDocument, IllustrationObject, PaintLayer, Transform } from '@aidraw/core';
+import { paintTileCachePlan, type PaintTileCacheEntry } from './paint-tile-cache';
 
 export interface IllustrationRasterRegion {
   x: number;
@@ -48,13 +49,42 @@ function objectCanRenderPhaseExactly(object: IllustrationObject): boolean {
   return object.stroke.paint.kind === 'none' || object.stroke.width <= 0;
 }
 
+function paintLayerCanRenderPhaseExactly(document: IllustrationDocument, layer: PaintLayer): boolean {
+  if (layer.strokes.length === 0 && Object.keys(layer.tileAssetIds).length === 0) return true;
+  const plan = paintTileCachePlan(layer, document.assets);
+  if (!plan || plan.strokeCount !== layer.strokes.length) return false;
+  return plan.entries.every((entry) => {
+    const x = entry.tileX * layer.tileSize;
+    const y = entry.tileY * layer.tileSize;
+    return Number.isSafeInteger(x)
+      && Number.isSafeInteger(y)
+      && Number.isSafeInteger(x + layer.tileSize)
+      && Number.isSafeInteger(y + layer.tileSize);
+  });
+}
+
+export function paintTileCacheEntriesForIllustrationRegion(
+  entries: readonly PaintTileCacheEntry[],
+  tileSize: number,
+  region: IllustrationRasterRegion,
+): PaintTileCacheEntry[] {
+  const right = region.x + region.width;
+  const bottom = region.y + region.height;
+  return entries.filter((entry) => {
+    const x = entry.tileX * tileSize;
+    const y = entry.tileY * tileSize;
+    return x < right && x + tileSize > region.x && y < bottom && y + tileSize > region.y;
+  });
+}
+
 /**
  * Canvas coverage is not generally invariant when identical geometry is
  * translated onto a differently sized backing surface. The regional path is
- * therefore limited to the integer-translated square-rectangle/polygon/star subset
- * proven byte-exact by parity coverage, plus structural containers. Richer
- * vector/raster content retains the established full-artboard render and raw-
- * crop path.
+ * therefore limited to the integer-translated square-rectangle/polygon/star
+ * subset proven byte-exact by parity coverage, structural containers, and
+ * complete materialized paint caches whose pixels can be copied at integer
+ * tile coordinates. Live paint tails and richer vector/raster content retain
+ * the established full-artboard render and raw-crop path.
  */
 export function illustrationRegionCanRenderLocally(document: IllustrationDocument, onlyLayerId?: string): boolean {
   const objectChildren = new Set(Object.values(document.objects).flatMap((object) => object.type === 'group' ? object.childIds : []));
@@ -100,7 +130,7 @@ export function illustrationRegionCanRenderLocally(document: IllustrationDocumen
     if (layer.opacity !== 1 || layer.blendMode !== 'normal' || layer.maskLayerId || layer.filters?.length) return false;
     visitingLayers.add(layerId);
     const local = layer.type === 'paint'
-      ? layer.strokes.length === 0 && Object.keys(layer.tileAssetIds).length === 0
+      ? paintLayerCanRenderPhaseExactly(document, layer)
       : layer.type === 'vector'
         ? layer.objectIds.every(visitObjectGraph)
           && layer.objectIds.filter((objectId) => !objectChildren.has(objectId)).every(visitObject)

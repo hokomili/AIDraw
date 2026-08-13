@@ -328,6 +328,14 @@ describe('native document rendering', () => {
     const cached = (await renderIllustration(document)).getContext('2d').getImageData(0, 0, 768, 128).data;
     expect(Buffer.from(cached)).toEqual(Buffer.from(uncached));
 
+    for (const background of [null, '#f8efe5']) for (const region of [{ x: 512, y: 0, width: 128, height: 96 }, { x: 540, y: 21, width: 110, height: 80 }]) {
+      document.artboard.background = background;
+      const full = await renderIllustration(document); const regional = await renderIllustrationRegion(document, region);
+      expect(Buffer.from(regional.getContext('2d').getImageData(0, 0, region.width, region.height).data), `${background ?? 'transparent'}/${region.x},${region.y}`).toEqual(Buffer.from(full.getContext('2d').getImageData(region.x, region.y, region.width, region.height).data));
+      full.width = 1; full.height = 1; regional.width = 1; regional.height = 1;
+    }
+    document.artboard.background = null;
+
     const originalLeftAssetId = paint.tileAssetIds['0,0'];
     const originalRightAssetId = paint.tileAssetIds['2,0'];
     paint.strokes.push({ id: 'appended-left-stroke', actorId: HUMAN_ACTOR.id, points: [{ x: 128, y: 72, pressure: 0.5 }, { x: 192, y: 88, pressure: 0.5 }], color: '#3344cc', size: 8, opacity: 1, hardness: 1, flow: 1, mode: 'paint', preset: 'hard-round' });

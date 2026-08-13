@@ -18,7 +18,7 @@ import { BoundedResourceCache } from '../common/bounded-resource-cache';
 import { applyCanvasStrokeStyle } from '../common/canvas-stroke';
 import { colorWithOpacity } from '../common/color';
 import { illustrationGroupRequiresIsolation, illustrationObjectHasTransform } from '../common/illustration-geometry';
-import { illustrationRegionBacking, illustrationRegionCanRenderLocally, type IllustrationRasterRegion } from '../common/illustration-region';
+import { illustrationRegionBacking, illustrationRegionCanRenderLocally, paintTileCacheEntriesForIllustrationRegion, type IllustrationRasterRegion } from '../common/illustration-region';
 import { isometricCellRect, isometricObjectMatrix, isometricProjectionExtent } from '../common/isometric-projection';
 import { drawMapObjectOverlay, mapObjectsIntersectingRasterRegion } from '../common/map-object-render';
 import { orthogonalCellRect, orthogonalObjectMatrix, orthogonalProjectionExtent } from '../common/orthogonal-projection';
@@ -205,7 +205,7 @@ async function drawIllustrationObject(context: Context, document: IllustrationDo
   context.restore();
 }
 
-async function renderIllustrationSurface(document: IllustrationDocument, region: IllustrationRasterRegion, onlyLayerId?: string, includeBackground = true, neutralizeOnlyLayer = false): Promise<Canvas> {
+async function renderIllustrationSurface(document: IllustrationDocument, region: IllustrationRasterRegion, onlyLayerId?: string, includeBackground = true, neutralizeOnlyLayer = false, restrictPaintTilesToRegion = false): Promise<Canvas> {
   const canvas = createCanvas(region.width, region.height);
   const context = canvas.getContext('2d');
   context.save();
@@ -245,7 +245,10 @@ async function renderIllustrationSurface(document: IllustrationDocument, region:
         if (plan) {
           try {
             cachedTiles = [];
-            for (const entry of plan.entries) {
+            const entries = restrictPaintTilesToRegion
+              ? paintTileCacheEntriesForIllustrationRegion(plan.entries, layer.tileSize, region)
+              : plan.entries;
+            for (const entry of entries) {
               let image = paintTileImages.get(entry.assetId);
               if (!image) {
                 image = await cachedPaintTileImage(entry.asset.sha256, entry.asset.data!, layer.tileSize);
@@ -308,7 +311,7 @@ export async function renderIllustrationRegion(document: IllustrationDocument, r
     try { return cropIllustrationSurface(full, requested.x, requested.y, requested.width, requested.height); }
     finally { releaseCanvas(full); }
   }
-  const source = await renderIllustrationSurface(document, backing, onlyLayerId, includeBackground);
+  const source = await renderIllustrationSurface(document, backing, onlyLayerId, includeBackground, false, true);
   if (sameRegion(requested, backing)) return source;
   try { return cropIllustrationSurface(source, requested.x - backing.x, requested.y - backing.y, requested.width, requested.height); }
   finally { releaseCanvas(source); }

@@ -43,6 +43,7 @@ Object.assign(globalThis, { DOMMatrix, DOMPoint, Path2D });
 const budgets = {
   vector5000RenderMs: 3_000,
   illustration8192RegionRenderMs: 100,
+  materializedPaint8192RegionRenderMs: 100,
   illustrationLasso5000Ms: 1_000,
   illustrationHitTest5000Ms: 500,
   four4kPaintRenderMs: 8_000,
@@ -171,6 +172,20 @@ function sparseIllustrationRegionFixture() {
   return { document, region: { x: 8_184, y: 8_184, width: 1, height: 1 } };
 }
 
+function materializedPaintRegionFixture() {
+  const document = createIllustrationDocument('Maximum-artboard materialized-paint regional performance fixture');
+  document.artboard = { ...document.artboard, width: 8_192, height: 8_192, background: null };
+  const layer = Object.values(document.layers).find((entry) => entry.type === 'paint');
+  if (!layer || layer.type !== 'paint') throw new Error('Materialized regional paint layer is missing.');
+  layer.strokes.push({
+    id: 'perf-far-edge-paint', actorId: HUMAN_ACTOR.id, points: [{ x: 8_184, y: 8_184, pressure: 1 }],
+    color: '#ff3366', size: 16, opacity: 1, hardness: 1, flow: 1, mode: 'paint', preset: 'hard-round',
+  });
+  const materialized = materializePaintTiles(document);
+  if (materialized.renderedTiles !== 1 || layer.tileCache?.strokeCount !== layer.strokes.length) throw new Error('Materialized regional paint fixture is incomplete.');
+  return { document, region: { x: 8_184, y: 8_184, width: 1, height: 1 } };
+}
+
 function sparseSpriteRegionFixture() {
   const document = createPixelDocument('sprite', '4,096-chunk sprite viewport fixture');
   const sprite = document.pixelAssets[document.activeAssetId];
@@ -230,6 +245,12 @@ describe('Windows v1 non-GUI performance gate', () => {
     memoryProfile.push(memorySnapshot('after-8192-illustration-region-render', startingRss));
     expect([...sparseIllustrationRegionRender.value.getContext('2d').getImageData(0, 0, 1, 1).data]).toEqual([255, 51, 102, 255]);
     releaseMeasuredCanvas(sparseIllustrationRegionRender.value);
+    const materializedPaintRegionFixtureValue = materializedPaintRegionFixture();
+    const materializedPaintRegionRender = await measured(() => renderIllustrationRegion(materializedPaintRegionFixtureValue.document, materializedPaintRegionFixtureValue.region));
+    const afterMaterializedPaintRegionRss = process.memoryUsage().rss;
+    memoryProfile.push(memorySnapshot('after-8192-materialized-paint-region-render', startingRss));
+    expect([...materializedPaintRegionRender.value.getContext('2d').getImageData(0, 0, 1, 1).data]).toEqual([255, 51, 102, 255]);
+    releaseMeasuredCanvas(materializedPaintRegionRender.value);
     const vectorLasso = await measured(() => lassoSelectsIllustrationObjects(
       [{ x: -10, y: -10 }, { x: 1_400, y: -10 }, { x: 1_400, y: 800 }, { x: -10, y: 800 }],
       Object.values(vector.objects),
@@ -349,10 +370,11 @@ describe('Windows v1 non-GUI performance gate', () => {
     memoryProfile.push(memorySnapshot('after-million-cell-flood-fixture', startingRss));
     const floodFill = await measured(() => floodPixelRegion({ width: floodFixture.sprite.width, height: floodFixture.sprite.height, start: { x: 0, y: 0 }, read: floodFixture.read }));
     memoryProfile.push(memorySnapshot('after-million-cell-flood-fill', startingRss));
-    const peakRss = Math.max(afterVectorRss, afterSparseIllustrationRegionRss, afterVectorLassoRss, afterVectorHitTestRss, afterPaintRss, afterMapRss, afterSparseMapRegionRss, afterSparseSpriteRegionRss, afterMapObjectFilterRss, afterOverlayCullRss, afterGridSurfacePlanRss, afterNormalCompositeRss, afterExactGifRss, afterExactGifExportRss, process.memoryUsage().rss);
+    const peakRss = Math.max(afterVectorRss, afterSparseIllustrationRegionRss, afterMaterializedPaintRegionRss, afterVectorLassoRss, afterVectorHitTestRss, afterPaintRss, afterMapRss, afterSparseMapRegionRss, afterSparseSpriteRegionRss, afterMapObjectFilterRss, afterOverlayCullRss, afterGridSurfacePlanRss, afterNormalCompositeRss, afterExactGifRss, afterExactGifExportRss, process.memoryUsage().rss);
     const metrics = {
       vector5000RenderMs: vectorRender.durationMs,
       illustration8192RegionRenderMs: sparseIllustrationRegionRender.durationMs,
+      materializedPaint8192RegionRenderMs: materializedPaintRegionRender.durationMs,
       illustrationLasso5000Ms: vectorLasso.durationMs,
       illustrationHitTest5000Ms: vectorHitTest.durationMs,
       four4kPaintRenderMs: paintRender.durationMs,
@@ -373,7 +395,7 @@ describe('Windows v1 non-GUI performance gate', () => {
       millionCellFloodFillMs: floodFill.durationMs,
       rssGrowthMiB: Number(((peakRss - startingRss) / 1024 / 1024).toFixed(2)),
     };
-    const report = { version: 1, createdAt: new Date().toISOString(), build: process.env.GITHUB_SHA ?? 'local', machine: { hostname: hostname(), platform: platform(), release: release(), arch: process.arch, cpu: cpus()[0]?.model, logicalCpus: cpus().length, totalMemoryMiB: Math.round(totalmem() / 1024 / 1024), freeMemoryMiB: Math.round(freemem() / 1024 / 1024), node: process.version }, coverage: { automated: ['5,000 vector render', 'one-pixel regional render on an 8192×8192 illustration', 'exact canonical lasso selection across 5,000 vector objects', 'path-authoritative click hit testing across 5,000 vector objects', 'four 4096×4096 editable paint layers', 'cold and warm four-layer 4096×4096 materialized sparse paint render', '65,536 addressed tiles from an 8192×8192 sparse source sheet', 'one-pixel regional render across 4,096 stored map chunks', 'one-pixel regional sprite composite across 4,096 stored cel chunks', 'regional projected-bounds filter across 100,000 map objects', 'viewport cull across 1,048,576 overlay cells in 65,536 compact runs', 'viewport checker planning, exact straight-path reduction across 1,000,001 lasso samples, and incremental validation to the 4,096-vertex ceiling', 'exact normal compositing across two one-million-pixel layers', 'exact GIF indexing across one million final binary-alpha normal-composite pixels', 'sequential exact GIF export across sixteen million final pixels', 'native save', 'PNG export', 'one-million-sample compact accounting', 'one-million-cell bounded flood fill', 'RSS growth'], deferredToPackagedComputerUse: ['pointer-to-preview latency', 'requestAnimationFrame pacing', 'human input while million-cell overlays are visible', '200% display scaling and tablet latency'] }, budgets, metrics, diagnostics: { memoryProfile } };
+    const report = { version: 1, createdAt: new Date().toISOString(), build: process.env.GITHUB_SHA ?? 'local', machine: { hostname: hostname(), platform: platform(), release: release(), arch: process.arch, cpu: cpus()[0]?.model, logicalCpus: cpus().length, totalMemoryMiB: Math.round(totalmem() / 1024 / 1024), freeMemoryMiB: Math.round(freemem() / 1024 / 1024), node: process.version }, coverage: { automated: ['5,000 vector render', 'one-pixel straight-primitive regional render on an 8192×8192 illustration', 'one-pixel complete-materialized-paint regional render on an 8192×8192 illustration', 'exact canonical lasso selection across 5,000 vector objects', 'path-authoritative click hit testing across 5,000 vector objects', 'four 4096×4096 editable paint layers', 'cold and warm four-layer 4096×4096 materialized sparse paint render', '65,536 addressed tiles from an 8192×8192 sparse source sheet', 'one-pixel regional render across 4,096 stored map chunks', 'one-pixel regional sprite composite across 4,096 stored cel chunks', 'regional projected-bounds filter across 100,000 map objects', 'viewport cull across 1,048,576 overlay cells in 65,536 compact runs', 'viewport checker planning, exact straight-path reduction across 1,000,001 lasso samples, and incremental validation to the 4,096-vertex ceiling', 'exact normal compositing across two one-million-pixel layers', 'exact GIF indexing across one million final binary-alpha normal-composite pixels', 'sequential exact GIF export across sixteen million final pixels', 'native save', 'PNG export', 'one-million-sample compact accounting', 'one-million-cell bounded flood fill', 'RSS growth'], deferredToPackagedComputerUse: ['pointer-to-preview latency', 'requestAnimationFrame pacing', 'human input while million-cell overlays are visible', '200% display scaling and tablet latency'] }, budgets, metrics, diagnostics: { memoryProfile } };
     const reportPath = process.env.AIDRAW_PERFORMANCE_REPORT ?? join(process.cwd(), 'test-results', 'performance-gate.json');
     await mkdir(dirname(reportPath), { recursive: true }); await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
     expect(queueAccounting.value.samples).toBe(1_000_000); expect((queueAccounting.value.midpoint[0] as Extract<CanvasOperation, { kind: 'pixel.cel.region' }>).runs.reduce((sum, run) => sum + run.length, 0)).toBe(500_000);

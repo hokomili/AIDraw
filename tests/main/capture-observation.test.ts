@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 
 import { captureObservation, MAX_OBSERVATION_SIDE } from '../../src/main/capture-observation';
 import { exportDocument } from '../../src/main/export-document';
+import { materializePaintTiles } from '../../src/main/persistence';
 import { renderTilemap } from '../../src/main/render-document';
 import { assertObservationUtilityResponse } from '../../src/main/utility-contract';
 
@@ -60,6 +61,26 @@ describe('bounded illustration observation', () => {
       stroke: { paint: { kind: 'none' }, width: 0, opacity: 1, lineCap: 'round', lineJoin: 'round', dash: [] },
     };
     document.objects[object.id] = object; layer.objectIds.push(object.id);
+    const region = { x: 8_184, y: 8_184, width: 1, height: 1 };
+
+    const observed = await captureObservation(document, { region, scale: 1, background: 'transparent' });
+    expect(observed).toMatchObject({ available: true, width: 1, height: 1, region });
+    const image = await loadImage(Buffer.from(String(observed.data), 'base64')); const canvas = createCanvas(1, 1); canvas.getContext('2d').drawImage(image, 0, 0);
+    expect([...canvas.getContext('2d').getImageData(0, 0, 1, 1).data]).toEqual([255, 51, 102, 255]);
+
+    await expect(captureObservation(document, { scale: 1, background: 'transparent' })).resolves.toMatchObject({ error: 'observation_too_large', limit: { pixels: 4_194_304 } });
+  });
+
+  it('observes a tiny far-edge region from a complete materialized paint cache', async () => {
+    const document = createIllustrationDocument('Maximum materialized-paint observation');
+    document.artboard = { ...document.artboard, width: 8_192, height: 8_192, background: null };
+    const paint = Object.values(document.layers).find((entry) => entry.type === 'paint');
+    if (!paint || paint.type !== 'paint') throw new Error('Expected paint layer');
+    paint.strokes.push({
+      id: 'far-edge-paint', actorId: HUMAN_ACTOR.id, points: [{ x: 8_184, y: 8_184, pressure: 1 }],
+      color: '#ff3366', size: 16, opacity: 1, hardness: 1, flow: 1, mode: 'paint', preset: 'hard-round',
+    });
+    expect(materializePaintTiles(document)).toEqual({ layers: 1, renderedTiles: 1, reusedTiles: 0 });
     const region = { x: 8_184, y: 8_184, width: 1, height: 1 };
 
     const observed = await captureObservation(document, { region, scale: 1, background: 'transparent' });
