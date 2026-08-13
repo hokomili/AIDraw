@@ -4,7 +4,7 @@ import { gunzipSync, inflateSync } from 'node:zlib';
 import { basename, dirname, extname, isAbsolute, relative, resolve } from 'node:path';
 import { createCanvas, DOMMatrix, ImageData, Path2D, loadImage } from '@napi-rs/canvas';
 import { initializeCanvas as initializePsdCanvas, readPsd, type Layer as PsdLayer } from 'ag-psd';
-import { decompressFrames, parseGIF } from 'gifuct-js';
+import { decompressFrames, parseGIF, type ParsedFrame } from 'gifuct-js';
 import { XMLParser } from 'fast-xml-parser';
 import {
   HUMAN_ACTOR,
@@ -23,6 +23,8 @@ import {
   type BlendMode,
   type IllustrationLayer,
   type ImageObject,
+  type PaletteEntry,
+  type PixelSprite,
   type TextObject,
   type TextStyleRange,
   type TileDefinition,
@@ -32,6 +34,7 @@ import { quantizeImageToPalette, quantizeRgbaToPalette } from './quantize-image'
 import { decodeApng } from './apng';
 import { inspectGif } from './gif';
 import { calculateSpriteSheetLayout, validateSpriteSheetSliceOptions, type SpriteSheetSliceOptions } from '../common/sprite-sheet';
+import { createExactAnimationPalettePlanner, exactAnimationFrameChanges, type ExactAnimationPalettePlan } from '../common/animation-palette';
 import { displayImageDimensions, inspectImageHeader, MAX_INLINE_IMAGE_DIMENSION, MAX_INLINE_IMAGE_PIXELS } from './transaction-policy';
 import { importEditableSvg } from './svg-import';
 import { MAX_IMPORT_UTILITY_DOCUMENTS } from './utility-contract';
@@ -39,6 +42,8 @@ import { MAX_IMPORT_UTILITY_DOCUMENTS } from './utility-contract';
 initializePsdCanvas(createCanvas as unknown as (width: number, height: number) => HTMLCanvasElement);
 
 export interface ImportResult { documents: AIDrawDocument[]; warnings: string[] }
+
+const ANIMATION_PALETTE_FALLBACK_WARNING = 'One or more animation frames contain more than 255 visible RGBA colors after the alpha threshold; frames were quantized to the document palette and the original source remains embedded.';
 
 export const MAX_STRUCTURED_IMPORT_BYTES = 16 * 1024 * 1024;
 export const MAX_BINARY_IMPORT_BYTES = 256 * 1024 * 1024;
@@ -144,16 +149,65 @@ async function importRaster(bytes: Buffer, name: string, mimeType: string, pixel
   return { documents: [document], warnings };
 }
 
+function exactAnimationPlan(frames: Iterable<Uint8ClampedArray>, palette: PaletteEntry[], alphaThreshold: number): ExactAnimationPalettePlan | undefined {
+  const planner = createExactAnimationPalettePlanner(palette, alphaThreshold);
+  for (const frame of frames) if (!planner.addFrame(frame)) break;
+  return planner.finish();
+}
+
+function setImportedFramePalette(sprite: PixelSprite, frameId: string, plan: ExactAnimationPalettePlan | undefined, frameIndex: number): void {
+  const override = plan?.frames[frameIndex]?.paletteOverride;
+  if (override) sprite.paletteOverrides[frameId] = structuredClone(override);
+}
+
+function visitCompositedGifFrames(
+  frames: ParsedFrame[],
+  width: number,
+  height: number,
+  visit: (rgba: Uint8ClampedArray, index: number) => boolean | void,
+): void {
+  const canvas = createCanvas(width, height); const context = canvas.getContext('2d'); context.imageSmoothingEnabled = false;
+  try {
+    for (let index = 0; index < frames.length; index += 1) {
+      const frame = frames[index];
+      const restore = frame.disposalType === 3 ? context.getImageData(0, 0, width, height) : undefined;
+      const patchCanvas = createCanvas(frame.dims.width, frame.dims.height);
+      try {
+        patchCanvas.getContext('2d').putImageData(new ImageData(frame.patch, frame.dims.width, frame.dims.height), 0, 0);
+        context.drawImage(patchCanvas, frame.dims.left, frame.dims.top);
+      } finally {
+        patchCanvas.width = 1; patchCanvas.height = 1;
+      }
+      if (visit(context.getImageData(0, 0, width, height).data, index) === false) return;
+      if (frame.disposalType === 2) context.clearRect(frame.dims.left, frame.dims.top, frame.dims.width, frame.dims.height);
+      else if (frame.disposalType === 3 && restore) context.putImageData(restore, 0, 0);
+    }
+  } finally {
+    canvas.width = 1; canvas.height = 1;
+  }
+}
+
 export function importApngBytes(bytes: Buffer, name: string): ImportResult | undefined {
   const decoded = decodeApng(bytes); if (!decoded) return undefined;
-  const document = createPixelDocument('sprite', name); const sprite = createPixelSprite(name, decoded.width, decoded.height); document.pixelAssets = { [sprite.id]: sprite }; document.assetIds = [sprite.id]; document.activeAssetId = sprite.id; const layerId = sprite.layerIds[0]; const firstFrameId = sprite.frameIds[0]; const firstCel = Object.values(sprite.cels)[0]; sprite.frames[firstFrameId].durationMs = decoded.frames[0]?.delayMs ?? 100;
+  const document = createPixelDocument('sprite', name); const sprite = createPixelSprite(name, decoded.width, decoded.height);
+  document.pixelAssets = { [sprite.id]: sprite }; document.assetIds = [sprite.id]; document.activeAssetId = sprite.id;
+  const exactPlan = exactAnimationPlan(decoded.frames.map((frame) => frame.rgba), document.palette, document.conversionDefaults.alphaThreshold);
+  if (exactPlan) document.palette = structuredClone(exactPlan.palette);
+  const layerId = sprite.layerIds[0]; const firstFrameId = sprite.frameIds[0]; const firstCel = Object.values(sprite.cels)[0]; sprite.frames[firstFrameId].durationMs = decoded.frames[0]?.delayMs ?? 100;
   decoded.frames.forEach((frame, index) => {
-    const changes = quantizeRgbaToPalette(frame.rgba, decoded.width, decoded.height, document.palette, { alphaThreshold: document.conversionDefaults.alphaThreshold, dithering: document.conversionDefaults.dithering, includeTransparent: true });
-    if (index === 0) { writePixels(firstCel, changes); return; }
-    const timestamp = nowIso(); const frameId = createId('frame'); const celId = createId('cel'); sprite.frameIds.push(frameId); sprite.frames[frameId] = { id: frameId, revision: 0, name: `Frame ${index + 1}`, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, durationMs: frame.delayMs }; sprite.cels[celId] = { id: celId, revision: 0, name: `Pixels · Frame ${index + 1}`, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, layerId, frameId, chunks: {} }; writePixels(sprite.cels[celId], changes);
+    const changes = exactPlan
+      ? exactAnimationFrameChanges(frame.rgba, decoded.width, decoded.height, exactPlan.frames[index], exactPlan.alphaThreshold)
+      : quantizeRgbaToPalette(frame.rgba, decoded.width, decoded.height, document.palette, { alphaThreshold: document.conversionDefaults.alphaThreshold, dithering: document.conversionDefaults.dithering, includeTransparent: true });
+    if (index === 0) {
+      writePixels(firstCel, changes); setImportedFramePalette(sprite, firstFrameId, exactPlan, index); return;
+    }
+    const timestamp = nowIso(); const frameId = createId('frame'); const celId = createId('cel'); sprite.frameIds.push(frameId);
+    sprite.frames[frameId] = { id: frameId, revision: 0, name: `Frame ${index + 1}`, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, durationMs: frame.delayMs };
+    sprite.cels[celId] = { id: celId, revision: 0, name: `Pixels · Frame ${index + 1}`, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, layerId, frameId, chunks: {} };
+    writePixels(sprite.cels[celId], changes); setImportedFramePalette(sprite, frameId, exactPlan, index);
   });
   const source = imageAsset(`${name} source`, 'image/apng', bytes); document.assets[source.id] = source;
-  document.dirty = true; return { documents: [document], warnings: [] };
+  document.dirty = true; return { documents: [document], warnings: exactPlan ? [] : [ANIMATION_PALETTE_FALLBACK_WARNING] };
 }
 
 export function importGifBytes(bytes: Buffer, name: string): ImportResult {
@@ -162,23 +216,24 @@ export function importGifBytes(bytes: Buffer, name: string): ImportResult {
   if (frames.length !== inspected.frameCount) throw new Error('GIF decoder frame count disagrees with the validated container.');
   const width = inspected.width; const height = inspected.height; const document = createPixelDocument('sprite', name); const sprite = createPixelSprite(name, width, height);
   document.pixelAssets = { [sprite.id]: sprite }; document.assetIds = [sprite.id]; document.activeAssetId = sprite.id;
-  const layerId = sprite.layerIds[0]; const firstFrameId = sprite.frameIds[0]; const firstCel = Object.values(sprite.cels)[0]; const canvas = createCanvas(width, height); const context = canvas.getContext('2d'); context.imageSmoothingEnabled = false;
-  frames.forEach((frame, index) => {
-    const restore = frame.disposalType === 3 ? context.getImageData(0, 0, width, height) : undefined;
-    const patchCanvas = createCanvas(frame.dims.width, frame.dims.height); patchCanvas.getContext('2d').putImageData(new ImageData(frame.patch, frame.dims.width, frame.dims.height), 0, 0);
-    context.drawImage(patchCanvas, frame.dims.left, frame.dims.top); const changes = quantizeRgbaToPalette(context.getImageData(0, 0, width, height).data, width, height, document.palette, { alphaThreshold: document.conversionDefaults.alphaThreshold, dithering: document.conversionDefaults.dithering, includeTransparent: true });
+  const planner = createExactAnimationPalettePlanner(document.palette, document.conversionDefaults.alphaThreshold);
+  visitCompositedGifFrames(frames, width, height, (rgba) => planner.addFrame(rgba));
+  const exactPlan = planner.finish(); if (exactPlan) document.palette = structuredClone(exactPlan.palette);
+  const layerId = sprite.layerIds[0]; const firstFrameId = sprite.frameIds[0]; const firstCel = Object.values(sprite.cels)[0];
+  visitCompositedGifFrames(frames, width, height, (rgba, index) => {
+    const frame = frames[index]; const changes = exactPlan
+      ? exactAnimationFrameChanges(rgba, width, height, exactPlan.frames[index], exactPlan.alphaThreshold)
+      : quantizeRgbaToPalette(rgba, width, height, document.palette, { alphaThreshold: document.conversionDefaults.alphaThreshold, dithering: document.conversionDefaults.dithering, includeTransparent: true });
     if (index === 0) {
-      sprite.frames[firstFrameId].durationMs = Math.max(10, frame.delay || 100); writePixels(firstCel, changes);
-    } else {
-      const timestamp = nowIso(); const frameId = createId('frame'); const celId = createId('cel'); sprite.frameIds.push(frameId);
-      sprite.frames[frameId] = { id: frameId, revision: 0, name: `Frame ${index + 1}`, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, durationMs: Math.max(10, frame.delay || 100) };
-      sprite.cels[celId] = { id: celId, revision: 0, name: `Pixels · Frame ${index + 1}`, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, layerId, frameId, chunks: {} }; writePixels(sprite.cels[celId], changes);
+      sprite.frames[firstFrameId].durationMs = Math.max(10, frame.delay || 100); writePixels(firstCel, changes); setImportedFramePalette(sprite, firstFrameId, exactPlan, index); return;
     }
-    if (frame.disposalType === 2) context.clearRect(frame.dims.left, frame.dims.top, frame.dims.width, frame.dims.height);
-    else if (frame.disposalType === 3 && restore) context.putImageData(restore, 0, 0);
+    const timestamp = nowIso(); const frameId = createId('frame'); const celId = createId('cel'); sprite.frameIds.push(frameId);
+    sprite.frames[frameId] = { id: frameId, revision: 0, name: `Frame ${index + 1}`, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, durationMs: Math.max(10, frame.delay || 100) };
+    sprite.cels[celId] = { id: celId, revision: 0, name: `Pixels · Frame ${index + 1}`, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, layerId, frameId, chunks: {} };
+    writePixels(sprite.cels[celId], changes); setImportedFramePalette(sprite, frameId, exactPlan, index);
   });
   const source = imageAsset(`${name} source`, 'image/gif', bytes); document.assets[source.id] = source; document.dirty = true;
-  return { documents: [document], warnings: [] };
+  return { documents: [document], warnings: exactPlan ? [] : [ANIMATION_PALETTE_FALLBACK_WARNING] };
 }
 
 async function importSpriteSheet(bytes: Buffer, name: string, filePath: string): Promise<ImportResult> {

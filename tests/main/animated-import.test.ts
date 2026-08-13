@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { HUMAN_ACTOR, createPixelDocument, nowIso, readPixel, writePixels } from '@aidraw/core';
+import { DEFAULT_PALETTE, HUMAN_ACTOR, createPixelDocument, nowIso, readPixel, writePixels } from '@aidraw/core';
 import { GIFEncoder } from 'gifenc';
 import { crc32, deflateSync } from 'node:zlib';
 
@@ -8,6 +8,7 @@ vi.mock('electron', () => ({ nativeImage: { createFromBuffer: () => ({ isEmpty: 
 import { exportDocument } from '../../src/main/export-document';
 import { importApngBytes, importGifBytes } from '../../src/main/import-document';
 import { decodeApng } from '../../src/main/apng';
+import { renderSprite } from '../../src/main/render-document';
 
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 const ADAM7_PASSES = [
@@ -204,6 +205,67 @@ function partialIdatFirstFrameApng(): Buffer {
   ]);
 }
 
+function frameLocalPaletteApng(): { bytes: Buffer; expectedFrames: [Uint8ClampedArray, Uint8ClampedArray] } {
+  const width = 2; const height = 1;
+  const expectedFrames: [Uint8ClampedArray, Uint8ClampedArray] = [
+    Uint8ClampedArray.from([1, 2, 3, 255, 64, 128, 192, 128]),
+    Uint8ClampedArray.from([7, 8, 9, 255, 10, 11, 12, 192]),
+  ];
+  const header = Buffer.alloc(13); header.writeUInt32BE(width, 0); header.writeUInt32BE(height, 4); header[8] = 8; header[9] = 6;
+  const animation = Buffer.alloc(8); animation.writeUInt32BE(2, 0);
+  const secondCompressed = deflateSync(Buffer.concat([Buffer.from([0]), Buffer.from(expectedFrames[1])]));
+  const secondData = Buffer.alloc(secondCompressed.byteLength + 4); secondData.writeUInt32BE(2, 0); secondCompressed.copy(secondData, 4);
+  return {
+    bytes: Buffer.concat([
+      PNG_SIGNATURE,
+      pngChunk('IHDR', header),
+      pngChunk('acTL', animation),
+      pngChunk('fcTL', apngFrameControl(0, width, height, 0, 0, 5, 0, 0)),
+      pngChunk('IDAT', deflateSync(Buffer.concat([Buffer.from([0]), Buffer.from(expectedFrames[0])]))),
+      pngChunk('fcTL', apngFrameControl(1, width, height, 0, 0, 7, 0, 0)),
+      pngChunk('fdAT', secondData),
+      pngChunk('IEND'),
+    ]),
+    expectedFrames,
+  };
+}
+
+function frameLocalPaletteGif(): { bytes: Buffer; expectedFrames: [Uint8ClampedArray, Uint8ClampedArray] } {
+  const encoder = GIFEncoder();
+  encoder.writeFrame(Uint8Array.from([1, 2]), 2, 1, { palette: [[0, 0, 0], [1, 2, 3], [4, 5, 6]], transparent: true, transparentIndex: 0, delay: 50, repeat: 0, dispose: 1 });
+  encoder.writeFrame(Uint8Array.from([1, 2]), 2, 1, { palette: [[0, 0, 0], [7, 8, 9], [10, 11, 12]], transparent: true, transparentIndex: 0, delay: 70, repeat: 0, dispose: 1 });
+  encoder.finish();
+  return {
+    bytes: Buffer.from(encoder.bytes()),
+    expectedFrames: [
+      Uint8ClampedArray.from([1, 2, 3, 255, 4, 5, 6, 255]),
+      Uint8ClampedArray.from([7, 8, 9, 255, 10, 11, 12, 255]),
+    ],
+  };
+}
+
+function overExactPaletteLimitApng(): Buffer {
+  const width = 16; const height = 16;
+  const header = Buffer.alloc(13); header.writeUInt32BE(width, 0); header.writeUInt32BE(height, 4); header[8] = 8; header[9] = 6;
+  const animation = Buffer.alloc(8); animation.writeUInt32BE(1, 0);
+  return Buffer.concat([
+    PNG_SIGNATURE,
+    pngChunk('IHDR', header),
+    pngChunk('acTL', animation),
+    pngChunk('fcTL', apngFrameControl(0, width, height, 0, 0, 10, 0, 0)),
+    pngChunk('IDAT', deflateSync(rgbaScanlines(width, height, (x, y) => {
+      const index = y * width + x;
+      return [index, index ^ 0x55, index ^ 0xaa, 255];
+    }, false))),
+    pngChunk('IEND'),
+  ]);
+}
+
+function renderedFrames(result: ReturnType<typeof importGifBytes> | NonNullable<ReturnType<typeof importApngBytes>>): Uint8ClampedArray[] {
+  const document = result.documents[0]; if (document.kind !== 'pixel') throw new Error('Expected pixel'); const sprite = document.pixelAssets[document.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('Expected sprite');
+  return sprite.frameIds.map((frameId) => renderSprite(document, sprite, frameId).getContext('2d').getImageData(0, 0, sprite.width, sprite.height).data);
+}
+
 function animatedFixture() {
   const document = createPixelDocument('sprite', 'Round trip'); const sprite = document.pixelAssets[document.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('Expected sprite'); sprite.width = 4; sprite.height = 3; const firstCel = Object.values(sprite.cels)[0]; sprite.frames[sprite.frameIds[0]].durationMs = 80; writePixels(firstCel, [{ x: 0, y: 0, index: 4 }, { x: 3, y: 2, index: 2 }]);
   const timestamp = nowIso(); const frameId = 'frame-two'; const celId = 'cel-two'; sprite.frameIds.push(frameId); sprite.frames[frameId] = { id: frameId, revision: 0, name: 'Frame 2', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, durationMs: 170 }; sprite.cels[celId] = { id: celId, revision: 0, name: 'Frame 2', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, layerId: sprite.layerIds[0], frameId, chunks: {} }; writePixels(sprite.cels[celId], [{ x: 1, y: 1, index: 7 }]); return { document, sprite };
@@ -216,6 +278,25 @@ function assertImported(result: ReturnType<typeof importGifBytes> | NonNullable<
 describe('animated pixel import', () => {
   it('round-trips GIF frames, delays, transparency, and source retention', async () => { const { document } = animatedFixture(); const artifact = await exportDocument(document, 'gif'); assertImported(importGifBytes(artifact.data, 'GIF round trip')); });
   it('round-trips APNG frames, delays, transparency, and source retention', async () => { const { document } = animatedFixture(); const artifact = await exportDocument(document, 'apng'); const imported = importApngBytes(artifact.data, 'APNG round trip'); expect(imported).toBeTruthy(); assertImported(imported!); });
+
+  it('imports exact frame-local APNG colors into aligned palette overrides and re-exports them', async () => {
+    const fixture = frameLocalPaletteApng(); const imported = importApngBytes(fixture.bytes, 'Frame-local APNG')!; const document = imported.documents[0]; if (document.kind !== 'pixel') throw new Error('Expected pixel'); const sprite = document.pixelAssets[document.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('Expected sprite');
+    expect(imported.warnings).toEqual([]); expect([document.palette[1].color, document.palette[2].color]).toEqual(['#010203', '#4080c080']); expect([sprite.paletteOverrides[sprite.frameIds[1]][1].color, sprite.paletteOverrides[sprite.frameIds[1]][2].color]).toEqual(['#070809', '#0a0b0cc0']);
+    const cels = sprite.frameIds.map((frameId) => Object.values(sprite.cels).find((cel) => cel.frameId === frameId)!);
+    expect(cels.map((cel) => [readPixel(cel, 0, 0), readPixel(cel, 1, 0)])).toEqual([[1, 2], [1, 2]]); expect(Object.values(document.assets)[0].data).toBe(fixture.bytes.toString('base64'));
+    const exported = await exportDocument(document, 'apng'); const decoded = decodeApng(exported.data)!; expect(decoded.frames.map(({ rgba }) => Buffer.from(rgba))).toEqual(fixture.expectedFrames.map((rgba) => Buffer.from(rgba)));
+  });
+
+  it('imports exact GIF local color tables as frame palette overrides', () => {
+    const fixture = frameLocalPaletteGif(); const imported = importGifBytes(fixture.bytes, 'Local-palette GIF'); const document = imported.documents[0]; if (document.kind !== 'pixel') throw new Error('Expected pixel'); const sprite = document.pixelAssets[document.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('Expected sprite');
+    expect(imported.warnings).toEqual([]); expect([document.palette[1].color, document.palette[2].color]).toEqual(['#010203', '#040506']); expect([sprite.paletteOverrides[sprite.frameIds[1]][1].color, sprite.paletteOverrides[sprite.frameIds[1]][2].color]).toEqual(['#070809', '#0a0b0c']);
+    expect(renderedFrames(imported).map((rgba) => Buffer.from(rgba))).toEqual(fixture.expectedFrames.map((rgba) => Buffer.from(rgba))); expect(Object.values(document.assets)[0].data).toBe(fixture.bytes.toString('base64'));
+  });
+
+  it('warns and retains document-palette quantization above 255 visible colors in one frame', () => {
+    const bytes = overExactPaletteLimitApng(); const imported = importApngBytes(bytes, '256-color APNG')!; const document = imported.documents[0]; if (document.kind !== 'pixel') throw new Error('Expected pixel'); const sprite = document.pixelAssets[document.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('Expected sprite');
+    expect(imported.warnings).toEqual([expect.stringMatching(/more than 255 visible RGBA colors.*quantized to the document palette/)]); expect(document.palette).toEqual(DEFAULT_PALETTE); expect(sprite.paletteOverrides).toEqual({}); expect(Object.values(document.assets)[0].data).toBe(bytes.toString('base64'));
+  });
 
   it('imports a spec-derived interlaced RGBA APNG with exact frame rectangles and pixels', () => {
     const fixture = interlacedRgbaApng(); const decoded = decodeApng(fixture.bytes); expect(decoded).toBeTruthy();

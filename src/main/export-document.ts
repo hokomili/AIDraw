@@ -19,6 +19,7 @@ import {
   type PixelTilemap,
   type PixelTileset,
 } from '@aidraw/core';
+import { exactSingleLayerAnimationFrame } from '../common/animation-palette';
 import { splitColorAlpha } from '../common/color';
 import { MAX_STATIC_RASTER_PIXELS } from '../common/static-raster';
 import { layoutStyledText } from '../common/text-layout';
@@ -645,7 +646,11 @@ async function spriteSheet(document: PixelDocument, sprite: PixelSprite, scale =
 async function animatedImage(document: PixelDocument, sprite: PixelSprite, format: 'gif' | 'apng', scale = 1, tagId?: string): Promise<ExportArtifact> {
   assertScaledDimensions(sprite.width, sprite.height, scale);
   const width = sprite.width * scale; const height = sprite.height * scale;
-  const frameIds = pixelAnimationSequence(sprite, tagId); const frames = frameIds.map((frameId) => nearestNeighborFrame(renderSprite(document, sprite, frameId).getContext('2d').getImageData(0, 0, sprite.width, sprite.height).data, sprite.width, sprite.height, scale));
+  const frameIds = pixelAnimationSequence(sprite, tagId); const frames = frameIds.map((frameId) => {
+    const exact = format === 'apng' ? exactSingleLayerAnimationFrame(document.palette, sprite, frameId) : undefined;
+    const rgba = exact ?? renderSprite(document, sprite, frameId).getContext('2d').getImageData(0, 0, sprite.width, sprite.height).data;
+    return nearestNeighborFrame(rgba, sprite.width, sprite.height, scale);
+  });
   const delays = frameIds.map((frameId) => sprite.frames[frameId]?.durationMs ?? 100); const warnings = animationExportWarnings(sprite, tagId, scale);
   if (format === 'apng') {
     // upng-js sizes its output buffer from the first raw frame and only adds 100
