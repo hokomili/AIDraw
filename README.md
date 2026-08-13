@@ -44,6 +44,8 @@ Tilemap observation is allocation-bounded to the requested nonnegative nominal r
 
 Transient pixel/tile overlays follow the same outward-rounded viewport discipline as base artwork. Flood/replace and stamp previews, marching-ant cells, and replay overlays now submit Canvas work only for conservative projected cell bounds that can reach the view; compact horizontal replay/preview runs are clipped algebraically, including isometric diamond bounds, without expanding their stored operation. Point selections still scan their canonical point array once and retain only visible candidates. This changes no selection, preview, replay, transaction, order, or pixel semantics and is not a spatial-index or packaged frame-pacing claim.
 
+The transparency checker is likewise bounded to the current viewport plus fixed shadow overscan: its global cell phase and artboard-edge appearance remain stable, but only one bounded source rectangle receives the drop shadow and checker cells are clipped at the nominal surface edge. A freeform pixel/tile lasso shows its exact reduced outline while dragging and rasterizes selected cells once on release. Same-direction collinear samples collapse without approximation; 4,096 path vertices, one million candidate cells, and four million boundary steps are explicit fail-closed ceilings, and exceeding any ceiling preserves the prior selection. These are source/headless planner and wiring guarantees, not packaged pointer-latency, Canvas-blur, or frame-pacing evidence.
+
 ## Requirements
 
 - Windows 11 x64 is the currently locally verified development target.

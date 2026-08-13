@@ -21,4 +21,15 @@ describe('bounded placed-tile source wiring', () => {
     const mapRenderer = headless.slice(headless.indexOf('export function renderTilemap'), headless.indexOf('export function renderPixelAsset'));
     expect(mapRenderer).not.toContain('renderSprite(document, sourceAsset)');
   });
+
+  it('bounds the checker surface and computes an exact lasso only once on release', async () => {
+    const interactive = await readFile(new URL('../../src/renderer/canvas/PixelCanvas.tsx', import.meta.url), 'utf8');
+    expect(interactive).toContain('drawBoundedGridChecker(');
+    expect(interactive).toContain('createGridLassoDraft(point)');
+    expect(interactive).toContain('appendGridLassoPoint(current, point)');
+    expect(interactive).toContain('rasterizeGridLasso(pendingLassoPath)');
+    expect(interactive).toContain('selection was unchanged.');
+    expect(interactive).not.toContain('setPreview(rasterizeGridLasso(next))');
+    expect(interactive).not.toContain("context.shadowColor = 'rgba(47, 39, 63, .2)'; context.shadowBlur = 24");
+  });
 });

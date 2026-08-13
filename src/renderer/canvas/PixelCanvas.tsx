@@ -61,7 +61,8 @@ import { EditorDialog, EntryDialog } from '../components/EditorDialog';
 import { bresenham } from './geometry';
 import { clientPointToIsometricCoordinate, clientPointToIsometricTile, clientPointToOrthogonalCoordinate, clientPointToOrthogonalTile, clientPointToPixel } from './pixel-coordinates';
 import { pixelSelectionBounds, transformPixelSelection, type PixelSelectionTransform } from '../../common/pixel-selection';
-import { captureGridSelection, combineGridSelection, placeGridClipboard, rasterizeGridLasso, scaleGridSelection, transformGridSelection, type GridSelectionClipboard } from '../../common/grid-selection';
+import { MAX_GRID_LASSO_VERTICES, appendGridLassoPoint, captureGridSelection, combineGridSelection, createGridLassoDraft, placeGridClipboard, rasterizeGridLasso, scaleGridSelection, transformGridSelection, type GridLassoDraft, type GridSelectionClipboard } from '../../common/grid-selection';
+import { drawBoundedGridChecker } from '../../common/grid-checker';
 import { deleteMapObjectPoint, insertMapObjectPoint, mapObjectAtPoint, mapObjectBounds, moveMapObjectPoint, nearestMapObjectSegment, transformMapObject } from '../../common/map-objects';
 import { isometricCellRect, isometricCoordinateDeltaFromScreen, isometricObjectMatrix, isometricProjectionExtent, type IsometricCellRect } from '../../common/isometric-projection';
 import { drawMapObjectOverlay, mapObjectIntersectsRasterRegion } from '../../common/map-object-render';
@@ -154,12 +155,6 @@ function pixelToolLimitMessage(action: string, result: Extract<PixelRegionResult
   return `${action} is limited to ${limit} ${result.reason === 'cells' ? 'cells' : 'row runs'}; nothing was changed.`;
 }
 
-function drawChecker(context: CanvasRenderingContext2D, width: number, height: number, cell = 8): void {
-  context.fillStyle = '#f5f1eb'; context.fillRect(0, 0, width, height);
-  context.fillStyle = '#e5e0d9';
-  for (let y = 0; y < height; y += cell) for (let x = 0; x < width; x += cell) if ((x / cell + y / cell) % 2 === 0) context.fillRect(x, y, cell, cell);
-}
-
 function traceIsometricCell(context: CanvasRenderingContext2D, rect: IsometricCellRect): void {
   context.beginPath();
   context.moveTo(rect.x + rect.width / 2, rect.y);
@@ -250,6 +245,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const [selection, setSelection] = useState<PixelPoint[]>([]);
   const [selectionOffset, setSelectionOffset] = useState<PixelPoint>();
   const [lassoPath, setLassoPath] = useState<PixelPoint[]>([]);
+  const lassoDraftRef = useRef<GridLassoDraft | undefined>(undefined);
   const selectionCombination = useRef<SelectionCombination>('replace');
   const [selectionScaleOpen, setSelectionScaleOpen] = useState(false);
   const [clipboardAvailable, setClipboardAvailable] = useState(Boolean(localSelectionClipboard));
@@ -460,9 +456,13 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
         replayMasks.celPixels.set(linkedCelId, linkedPoints);
       }
     }
-    context.shadowColor = 'rgba(47, 39, 63, .2)'; context.shadowBlur = 24; context.shadowOffsetY = 8;
-    drawChecker(context, logical.width * view.scale, logical.height * view.scale, Math.max(4, view.scale));
-    context.shadowColor = 'transparent';
+    drawBoundedGridChecker(
+      context,
+      logical.width * view.scale,
+      logical.height * view.scale,
+      Math.max(4, view.scale),
+      { x: -view.offsetX, y: -view.offsetY, width: size.width, height: size.height },
+    );
     const isometricCellHeight = tilemap?.orientation === 'isometric' ? view.scale * tilemap.tileHeight / tilemap.tileWidth : view.scale;
     const orthogonalCellHeight = tilemap?.orientation === 'orthogonal' ? view.scale * tilemap.tileHeight / tilemap.tileWidth : view.scale;
     const baseRasterViewportRegion = sprite || tilemap ? coveringRasterViewportRegion({
@@ -940,6 +940,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     return cancelPixelGesture(() => {
       gestureEpochRef.current += 1;
       lockPromiseRef.current = undefined; mapObjectGestureRef.current = undefined;
+      lassoDraftRef.current = undefined;
       setStart(undefined); setPreview([]); setBulkPreview([]); setLassoPath([]); setStampPreview([]); setTileStampPreview([]); setSelectionOffset(undefined); setLockPromise(undefined); setMapObjectGesture(undefined);
     }, pendingLocks, (lockId) => window.aidraw.releaseHumanLock(lockId));
   };
@@ -1004,7 +1005,14 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       setPreview([]); setBulkPreview([]); return;
     }
     if (tool === 'select' && combination === 'replace' && selection.some((entry) => entry.x === point.x && entry.y === point.y)) { setStart(point); setCursor(point); setPreview([]); setSelectionOffset({ x: 0, y: 0 }); return; }
-    if (tool === 'select' || tool === 'lasso') { setSelectionOffset(undefined); setStart(point); setCursor(point); setLassoPath(tool === 'lasso' ? [point] : []); setPreview([point]); return; }
+    if (tool === 'select' || tool === 'lasso') {
+      let draft: GridLassoDraft | undefined;
+      try { draft = tool === 'lasso' ? createGridLassoDraft(point) : undefined; }
+      catch (error) { notify(`${error instanceof Error ? error.message : 'Grid lasso could not start.'} Selection was unchanged.`, 'warning'); return; }
+      const path = draft?.points ?? [];
+      lassoDraftRef.current = draft;
+      setSelectionOffset(undefined); setStart(point); setCursor(point); setLassoPath(path); setPreview(tool === 'lasso' ? [] : [point]); return;
+    }
     if (tool === 'text' && sprite && activeFrameId) {
       setBitmapTextPoint(point);
       return;
@@ -1035,7 +1043,24 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     if (tool === 'hand' || event.button === 1) {
       setPan((current) => ({ x: current.x + event.movementX, y: current.y + event.movementY }));
     } else if (selectionOffset && tool === 'select') setSelectionOffset({ x: point.x - start.x, y: point.y - start.y });
-    else if (tool === 'lasso') setLassoPath((current) => { const last = current.at(-1); const next = last?.x === point.x && last.y === point.y ? current : [...current, point]; setPreview(rasterizeGridLasso(next)); return next; });
+    else if (tool === 'lasso') {
+      try {
+        const current = lassoDraftRef.current;
+        if (!current) return;
+        const next = appendGridLassoPoint(current, point);
+        if (!next) {
+          notify(`Grid lasso is limited to ${MAX_GRID_LASSO_VERTICES.toLocaleString('en-US')} path vertices; selection was unchanged.`, 'warning');
+          void cancelGesture();
+          return;
+        }
+        lassoDraftRef.current = next;
+        setLassoPath(next.points);
+      } catch (error) {
+        notify(`${error instanceof Error ? error.message : 'Grid lasso could not continue.'} Selection was unchanged.`, 'warning');
+        void cancelGesture();
+        return;
+      }
+    }
     else if (tool === 'fill' || tool === 'replace') { setCursor(point); return; }
     else updatePreview(start, point);
     setCursor(point);
@@ -1049,12 +1074,26 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       finally { if (lock.lockId) await window.aidraw.releaseHumanLock(lock.lockId); }
       return;
     }
+    if (!start && !selectionOffset && !lockPromise) return;
     const pendingLock = lockPromise;
     const pendingRuns = bulkPreview;
+    const pendingLassoPath = lassoDraftRef.current?.points ?? [];
+    if (tool === 'lasso' && pendingLassoPath.length === 0) return;
     const points = preview.filter((point) => tilemap?.infinite || (point.x >= 0 && point.y >= 0 && point.x < logical.gridWidth && point.y < logical.gridHeight));
     const placedStamp = stampPreview; const placedTiles = tileStampPreview; setStart(undefined); setPreview([]); setBulkPreview([]); setLassoPath([]); setStampPreview([]); setTileStampPreview([]);
+    lassoDraftRef.current = undefined;
     if (selectionOffset && tool === 'select') { const offset = selectionOffset; setSelectionOffset(undefined); if (offset.x || offset.y) await transformSelection('move', offset); return; }
-    if (tool === 'select' || tool === 'lasso') { setSelection((current) => combineGridSelection(current, points, selectionCombination.current)); return; }
+    if (tool === 'select') { setSelection((current) => combineGridSelection(current, points, selectionCombination.current)); return; }
+    if (tool === 'lasso') {
+      try {
+        const selected = rasterizeGridLasso(pendingLassoPath)
+          .filter((point) => tilemap?.infinite || (point.x >= 0 && point.y >= 0 && point.x < logical.gridWidth && point.y < logical.gridHeight));
+        setSelection((current) => combineGridSelection(current, selected, selectionCombination.current));
+      } catch (error) {
+        notify(`${error instanceof Error ? error.message : 'Grid lasso could not be evaluated.'} Selection was unchanged.`, 'warning');
+      }
+      return;
+    }
     if (points.length === 0 && pendingRuns.length === 0) { const emptyLock = await pendingLock; setLockPromise(undefined); if (gestureEpoch !== gestureEpochRef.current) return; if (emptyLock?.lockId) await window.aidraw.releaseHumanLock(emptyLock.lockId); return; }
     const lock = await pendingLock;
     setLockPromise(undefined);
@@ -1230,7 +1269,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       else if (command === 'cut') { if (copyLocalSelection()) void deleteSelection(); }
       else if (command === 'paste') void pasteLocalSelection();
       else if (command === 'delete') void deleteSelection();
-      else if (command === 'clear') { setSelection([]); setSelectionOffset(undefined); setLassoPath([]); }
+      else if (command === 'clear') { lassoDraftRef.current = undefined; setSelection([]); setSelectionOffset(undefined); setLassoPath([]); }
       else if (command === 'select-all') {
         if (tilemap?.infinite) { notify('Select All is not finite on an infinite map; drag a bounded selection instead.', 'warning'); return; }
         const width = sprite?.width ?? tilemap?.width ?? 0; const height = sprite?.height ?? tilemap?.height ?? 0;

@@ -29,6 +29,8 @@ import { transactionSamples, visibleOperations } from '@main/playback-scheduler'
 import { materializePaintTiles, writeNativeDocument } from '@main/persistence';
 import { renderIllustration, renderIllustrationRegion, renderTilemap, renderTilemapRegion } from '@main/render-document';
 import { mapObjectsIntersectingRasterRegion } from '@common/map-object-render';
+import { planGridChecker } from '@common/grid-checker';
+import { MAX_GRID_LASSO_VERTICES, appendGridLassoPoint, createGridLassoDraft } from '@common/grid-selection';
 import { drawPixelSpriteRegion } from '@common/pixel-sprite-render';
 import { createGridRasterRegionFilter } from '@common/tilemap-region';
 import { lassoSelectsIllustrationObjects } from '@common/illustration-lasso';
@@ -49,6 +51,7 @@ const budgets = {
   sprite4096ChunkRegionRenderMs: 100,
   mapObject100000RegionFilterMs: 500,
   millionCellOverlayCullMs: 100,
+  millionSampleGridSurfacePlanMs: 500,
   nativeSaveMs: 5_000,
   pngExportMs: 5_000,
   millionSampleAccountingMs: 500,
@@ -270,6 +273,16 @@ describe('Windows v1 non-GUI performance gate', () => {
     });
     const afterOverlayCullRss = process.memoryUsage().rss;
     memoryProfile.push(memorySnapshot('after-million-cell-overlay-cull', startingRss));
+    const gridSurfacePlan = await measured(() => {
+      let lassoPath = createGridLassoDraft({ x: 0, y: 0 });
+      for (let x = 1; x <= 1_000_000; x += 1) lassoPath = appendGridLassoPoint(lassoPath, { x, y: 0 })!;
+      let complexLassoPath = createGridLassoDraft({ x: 0, y: 0 });
+      for (let x = 1; x < MAX_GRID_LASSO_VERTICES; x += 1) complexLassoPath = appendGridLassoPoint(complexLassoPath, { x, y: x % 2 })!;
+      const checker = planGridChecker(524_288, 524_288, 4, { x: 500_000, y: 500_000, width: 1_280, height: 720 });
+      return { lassoVertices: lassoPath.points.length, complexLassoVertices: complexLassoPath.points.length, checkerCandidates: (checker.columnEnd - checker.columnStart) * (checker.rowEnd - checker.rowStart), shadowSource: checker.shadowSource };
+    });
+    const afterGridSurfacePlanRss = process.memoryUsage().rss;
+    memoryProfile.push(memorySnapshot('after-million-sample-grid-surface-plan', startingRss));
     const root = await mkdtemp(join(tmpdir(), 'aidraw-performance-')); temporaryPaths.push(root);
     const nativeSave = await measured(() => writeNativeDocument(join(root, 'vectors.aidraw'), vector, 'performance-gate'));
     memoryProfile.push(memorySnapshot('after-native-save', startingRss));
@@ -283,7 +296,7 @@ describe('Windows v1 non-GUI performance gate', () => {
     memoryProfile.push(memorySnapshot('after-million-cell-flood-fixture', startingRss));
     const floodFill = await measured(() => floodPixelRegion({ width: floodFixture.sprite.width, height: floodFixture.sprite.height, start: { x: 0, y: 0 }, read: floodFixture.read }));
     memoryProfile.push(memorySnapshot('after-million-cell-flood-fill', startingRss));
-    const peakRss = Math.max(afterVectorRss, afterSparseIllustrationRegionRss, afterVectorLassoRss, afterVectorHitTestRss, afterPaintRss, afterMapRss, afterSparseMapRegionRss, afterSparseSpriteRegionRss, afterMapObjectFilterRss, afterOverlayCullRss, process.memoryUsage().rss);
+    const peakRss = Math.max(afterVectorRss, afterSparseIllustrationRegionRss, afterVectorLassoRss, afterVectorHitTestRss, afterPaintRss, afterMapRss, afterSparseMapRegionRss, afterSparseSpriteRegionRss, afterMapObjectFilterRss, afterOverlayCullRss, afterGridSurfacePlanRss, process.memoryUsage().rss);
     const metrics = {
       vector5000RenderMs: vectorRender.durationMs,
       illustration8192RegionRenderMs: sparseIllustrationRegionRender.durationMs,
@@ -297,13 +310,14 @@ describe('Windows v1 non-GUI performance gate', () => {
       sprite4096ChunkRegionRenderMs: sparseSpriteRegionRender.durationMs,
       mapObject100000RegionFilterMs: mapObjectRegionFilter.durationMs,
       millionCellOverlayCullMs: overlayCull.durationMs,
+      millionSampleGridSurfacePlanMs: gridSurfacePlan.durationMs,
       nativeSaveMs: nativeSave.durationMs,
       pngExportMs: pngExport.durationMs,
       millionSampleAccountingMs: queueAccounting.durationMs,
       millionCellFloodFillMs: floodFill.durationMs,
       rssGrowthMiB: Number(((peakRss - startingRss) / 1024 / 1024).toFixed(2)),
     };
-    const report = { version: 1, createdAt: new Date().toISOString(), build: process.env.GITHUB_SHA ?? 'local', machine: { hostname: hostname(), platform: platform(), release: release(), arch: process.arch, cpu: cpus()[0]?.model, logicalCpus: cpus().length, totalMemoryMiB: Math.round(totalmem() / 1024 / 1024), freeMemoryMiB: Math.round(freemem() / 1024 / 1024), node: process.version }, coverage: { automated: ['5,000 vector render', 'one-pixel regional render on an 8192×8192 illustration', 'exact canonical lasso selection across 5,000 vector objects', 'path-authoritative click hit testing across 5,000 vector objects', 'four 4096×4096 editable paint layers', 'cold and warm four-layer 4096×4096 materialized sparse paint render', '65,536 addressed tiles from an 8192×8192 sparse source sheet', 'one-pixel regional render across 4,096 stored map chunks', 'one-pixel regional sprite composite across 4,096 stored cel chunks', 'regional projected-bounds filter across 100,000 map objects', 'viewport cull across 1,048,576 overlay cells in 65,536 compact runs', 'native save', 'PNG export', 'one-million-sample compact accounting', 'one-million-cell bounded flood fill', 'RSS growth'], deferredToPackagedComputerUse: ['pointer-to-preview latency', 'requestAnimationFrame pacing', 'human input while million-cell overlays are visible', '200% display scaling and tablet latency'] }, budgets, metrics, diagnostics: { memoryProfile } };
+    const report = { version: 1, createdAt: new Date().toISOString(), build: process.env.GITHUB_SHA ?? 'local', machine: { hostname: hostname(), platform: platform(), release: release(), arch: process.arch, cpu: cpus()[0]?.model, logicalCpus: cpus().length, totalMemoryMiB: Math.round(totalmem() / 1024 / 1024), freeMemoryMiB: Math.round(freemem() / 1024 / 1024), node: process.version }, coverage: { automated: ['5,000 vector render', 'one-pixel regional render on an 8192×8192 illustration', 'exact canonical lasso selection across 5,000 vector objects', 'path-authoritative click hit testing across 5,000 vector objects', 'four 4096×4096 editable paint layers', 'cold and warm four-layer 4096×4096 materialized sparse paint render', '65,536 addressed tiles from an 8192×8192 sparse source sheet', 'one-pixel regional render across 4,096 stored map chunks', 'one-pixel regional sprite composite across 4,096 stored cel chunks', 'regional projected-bounds filter across 100,000 map objects', 'viewport cull across 1,048,576 overlay cells in 65,536 compact runs', 'viewport checker planning, exact straight-path reduction across 1,000,001 lasso samples, and incremental validation to the 4,096-vertex ceiling', 'native save', 'PNG export', 'one-million-sample compact accounting', 'one-million-cell bounded flood fill', 'RSS growth'], deferredToPackagedComputerUse: ['pointer-to-preview latency', 'requestAnimationFrame pacing', 'human input while million-cell overlays are visible', '200% display scaling and tablet latency'] }, budgets, metrics, diagnostics: { memoryProfile } };
     const reportPath = process.env.AIDRAW_PERFORMANCE_REPORT ?? join(process.cwd(), 'test-results', 'performance-gate.json');
     await mkdir(dirname(reportPath), { recursive: true }); await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
     expect(queueAccounting.value.samples).toBe(1_000_000); expect((queueAccounting.value.midpoint[0] as Extract<CanvasOperation, { kind: 'pixel.cel.region' }>).runs.reduce((sum, run) => sum + run.length, 0)).toBe(500_000);
@@ -312,6 +326,7 @@ describe('Windows v1 non-GUI performance gate', () => {
     expect(floodFill.value).toMatchObject({ ok: true, cellCount: 1_000_000 });
     expect(mapObjectRegionFilter.value.map(({ id }) => id)).toEqual(['regional-object-99999']);
     expect(overlayCull.value).toEqual({ candidateRuns: 1, candidateCells: 2 });
+    expect(gridSurfacePlan.value).toEqual({ lassoVertices: 2, complexLassoVertices: 4_096, checkerCandidates: 57_600, shadowSource: { x: 499_936, y: 499_936, width: 1_408, height: 848 } });
     if (!floodFill.value.ok) throw new Error('Expected bounded flood fill to succeed.');
     expect(floodFill.value.runs).toHaveLength(1_000);
     for (const [name, budget] of Object.entries(budgets)) expect(metrics[name as keyof typeof metrics], `${name} exceeded its documented budget; inspect ${reportPath}`).toBeLessThanOrEqual(budget);
