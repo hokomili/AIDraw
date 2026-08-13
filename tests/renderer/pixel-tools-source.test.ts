@@ -24,4 +24,13 @@ describe('pixel tool renderer wiring', () => {
     expect(source).toContain('gestureEpochRef.current += 1');
     expect(source).toContain('gestureEpoch !== gestureEpochRef.current');
   });
+
+  it('exposes both exact quarter-turn directions for selections and reusable pixel or tile stamps', async () => {
+    const source = await readFile(new URL('../../src/renderer/canvas/PixelCanvas.tsx', import.meta.url), 'utf8');
+    expect(source).toContain("transformSelection('rotate-clockwise')");
+    expect(source).toContain("transformSelection('rotate-counterclockwise')");
+    expect(source).toContain("transformActiveStamp('rotate-clockwise')");
+    expect(source).toContain("transformActiveStamp('rotate-counterclockwise')");
+    expect(source).toContain('RotateCcw');
+  });
 });

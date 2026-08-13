@@ -25,6 +25,7 @@ describe('reusable tile stamps', () => {
     const stamp = { id: 'slope', name: 'Slope', width: 3, height: 2, anchorX: 0, anchorY: 1, cells: [{ x: 0, y: 0, gid: transformed }, { x: 2, y: 1, gid: 8 }] };
     expect(transformTileStamp(stamp, 'flip-horizontal')).toMatchObject({ width: 3, height: 2, anchorX: 2, anchorY: 1, cells: [{ x: 2, y: 0, gid: transformed }, { x: 0, y: 1, gid: 8 }] });
     expect(transformTileStamp(stamp, 'rotate-clockwise')).toMatchObject({ width: 2, height: 3, anchorX: 0, anchorY: 0, cells: [{ x: 1, y: 0, gid: transformed }, { x: 0, y: 2, gid: 8 }] });
+    expect(transformTileStamp(stamp, 'rotate-counterclockwise')).toMatchObject({ width: 2, height: 3, anchorX: 1, anchorY: 2, cells: [{ x: 0, y: 2, gid: transformed }, { x: 1, y: 0, gid: 8 }] });
   });
 
   it('clips finite maps and permits negative infinite-map destinations', () => {

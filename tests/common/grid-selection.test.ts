@@ -6,6 +6,8 @@ describe('generic grid selections', () => {
     const values = new Map([['1,1', 0x8000_0005], ['2,1', 0x4000_0006]]);
     const moved = transformGridSelection([{ x: 1, y: 1 }, { x: 2, y: 1 }], (x, y) => values.get(x + ',' + y) ?? 0, 'rotate-clockwise', { width: 8, height: 8 }, {}, 0);
     expect(moved.changes).toEqual(expect.arrayContaining([{ x: 1, y: 1, value: 0x8000_0005 }, { x: 1, y: 2, value: 0x4000_0006 }, { x: 2, y: 1, value: 0 }]));
+    const counter = transformGridSelection([{ x: 1, y: 1 }, { x: 2, y: 1 }], (x, y) => values.get(x + ',' + y) ?? 0, 'rotate-counterclockwise', { width: 8, height: 8 }, {}, 0);
+    expect(counter.changes).toEqual(expect.arrayContaining([{ x: 1, y: 1, value: 0x4000_0006 }, { x: 1, y: 2, value: 0x8000_0005 }, { x: 2, y: 1, value: 0 }]));
   });
 
   it('supports unbounded negative infinite-map destinations', () => {

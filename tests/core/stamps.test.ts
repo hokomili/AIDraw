@@ -23,6 +23,7 @@ describe('reusable pixel stamps', () => {
     const source = { id: 'shape', name: 'Shape', width: 3, height: 2, anchorX: 0, anchorY: 1, cells: [{ x: 0, y: 0, index: 2 }, { x: 2, y: 1, index: 5 }] };
     expect(transformPixelStamp(source, 'flip-horizontal')).toMatchObject({ width: 3, height: 2, anchorX: 2, anchorY: 1, cells: [{ x: 2, y: 0, index: 2 }, { x: 0, y: 1, index: 5 }] });
     expect(transformPixelStamp(source, 'rotate-clockwise')).toMatchObject({ width: 2, height: 3, anchorX: 0, anchorY: 0, cells: [{ x: 1, y: 0, index: 2 }, { x: 0, y: 2, index: 5 }] });
+    expect(transformPixelStamp(source, 'rotate-counterclockwise')).toMatchObject({ width: 2, height: 3, anchorX: 1, anchorY: 2, cells: [{ x: 0, y: 2, index: 2 }, { x: 1, y: 0, index: 5 }] });
   });
 
   it('places relative to the anchor and reports clipped cells', () => {

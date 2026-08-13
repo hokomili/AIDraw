@@ -48,7 +48,7 @@ import {
   type TileStamp,
   type TilemapChunk,
 } from '@aidraw/core';
-import { ArrowLeft, ArrowRight, ChevronLeft, ChevronRight, ClipboardPaste, Copy, Eraser, Eye, FlipHorizontal2, FlipVertical2, Grid3X3, Link2, Move, Palette, Pause, Play, Repeat2, RotateCw, Scaling, Scissors, Trash2, Unlink2 } from 'lucide-react';
+import { ArrowLeft, ArrowRight, ChevronLeft, ChevronRight, ClipboardPaste, Copy, Eraser, Eye, FlipHorizontal2, FlipVertical2, Grid3X3, Link2, Move, Palette, Pause, Play, Repeat2, RotateCcw, RotateCw, Scaling, Scissors, Trash2, Unlink2 } from 'lucide-react';
 import { useEditorStore } from '../store';
 import { PlaybackLanes } from '../components/PlaybackLanes';
 import { collectReplayMasks, replayPointKey, replayTileLayerKey } from '../replay';
@@ -1111,6 +1111,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
           <button disabled={sprite ? !activeStamp : !activeTileStamp} onClick={() => void transformActiveStamp('flip-horizontal')} title="Flip saved stamp horizontally"><FlipHorizontal2 size={13} /></button>
           <button disabled={sprite ? !activeStamp : !activeTileStamp} onClick={() => void transformActiveStamp('flip-vertical')} title="Flip saved stamp vertically"><FlipVertical2 size={13} /></button>
           <button disabled={sprite ? !activeStamp : !activeTileStamp} onClick={() => void transformActiveStamp('rotate-clockwise')} title="Rotate saved stamp 90° clockwise"><RotateCw size={13} /></button>
+          <button disabled={sprite ? !activeStamp : !activeTileStamp} onClick={() => void transformActiveStamp('rotate-counterclockwise')} title="Rotate saved stamp 90° counterclockwise"><RotateCcw size={13} /></button>
           <button disabled={sprite ? !activeStamp : !activeTileStamp} onClick={() => void deleteActiveStamp()} title="Delete saved stamp"><Trash2 size={13} /></button>
         </>}
         {selection.length > 0 && <>
@@ -1119,7 +1120,8 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
           <button onClick={() => { if (copyLocalSelection()) void deleteSelection(); }} title="Cut exact indexed selection (Ctrl+X)"><Scissors size={13} /> Cut</button>
           <button onClick={() => void transformSelection('flip-horizontal')} title="Flip selected pixels horizontally"><FlipHorizontal2 size={13} /> H</button>
           <button onClick={() => void transformSelection('flip-vertical')} title="Flip selected pixels vertically"><FlipVertical2 size={13} /> V</button>
-          <button onClick={() => void transformSelection('rotate-clockwise')} title="Rotate selected pixels 90° clockwise"><RotateCw size={13} /> 90°</button>
+          <button onClick={() => void transformSelection('rotate-clockwise')} title="Rotate selected cells 90° clockwise"><RotateCw size={13} /> CW</button>
+          <button onClick={() => void transformSelection('rotate-counterclockwise')} title="Rotate selected cells 90° counterclockwise"><RotateCcw size={13} /> CCW</button>
           <button onClick={() => setSelectionScaleOpen(true)} title="Scale selected cells by independent integer factors"><Scaling size={13} /> Scale</button>
           <button onClick={() => void deleteSelection()} title="Delete selected pixels"><Trash2 size={13} /></button>
           <button onClick={() => { setSelection([]); setSelectionOffset(undefined); }} title="Clear selection">Clear</button>
