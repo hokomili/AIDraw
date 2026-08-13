@@ -670,10 +670,15 @@ export class DocumentService extends EventEmitter {
         this.comparisons.delete(loaded.document.id);
         this.acknowledgedAgentActivityCounts.set(loaded.document.id, agentActivityEntries(loaded.document).length);
         void this.journal.compact(loaded.document).catch((error) => this.emit('recovery-error', error));
-        await this.traceStore?.import(loaded.document.id, loaded.trace);
+        warnings.push(...loaded.warnings);
+        try {
+          await this.traceStore?.import(loaded.document.id, loaded.trace);
+        } catch (error) {
+          this.emit('trace-error', error);
+          warnings.push(`${filePath}: Transaction trace history could not be imported: ${error instanceof Error ? error.message : 'Unknown trace import error.'}`);
+        }
         this.activeDocumentId = loaded.document.id;
         opened.push(filePath);
-        warnings.push(...loaded.warnings);
       } catch (error) {
         warnings.push(`${filePath}: ${error instanceof Error ? error.message : 'Could not open file.'}`);
       }

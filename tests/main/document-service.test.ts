@@ -3,13 +3,14 @@ import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createId, createIllustrationDocument, nowIso, type Actor, type CanvasTransaction, type ShapeObject } from '@aidraw/core';
+import { HUMAN_ACTOR, IDENTITY_TRANSFORM, applyTransaction, createId, createIllustrationDocument, nowIso, type Actor, type CanvasTransaction, type ShapeObject } from '@aidraw/core';
+import type { TransactionTraceEntry } from '@common/contracts';
 import { DocumentService, type NativeDocumentPreviewRenderer } from '@main/document-service';
 import { RecoveryJournal } from '@main/journal';
 import { writeNativeDocument } from '@main/persistence';
 import { TransactionTraceStore } from '@main/trace-store';
 import { createCanvas } from '@napi-rs/canvas';
-import { strFromU8, unzipSync } from 'fflate';
+import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate';
 
 const temporaryPaths: string[] = [];
 const services: DocumentService[] = [];
@@ -379,6 +380,66 @@ describe('document service collaboration semantics', () => {
     const restarted = new DocumentService(new RecoveryJournal(recoveryRoot), '1.0.0'); services.push(restarted);
     expect(await restarted.recover()).toBe(1);
     expect(restarted.snapshot()).toMatchObject({ activeDocumentId: source.id, activeDocument: { id: source.id, name: 'Recovered immediate edit', revision: 1, dirty: true, filePath: sourcePath } });
+  });
+
+  it('opens and recovers native artwork when advisory trace-history import fails', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-service-open-trace-failure-'));
+    temporaryPaths.push(root);
+    const source = createIllustrationDocument('Trace-backed native source');
+    const archivedTransaction: CanvasTransaction = {
+      id: 'archived-trace-transaction', clientOperationId: 'archived-trace-operation', documentId: source.id,
+      actor: HUMAN_ACTOR, label: 'Archived trace entry', createdAt: nowIso(), operations: [{ kind: 'document.rename', name: 'Archived trace rename' }],
+    };
+    const archivedTrace: TransactionTraceEntry = {
+      version: 1, documentId: source.id, revision: 1, recordedAt: nowIso(), outcome: 'committed', transaction: archivedTransaction,
+    };
+    const archivedSource = applyTransaction(source, archivedTransaction).document;
+    const sourcePath = await writeNativeDocument(join(root, 'trace-source'), archivedSource, '1.0.0', undefined, [archivedTrace]);
+    const archive = unzipSync(new Uint8Array(await readFile(sourcePath)));
+    archive['trace/transactions.jsonl'] = strToU8(`${strFromU8(archive['trace/transactions.jsonl'])}{}\n`);
+    await writeFile(sourcePath, zipSync(archive, { level: 6 }));
+    class FailingTraceStore extends TransactionTraceStore {
+      readonly imports: Array<{ documentId: string; entries: TransactionTraceEntry[] }> = [];
+
+      override async import(documentId: string, entries: TransactionTraceEntry[]): Promise<number> {
+        this.imports.push({ documentId, entries: structuredClone(entries) });
+        throw new Error('Injected trace import failure.');
+      }
+    }
+    const recoveryRoot = join(root, 'recovery');
+    const traces = new FailingTraceStore(join(root, 'traces'));
+    const service = new DocumentService(new RecoveryJournal(recoveryRoot), '1.0.0', traces);
+    services.push(service);
+    const traceErrors: unknown[] = [];
+    service.on('trace-error', (error) => traceErrors.push(error));
+
+    await expect(service.open([sourcePath])).resolves.toEqual({
+      opened: [sourcePath],
+      warnings: [
+        'A malformed transaction trace entry was ignored.',
+        `${sourcePath}: Transaction trace history could not be imported: Injected trace import failure.`,
+      ],
+    });
+    expect(traces.imports).toEqual([{ documentId: source.id, entries: [archivedTrace] }]);
+    expect(traceErrors).toHaveLength(1);
+    expect(traceErrors[0]).toMatchObject({ message: 'Injected trace import failure.' });
+    expect(service.snapshot()).toMatchObject({
+      activeDocumentId: source.id,
+      activeDocument: { id: source.id, name: 'Archived trace rename', revision: 1, dirty: false, filePath: sourcePath },
+    });
+
+    await expect(service.apply({
+      id: 'post-trace-failure-transaction', clientOperationId: 'post-trace-failure-operation', documentId: source.id,
+      actor: HUMAN_ACTOR, label: 'Edit after trace failure', createdAt: nowIso(), operations: [{ kind: 'document.rename', name: 'Recoverable after trace failure' }],
+    })).resolves.toMatchObject({ status: 'committed', revision: 2 });
+    await service.flushRecovery();
+    const restarted = new DocumentService(new RecoveryJournal(recoveryRoot), '1.0.0');
+    services.push(restarted);
+    expect(await restarted.recover()).toBe(1);
+    expect(restarted.snapshot()).toMatchObject({
+      activeDocumentId: source.id,
+      activeDocument: { id: source.id, name: 'Recoverable after trace failure', revision: 2, dirty: true, filePath: sourcePath },
+    });
   });
 
   it('refuses a different native file with an open document ID without replacing dirty work', async () => {
