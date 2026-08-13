@@ -50,9 +50,10 @@ import {
   type TileStamp,
   type TilemapChunk,
 } from '@aidraw/core';
-import { ArrowLeft, ArrowRight, ChevronLeft, ChevronRight, ClipboardPaste, Copy, Dices, Eraser, Eye, FlipHorizontal2, FlipVertical2, Grid3X3, Link2, Move, Palette, Pause, Play, Repeat2, RotateCcw, RotateCw, Scaling, Scissors, Table2, Trash2, Unlink2 } from 'lucide-react';
+import { ArrowLeft, ArrowRight, ChevronLeft, ChevronRight, ClipboardPaste, Copy, Dices, Eraser, Eye, FlipHorizontal2, FlipVertical2, Grid3X3, Link2, Move, Palette, Pause, Play, Repeat2, RotateCcw, RotateCw, Scaling, Scissors, SlidersHorizontal, Table2, Trash2, Unlink2 } from 'lucide-react';
 import { useEditorStore } from '../store';
 import { CelExposureGrid } from '../components/CelExposureGrid';
+import { OnionSkinSettingsPanel } from '../components/OnionSkinSettingsPanel';
 import { PlaybackLanes } from '../components/PlaybackLanes';
 import { collectReplayMasks, replayPointKey, replayTileLayerKey } from '../replay';
 import { EditorDialog, EntryDialog } from '../components/EditorDialog';
@@ -62,6 +63,7 @@ import { pixelSelectionBounds, transformPixelSelection, type PixelSelectionTrans
 import { captureGridSelection, combineGridSelection, placeGridClipboard, rasterizeGridLasso, scaleGridSelection, transformGridSelection, type GridSelectionClipboard } from '../../common/grid-selection';
 import { deleteMapObjectPoint, insertMapObjectPoint, mapObjectAtPoint, mapObjectBounds, moveMapObjectPoint, nearestMapObjectSegment, transformMapObject } from '../../common/map-objects';
 import { TILE_VARIANT_SEED_PROPERTY, chooseTileVariant, nextTileVariantSeed, tileVariantCandidates, tileVariantGroup } from '../../common/tile-variants';
+import { DEFAULT_ONION_SKIN_SETTINGS, onionSkinLayers, type OnionSkinSettings } from '../../common/onion-skin';
 import { parseBitmapFontJson } from '../../common/bitmap-font-interchange';
 import { cancelPixelGesture, releasePendingPixelLocks } from '../../common/pixel-gesture';
 import { editableSpriteLayer, recordValues, safeDecodePixelChunk, spriteBitmap, visibleSpriteLayers } from './pixel-bitmap';
@@ -244,6 +246,8 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const [pingPong, setPingPong] = useState(false);
   const [playDirection, setPlayDirection] = useState<1 | -1>(1);
   const [onionSkin, setOnionSkin] = useState(true);
+  const [onionSettings, setOnionSettings] = useState<OnionSkinSettings>(() => ({ ...DEFAULT_ONION_SKIN_SETTINGS }));
+  const [onionSettingsOpen, setOnionSettingsOpen] = useState(false);
   const [wrapPreview, setWrapPreview] = useState(false);
   const [symmetry, setSymmetry] = useState<'none' | 'horizontal' | 'vertical' | 'both'>('none');
   const [paletteCycling, setPaletteCycling] = useState(false);
@@ -427,9 +431,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
         }
       };
       if (onionSkin && sprite.frameIds.length > 1) {
-        const index = sprite.frameIds.indexOf(activeFrameId);
-        if (index > 0) drawFrame(sprite.frameIds[index - 1], 0.22, '#51bfc0');
-        if (index < sprite.frameIds.length - 1) drawFrame(sprite.frameIds[index + 1], 0.18, '#ef7297');
+        for (const onionLayer of onionSkinLayers(sprite.frameIds, activeFrameId, onionSettings)) drawFrame(onionLayer.frameId, onionLayer.opacity, onionLayer.tint);
       }
       drawFrame(activeFrameId, 1);
       if (wrapPreview) {
@@ -580,7 +582,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       context.stroke();
     }
     context.restore();
-  }, [activeFrameId, activePaletteCycle, activePaletteOverride, bulkPreview, ditherCoverage, ditherMatrixSize, ditherMixIndex, document, lassoPath, logical, mapObjectGesture, onionSkin, paletteCycling, paletteOffset, pan.x, pan.y, pixelIndex, playbacks, preview, selectedEntityId, selection, selectionOffset, size, sprite, stampPreview, tilemap, tileStampPreview, tileset, tool, view, wrapPreview]);
+  }, [activeFrameId, activePaletteCycle, activePaletteOverride, bulkPreview, ditherCoverage, ditherMatrixSize, ditherMixIndex, document, lassoPath, logical, mapObjectGesture, onionSettings, onionSkin, paletteCycling, paletteOffset, pan.x, pan.y, pixelIndex, playbacks, preview, selectedEntityId, selection, selectionOffset, size, sprite, stampPreview, tilemap, tileStampPreview, tileset, tool, view, wrapPreview]);
 
   const toPixel = (event: ReactPointerEvent<HTMLCanvasElement>): PixelPoint => {
     const bounds = event.currentTarget.getBoundingClientRect();
@@ -1118,6 +1120,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       {tileset && <div className="tileset-canvas-label"><Grid3X3 size={14} /><span><strong>Tileset source</strong><small>{tileset.tileWidth} × {tileset.tileHeight}px cells · metadata in Layers</small></span></div>}
       <div className="pixel-floating-controls">
         {hasTimeline && <button className={onionSkin ? 'is-active' : ''} onClick={() => setOnionSkin((value) => !value)} title="Onion skin"><Eye size={14} /> Onion</button>}
+        {hasTimeline && <button className={onionSettingsOpen ? 'is-active' : ''} aria-expanded={onionSettingsOpen} aria-controls="onion-skin-settings" onClick={() => { setOnionSettingsOpen((open) => !open); setExposureGridOpen(false); }} title="Configure bounded onion skin frames, tint, and opacity"><SlidersHorizontal size={13} /> Onion setup</button>}
         <button className={wrapPreview ? 'is-active' : ''} onClick={() => setWrapPreview((value) => !value)} title="Tile wrap preview"><Repeat2 size={14} /> Wrap</button>
         {sprite && <button className={symmetry !== 'none' ? 'is-active' : ''} onClick={() => setSymmetry((value) => value === 'none' ? 'horizontal' : value === 'horizontal' ? 'vertical' : value === 'vertical' ? 'both' : 'none')} title="Cycle symmetry: none, horizontal, vertical, both"><FlipHorizontal2 size={14} /> {symmetry === 'none' ? 'Sym' : symmetry[0].toUpperCase()}</button>}
         {sprite && <button className={paletteCycling ? 'is-active' : ''} onClick={() => { if (paletteCycling) setPaletteOffset(0); setPaletteCycling(!paletteCycling); }} title="Palette cycling preview"><Repeat2 size={14} /> Cycle</button>}
@@ -1158,7 +1161,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
             <button onClick={() => void moveFrame(1)} disabled={sprite.frameIds.indexOf(activeFrameId ?? '') >= sprite.frameIds.length - 1} title="Move active frame right"><ArrowRight size={12} /></button>
             <button onClick={() => void duplicateFrame()} title="Duplicate active frame"><Copy size={12} /></button>
             <button className={activeFrameLinked ? 'is-active' : ''} onClick={() => void toggleCelLink()} title={activeFrameLinked ? 'Unlink active frame cels' : 'Link active frame cels to previous frame'}>{activeFrameLinked ? <Unlink2 size={12} /> : <Link2 size={12} />}</button>
-            <button className={exposureGridOpen ? 'is-active' : ''} onClick={() => setExposureGridOpen((open) => !open)} title="Open layer-by-frame cel exposure grid"><Table2 size={12} /></button>
+            <button className={exposureGridOpen ? 'is-active' : ''} onClick={() => { setExposureGridOpen((open) => !open); setOnionSettingsOpen(false); }} title="Open layer-by-frame cel exposure grid"><Table2 size={12} /></button>
             <button className={activePaletteOverride ? 'is-active' : ''} onClick={() => void togglePaletteOverride()} title={activePaletteOverride ? 'Use document palette' : 'Create per-frame palette override'}><Palette size={12} /></button>
             {activePaletteOverride?.[pixelIndex] && <input aria-label="Active frame palette color" type="color" value={activePaletteOverride[pixelIndex].color.slice(0, 7)} onChange={(event) => void changeOverrideColor(event.target.value)} />}
             <button onClick={() => void deleteFrame()} disabled={sprite.frameIds.length <= 1} title="Delete active frame"><Trash2 size={12} /></button>
@@ -1171,6 +1174,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
         </div>
       )}
       {exposureGridOpen && sprite && activeFrameId && <CelExposureGrid key={`${sprite.id}:${sprite.revision}:${activeFrameId}:${selectedEntityId ?? ''}`} sprite={sprite} activeFrameId={activeFrameId} activeLayerId={selectedEntityId} onSelect={(nextFrameId, layerId) => { setFrameId(nextFrameId); setSelectedEntity(layerId); }} onToggleLink={(layerId, nextFrameId) => void toggleCelExposureLink(layerId, nextFrameId)} onClose={() => setExposureGridOpen(false)} />}
+      {onionSettingsOpen && hasTimeline && sprite && <OnionSkinSettingsPanel settings={onionSettings} onChange={setOnionSettings} onClose={() => setOnionSettingsOpen(false)} />}
       {bitmapTextPoint && sprite && <BitmapTextDialog fonts={document.bitmapFonts} origin={bitmapTextPoint} spriteSize={{ width: sprite.width, height: sprite.height }} paletteIndex={pixelIndex} onSubmit={addBitmapText} onFontsReplace={(fonts) => apply('Replace bitmap font library', [{ kind: 'pixel.bitmap-fonts.replace', fonts }])} onClose={() => setBitmapTextPoint(undefined)} />}
       {stampCaptureOpen && (sprite || tilemap) && <EntryDialog
         title="Save reusable stamp"
