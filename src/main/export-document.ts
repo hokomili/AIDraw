@@ -19,7 +19,7 @@ import {
   type PixelTilemap,
   type PixelTileset,
 } from '@aidraw/core';
-import { exactNormalCompositeAnimationFrame, exactSingleLayerGifFrame } from '../common/animation-palette';
+import { exactNormalCompositeAnimationFrame, exactNormalCompositeGifFrame } from '../common/animation-palette';
 import { splitColorAlpha } from '../common/color';
 import { AIDRAW_PSD_EDITABLE_TEXT_SUFFIX, aidrawPsdLockFields, aidrawPsdTextMatrix } from '../common/psd-text';
 import { MAX_PSD_EXPANDED_LAYER_PIXELS, MAX_PSD_LAYER_RECORDS, assertPsdLayerStructureBudget } from '../common/psd-limits';
@@ -896,7 +896,7 @@ async function animatedImage(document: PixelDocument, sprite: PixelSprite, forma
     const encodeApng = UPNG.encode as unknown as (images: ArrayBuffer[], frameWidth: number, frameHeight: number, colors: number, frameDelays?: number[], forbidPalette?: boolean) => ArrayBuffer;
     return { data: Buffer.from(encodeApng(inputs, width, height, 0, delays, true)), mimeType: 'image/apng', extension: 'apng', report: { warnings, rasterized: [] } };
   }
-  const exactFrames = frameIds.map((frameId) => exactSingleLayerGifFrame(document.palette, sprite, frameId));
+  const exactFrames = frameIds.map((frameId) => exactNormalCompositeGifFrame(document.palette, sprite, frameId));
   const encoder = GIFEncoder();
   if (exactFrames.every((frame): frame is NonNullable<typeof frame> => frame !== undefined)) {
     exactFrames.forEach((frame, index) => encoder.writeFrame(nearestNeighborIndexes(frame.indexes, sprite.width, sprite.height, scale), width, height, { palette: frame.palette, transparent: true, transparentIndex: 0, delay: delays[index], repeat: 0 }));

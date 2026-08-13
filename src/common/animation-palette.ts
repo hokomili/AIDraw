@@ -315,3 +315,40 @@ export function exactSingleLayerGifFrame(
   for (const index of frame.indexes) if (index && frame.colors[index]?.[3] !== 255) return undefined;
   return { indexes: frame.indexes, palette: frame.colors.map(([red, green, blue]) => [red, green, blue]) };
 }
+
+/**
+ * Returns exact GIF indexes for an ordinary normal composite when its final
+ * pixels need only GIF's binary transparency and at most 255 visible colors.
+ * The narrower imported single-layer path retains its authored palette slots;
+ * flattened composites receive deterministic first-visible-use local slots.
+ */
+export function exactNormalCompositeGifFrame(
+  palette: PaletteEntry[],
+  sprite: PixelSprite,
+  frameId: string,
+): { indexes: Uint8Array; palette: number[][] } | undefined {
+  const direct = exactSingleLayerGifFrame(palette, sprite, frameId);
+  if (direct) return direct;
+  const rgba = exactNormalCompositeAnimationFrame(palette, sprite, frameId);
+  if (!rgba) return undefined;
+  const indexes = new Uint8Array(sprite.width * sprite.height);
+  const gifPalette: number[][] = [[0, 0, 0]];
+  const colorIndexes = new Map<number, number>();
+  for (let pixel = 0; pixel < indexes.length; pixel += 1) {
+    const offset = pixel * 4;
+    const alpha = rgba[offset + 3];
+    if (alpha === 0) continue;
+    if (alpha !== 255) return undefined;
+    const color = rgba[offset] * 65_536 + rgba[offset + 1] * 256 + rgba[offset + 2];
+    let index = colorIndexes.get(color);
+    if (index === undefined) {
+      if (gifPalette.length >= 256) return undefined;
+      index = gifPalette.length;
+      colorIndexes.set(color, index);
+      gifPalette.push([rgba[offset], rgba[offset + 1], rgba[offset + 2]]);
+    }
+    indexes[pixel] = index;
+  }
+  if (gifPalette.length === 1) gifPalette.push([0, 0, 0]);
+  return { indexes, palette: gifPalette };
+}

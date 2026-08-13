@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_PALETTE, createPixelDocument, writePixels } from '@aidraw/core';
-import { createExactAnimationPalettePlanner, exactAnimationFrameChanges, exactNormalCompositeAnimationFrame, exactSingleLayerGifFrame } from '../../src/common/animation-palette';
+import { createExactAnimationPalettePlanner, exactAnimationFrameChanges, exactNormalCompositeAnimationFrame, exactNormalCompositeGifFrame, exactSingleLayerGifFrame } from '../../src/common/animation-palette';
 
 describe('exact animation frame palettes', () => {
   it('keeps reference indexes and assigns frame-local RGBA colors deterministically', () => {
@@ -43,6 +43,7 @@ describe('exact animation frame palettes', () => {
   it('offers exact GIF indexes only for opaque ordinary single-layer frames', () => {
     const document = createPixelDocument('sprite', 'Exact GIF guard'); const sprite = document.pixelAssets[document.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('Expected sprite'); sprite.width = 2; sprite.height = 1; const cel = Object.values(sprite.cels)[0]; writePixels(cel, [{ x: 0, y: 0, index: 1 }, { x: 1, y: 0, index: 2 }]);
     document.palette[1].color = '#010203'; document.palette[2].color = '#040506'; const exact = exactSingleLayerGifFrame(document.palette, sprite, sprite.frameIds[0]); expect(Array.from(exact!.indexes)).toEqual([1, 2]); expect(exact!.palette.slice(1, 3)).toEqual([[1, 2, 3], [4, 5, 6]]);
+    expect(exactNormalCompositeGifFrame(document.palette, sprite, sprite.frameIds[0])).toEqual(exact);
     document.palette[1].color = '#01020380'; expect(exactSingleLayerGifFrame(document.palette, sprite, sprite.frameIds[0])).toBeUndefined(); document.palette[1].color = '#010203'; sprite.layers[sprite.layerIds[0]].opacity = 0.5; expect(exactSingleLayerGifFrame(document.palette, sprite, sprite.frameIds[0])).toBeUndefined();
   });
 
@@ -79,5 +80,38 @@ describe('exact animation frame palettes', () => {
     const document = createPixelDocument('sprite', 'Transparent RGB'); const sprite = document.pixelAssets[document.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('Expected sprite');
     sprite.width = 1; sprite.height = 1; document.palette[1].color = '#12345600'; writePixels(Object.values(sprite.cels)[0], [{ x: 0, y: 0, index: 1 }]);
     expect(Array.from(exactNormalCompositeAnimationFrame(document.palette, sprite, sprite.frameIds[0])!)).toEqual([18, 52, 86, 0]);
+  });
+
+  it('assigns exact first-use GIF slots to a binary-alpha normal composite', () => {
+    const document = createPixelDocument('sprite', 'Exact composite GIF'); const sprite = document.pixelAssets[document.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('Expected sprite');
+    sprite.width = 3; sprite.height = 1; document.palette[1].color = '#ff0000'; document.palette[2].color = '#0000ff80';
+    const bottomId = sprite.layerIds[0]; const bottom = sprite.layers[bottomId]; const bottomCel = Object.values(sprite.cels)[0]; const topId = 'gif-top-layer'; const topCelId = 'gif-top-cel';
+    sprite.layers[topId] = { ...structuredClone(bottom), id: topId, name: 'Top' }; sprite.layerIds.push(topId);
+    sprite.cels[topCelId] = { ...structuredClone(bottomCel), id: topCelId, name: 'Top cel', layerId: topId, chunks: {} };
+    writePixels(bottomCel, [{ x: 0, y: 0, index: 1 }, { x: 1, y: 0, index: 1 }]); writePixels(sprite.cels[topCelId], [{ x: 0, y: 0, index: 2 }]);
+
+    const exact = exactNormalCompositeGifFrame(document.palette, sprite, sprite.frameIds[0])!;
+    expect(Array.from(exact.indexes)).toEqual([1, 2, 0]);
+    expect(exact.palette).toEqual([[0, 0, 0], [127, 0, 128], [255, 0, 0]]);
+    writePixels(sprite.cels[topCelId], [{ x: 2, y: 0, index: 2 }]);
+    expect(exactNormalCompositeGifFrame(document.palette, sprite, sprite.frameIds[0])).toBeUndefined();
+  });
+
+  it('declines a normal composite that needs 256 visible GIF colors', () => {
+    const document = createPixelDocument('sprite', 'GIF color overflow'); const sprite = document.pixelAssets[document.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('Expected sprite');
+    sprite.width = 256; sprite.height = 1;
+    while (document.palette.length < 256) document.palette.push({ id: `gif-overflow-${document.palette.length}`, name: `Overflow ${document.palette.length}`, color: '#000000' });
+    document.palette[1].color = '#000000'; document.palette[2].color = '#ffffff';
+    for (let index = 3; index < 256; index += 1) {
+      const color = index - 2; const red = color % 16 * 16; const green = Math.floor(color / 16) * 16;
+      document.palette[index].color = `#${red.toString(16).padStart(2, '0')}${green.toString(16).padStart(2, '0')}0080`;
+    }
+    const bottomId = sprite.layerIds[0]; const bottom = sprite.layers[bottomId]; const bottomCel = Object.values(sprite.cels)[0]; const topId = 'gif-overflow-top'; const topCelId = 'gif-overflow-top-cel';
+    sprite.layers[topId] = { ...structuredClone(bottom), id: topId, name: 'Top' }; sprite.layerIds.push(topId);
+    sprite.cels[topCelId] = { ...structuredClone(bottomCel), id: topCelId, name: 'Top cel', layerId: topId, chunks: {} };
+    writePixels(bottomCel, Array.from({ length: 256 }, (_, x) => ({ x, y: 0, index: x < 254 ? 1 : 2 })));
+    writePixels(sprite.cels[topCelId], [...Array.from({ length: 253 }, (_, x) => ({ x, y: 0, index: x + 3 })), { x: 255, y: 0, index: 3 }]);
+
+    expect(exactNormalCompositeGifFrame(document.palette, sprite, sprite.frameIds[0])).toBeUndefined();
   });
 });
