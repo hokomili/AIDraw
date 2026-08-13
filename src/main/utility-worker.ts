@@ -212,12 +212,24 @@ process.parentPort.on('message', (event) => {
         process.parentPort!.postMessage({ id, ok: true, kind: request.kind, artifact: serialized } satisfies UtilityResponse);
       } else if (request.kind === 'import-document') {
         const imported = await runImportUtilityRequest(request);
-        assertImportUtilityResponseEnvelope(request, { kind: request.kind, documents: imported.documents, warnings: imported.warnings });
+        assertImportUtilityResponseEnvelope(request, {
+          kind: request.kind,
+          documents: imported.documents,
+          warnings: imported.warnings,
+          ...(imported.fidelity === undefined ? {} : { fidelity: imported.fidelity }),
+        });
         const returned = request.e2eResultFault
           ? createFnd09InvalidImportResult(imported, request.e2eResultFault)
           : imported;
         if (request.e2eResultFault) await new Promise((resolveWait) => setTimeout(resolveWait, FND09_IMPORT_RESULT_E2E_HOLD_MS));
-        process.parentPort!.postMessage({ id, ok: true, kind: request.kind, documents: returned.documents, warnings: returned.warnings } as unknown as UtilityResponse);
+        process.parentPort!.postMessage({
+          id,
+          ok: true,
+          kind: request.kind,
+          documents: returned.documents,
+          warnings: returned.warnings,
+          ...(!request.e2eResultFault && imported.fidelity !== undefined ? { fidelity: imported.fidelity } : {}),
+        } as unknown as UtilityResponse);
       } else if (request.kind === 'capture-observation') {
         const { captureObservation } = await import('./capture-observation');
         let result = await captureObservation(request.document, request.request, request.maxPixels);

@@ -38,6 +38,7 @@ import { decodeApng } from './apng';
 import { inspectGif, visitDecodedGifFrames, type DecodedGifFrame } from './gif';
 import { calculateSpriteSheetLayout, validateSpriteSheetSliceOptions, type SpriteSheetSliceOptions } from '../common/sprite-sheet';
 import { createExactAnimationPalettePlanner, exactAnimationFrameChanges, exactSharedIndexedPaletteChanges, planExactSharedIndexedPalette, type ExactAnimationPalettePlan } from '../common/animation-palette';
+import { tryAppendInterchangeFidelityEntry, type InterchangeFidelityEntry } from '../common/interchange-fidelity';
 import { aidrawPsdTextGeometry, aidrawPsdTextObjectName, psdLayerHasPartialLock, psdLayerIsLockedAll } from '../common/psd-text';
 import { MAX_PSD_EXPANDED_LAYER_PIXELS, MAX_PSD_LAYER_NESTING_DEPTH, MAX_PSD_LAYER_RECORDS } from '../common/psd-limits';
 import { displayImageDimensions, inspectImageHeader, MAX_INLINE_ASSET_BYTES, MAX_INLINE_IMAGE_DIMENSION, MAX_INLINE_IMAGE_PIXELS } from './transaction-policy';
@@ -47,7 +48,7 @@ import { jsonStringSerializedByteLength } from './utility-resource-policy';
 
 initializePsdCanvas(createCanvas as unknown as (width: number, height: number) => HTMLCanvasElement);
 
-export interface ImportResult { documents: AIDrawDocument[]; warnings: string[] }
+export interface ImportResult { documents: AIDrawDocument[]; warnings: string[]; fidelity?: InterchangeFidelityEntry[] }
 
 const ANIMATION_PALETTE_FALLBACK_WARNING = 'One or more animation frames contain more than 255 visible RGBA colors after the alpha threshold; frames were quantized to the document palette and the original source remains embedded.';
 
@@ -443,6 +444,23 @@ function aidrawPsdBlendMode(value: PsdLayer['blendMode']): BlendMode {
     : 'normal';
 }
 
+function recordPsdBlendModeSubstitution(
+  fidelity: InterchangeFidelityEntry[],
+  value: PsdLayer['blendMode'],
+  subjectId: string,
+  subjectName: string,
+): boolean {
+  const sourceMode = String(value ?? 'normal');
+  if (aidrawPsdBlendMode(value) !== 'normal' || sourceMode === 'normal') return false;
+  return tryAppendInterchangeFidelityEntry(fidelity, {
+    code: 'blend-mode-substitution',
+    subjectType: 'layer',
+    subjectId,
+    subjectName,
+    detail: `PSD blend mode ${JSON.stringify(sourceMode)} is not supported by AIDraw and was imported as normal.`,
+  });
+}
+
 function psdColorHex(value: unknown, fallback = '#000000'): string {
   if (!value || typeof value !== 'object') return fallback;
   const color = value as { r?: unknown; g?: unknown; b?: unknown; a?: unknown };
@@ -493,6 +511,7 @@ function importPsd(bytes: Buffer, name: string, pixelMode: boolean): ImportResul
   if (psd.width !== inspected.width || psd.height !== inspected.height) throw new Error('Decoded PSD canvas dimensions disagree with its file header.');
   if (psd.imageData) { psdImagePixels(psd.imageData, 'Decoded PSD composite'); if (psd.imageData.width !== psd.width || psd.imageData.height !== psd.height) throw new Error('Decoded PSD composite dimensions disagree with its canvas.'); }
   inspectPsdLayers(psd.children);
+  const fidelity: InterchangeFidelityEntry[] = [];
   if (pixelMode) {
     const document = createPixelDocument('project', name);
     const rasterImages = psdRasterImages(psd.children);
@@ -501,13 +520,14 @@ function importPsd(bytes: Buffer, name: string, pixelMode: boolean): ImportResul
     const sprite = createPixelSprite(name, psd.width, psd.height); const frameId = sprite.frameIds[0];
     const fallbackLayerId = sprite.layerIds[0]; const fallbackLayer = sprite.layers[fallbackLayerId]; const fallbackCel = Object.values(sprite.cels)[0];
     sprite.layerIds = []; sprite.layers = {}; sprite.cels = {};
-    const stats = { rasterLayers: 0, omittedLayers: 0, partialLocks: 0 };
+    const stats = { rasterLayers: 0, omittedLayers: 0, partialLocks: 0, blendModeSubstitutions: 0 };
     const addLayers = (layers: PsdLayer[] | undefined, parentId?: string): void => {
       for (const [index, source] of (layers ?? []).entries()) {
         const isGroup = psdLayerIsGroup(source); const imageData = source.imageData; const layerName = source.name ?? `${isGroup ? 'Group' : 'Layer'} ${index + 1}`;
         if (psdLayerHasPartialLock(source)) stats.partialLocks += 1;
         if (!isGroup && !imageData) { stats.omittedLayers += 1; continue; }
         const timestamp = nowIso(); const id = createId('layer');
+        if (recordPsdBlendModeSubstitution(fidelity, source.blendMode, id, layerName)) stats.blendModeSubstitutions += 1;
         const common = { id, revision: 0, name: layerName, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, visible: !source.hidden, locked: psdLayerIsLockedAll(source), opacity: source.opacity ?? 1, blendMode: aidrawPsdBlendMode(source.blendMode), ...(parentId ? { parentId } : {}) };
         const layer: PixelLayer = isGroup ? { ...common, type: 'group', childIds: [] } : { ...common, type: 'pixel' };
         sprite.layers[id] = layer;
@@ -539,18 +559,20 @@ function importPsd(bytes: Buffer, name: string, pixelMode: boolean): ImportResul
     if (rasterImages.length && !exactPalettePlan) warnings.push(PSD_PALETTE_FALLBACK_WARNING);
     if (stats.omittedLayers) warnings.push(`${stats.omittedLayers} PSD layer${stats.omittedLayers === 1 ? '' : 's'} without decoded raster pixels ${stats.omittedLayers === 1 ? 'was' : 'were'} omitted from the pixel sprite.`);
     if (stats.partialLocks) warnings.push(`${stats.partialLocks} PSD layer${stats.partialLocks === 1 ? '' : 's'} used a partial transparency, position, composite, or artboard lock and imported unlocked; AIDraw maps only Photoshop lock-all to its binary layer lock.`);
+    if (stats.blendModeSubstitutions) warnings.push(`${stats.blendModeSubstitutions} PSD layer blend mode${stats.blendModeSubstitutions === 1 ? '' : 's'} ${stats.blendModeSubstitutions === 1 ? 'was' : 'were'} imported as normal; exact affected layers are listed in the interchange report.`);
     if (psd.bitsPerChannel !== undefined && psd.bitsPerChannel !== 8) warnings.push(`The ${psd.bitsPerChannel}-bit PSD was decoded into AIDraw's 8-bit indexed workflow.`);
-    return { documents: [validateImportedPsdDocument(document)], warnings };
+    return { documents: [validateImportedPsdDocument(document)], warnings, fidelity };
   }
   const document = createIllustrationDocument(name); document.artboard.width = psd.width; document.artboard.height = psd.height; document.artboard.background = null;
   const initialLayers = [...document.layerIds]; for (const id of initialLayers) delete document.layers[id]; document.layerIds = [];
-  const stats = { groups: 0, text: 0, effects: 0, vector: 0, adjustments: 0, partialLocks: 0 };
+  const stats = { groups: 0, text: 0, effects: 0, vector: 0, adjustments: 0, partialLocks: 0, blendModeSubstitutions: 0 };
   let extractedTextSerializedBytes = 0;
   const addLayers = (layers: PsdLayer[] | undefined, parentId?: string) => {
     for (const [index, source] of (layers ?? []).entries()) {
       const timestamp = nowIso(); const id = createId('layer'); const isGroup = psdLayerIsGroup(source); const layerName = source.name ?? `${isGroup ? 'Group' : 'Layer'} ${index + 1}`;
       if (source.effects) stats.effects += 1; if (source.vectorMask || source.vectorFill || source.vectorStroke) stats.vector += 1; if (source.adjustment) stats.adjustments += 1;
       if (psdLayerHasPartialLock(source)) stats.partialLocks += 1;
+      if (recordPsdBlendModeSubstitution(fidelity, source.blendMode, id, layerName)) stats.blendModeSubstitutions += 1;
       if (isGroup) {
         const group: IllustrationLayer = { id, revision: 0, name: layerName, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, parentId, visible: !source.hidden, locked: psdLayerIsLockedAll(source), opacity: source.opacity ?? 1, blendMode: aidrawPsdBlendMode(source.blendMode), type: 'group', childIds: [] };
         document.layers[id] = group; stats.groups += 1;
@@ -581,8 +603,9 @@ function importPsd(bytes: Buffer, name: string, pixelMode: boolean): ImportResul
   if (stats.vector) warnings.push(`${stats.vector} vector-mask/fill/stroke layer${stats.vector === 1 ? '' : 's'} retain raster fallbacks; editable Photoshop vector descriptors are not yet translated.`);
   if (stats.adjustments) warnings.push(`${stats.adjustments} adjustment layer${stats.adjustments === 1 ? '' : 's'} remain rasterized.`);
   if (stats.partialLocks) warnings.push(`${stats.partialLocks} PSD layer${stats.partialLocks === 1 ? '' : 's'} used a partial transparency, position, composite, or artboard lock and imported unlocked; AIDraw maps only Photoshop lock-all to its binary layer lock.`);
+  if (stats.blendModeSubstitutions) warnings.push(`${stats.blendModeSubstitutions} PSD layer blend mode${stats.blendModeSubstitutions === 1 ? '' : 's'} ${stats.blendModeSubstitutions === 1 ? 'was' : 'were'} imported as normal; exact affected layers are listed in the interchange report.`);
   if (psd.bitsPerChannel !== undefined && psd.bitsPerChannel !== 8) warnings.push(`The ${psd.bitsPerChannel}-bit PSD was decoded into AIDraw's 8-bit sRGB workflow.`);
-  return { documents: [validateImportedPsdDocument(document)], warnings };
+  return { documents: [validateImportedPsdDocument(document)], warnings, fidelity };
 }
 
 function tiledProperties(value: any): Record<string, string | number | boolean> {

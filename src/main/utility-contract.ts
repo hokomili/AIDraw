@@ -188,7 +188,7 @@ export type UtilityResponse =
   | { id: string; ok: true; kind: 'validate-image'; width: number; height: number }
   | { id: string; ok: true; kind: 'quantize-image'; changes: Array<{ x: number; y: number; index: number }> }
   | { id: string; ok: true; kind: 'export-document'; artifact: SerializedExportArtifact }
-  | { id: string; ok: true; kind: 'import-document'; documents: AIDrawDocument[]; warnings: string[] }
+  | { id: string; ok: true; kind: 'import-document'; documents: AIDrawDocument[]; warnings: string[]; fidelity?: InterchangeFidelityEntry[] }
   | { id: string; ok: true; kind: 'capture-observation'; result: Record<string, unknown> }
   | { id: string; ok: true; kind: 'generation-run'; outputs: GeneratedOutput[] }
   | { id: string; ok: true; kind: 'normalize-generation-acceptance'; result: GeneratedAcceptancePreparation }
@@ -860,28 +860,43 @@ export function assertExportUtilityResponse(
 export function assertImportUtilityResponseEnvelope(
   request: ImportUtilityRequest,
   value: unknown,
-): { documents: unknown[]; warnings: string[] } {
+): { documents: unknown[]; warnings: string[]; fidelity?: InterchangeFidelityEntry[] } {
   if (!value || typeof value !== 'object') throw new Error('Raster utility returned a malformed import result.');
-  const response = value as { kind?: unknown; documents?: unknown; warnings?: unknown };
+  const response = value as { kind?: unknown; documents?: unknown; warnings?: unknown; fidelity?: unknown };
   if (response.kind !== request.kind || !Array.isArray(response.documents)) throw new Error('Raster utility returned a malformed import result.');
   if (response.documents.length < 1 || response.documents.length > MAX_IMPORT_UTILITY_DOCUMENTS) {
     throw new Error(`Raster utility import result must contain 1–${MAX_IMPORT_UTILITY_DOCUMENTS} documents.`);
   }
   assertBoundedStringArray(response.warnings, 'Raster utility import warnings', 'Raster utility returned malformed import warnings.');
+  if (response.fidelity !== undefined && (!Array.isArray(response.fidelity)
+    || response.fidelity.length > MAX_INTERCHANGE_FIDELITY_ENTRIES
+    || response.fidelity.some((entry) => !isInterchangeFidelityEntry(entry)))) {
+    throw new Error('Raster utility returned malformed import fidelity reasons.');
+  }
+  assertUtilityJsonBudget({ warnings: response.warnings, fidelity: response.fidelity ?? [] }, {
+    label: 'Raster utility import report',
+    maxBytes: MAX_UTILITY_REPORT_SERIALIZED_BYTES,
+    maxNodes: MAX_UTILITY_REPORT_ENTRIES * 8 + 4,
+    maxDepth: 3,
+  });
   assertUtilityJsonBudget(response.documents, {
     label: 'Raster utility imported documents',
     maxBytes: MAX_IMPORT_UTILITY_SERIALIZED_BYTES,
     maxNodes: MAX_IMPORT_UTILITY_NODES,
     maxDepth: MAX_IMPORT_UTILITY_DEPTH,
   });
-  return { documents: response.documents, warnings: response.warnings };
+  return {
+    documents: response.documents,
+    warnings: response.warnings,
+    ...(response.fidelity === undefined ? {} : { fidelity: response.fidelity.map((entry) => structuredClone(entry as InterchangeFidelityEntry)) }),
+  };
 }
 
 /** Apply the established document migration/schema gate before imported output reaches callers. */
 export function validateImportUtilityResponse(
   request: ImportUtilityRequest,
   value: unknown,
-): { documents: AIDrawDocument[]; warnings: string[] } {
+): { documents: AIDrawDocument[]; warnings: string[]; fidelity?: InterchangeFidelityEntry[] } {
   const response = assertImportUtilityResponseEnvelope(request, value);
   const documents: AIDrawDocument[] = [];
   for (const document of response.documents) {
@@ -896,5 +911,9 @@ export function validateImportUtilityResponse(
     }
     catch { throw new Error('Raster utility returned a malformed imported document.'); }
   }
-  return { documents, warnings: [...response.warnings] };
+  return {
+    documents,
+    warnings: [...response.warnings],
+    ...(response.fidelity === undefined ? {} : { fidelity: response.fidelity.map((entry) => structuredClone(entry)) }),
+  };
 }

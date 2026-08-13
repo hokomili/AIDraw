@@ -62,6 +62,9 @@ describe('utility-process result resource policy', () => {
     const request: ImportUtilityRequest = { id: 'pre-transfer-import', kind: 'import-document', filePath: '/approved/source.pdf', pixelMode: false };
     const canonical = createIllustrationDocument('Pre-transfer import');
     expect(assertImportUtilityResponseEnvelope(request, { kind: request.kind, documents: [canonical], warnings: ['Raster fallback retained.'] })).toEqual({ documents: [canonical], warnings: ['Raster fallback retained.'] });
+    const fidelity = [{ code: 'blend-mode-substitution' as const, subjectType: 'layer' as const, subjectId: 'layer-1', subjectName: 'Color layer', detail: 'PSD blend mode "color" was imported as normal.' }];
+    expect(assertImportUtilityResponseEnvelope(request, { kind: request.kind, documents: [canonical], warnings: [], fidelity })).toEqual({ documents: [canonical], warnings: [], fidelity });
+    expect(() => assertImportUtilityResponseEnvelope(request, { kind: request.kind, documents: [canonical], warnings: [], fidelity: [{ ...fidelity[0], code: 'invented' }] })).toThrow('malformed import fidelity reasons');
 
     const cyclic: Record<string, unknown> = {}; cyclic.self = cyclic;
     expect(() => assertImportUtilityResponseEnvelope(request, { kind: request.kind, documents: [cyclic], warnings: [] })).toThrow('cyclic and cannot be serialized');

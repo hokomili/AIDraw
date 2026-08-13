@@ -35,6 +35,7 @@ describe('interchange fidelity reasons', () => {
     expect(normalized[0]).not.toBe(source[0]);
     expect(normalizeInterchangeFidelityEntries(undefined)).toEqual([]);
     expect(interchangeFidelityCodeLabel(valid.code)).toBe('Raster fallback');
+    expect(interchangeFidelityCodeLabel('blend-mode-substitution')).toBe('Blend mode substitution');
   });
 
   it('caps producer entries without replacing an already-recorded reason', () => {

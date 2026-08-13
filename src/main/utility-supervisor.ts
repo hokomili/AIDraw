@@ -36,6 +36,7 @@ import {
 import type { SpriteSheetSliceOptions } from '../common/sprite-sheet';
 import type { ObservationRequest } from './capture-observation';
 import type { GeneratedAcceptancePreparation, GeneratedOutput, GenerationRequest } from '../common/generation';
+import type { InterchangeFidelityEntry } from '../common/interchange-fidelity';
 import {
   FND09_OBSERVATION_CODEC_E2E_MAX_PIXELS,
   FND09_OBSERVATION_CODEC_E2E_REQUEST,
@@ -274,12 +275,12 @@ export class RasterUtilitySupervisor {
     filePath: string,
     pixelMode: boolean,
     control: { signal?: AbortSignal; timeoutMs?: number } = {},
-  ): Promise<{ documents: AIDrawDocument[]; warnings: string[] }> {
+  ): Promise<{ documents: AIDrawDocument[]; warnings: string[]; fidelity?: InterchangeFidelityEntry[] }> {
     const request: Extract<UtilityRequest, { kind: 'import-document' }> = { id: createId('utility'), kind: 'import-document', filePath, pixelMode };
     return this.enqueue(request, { ...control, timeoutMs: control.timeoutMs ?? 300_000 }).then(async (response) => {
       if (response.kind !== 'import-document') throw new Error('Raster utility returned the wrong result kind.');
       await this.validateImportedDocumentImages(response.documents, control);
-      return { documents: response.documents, warnings: response.warnings };
+      return { documents: response.documents, warnings: response.warnings, ...(response.fidelity === undefined ? {} : { fidelity: response.fidelity }) };
     });
   }
 
@@ -288,7 +289,7 @@ export class RasterUtilitySupervisor {
     filePath: string,
     fault: Fnd09ImportResultFault,
     control: { signal?: AbortSignal; timeoutMs?: number } = {},
-  ): Promise<{ documents: AIDrawDocument[]; warnings: string[] }> {
+  ): Promise<{ documents: AIDrawDocument[]; warnings: string[]; fidelity?: InterchangeFidelityEntry[] }> {
     if (!isFnd09ImportResultE2eEnabled({
       nodeEnv: process.env.NODE_ENV,
       enabled: process.env.AIDRAW_E2E_UTILITY_IMPORT_RESULT,
@@ -305,7 +306,7 @@ export class RasterUtilitySupervisor {
     return this.enqueue(request, { ...control, timeoutMs: control.timeoutMs ?? 15_000 }).then(async (response) => {
       if (response.kind !== 'import-document') throw new Error('Raster utility returned the wrong import-result probe kind.');
       await this.validateImportedDocumentImages(response.documents, control);
-      return { documents: response.documents, warnings: response.warnings };
+      return { documents: response.documents, warnings: response.warnings, ...(response.fidelity === undefined ? {} : { fidelity: response.fidelity }) };
     });
   }
 
@@ -313,12 +314,12 @@ export class RasterUtilitySupervisor {
     filePath: string,
     metadata: { options: SpriteSheetSliceOptions; name: string; mimeType: string; expectedSha256: string },
     control: { signal?: AbortSignal; timeoutMs?: number } = {},
-  ): Promise<{ documents: AIDrawDocument[]; warnings: string[] }> {
+  ): Promise<{ documents: AIDrawDocument[]; warnings: string[]; fidelity?: InterchangeFidelityEntry[] }> {
     const request: Extract<UtilityRequest, { kind: 'import-document' }> = { id: createId('utility'), kind: 'import-document', filePath, pixelMode: true, spriteSheet: structuredClone(metadata) };
     return this.enqueue(request, { ...control, timeoutMs: control.timeoutMs ?? 300_000 }).then(async (response) => {
       if (response.kind !== 'import-document') throw new Error('Raster utility returned the wrong result kind.');
       await this.validateImportedDocumentImages(response.documents, control);
-      return { documents: response.documents, warnings: response.warnings };
+      return { documents: response.documents, warnings: response.warnings, ...(response.fidelity === undefined ? {} : { fidelity: response.fidelity }) };
     });
   }
 

@@ -5,6 +5,7 @@ export const INTERCHANGE_FIDELITY_CODES = [
   'searchable-text-retained',
   'searchable-text-omitted',
   'animation-frames-omitted',
+  'blend-mode-substitution',
 ] as const;
 
 export type InterchangeFidelityCode = typeof INTERCHANGE_FIDELITY_CODES[number];
@@ -72,5 +73,6 @@ export function interchangeFidelityCodeLabel(code: InterchangeFidelityCode): str
     case 'searchable-text-retained': return 'Searchable text retained';
     case 'searchable-text-omitted': return 'Searchable text omitted';
     case 'animation-frames-omitted': return 'Animation frames omitted';
+    case 'blend-mode-substitution': return 'Blend mode substitution';
   }
 }

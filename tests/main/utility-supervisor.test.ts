@@ -296,6 +296,34 @@ describe('RasterUtilitySupervisor', () => {
     const worker = new FakeUtility(); const supervisor = new RasterUtilitySupervisor(() => worker); const pending = supervisor.importDocument('C:\\approved\\drawing.svg', false); await nextTurn(); const request = worker.messages[0] as { id: string; kind: string; filePath: string; pixelMode: boolean }; expect(request).toMatchObject({ kind: 'import-document', filePath: 'C:\\approved\\drawing.svg', pixelMode: false }); const document = createIllustrationDocument('Imported in worker'); worker.respond({ id: request.id, ok: true, kind: 'import-document', documents: [document], warnings: ['One fallback'] }); await expect(pending).resolves.toEqual({ documents: [document], warnings: ['One fallback'] }); supervisor.stop();
   });
 
+  it('round-trips bounded import fidelity and retires a worker that invents a reason code', async () => {
+    const workers = [new FakeUtility(), new FakeUtility()];
+    const fork = vi.fn(() => workers[fork.mock.calls.length - 1]);
+    const supervisor = new RasterUtilitySupervisor(fork);
+    const document = createIllustrationDocument('PSD fidelity import');
+    const fidelity = [{ code: 'blend-mode-substitution' as const, subjectType: 'layer' as const, subjectId: 'layer-color', subjectName: 'Color layer', detail: 'PSD blend mode "color" was imported as normal.' }];
+
+    const accepted = supervisor.importDocument('C:\\approved\\drawing.psd', false);
+    await nextTurn();
+    const acceptedRequest = workers[0].messages[0] as { id: string };
+    workers[0].respond({ id: acceptedRequest.id, ok: true, kind: 'import-document', documents: [document], warnings: ['One blend mode changed.'], fidelity });
+    await expect(accepted).resolves.toEqual({ documents: [document], warnings: ['One blend mode changed.'], fidelity });
+
+    const rejected = supervisor.importDocument('C:\\approved\\invented.psd', false);
+    await nextTurn();
+    const rejectedRequest = workers[0].messages[1] as { id: string };
+    workers[0].respond({ id: rejectedRequest.id, ok: true, kind: 'import-document', documents: [document], warnings: [], fidelity: [{ ...fidelity[0], code: 'invented' }] });
+    await expect(rejected).rejects.toThrow('malformed import fidelity reasons');
+    expect(workers[0].killed).toBe(true);
+
+    const recovered = supervisor.importDocument('C:\\approved\\recovered.svg', false);
+    await nextTurn();
+    const recoveredRequest = workers[1].messages[0] as { id: string };
+    workers[1].respond({ id: recoveredRequest.id, ok: true, kind: 'import-document', documents: [document], warnings: [] });
+    await expect(recovered).resolves.toEqual({ documents: [document], warnings: [] });
+    supervisor.stop();
+  });
+
   it('holds imported image documents until their embedded payloads pass supervised decode', async () => {
     const worker = new FakeUtility();
     const supervisor = new RasterUtilitySupervisor(() => worker);

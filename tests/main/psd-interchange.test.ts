@@ -187,4 +187,34 @@ describe('PSD interchange', () => {
       expect(pixelImported.warnings).toContainEqual(expect.stringMatching(/partial .* lock.*imported unlocked/i));
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
+
+  it('reports exact imported layers whose unsupported PSD blend modes become normal', async () => {
+    const pixel = () => new ImageData(Uint8ClampedArray.from([20, 40, 60, 255]), 1, 1);
+    const bytes = writePsdBuffer({
+      width: 1,
+      height: 1,
+      imageData: pixel(),
+      children: [{ name: 'Pass-through folder', blendMode: 'pass through', children: [{ name: 'Color leaf', blendMode: 'color', imageData: pixel() }] }],
+    });
+    const directory = await mkdtemp(join(tmpdir(), 'aidraw-psd-blend-substitution-'));
+    try {
+      const path = join(directory, 'unsupported-blends.psd'); await writeFile(path, bytes);
+      for (const pixelMode of [false, true]) {
+        const imported = await importDocument(path, pixelMode); const document = imported.documents[0];
+        let layers: Array<IllustrationLayer | PixelLayer>;
+        if (document.kind === 'illustration') layers = Object.values(document.layers);
+        else {
+          const sprite = document.pixelAssets[document.activeAssetId]; if (sprite?.type !== 'sprite') throw new Error('Expected imported pixel sprite');
+          layers = Object.values(sprite.layers);
+        }
+        const group = layers.find((layer) => layer.name === 'Pass-through folder'); const leaf = layers.find((layer) => layer.name === 'Color leaf');
+        expect(group).toMatchObject({ type: 'group', blendMode: 'normal' }); expect(leaf).toMatchObject({ blendMode: 'normal' });
+        expect(imported.warnings).toContain('2 PSD layer blend modes were imported as normal; exact affected layers are listed in the interchange report.');
+        expect(imported.fidelity).toEqual([
+          { code: 'blend-mode-substitution', subjectType: 'layer', subjectId: group?.id, subjectName: 'Pass-through folder', detail: 'PSD blend mode "pass through" is not supported by AIDraw and was imported as normal.' },
+          { code: 'blend-mode-substitution', subjectType: 'layer', subjectId: leaf?.id, subjectName: 'Color leaf', detail: 'PSD blend mode "color" is not supported by AIDraw and was imported as normal.' },
+        ]);
+      }
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
 });
