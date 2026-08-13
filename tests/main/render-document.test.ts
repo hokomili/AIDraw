@@ -1,9 +1,38 @@
 import { describe, expect, it } from 'vitest';
-import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createIllustrationDocument, nowIso, type GroupObject, type ShapeObject } from '@aidraw/core';
+import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createIllustrationDocument, createPixelDocument, createPixelSprite, createPixelTilemap, createPixelTileset, encodeTiledGid, nowIso, writePixels, writeTiles, type GroupObject, type ShapeObject } from '@aidraw/core';
 import { materializePaintTiles } from '@main/persistence';
-import { renderIllustration } from '@main/render-document';
+import { renderIllustration, renderSprite, renderTilemap } from '@main/render-document';
 
-describe('native illustration rendering', () => {
+describe('native document rendering', () => {
+  it('renders all eight Tiled tile transforms in diagonal-first order', () => {
+    const document = createPixelDocument('project', 'Tiled transform rendering'); document.assetIds = []; document.pixelAssets = {};
+    const sprite = createPixelSprite('Labeled tile', 2, 2); const cel = Object.values(sprite.cels)[0];
+    writePixels(cel, [{ x: 0, y: 0, index: 2 }, { x: 1, y: 0, index: 4 }, { x: 0, y: 1, index: 8 }, { x: 1, y: 1, index: 11 }]);
+    const tileset = createPixelTileset('Labeled tile', sprite.id, 2, 2, 1, 1); tileset.firstGid = 1;
+    const map = createPixelTilemap('Transform matrix'); map.width = 8; map.height = 1; map.tileWidth = 2; map.tileHeight = 2; map.tilesetIds = [tileset.id];
+    const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile' || !layer.chunks) throw new Error('Expected tile layer');
+    const cases = [
+      [{}, ['A', 'B', 'C', 'D']],
+      [{ hFlip: true }, ['B', 'A', 'D', 'C']],
+      [{ vFlip: true }, ['C', 'D', 'A', 'B']],
+      [{ hFlip: true, vFlip: true }, ['D', 'C', 'B', 'A']],
+      [{ diagonal: true }, ['D', 'B', 'C', 'A']],
+      [{ diagonal: true, hFlip: true }, ['B', 'D', 'A', 'C']],
+      [{ diagonal: true, vFlip: true }, ['C', 'A', 'D', 'B']],
+      [{ diagonal: true, hFlip: true, vFlip: true }, ['A', 'C', 'B', 'D']],
+    ] as const;
+    writeTiles(layer.chunks, cases.map(([transforms], x) => ({ x, y: 0, gid: encodeTiledGid(1, transforms) })));
+    document.pixelAssets = { [sprite.id]: sprite, [tileset.id]: tileset, [map.id]: map }; document.assetIds = [sprite.id, tileset.id, map.id]; document.activeAssetId = map.id;
+
+    const source = renderSprite(document, sprite).getContext('2d').getImageData(0, 0, 2, 2).data;
+    const pixels = new Map(['A', 'B', 'C', 'D'].map((label, index) => [label, [...source.slice(index * 4, index * 4 + 4)]]));
+    const rendered = renderTilemap(document, map).getContext('2d');
+    cases.forEach(([, expected], x) => {
+      const actual = [...rendered.getImageData(x * 2, 0, 2, 2).data];
+      expect(actual).toEqual(expected.flatMap((label) => pixels.get(label)!));
+    });
+  });
+
   it('renders sparse paint caches without drift and updates only tiles touched by appended strokes', async () => {
     const document = createIllustrationDocument('Sparse paint cache');
     document.artboard = { ...document.artboard, width: 768, height: 128, background: null };

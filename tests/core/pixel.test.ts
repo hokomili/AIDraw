@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createPixelDocument, decodeTiledGid, encodeTiledGid, readPixel, resizePixelSpriteCanvas, writePixelRuns, writePixels, writeTileRuns, writeTiles, readTile, type TilemapChunk } from '@aidraw/core';
+import { createPixelDocument, decodeTiledGid, encodeTiledGid, readPixel, resizePixelSpriteCanvas, tiledTileTransformMatrix, writePixelRuns, writePixels, writeTileRuns, writeTiles, readTile, type TilemapChunk } from '@aidraw/core';
 
 describe('chunked indexed pixels and sparse tiles', () => {
   it('round-trips pixels across positive and negative chunk boundaries', () => {
@@ -30,6 +30,36 @@ describe('chunked indexed pixels and sparse tiles', () => {
     expect(encoded).toBe(0xeabc_def0);
     expect(decodeTiledGid(encoded)).toEqual({ gid: 0x0abc_def0, hFlip: true, vFlip: true, diagonal: true });
     expect(() => encodeTiledGid(0x1000_0000)).toThrow(/28-bit/);
+  });
+
+  it('maps all eight Tiled tile transforms in diagonal-first order', () => {
+    const cases = [
+      [{}, ['A', 'B', 'C', 'D']],
+      [{ hFlip: true }, ['B', 'A', 'D', 'C']],
+      [{ vFlip: true }, ['C', 'D', 'A', 'B']],
+      [{ hFlip: true, vFlip: true }, ['D', 'C', 'B', 'A']],
+      [{ diagonal: true }, ['D', 'B', 'C', 'A']],
+      [{ diagonal: true, hFlip: true }, ['B', 'D', 'A', 'C']],
+      [{ diagonal: true, vFlip: true }, ['C', 'A', 'D', 'B']],
+      [{ diagonal: true, hFlip: true, vFlip: true }, ['A', 'C', 'B', 'D']],
+    ] as const;
+    const sourceCorners = [
+      ['A', -2, -2], ['B', 2, -2], ['C', -2, 2], ['D', 2, 2],
+    ] as const;
+    const destinationOrder = ['LT', 'RT', 'LB', 'RB'];
+
+    for (const [transforms, expected] of cases) {
+      const matrix = tiledTileTransformMatrix(transforms);
+      const destinations = new Map<string, string>();
+      for (const [label, x, y] of sourceCorners) {
+        const transformedX = matrix.a * x + matrix.c * y;
+        const transformedY = matrix.b * x + matrix.d * y;
+        expect(Math.abs(transformedX)).toBeCloseTo(2);
+        expect(Math.abs(transformedY)).toBeCloseTo(2);
+        destinations.set(`${transformedX < 0 ? 'L' : 'R'}${transformedY < 0 ? 'T' : 'B'}`, label);
+      }
+      expect(destinationOrder.map((position) => destinations.get(position))).toEqual(expected);
+    }
   });
 
   it('writes compact pixel and tile runs across chunk boundaries with compact exact inverses', () => {

@@ -6,11 +6,16 @@ import {
   IDENTITY_TRANSFORM,
   createIllustrationDocument,
   createPixelDocument,
+  createPixelSprite,
+  createPixelTilemap,
+  createPixelTileset,
+  encodeTiledGid,
   illustrationAtTime,
   nowIso,
   rasterBrushDynamics,
   writePixels,
   writeTileRuns,
+  writeTiles,
   type IllustrationKeyframe,
   type RasterStroke,
   type ShapeObject,
@@ -58,6 +63,22 @@ function mapGolden(orientation: 'orthogonal' | 'isometric'): string {
   return rgbaHash(renderTilemap(document, map));
 }
 
+function tileTransformGolden(): string {
+  const document = createPixelDocument('project', 'Tiled transform golden'); document.assetIds = []; document.pixelAssets = {};
+  const sprite = createPixelSprite('Labeled tile', 2, 2); const cel = Object.values(sprite.cels)[0];
+  writePixels(cel, [{ x: 0, y: 0, index: 2 }, { x: 1, y: 0, index: 4 }, { x: 0, y: 1, index: 8 }, { x: 1, y: 1, index: 11 }]);
+  const tileset = createPixelTileset('Labeled tile', sprite.id, 2, 2, 1, 1); tileset.firstGid = 1;
+  const map = createPixelTilemap('Transform matrix'); map.width = 8; map.height = 1; map.tileWidth = 2; map.tileHeight = 2; map.tilesetIds = [tileset.id];
+  const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile' || !layer.chunks) throw new Error('Expected tile layer');
+  const transforms = [
+    {}, { hFlip: true }, { vFlip: true }, { hFlip: true, vFlip: true },
+    { diagonal: true }, { diagonal: true, hFlip: true }, { diagonal: true, vFlip: true }, { diagonal: true, hFlip: true, vFlip: true },
+  ];
+  writeTiles(layer.chunks, transforms.map((flags, x) => ({ x, y: 0, gid: encodeTiledGid(1, flags) })));
+  document.pixelAssets = { [sprite.id]: sprite, [tileset.id]: tileset, [map.id]: map }; document.assetIds = [sprite.id, tileset.id, map.id]; document.activeAssetId = map.id;
+  return rgbaHash(renderTilemap(document, map));
+}
+
 async function animationGolden(): Promise<string> {
   const document = createIllustrationDocument('Animation golden'); document.artboard = { ...document.artboard, width: 64, height: 32, background: null }; const layer = Object.values(document.layers).find((entry) => entry.type === 'vector'); if (!layer || layer.type !== 'vector') throw new Error('Missing vector layer'); const object = shape('actor', layer.id, 4, 8, 12, 12, '#ff6b7a'); document.objects[object.id] = object; layer.objectIds.push(object.id); document.animation.durationMs = 1_000;
   const keyframe = (id: string, timeMs: number, x: number, rotation: number): IllustrationKeyframe => ({ id, revision: 0, name: id, createdAt: object.createdAt, updatedAt: object.updatedAt, createdBy: HUMAN_ACTOR.id, objectId: object.id, timeMs, transform: { ...object.transform, x, rotation }, opacity: timeMs ? 0.6 : 1, visible: true, easing: 'ease-in-out' });
@@ -73,12 +94,13 @@ const GOLDEN_HASHES = {
   indexedSprite: '794c89da39db802f2586364a02711207ee3b3ac0463b9b1e03aa10b389711dc0',
   orthogonalMap: '37aa4899a52c08f383ddd8fbbc7bfc33823180aa8714e5c7d44047bf77b64879',
   isometricMap: '22a795ad9d9dde42295e7fe66d147f7c2a40c119a3624540ada3f6928d999de1',
+  tileTransforms: '6bc27075a13934fa4d9a8cb4be584a77cfa9b3f696b71933bd143b838244934d',
   illustrationAnimation: 'c43ed7db842896effb9597fd9ed05e4fc77feda49e1be599b29e7104da71cee1',
 };
 
 describe('deterministic raw-RGBA rendering goldens', () => {
   it('matches the maintained cross-mode corpus', async () => {
-    const actual = { illustrationComposite: await illustrationCompositeGolden(), naturalBrushes: await brushGolden(), indexedSprite: spriteGolden(), orthogonalMap: mapGolden('orthogonal'), isometricMap: mapGolden('isometric'), illustrationAnimation: await animationGolden() };
+    const actual = { illustrationComposite: await illustrationCompositeGolden(), naturalBrushes: await brushGolden(), indexedSprite: spriteGolden(), orthogonalMap: mapGolden('orthogonal'), isometricMap: mapGolden('isometric'), tileTransforms: tileTransformGolden(), illustrationAnimation: await animationGolden() };
     expect(actual).toEqual(GOLDEN_HASHES);
   });
 });

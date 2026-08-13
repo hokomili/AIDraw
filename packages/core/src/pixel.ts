@@ -7,6 +7,13 @@ export const TILED_FLIP_VERTICAL = 0x4000_0000;
 export const TILED_FLIP_DIAGONAL = 0x2000_0000;
 export const TILED_GID_MASK = 0x0fff_ffff;
 
+export interface TiledTileTransformMatrix {
+  a: number;
+  b: number;
+  c: number;
+  d: number;
+}
+
 export function decodeTiledGid(raw: number): { gid: number; hFlip: boolean; vFlip: boolean; diagonal: boolean } {
   const value = raw >>> 0;
   return { gid: value & TILED_GID_MASK, hFlip: Boolean(value & TILED_FLIP_HORIZONTAL), vFlip: Boolean(value & TILED_FLIP_VERTICAL), diagonal: Boolean(value & TILED_FLIP_DIAGONAL) };
@@ -15,6 +22,14 @@ export function decodeTiledGid(raw: number): { gid: number; hFlip: boolean; vFli
 export function encodeTiledGid(gid: number, transforms: { hFlip?: boolean; vFlip?: boolean; diagonal?: boolean } = {}): number {
   if (!Number.isInteger(gid) || gid < 0 || gid > TILED_GID_MASK) throw new Error('Tiled GIDs must be integers inside the 28-bit tile range.');
   return (gid | (transforms.hFlip ? TILED_FLIP_HORIZONTAL : 0) | (transforms.vFlip ? TILED_FLIP_VERTICAL : 0) | (transforms.diagonal ? TILED_FLIP_DIAGONAL : 0)) >>> 0;
+}
+
+/** Maps a centered tile using Tiled's diagonal-first, then horizontal/vertical flip order. */
+export function tiledTileTransformMatrix(transforms: { hFlip?: boolean; vFlip?: boolean; diagonal?: boolean }): TiledTileTransformMatrix {
+  const horizontal = transforms.hFlip ? -1 : 1;
+  const vertical = transforms.vFlip ? -1 : 1;
+  if (!transforms.diagonal) return { a: horizontal, b: 0, c: 0, d: vertical };
+  return { a: 0, b: -vertical, c: -horizontal, d: 0 };
 }
 
 export function resolveTilesetForGid(document: PixelDocument, map: PixelTilemap, gid: number): { tileset: PixelTileset; localId: number } | undefined {

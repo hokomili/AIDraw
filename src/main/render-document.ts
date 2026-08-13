@@ -5,6 +5,7 @@ import {
   decodeTiledGid,
   decodeTilemapChunk,
   resolveTilesetForGid,
+  tiledTileTransformMatrix,
   type AIDrawDocument,
   type BlendMode,
   type IllustrationDocument,
@@ -292,7 +293,8 @@ export function renderTilemap(document: PixelDocument, map: PixelTilemap, onlyLa
         if (resolved && sourceAsset?.type === 'sprite') {
           let source = sources.get(sourceAsset.id); if (!source) { source = renderSprite(document, sourceAsset); sources.set(sourceAsset.id, source); }
           const definition = resolved.tileset.tiles[resolved.localId]; const sx = definition?.sourceX ?? resolved.localId % resolved.tileset.columns * resolved.tileset.tileWidth; const sy = definition?.sourceY ?? Math.floor(resolved.localId / resolved.tileset.columns) * resolved.tileset.tileHeight;
-          context.save(); context.translate(dx + map.tileWidth / 2, dy + map.tileHeight / 2); if (decoded.diagonal) { context.rotate(Math.PI / 2); context.scale(1, -1); } context.scale(decoded.hFlip ? -1 : 1, decoded.vFlip ? -1 : 1); context.drawImage(source, sx, sy, resolved.tileset.tileWidth, resolved.tileset.tileHeight, -map.tileWidth / 2, -map.tileHeight / 2, map.tileWidth, map.tileHeight); context.restore();
+          const transform = tiledTileTransformMatrix(decoded);
+          context.save(); context.translate(dx + map.tileWidth / 2, dy + map.tileHeight / 2); context.transform(transform.a, transform.b, transform.c, transform.d, 0, 0); context.drawImage(source, sx, sy, resolved.tileset.tileWidth, resolved.tileset.tileHeight, -map.tileWidth / 2, -map.tileHeight / 2, map.tileWidth, map.tileHeight); context.restore();
         } else { context.fillStyle = `hsl(${decoded.gid * 47 % 360} 55% 60%)`; context.fillRect(dx, dy, map.tileWidth, map.tileHeight); }
       }
     }

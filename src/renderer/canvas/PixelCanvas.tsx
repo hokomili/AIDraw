@@ -27,6 +27,7 @@ import {
   setPixelFrameCelsLinked,
   setPixelFramePaletteOverride,
   stepPaletteByLuminance,
+  tiledTileTransformMatrix,
   transformPixelStamp,
   transformTileStamp,
   upsertPixelAnimationTag,
@@ -523,7 +524,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
             let mapSource = mapSourceAsset?.type === 'sprite' ? mapSources.get(mapSourceAsset.id) : undefined; if (!mapSource && mapSourceAsset?.type === 'sprite') { mapSource = spriteBitmap(mapSourceAsset, mapSourceAsset.frameIds[0], document.palette); mapSources.set(mapSourceAsset.id, mapSource); }
             const definition = resolved?.tileset.tiles[resolved.localId]; const sourceX = resolved ? definition?.sourceX ?? resolved.localId % resolved.tileset.columns * resolved.tileset.tileWidth : 0;
             const sourceY = resolved ? definition?.sourceY ?? Math.floor(resolved.localId / resolved.tileset.columns) * resolved.tileset.tileHeight : 0;
-            const drawTile = (screenX: number, screenY: number) => { if (!mapSource || !resolved) return false; context.save(); context.translate(screenX + view.scale / 2, screenY + view.scale / 2); if (decoded.diagonal) { context.rotate(Math.PI / 2); context.scale(1, -1); } context.scale(decoded.hFlip ? -1 : 1, decoded.vFlip ? -1 : 1); context.drawImage(mapSource, sourceX, sourceY, resolved.tileset.tileWidth, resolved.tileset.tileHeight, -view.scale / 2, -view.scale / 2, view.scale, view.scale); context.restore(); return true; };
+            const drawTile = (screenX: number, screenY: number) => { if (!mapSource || !resolved) return false; const transform = tiledTileTransformMatrix(decoded); context.save(); context.translate(screenX + view.scale / 2, screenY + view.scale / 2); context.transform(transform.a, transform.b, transform.c, transform.d, 0, 0); context.drawImage(mapSource, sourceX, sourceY, resolved.tileset.tileWidth, resolved.tileset.tileHeight, -view.scale / 2, -view.scale / 2, view.scale, view.scale); context.restore(); return true; };
             if (tilemap.orientation === 'orthogonal') {
               if (!drawTile(x * view.scale, y * view.scale)) { context.fillStyle = `hsl(${decoded.gid * 47 % 360} 52% 62%)`; context.fillRect(x * view.scale, y * view.scale, view.scale, view.scale); }
             } else {

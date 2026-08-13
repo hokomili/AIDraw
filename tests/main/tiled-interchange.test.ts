@@ -2,11 +2,12 @@ import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { createPixelDocument, createPixelSprite, createPixelTilemap, createPixelTileset, readPixel, readTileAt, writePixels, writeTiles, type PixelSprite } from '@aidraw/core';
+import { createPixelDocument, createPixelSprite, createPixelTilemap, createPixelTileset, encodeTiledGid, readPixel, readTileAt, writePixels, writeTiles, type PixelSprite } from '@aidraw/core';
 import UPNG from 'upng-js';
 
 import { importDocument } from '../../src/main/import-document';
 import { exportDocument } from '../../src/main/export-document';
+import { renderTilemap } from '../../src/main/render-document';
 import { runImportUtilityRequest } from '../../src/main/utility-import';
 
 const fixture = new URL('../fixtures/tiled/isometric-external.tmj', import.meta.url).pathname.replace(/^\/(?=[A-Za-z]:)/, '');
@@ -165,5 +166,33 @@ describe('representative Tiled JSON interchange', () => {
     const pngPixels = (bytes: Buffer) => { const decoded = UPNG.decode(Uint8Array.from(bytes).buffer); return { width: decoded.width, height: decoded.height, rgba: Buffer.from(UPNG.toRGBA8(decoded)[0]) }; };
     const firstPng = pngPixels(await readFile(first.companionPath)); const secondPng = pngPixels(await readFile(second.companionPath));
     expect(firstPng).toMatchObject({ width: 32, height: 16 }); expect(secondPng.width).toBe(firstPng.width); expect(secondPng.height).toBe(firstPng.height); expect(secondPng.rgba.equals(firstPng.rgba)).toBe(true);
+  });
+
+  it('round-trips all eight square-tile transform flags with pixel-identical production rendering', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'aidraw-tiled-transforms-')); temporaryDirectories.push(directory);
+    const document = createPixelDocument('project', 'Tiled transform round trip'); document.assetIds = []; document.pixelAssets = {};
+    const sprite = createPixelSprite('Labeled tile', 2, 2); const cel = Object.values(sprite.cels)[0];
+    writePixels(cel, [{ x: 0, y: 0, index: 2 }, { x: 1, y: 0, index: 4 }, { x: 0, y: 1, index: 8 }, { x: 1, y: 1, index: 11 }]);
+    const tileset = createPixelTileset('Labeled tile', sprite.id, 2, 2, 1, 1); tileset.firstGid = 1;
+    const map = createPixelTilemap('Transform matrix'); map.width = 8; map.height = 1; map.tileWidth = 2; map.tileHeight = 2; map.tilesetIds = [tileset.id];
+    const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile' || !layer.chunks) throw new Error('Expected tile layer');
+    const transforms = [
+      {}, { hFlip: true }, { vFlip: true }, { hFlip: true, vFlip: true },
+      { diagonal: true }, { diagonal: true, hFlip: true }, { diagonal: true, vFlip: true }, { diagonal: true, hFlip: true, vFlip: true },
+    ];
+    const expectedGids = transforms.map((flags) => encodeTiledGid(1, flags));
+    writeTiles(layer.chunks, expectedGids.map((gid, x) => ({ x, y: 0, gid })));
+    document.pixelAssets = { [sprite.id]: sprite, [tileset.id]: tileset, [map.id]: map }; document.assetIds = [sprite.id, tileset.id, map.id]; document.activeAssetId = map.id;
+    const originalRender = Buffer.from(renderTilemap(document, map).getContext('2d').getImageData(0, 0, 16, 2).data);
+
+    const artifact = await exportDocument(document, 'tiled-json'); expect(artifact.report).toEqual({ warnings: [], rasterized: [] }); expect(artifact.companions).toHaveLength(1);
+    const mapPath = join(directory, 'transform-matrix.tmj'); const companion = artifact.companions![0];
+    await Promise.all([writeFile(mapPath, artifact.data, { flag: 'wx' }), writeFile(join(directory, companion.name), companion.data, { flag: 'wx' })]);
+    const imported = await runImportUtilityRequest({ id: 'transform-roundtrip-import', kind: 'import-document', filePath: mapPath, pixelMode: true }); expect(imported.warnings).toEqual([]);
+    const importedDocument = imported.documents[0]; if (importedDocument.kind !== 'pixel') throw new Error('Expected imported pixel document');
+    const importedMap = importedDocument.pixelAssets[importedDocument.activeAssetId]; if (importedMap.type !== 'tilemap') throw new Error('Expected imported tilemap');
+    const importedLayer = importedMap.layers[importedMap.layerIds[0]]; if (importedLayer.type !== 'tile' || !importedLayer.chunks) throw new Error('Expected imported tile layer');
+    expect(Array.from({ length: 8 }, (_, x) => readTileAt(importedLayer.chunks!, x, 0))).toEqual(expectedGids);
+    expect(Buffer.from(renderTilemap(importedDocument, importedMap).getContext('2d').getImageData(0, 0, 16, 2).data)).toEqual(originalRender);
   });
 });
