@@ -36,6 +36,7 @@ import { inspectGif } from './gif';
 import { calculateSpriteSheetLayout, validateSpriteSheetSliceOptions, type SpriteSheetSliceOptions } from '../common/sprite-sheet';
 import { createExactAnimationPalettePlanner, exactAnimationFrameChanges, type ExactAnimationPalettePlan } from '../common/animation-palette';
 import { aidrawPsdTextGeometry, aidrawPsdTextObjectName, psdLayerHasPartialLock, psdLayerIsLockedAll } from '../common/psd-text';
+import { MAX_PSD_EXPANDED_LAYER_PIXELS, MAX_PSD_LAYER_NESTING_DEPTH, MAX_PSD_LAYER_RECORDS } from '../common/psd-limits';
 import { displayImageDimensions, inspectImageHeader, MAX_INLINE_IMAGE_DIMENSION, MAX_INLINE_IMAGE_PIXELS } from './transaction-policy';
 import { importEditableSvg } from './svg-import';
 import { MAX_IMPORT_UTILITY_DOCUMENTS } from './utility-contract';
@@ -50,9 +51,7 @@ export const MAX_STRUCTURED_IMPORT_BYTES = 16 * 1024 * 1024;
 export const MAX_BINARY_IMPORT_BYTES = 256 * 1024 * 1024;
 const MAX_SPRITE_SHEET_FRAMES = 4_096;
 const MAX_SPRITE_SHEET_EXPANDED_PIXELS = 64 * 1024 * 1024;
-const MAX_PSD_LAYERS = 2_048;
-const MAX_PSD_EXPANDED_PIXELS = 64 * 1024 * 1024;
-const MAX_PSD_DECODED_BYTES = (MAX_PSD_EXPANDED_PIXELS + MAX_INLINE_IMAGE_PIXELS) * 4;
+const MAX_PSD_DECODED_BYTES = (MAX_PSD_EXPANDED_LAYER_PIXELS + MAX_INLINE_IMAGE_PIXELS) * 4;
 const MAX_PDF_PAGES = MAX_IMPORT_UTILITY_DOCUMENTS;
 const MAX_PDF_EXPANDED_PIXELS = 64 * 1024 * 1024;
 const MAX_TILED_LAYERS = 4_096;
@@ -342,11 +341,11 @@ function psdLayerIsGroup(layer: PsdLayer): layer is PsdLayer & { children: PsdLa
 }
 
 function flattenPsdLayers(layers: PsdLayer[] | undefined, prefix = '', depth = 0, budget = { count: 0, pixels: 0 }): Array<{ layer: PsdLayer; name: string }> {
-  if (depth > MAX_TILED_DEPTH) throw new Error('PSD layer nesting exceeds the 64-level safety limit.');
+  if (depth > MAX_PSD_LAYER_NESTING_DEPTH) throw new Error(`PSD layer nesting exceeds the ${MAX_PSD_LAYER_NESTING_DEPTH}-level safety limit.`);
   const flattened: Array<{ layer: PsdLayer; name: string }> = [];
   for (const [index, layer] of (layers ?? []).entries()) {
-    budget.count += 1; if (budget.count > MAX_PSD_LAYERS) throw new Error(`PSD exceeds the ${MAX_PSD_LAYERS.toLocaleString('en-US')}-layer safety limit.`);
-    if (layer.imageData) { budget.pixels += psdImagePixels(layer.imageData, `PSD layer ${budget.count}`); if (budget.pixels > MAX_PSD_EXPANDED_PIXELS) throw new Error('PSD layer pixels exceed the 64-megapixel expanded safety budget.'); }
+    budget.count += 1; if (budget.count > MAX_PSD_LAYER_RECORDS) throw new Error(`PSD exceeds the ${MAX_PSD_LAYER_RECORDS.toLocaleString('en-US')}-layer safety limit.`);
+    if (layer.imageData) { budget.pixels += psdImagePixels(layer.imageData, `PSD layer ${budget.count}`); if (budget.pixels > MAX_PSD_EXPANDED_LAYER_PIXELS) throw new Error('PSD layer pixels exceed the 64-megapixel expanded safety budget.'); }
     if (psdLayerIsGroup(layer)) {
       if (layer.children.length) flattened.push(...flattenPsdLayers(layer.children, `${prefix}${layer.name ?? `Group ${index + 1}`}/`, depth + 1, budget));
     } else flattened.push({ layer, name: `${prefix}${layer.name ?? `Layer ${index + 1}`}` });

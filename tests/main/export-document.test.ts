@@ -13,9 +13,11 @@ import {
   writePixels,
   writeTiles,
   type CanvasTransaction,
+  type PixelLayer,
   type ShapeObject,
   type TextObject,
 } from '@aidraw/core';
+import { MAX_PSD_LAYER_NESTING_DEPTH, MAX_PSD_LAYER_RECORDS, assertPsdLayerStructureBudget } from '@common/psd-limits';
 import { assertPsdLayerRasterBudget, exportDocument, illustrationToSvg, plannedExportCompanionPaths } from '@main/export-document';
 import { decompressFrames, parseGIF } from 'gifuct-js';
 import UPNG from 'upng-js';
@@ -38,6 +40,40 @@ describe('interchange exporters', () => {
 
     const illustration = createIllustrationDocument('PSD raster budget'); illustration.artboard = { ...illustration.artboard, width: 8_192, height: 8_192 };
     await expect(exportDocument(illustration, 'psd')).rejects.toThrow(/64-megapixel expanded safety budget/);
+  });
+
+  it('rejects oversized PSD output trees before writer recursion or layer rendering', async () => {
+    expect(() => assertPsdLayerStructureBudget(MAX_PSD_LAYER_RECORDS, MAX_PSD_LAYER_NESTING_DEPTH)).not.toThrow();
+    expect(() => assertPsdLayerStructureBudget(MAX_PSD_LAYER_RECORDS + 1, MAX_PSD_LAYER_NESTING_DEPTH)).toThrow(/2,048-layer safety limit/);
+    expect(() => assertPsdLayerStructureBudget(MAX_PSD_LAYER_RECORDS, MAX_PSD_LAYER_NESTING_DEPTH + 1)).toThrow(/64-level safety limit/);
+
+    const broad = createPixelDocument('sprite', 'PSD broad structure'); const broadSprite = broad.pixelAssets[broad.activeAssetId];
+    if (broadSprite.type !== 'sprite') throw new Error('Expected sprite'); broadSprite.layers = {}; broadSprite.layerIds = []; broadSprite.cels = {};
+    const timestamp = nowIso();
+    for (let index = 0; index <= MAX_PSD_LAYER_RECORDS; index += 1) {
+      const id = createId('layer'); const layer: PixelLayer = { id, revision: 0, name: `Empty group ${index}`, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, type: 'group', visible: true, locked: false, opacity: 1, blendMode: 'normal', childIds: [] };
+      broadSprite.layers[id] = layer; broadSprite.layerIds.push(id);
+    }
+    await expect(exportDocument(broad, 'psd')).rejects.toThrow(/2,048-layer safety limit/);
+
+    const deep = createPixelDocument('sprite', 'PSD deep structure'); const deepSprite = deep.pixelAssets[deep.activeAssetId];
+    if (deepSprite.type !== 'sprite') throw new Error('Expected sprite'); deepSprite.layers = {}; deepSprite.layerIds = []; deepSprite.cels = {};
+    const deepIds = Array.from({ length: MAX_PSD_LAYER_NESTING_DEPTH + 2 }, () => createId('layer'));
+    deepIds.forEach((id, index) => {
+      const layer: PixelLayer = { id, revision: 0, name: `Depth ${index}`, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, type: 'group', visible: true, locked: false, opacity: 1, blendMode: 'normal', childIds: deepIds[index + 1] ? [deepIds[index + 1]] : [], ...(index > 0 ? { parentId: deepIds[index - 1] } : {}) };
+      deepSprite.layers[id] = layer;
+    });
+    deepSprite.layerIds = [deepIds[0]];
+    await expect(exportDocument(deep, 'psd')).rejects.toThrow(/64-level safety limit/);
+
+    const companions = createIllustrationDocument('PSD companion structure'); const vector = companions.layerIds.map((id) => companions.layers[id]).find((layer) => layer.type === 'vector');
+    if (!vector || vector.type !== 'vector') throw new Error('Expected vector layer');
+    const textCount = MAX_PSD_LAYER_RECORDS - companions.layerIds.length;
+    for (let index = 0; index < textCount; index += 1) {
+      const id = createId('text'); const text: TextObject = { id, revision: 0, name: `Text ${index}`, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, layerId: vector.id, type: 'text', text: 'x', width: 1, height: 1, transform: IDENTITY_TRANSFORM, visible: true, locked: false, opacity: 1, blendMode: 'normal', align: 'left', lineHeight: 1, ranges: [{ start: 0, end: 1, fontFamily: 'ArialMT', fontSize: 1, fontWeight: 400, fontStyle: 'normal', color: '#000000', letterSpacing: 0 }] };
+      companions.objects[id] = text; vector.objectIds.push(id);
+    }
+    await expect(exportDocument(companions, 'psd')).rejects.toThrow(/2,048-layer safety limit/);
   });
 
   it('preserves editable illustration shapes in SVG', () => {
