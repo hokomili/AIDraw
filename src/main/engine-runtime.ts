@@ -36,6 +36,7 @@ export class EngineRuntime {
   readonly interchangeReports: InterchangeReportStore;
   private recoveryTimer?: NodeJS.Timeout;
   private started = false;
+  private stopPromise?: Promise<void>;
 
   constructor(private readonly options: EngineRuntimeOptions) {
     const { userDataPath, appVersion } = options;
@@ -90,7 +91,17 @@ export class EngineRuntime {
 
   async stop(): Promise<void> {
     if (!this.started) return;
-    this.started = false;
+    if (this.stopPromise) return this.stopPromise;
+    const operation = this.stopStartedRuntime();
+    this.stopPromise = operation;
+    try {
+      await operation;
+    } finally {
+      if (this.stopPromise === operation) this.stopPromise = undefined;
+    }
+  }
+
+  private async stopStartedRuntime(): Promise<void> {
     if (this.recoveryTimer) clearInterval(this.recoveryTimer);
     this.recoveryTimer = undefined;
     await this.mcpHost.stop();
@@ -98,5 +109,6 @@ export class EngineRuntime {
     this.generationUtilities.stop();
     await this.service.compactRecovery();
     this.service.setMcpInfo({ running: false });
+    this.started = false;
   }
 }

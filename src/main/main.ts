@@ -50,6 +50,7 @@ import {
 import { buildCheckpointComparison } from './checkpoint-comparison';
 import { readBoundedRegularFile } from './bounded-file-read';
 import { resolveMcpConnectionHandoffPath, writeMcpConnectionHandoff } from './mcp-connection-handoff';
+import { GracefulShutdownCoordinator } from './graceful-shutdown';
 
 declare const MAIN_WINDOW_VITE_DEV_SERVER_URL: string | undefined;
 declare const MAIN_WINDOW_VITE_NAME: string;
@@ -61,11 +62,18 @@ let mcpHost: McpHost;
 let providerCredentials: ProviderCredentialStore;
 let generationManager: GenerationManager;
 let batchDocumentWorkflows: BatchDocumentWorkflows;
-let engineShutdownComplete = false;
 let engineQuitPending = false;
 let engineReadyPromise: Promise<void> | undefined;
 let suppressMacLoginActivationUntil = 0;
 const pendingSpriteSheets = new Map<string, { filePath: string; sha256: string; name: string; mimeType: 'image/png' | 'image/jpeg' | 'image/webp'; expiresAt: number }>();
+function reportGracefulShutdownFailure(error: unknown): void {
+  process.stderr.write(`AIDraw graceful shutdown failed: ${error instanceof Error ? error.message : String(error)}\n`);
+}
+const gracefulShutdown = new GracefulShutdownCoordinator({
+  stopEngine: async () => { await engineRuntime?.stop(); },
+  quitApplication: () => { app.quit(); },
+  reportFailure: reportGracefulShutdownFailure,
+});
 
 async function recordInterchangeReport(input: InterchangeReportInput) {
   const report = await engineRuntime.interchangeReports.record(input);
@@ -862,7 +870,7 @@ async function setEngineStartAtLogin(enabled: boolean): Promise<EngineStatus> {
 }
 
 async function requestEngineQuit(confirmInEditor = true): Promise<void> {
-  if (engineQuitPending || engineShutdownComplete) return;
+  if (engineQuitPending || gracefulShutdown.isComplete()) return;
   engineQuitPending = true;
   try {
     const dirty = service.getDocuments().filter((document) => document.dirty);
@@ -881,9 +889,9 @@ async function requestEngineQuit(confirmInEditor = true): Promise<void> {
       });
       if (decision.response !== 0) return;
     }
-    await engineRuntime.stop();
-    engineShutdownComplete = true;
-    app.quit();
+    await gracefulShutdown.requestQuit();
+  } catch (error) {
+    reportGracefulShutdownFailure(error);
   } finally {
     engineQuitPending = false;
   }
@@ -972,12 +980,12 @@ async function initializeApplication(): Promise<void> {
       exitCode = 1;
       process.stderr.write(`AIDraw CLI: ${error instanceof Error ? error.message : String(error)}\n\n${cliHelp(basename(process.execPath))}\n`);
     }
-    engineShutdownComplete = true;
+    gracefulShutdown.markComplete();
     app.exit(exitCode);
     return;
   }
   if (startupCommand === 'quit-engine') {
-    engineShutdownComplete = true;
+    gracefulShutdown.markComplete();
     app.quit();
     return;
   }
@@ -1122,7 +1130,5 @@ if (!hasSingleInstanceLock) {
     // The window is only a client. The canonical engine intentionally remains
     // alive for authenticated agents and crash-safe autonomous work.
   });
-  app.on('before-quit', () => {
-    if (!engineShutdownComplete) void engineRuntime?.stop();
-  });
+  app.on('before-quit', (event) => { gracefulShutdown.handleBeforeQuit(event); });
 }
