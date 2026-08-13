@@ -1,4 +1,3 @@
-import { dirname, extname, join } from 'node:path';
 import { createCanvas, type Canvas } from '@napi-rs/canvas';
 import { initializeCanvas as initializePsdCanvas, writePsdBuffer, type Layer as PsdLayer, type Psd } from 'ag-psd';
 import { LineCapStyle, PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from 'pdf-lib';
@@ -23,11 +22,13 @@ import {
 import { splitColorAlpha } from '../common/color';
 import { layoutStyledText } from '../common/text-layout';
 import type { ExportFormat, ExportOptions } from '../common/contracts';
+import { safeTiledAssetName } from './export-artifact-policy';
 import { renderDocument, renderIllustration, renderSprite } from './render-document';
 
 initializePsdCanvas(createCanvas as unknown as (width: number, height: number) => HTMLCanvasElement);
 
 export type { ExportFormat } from '../common/contracts';
+export { plannedExportCompanionPaths } from './export-artifact-policy';
 
 export const MAX_EXPORT_SCALE = 64;
 
@@ -605,27 +606,12 @@ function tilemapXml(document: PixelDocument, map: PixelTilemap, images: Record<s
   return `<?xml version="1.0" encoding="UTF-8"?><map version="1.10" tiledversion="1.11.2" orientation="${map.orientation}" renderorder="right-down" infinite="${Number(map.infinite)}" width="${map.width}" height="${map.height}" tilewidth="${map.tileWidth}" tileheight="${map.tileHeight}">${tiledPropertyXml(map.properties)}${tilesets}${map.layerIds.map(layerXml).join('')}</map>`;
 }
 
-function safeAssetName(name: string, extension: string): string { return `${name.replace(/[<>:"/\\|?*]/g, '-').trim() || 'tileset'}.${extension}`; }
-
-export function plannedExportCompanionPaths(document: AIDrawDocument, format: ExportFormat, target: string): string[] {
-  if (format === 'sprite-sheet') return [`${target.slice(0, -extname(target).length)}.json`];
-  if (format !== 'tiled-json' && format !== 'tiled-xml') return [];
-  if (document.kind !== 'pixel') return [];
-  const active = document.pixelAssets[document.activeAssetId];
-  const tilesets = active?.type === 'tilemap'
-    ? active.tilesetIds.map((id) => document.pixelAssets[id]).filter((asset): asset is PixelTileset => asset?.type === 'tileset')
-    : active?.type === 'tileset' ? [active] : [];
-  return tilesets
-    .filter((tileset) => document.pixelAssets[tileset.spriteAssetId]?.type === 'sprite')
-    .map((tileset) => join(dirname(target), safeAssetName(tileset.name, 'png')));
-}
-
 async function tiled(document: PixelDocument, format: 'tiled-json' | 'tiled-xml'): Promise<ExportArtifact> {
   const active = document.pixelAssets[document.activeAssetId]; if (active?.type !== 'tilemap' && active?.type !== 'tileset') throw new Error('Choose a tilemap or tileset before Tiled export.');
   const tilesets = active.type === 'tilemap' ? active.tilesetIds.map((id) => document.pixelAssets[id]).filter((asset): asset is PixelTileset => asset?.type === 'tileset') : [active]; const images: Record<string, string> = {}; const companions: NonNullable<ExportArtifact['companions']> = [];
-  for (const tileset of tilesets) { const sprite = document.pixelAssets[tileset.spriteAssetId]; if (sprite?.type !== 'sprite') continue; const name = safeAssetName(tileset.name, 'png'); images[tileset.id] = name; companions.push({ name, extension: 'png', mimeType: 'image/png', data: renderSprite(document, sprite).toBuffer('image/png') }); }
+  for (const tileset of tilesets) { const sprite = document.pixelAssets[tileset.spriteAssetId]; if (sprite?.type !== 'sprite') continue; const name = safeTiledAssetName(tileset.name, 'png'); images[tileset.id] = name; companions.push({ name, extension: 'png', mimeType: 'image/png', data: renderSprite(document, sprite).toBuffer('image/png') }); }
   if (active.type === 'tileset') {
-    const body = format === 'tiled-json' ? JSON.stringify(tilesetJson(document, active, images[active.id]), null, 2) : `<?xml version="1.0" encoding="UTF-8"?>${tilesetXml(document, active, images[active.id] ?? safeAssetName(active.name, 'png'))}`;
+    const body = format === 'tiled-json' ? JSON.stringify(tilesetJson(document, active, images[active.id]), null, 2) : `<?xml version="1.0" encoding="UTF-8"?>${tilesetXml(document, active, images[active.id] ?? safeTiledAssetName(active.name, 'png'))}`;
     return { data: Buffer.from(body), mimeType: format === 'tiled-json' ? 'application/json' : 'application/xml', extension: format === 'tiled-json' ? 'tsj' : 'tsx', companions, report: { warnings: [], rasterized: [] } };
   }
   const body = format === 'tiled-json' ? JSON.stringify(tilemapToTiled(document, active, images), null, 2) : tilemapXml(document, active, images);

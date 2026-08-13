@@ -2,9 +2,9 @@ import { EventEmitter } from 'node:events';
 import { crc32 } from 'node:zlib';
 import { createCanvas } from '@napi-rs/canvas';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createIllustrationDocument, type PaletteEntry } from '@aidraw/core';
+import { createIllustrationDocument, createPixelDocument, type PaletteEntry } from '@aidraw/core';
 import { MAX_QUEUED_UTILITY_TASKS, RasterUtilitySupervisor, type UtilityProcessLike } from '@main/utility-supervisor';
-import { MAX_GENERATED_OUTPUT_BYTES, MAX_IMPORT_UTILITY_DOCUMENTS, MAX_OBSERVATION_PNG_BYTES, MAX_QUANTIZE_UTILITY_BASE64_CHARACTERS, MAX_QUANTIZE_UTILITY_SOURCE_BYTES, type UtilityResponse } from '@main/utility-contract';
+import { MAX_EXPORT_UTILITY_MEMBERS, MAX_GENERATED_OUTPUT_BYTES, MAX_GENERATION_PROGRESS_MESSAGE_BYTES, MAX_GENERATION_PROVIDER_METADATA_BYTES, MAX_IMPORT_UTILITY_DOCUMENTS, MAX_OBSERVATION_PNG_BYTES, MAX_OBSERVATION_UTILITY_RESULT_SERIALIZED_BYTES, MAX_QUANTIZE_UTILITY_BASE64_CHARACTERS, MAX_QUANTIZE_UTILITY_SOURCE_BYTES, MAX_UTILITY_ERROR_MESSAGE_BYTES, MAX_UTILITY_REPORT_SERIALIZED_BYTES, MAX_UTILITY_TEXT_BYTES, type UtilityResponse } from '@main/utility-contract';
 import type { GeneratedOutput, GenerationRequest } from '../../src/common/generation';
 import { normalizeGeneratedOutputForAcceptance } from '../../src/main/normalize-generation-output';
 
@@ -114,7 +114,7 @@ describe('RasterUtilitySupervisor', () => {
   it('round-trips export artifacts without exposing worker serialization to callers', async () => {
     const worker = new FakeUtility();
     const supervisor = new RasterUtilitySupervisor(() => worker);
-    const pending = supervisor.exportDocument(createIllustrationDocument('Worker export'), 'png');
+    const pending = supervisor.exportDocument(createPixelDocument('sprite', 'Worker export'), 'sprite-sheet');
     await nextTurn();
     const request = worker.messages[0] as { id: string; kind: string; document: { name: string } };
     expect(request).toMatchObject({ kind: 'export-document', document: { name: 'Worker export' } });
@@ -126,7 +126,7 @@ describe('RasterUtilitySupervisor', () => {
   });
 
   it('rejects malformed export artifact and companion envelopes before base64 coercion and recovers queued work', async () => {
-    const workers = [new FakeUtility(), new FakeUtility(), new FakeUtility()];
+    const workers = [new FakeUtility(), new FakeUtility(), new FakeUtility(), new FakeUtility(), new FakeUtility()];
     const fork = vi.fn(() => workers[fork.mock.calls.length - 1]);
     const supervisor = new RasterUtilitySupervisor(fork);
     const document = createIllustrationDocument('Guarded export');
@@ -168,7 +168,7 @@ describe('RasterUtilitySupervisor', () => {
       kind: 'export-document',
       artifact: {
         ...validArtifact(),
-        companions: [{ dataBase64: coercionTrap, extension: 'png', mimeType: 'image/png', name: '..\\escape.png' }],
+        companions: [{ dataBase64: Buffer.from('unexpected').toString('base64'), extension: 'png', mimeType: 'image/png', name: 'unexpected.png' }],
       },
     });
     await expect(malformedCompanion).rejects.toThrow('Raster utility returned a malformed export companion.');
@@ -179,7 +179,35 @@ describe('RasterUtilitySupervisor', () => {
     const afterMalformedCompanionRequest = workers[2].messages[0] as { id: string };
     workers[2].respond({ id: afterMalformedCompanionRequest.id, ok: true, kind: 'export-document', artifact: validArtifact() });
     await expect(afterMalformedCompanion).resolves.toMatchObject({ data: Buffer.from('png'), report: { warnings: [], rasterized: [] } });
-    expect(fork).toHaveBeenCalledTimes(3);
+
+    const reportEntry = 'x'.repeat(MAX_UTILITY_TEXT_BYTES - 16);
+    const oversizedReport = supervisor.exportDocument(document, 'png');
+    const afterOversizedReport = supervisor.exportDocument(document, 'png');
+    await nextTurn();
+    const oversizedReportRequest = workers[2].messages[1] as { id: string };
+    workers[2].respond({ id: oversizedReportRequest.id, ok: true, kind: 'export-document', artifact: { ...validArtifact(), report: { warnings: Array(17).fill(reportEntry), rasterized: [] } } });
+    await expect(oversizedReport).rejects.toThrow(`${MAX_UTILITY_REPORT_SERIALIZED_BYTES}-byte serialized limit`);
+    expect(workers[2].killed).toBe(true);
+
+    await nextTurn();
+    const afterOversizedReportRequest = workers[3].messages[0] as { id: string };
+    workers[3].respond({ id: afterOversizedReportRequest.id, ok: true, kind: 'export-document', artifact: validArtifact() });
+    await expect(afterOversizedReport).resolves.toMatchObject({ data: Buffer.from('png'), report: { warnings: [], rasterized: [] } });
+
+    const excessiveMembers = supervisor.exportDocument(createPixelDocument('tilemap', 'Guarded Tiled export'), 'tiled-json');
+    const afterExcessiveMembers = supervisor.exportDocument(document, 'png');
+    await nextTurn();
+    const excessiveMembersRequest = workers[3].messages[1] as { id: string };
+    const companion = { dataBase64: Buffer.from('png').toString('base64'), extension: 'png', mimeType: 'image/png', name: 'companion.png' };
+    workers[3].respond({ id: excessiveMembersRequest.id, ok: true, kind: 'export-document', artifact: { dataBase64: Buffer.from('{}').toString('base64'), mimeType: 'application/json', extension: 'tmj', report: { warnings: [], rasterized: [] }, companions: Array(MAX_EXPORT_UTILITY_MEMBERS).fill(companion) } });
+    await expect(excessiveMembers).rejects.toThrow(`${MAX_EXPORT_UTILITY_MEMBERS}-member limit`);
+    expect(workers[3].killed).toBe(true);
+
+    await nextTurn();
+    const afterExcessiveMembersRequest = workers[4].messages[0] as { id: string };
+    workers[4].respond({ id: afterExcessiveMembersRequest.id, ok: true, kind: 'export-document', artifact: validArtifact() });
+    await expect(afterExcessiveMembers).resolves.toMatchObject({ data: Buffer.from('png') });
+    expect(fork).toHaveBeenCalledTimes(5);
     supervisor.stop();
   });
 
@@ -188,7 +216,7 @@ describe('RasterUtilitySupervisor', () => {
   });
 
   it('bounds and validates imported canonical documents and warnings before fresh-worker recovery', async () => {
-    const workers = [new FakeUtility(), new FakeUtility(), new FakeUtility(), new FakeUtility()];
+    const workers = [new FakeUtility(), new FakeUtility(), new FakeUtility(), new FakeUtility(), new FakeUtility()];
     const fork = vi.fn(() => workers[fork.mock.calls.length - 1]);
     const supervisor = new RasterUtilitySupervisor(fork);
     const canonical = createIllustrationDocument('Canonical import');
@@ -248,7 +276,21 @@ describe('RasterUtilitySupervisor', () => {
     const afterMalformedWarningsRequest = workers[3].messages[0] as { id: string };
     workers[3].respond({ id: afterMalformedWarningsRequest.id, ok: true, kind: 'import-document', documents: [canonical], warnings: ['Recovered'] });
     await expect(afterMalformedWarnings).resolves.toEqual({ documents: [canonical], warnings: ['Recovered'] });
-    expect(fork).toHaveBeenCalledTimes(4);
+
+    const warningEntry = 'x'.repeat(MAX_UTILITY_TEXT_BYTES - 16);
+    const oversizedWarnings = supervisor.importDocument('C:\\approved\\oversized-warnings.svg', false);
+    const afterOversizedWarnings = supervisor.importDocument('C:\\approved\\after-oversized-warnings.svg', false);
+    await nextTurn();
+    const oversizedWarningsRequest = workers[3].messages[1] as { id: string };
+    workers[3].respond({ id: oversizedWarningsRequest.id, ok: true, kind: 'import-document', documents: [canonical], warnings: Array(17).fill(warningEntry) });
+    await expect(oversizedWarnings).rejects.toThrow(`${MAX_UTILITY_REPORT_SERIALIZED_BYTES}-byte serialized limit`);
+    expect(workers[3].killed).toBe(true);
+
+    await nextTurn();
+    const afterOversizedWarningsRequest = workers[4].messages[0] as { id: string };
+    workers[4].respond({ id: afterOversizedWarningsRequest.id, ok: true, kind: 'import-document', documents: [canonical], warnings: ['Recovered again'] });
+    await expect(afterOversizedWarnings).resolves.toEqual({ documents: [canonical], warnings: ['Recovered again'] });
+    expect(fork).toHaveBeenCalledTimes(5);
     supervisor.stop();
   });
 
@@ -265,7 +307,7 @@ describe('RasterUtilitySupervisor', () => {
   });
 
   it('rejects contradictory, over-budget, malformed-image, and unknown observation results before fresh-worker recovery', async () => {
-    const workers = Array.from({ length: 5 }, () => new FakeUtility());
+    const workers = Array.from({ length: 6 }, () => new FakeUtility());
     const fork = vi.fn(() => workers[fork.mock.calls.length - 1]);
     const supervisor = new RasterUtilitySupervisor(fork);
     const document = createIllustrationDocument('Guarded observation');
@@ -328,18 +370,31 @@ describe('RasterUtilitySupervisor', () => {
     workers[4].respond({ id: afterUnknownDiscriminantRequest.id, ok: true, kind: 'capture-observation', result: validObservationResult() });
     await expect(afterUnknownDiscriminant).resolves.toEqual(validObservationResult());
 
+    const oversizedResult = request();
+    const afterOversizedResult = request();
+    await nextTurn();
+    const oversizedResultRequest = workers[4].messages[1] as { id: string };
+    workers[4].respond({ id: oversizedResultRequest.id, ok: true, kind: 'capture-observation', result: { error: 'invalid_observation_target', message: 'x'.repeat(MAX_OBSERVATION_UTILITY_RESULT_SERIALIZED_BYTES) } });
+    await expect(oversizedResult).rejects.toThrow(`${MAX_OBSERVATION_UTILITY_RESULT_SERIALIZED_BYTES}-byte serialized limit`);
+    expect(workers[4].killed).toBe(true);
+
+    await nextTurn();
+    const afterOversizedResultRequest = workers[5].messages[0] as { id: string };
+    workers[5].respond({ id: afterOversizedResultRequest.id, ok: true, kind: 'capture-observation', result: validObservationResult() });
+    await expect(afterOversizedResult).resolves.toEqual(validObservationResult());
+
     const boundedError = request(47);
     await nextTurn();
-    const boundedErrorRequest = workers[4].messages[1] as { id: string };
+    const boundedErrorRequest = workers[5].messages[1] as { id: string };
     const boundedErrorResult = {
       error: 'observation_too_large',
       requested: { width: 8, height: 6, pixels: 48 },
       limit: { pixels: 47 },
       guidance: 'Request a smaller region or scale.',
     };
-    workers[4].respond({ id: boundedErrorRequest.id, ok: true, kind: 'capture-observation', result: boundedErrorResult });
+    workers[5].respond({ id: boundedErrorRequest.id, ok: true, kind: 'capture-observation', result: boundedErrorResult });
     await expect(boundedError).resolves.toEqual(boundedErrorResult);
-    expect(fork).toHaveBeenCalledTimes(5);
+    expect(fork).toHaveBeenCalledTimes(6);
     supervisor.stop();
   });
 
@@ -410,6 +465,8 @@ describe('RasterUtilitySupervisor', () => {
     let coercions = 0;
     worker.respond({ id: generationRequest.id, ok: true, kind: 'generation-progress', progress: Number.POSITIVE_INFINITY, message: { toString: () => { coercions += 1; return 'must-not-coerce'; } } });
     expect(progress).not.toHaveBeenCalled(); expect(coercions).toBe(0); expect(worker.killed).toBe(false);
+    worker.respond({ id: generationRequest.id, ok: true, kind: 'generation-progress', progress: 0.2, message: 'x'.repeat(MAX_GENERATION_PROGRESS_MESSAGE_BYTES + 1) });
+    expect(progress).not.toHaveBeenCalled(); expect(worker.killed).toBe(false);
     worker.respond({ id: generationRequest.id, ok: true, kind: 'generation-progress', progress: 0.25, message: 'Rendering locally' });
     expect(progress).toHaveBeenCalledTimes(1); expect(progress).toHaveBeenLastCalledWith(0.25, 'Rendering locally');
     const output = validGeneratedOutput(); worker.respond({ id: generationRequest.id, ok: true, kind: 'generation-run', outputs: [output] });
@@ -426,8 +483,8 @@ describe('RasterUtilitySupervisor', () => {
     supervisor.stop();
   });
 
-  it('rejects over-count, duplicate, over-byte, MIME, dimension, and seed-contradictory generation results before fresh-worker recovery', async () => {
-    const workers = Array.from({ length: 7 }, () => new FakeUtility());
+  it('rejects over-count, duplicate, over-byte, MIME, dimension, seed, and metadata-contradictory generation results before fresh-worker recovery', async () => {
+    const workers = Array.from({ length: 8 }, () => new FakeUtility());
     const fork = vi.fn(() => workers[fork.mock.calls.length - 1]);
     const supervisor = new RasterUtilitySupervisor(fork);
     const document = createIllustrationDocument('Guarded generation');
@@ -510,7 +567,16 @@ describe('RasterUtilitySupervisor', () => {
       'malformed result',
       [validGeneratedOutput({ seed: 17 })],
     );
-    expect(fork).toHaveBeenCalledTimes(7);
+
+    await rejectThenRecover(
+      6,
+      start(openAiRequest),
+      start(openAiRequest),
+      [validGeneratedOutput({ providerMetadata: { payload: 'x'.repeat(MAX_GENERATION_PROVIDER_METADATA_BYTES) } })],
+      `${MAX_GENERATION_PROVIDER_METADATA_BYTES}-byte serialized limit`,
+      [validGeneratedOutput()],
+    );
+    expect(fork).toHaveBeenCalledTimes(8);
     supervisor.stop();
   });
 
@@ -685,7 +751,7 @@ describe('RasterUtilitySupervisor', () => {
   });
 
   it('rejects malformed worker response envelopes and restarts queued work cleanly', async () => {
-    const workers = [new FakeUtility(), new FakeUtility(), new FakeUtility()];
+    const workers = [new FakeUtility(), new FakeUtility(), new FakeUtility(), new FakeUtility()];
     const fork = vi.fn(() => workers[fork.mock.calls.length - 1]);
     const supervisor = new RasterUtilitySupervisor(fork);
     const options = { alphaThreshold: 0.5, dithering: 'none' as const };
@@ -715,7 +781,20 @@ describe('RasterUtilitySupervisor', () => {
     const afterErrorRequest = workers[2].messages[0] as { id: string };
     workers[2].respond({ id: afterErrorRequest.id, ok: true, kind: 'quantize-image', changes: [] });
     await expect(afterError).resolves.toEqual([]);
-    expect(fork).toHaveBeenCalledTimes(3);
+
+    const oversizedError = supervisor.quantizeImage(Buffer.from('oversized-error'), 1, 1, palette, options);
+    const afterOversizedError = supervisor.quantizeImage(Buffer.from('after-oversized-error'), 1, 1, palette, options);
+    await nextTurn();
+    const oversizedErrorRequest = workers[2].messages[1] as { id: string };
+    workers[2].respond({ id: oversizedErrorRequest.id, ok: false, error: { code: 'utility_failed', message: 'x'.repeat(MAX_UTILITY_ERROR_MESSAGE_BYTES + 1) } });
+    await expect(oversizedError).rejects.toThrow('Raster utility returned a malformed error response.');
+    expect(workers[2].killed).toBe(true);
+
+    await nextTurn();
+    const afterOversizedErrorRequest = workers[3].messages[0] as { id: string };
+    workers[3].respond({ id: afterOversizedErrorRequest.id, ok: true, kind: 'quantize-image', changes: [] });
+    await expect(afterOversizedError).resolves.toEqual([]);
+    expect(fork).toHaveBeenCalledTimes(4);
     supervisor.stop();
   });
 

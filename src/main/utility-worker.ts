@@ -3,11 +3,13 @@ import { runImportUtilityRequest } from './utility-import';
 import {
   assertNormalizeGenerationAcceptanceInput,
   assertQuantizeUtilityParameters,
+  isGenerationProgressUtilityResponse,
   MAX_QUANTIZE_UTILITY_BASE64_CHARACTERS,
   type SerializedExportArtifact,
   type UtilityRequest,
   type UtilityResponse,
 } from './utility-contract';
+import { boundedUtilityErrorMessage } from './utility-resource-policy';
 import { isAbsolute } from 'node:path';
 import { validateSpriteSheetSliceOptions } from '../common/sprite-sheet';
 import { validateGenerationRequest } from '../common/generation-capabilities';
@@ -224,7 +226,10 @@ process.parentPort.on('message', (event) => {
           outputs = createFnd09GenerationResultOutputs(request.request, request.e2eResultFixture);
         } else {
           const { runGenerationProvider } = await import('./generation-provider-runner');
-          outputs = await runGenerationProvider(request, { signal: controller.signal, onProgress: (progress, message) => process.parentPort!.postMessage({ id, ok: true, kind: 'generation-progress', progress, message } satisfies UtilityResponse) });
+          outputs = await runGenerationProvider(request, { signal: controller.signal, onProgress: (progress, message) => {
+            const response = { id, ok: true, kind: 'generation-progress' as const, progress, message };
+            if (isGenerationProgressUtilityResponse(request, response)) process.parentPort!.postMessage(response satisfies UtilityResponse);
+          } });
         }
         if (request.e2eResultFixture !== undefined && request.e2eResultFixture !== 'valid') {
           await new Promise((resolveWait) => setTimeout(resolveWait, FND09_GENERATION_RESULT_E2E_HOLD_MS));
@@ -232,7 +237,7 @@ process.parentPort.on('message', (event) => {
         process.parentPort!.postMessage({ id, ok: true, kind: request.kind, outputs } as unknown as UtilityResponse);
       }
     } catch (error) {
-      process.parentPort!.postMessage({ id, ok: false, error: { code: 'utility_failed', message: error instanceof Error ? error.message : String(error) } } satisfies UtilityResponse);
+      process.parentPort!.postMessage({ id, ok: false, error: { code: 'utility_failed', message: boundedUtilityErrorMessage(error) } } satisfies UtilityResponse);
     } finally {
       if (generationController) generationControllers.delete(id);
     }

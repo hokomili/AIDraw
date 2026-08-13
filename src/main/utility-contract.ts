@@ -17,13 +17,49 @@ import type { Fnd09QuantizationResultFault } from './utility-quantization-result
 import type { Fnd09ExportResultFault } from './utility-export-result-e2e-contract';
 import type { Fnd09ImportResultFault } from './utility-import-result-e2e-contract';
 import type { Fnd09GenerationResultFixture } from './utility-generation-result-e2e-contract';
+import { expectedExportArtifactIdentity, type ExportArtifactMemberIdentity } from './export-artifact-policy';
+import {
+  MAX_EXPORT_UTILITY_MEMBERS,
+  MAX_EXPORT_UTILITY_TOTAL_DECODED_BYTES,
+  MAX_GENERATION_PROGRESS_MESSAGE_BYTES,
+  MAX_GENERATION_PROVIDER_METADATA_BYTES,
+  MAX_GENERATION_PROVIDER_METADATA_DEPTH,
+  MAX_GENERATION_PROVIDER_METADATA_NODES,
+  MAX_IMPORT_UTILITY_DEPTH,
+  MAX_IMPORT_UTILITY_NODES,
+  MAX_IMPORT_UTILITY_SERIALIZED_BYTES,
+  MAX_UTILITY_ERROR_CODE_BYTES,
+  MAX_UTILITY_ERROR_MESSAGE_BYTES,
+  MAX_UTILITY_REPORT_ENTRIES,
+  MAX_UTILITY_REPORT_SERIALIZED_BYTES,
+  MAX_UTILITY_TEXT_BYTES,
+  assertUtilityAggregateByteLimit,
+  assertUtilityJsonBudget,
+  isBoundedUtilityString,
+} from './utility-resource-policy';
+
+export {
+  MAX_EXPORT_UTILITY_MEMBERS,
+  MAX_EXPORT_UTILITY_TOTAL_DECODED_BYTES,
+  MAX_GENERATION_PROGRESS_MESSAGE_BYTES,
+  MAX_GENERATION_PROVIDER_METADATA_BYTES,
+  MAX_IMPORT_UTILITY_SERIALIZED_BYTES,
+  MAX_UTILITY_ERROR_CODE_BYTES,
+  MAX_UTILITY_ERROR_MESSAGE_BYTES,
+  MAX_UTILITY_REPORT_ENTRIES,
+  MAX_UTILITY_REPORT_SERIALIZED_BYTES,
+  MAX_UTILITY_TEXT_BYTES,
+} from './utility-resource-policy';
 
 export const MAX_QUANTIZE_UTILITY_SOURCE_BYTES = MAX_INLINE_ASSET_BYTES;
 export const MAX_QUANTIZE_UTILITY_BASE64_CHARACTERS = 2_000_000;
+const MAX_EXPORT_UTILITY_BASE64_CHARACTERS = Math.ceil(MAX_EXPORT_UTILITY_TOTAL_DECODED_BYTES / 3) * 4;
 /** PDF is the only multi-document importer and already caps its page/result count here. */
 export const MAX_IMPORT_UTILITY_DOCUMENTS = 256;
 /** captureObservation already rejects a static PNG above this decoded-byte ceiling. */
 export const MAX_OBSERVATION_PNG_BYTES = 4 * 1024 * 1024;
+/** Includes the maximum base64 PNG plus bounded JSON observation metadata. */
+export const MAX_OBSERVATION_UTILITY_RESULT_SERIALIZED_BYTES = Math.ceil(MAX_OBSERVATION_PNG_BYTES / 3) * 4 + 64 * 1024;
 /** Provider adapters enforce these per-image limits before returning generated output. */
 export const MAX_GENERATED_OUTPUT_BYTES = 32 * 1024 * 1024;
 export const MAX_GENERATED_OUTPUT_SIDE = 8_192;
@@ -214,7 +250,7 @@ function isNonNegativeInteger(value: unknown): value is number {
 }
 
 function isNonEmptyString(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0;
+  return isBoundedUtilityString(value, MAX_UTILITY_TEXT_BYTES, false);
 }
 
 /**
@@ -235,7 +271,15 @@ export function isGenerationProgressUtilityResponse(
     && Number.isFinite(value.progress)
     && value.progress >= 0
     && value.progress <= 1
-    && typeof value.message === 'string';
+    && isBoundedUtilityString(value.message, MAX_GENERATION_PROGRESS_MESSAGE_BYTES);
+}
+
+export function isBoundedUtilityErrorResponse(value: unknown): value is { code: string; message: string } {
+  return isRecord(value)
+    && hasOnlyKeys(value, ['code', 'message'])
+    && hasKeys(value, ['code', 'message'])
+    && isBoundedUtilityString(value.code, MAX_UTILITY_ERROR_CODE_BYTES, false)
+    && isBoundedUtilityString(value.message, MAX_UTILITY_ERROR_MESSAGE_BYTES);
 }
 
 interface ObservationRegionContract {
@@ -440,6 +484,12 @@ export function assertObservationUtilityResponse(
   const response = value as Record<string, unknown>;
   if (response.kind !== request.kind || !isRecord(response.result)) throw new Error('Raster utility returned a malformed observation result.');
   const result = response.result;
+  assertUtilityJsonBudget(result, {
+    label: 'Raster utility observation result',
+    maxBytes: MAX_OBSERVATION_UTILITY_RESULT_SERIALIZED_BYTES,
+    maxNodes: 4_096,
+    maxDepth: 16,
+  });
   if (result.available !== true) { assertObservationError(request, result); return; }
   if (!hasOnlyKeys(result, ['available', 'mimeType', 'width', 'height', 'scale', 'region', 'background', 'assetId', 'frameId', 'layerId', 'illustrationTimeMs', 'data'])
     || !hasKeys(result, ['available', 'mimeType', 'width', 'height', 'scale', 'region', 'background', 'data'])
@@ -496,6 +546,14 @@ export function assertGenerationUtilityResponse(
       || candidate.providerMetadata !== undefined && !isRecord(candidate.providerMetadata)) {
       throw new Error('Generation utility returned a malformed result.');
     }
+    if (candidate.providerMetadata !== undefined) {
+      assertUtilityJsonBudget(candidate.providerMetadata, {
+        label: 'Generation utility provider metadata',
+        maxBytes: MAX_GENERATION_PROVIDER_METADATA_BYTES,
+        maxNodes: MAX_GENERATION_PROVIDER_METADATA_NODES,
+        maxDepth: MAX_GENERATION_PROVIDER_METADATA_DEPTH,
+      });
+    }
     const decodedBytes = base64DecodedByteLength(candidate.data);
     if (decodedBytes < 1) throw new Error('Generation utility returned a malformed image result.');
     if (decodedBytes > MAX_GENERATED_OUTPUT_BYTES) {
@@ -528,6 +586,14 @@ export function assertNormalizeGenerationAcceptanceInput(output: unknown): asser
     || output.seed !== undefined && !Number.isSafeInteger(output.seed)
     || output.providerMetadata !== undefined && !isRecord(output.providerMetadata)) {
     throw new Error('Generated acceptance input is malformed.');
+  }
+  if (output.providerMetadata !== undefined) {
+    assertUtilityJsonBudget(output.providerMetadata, {
+      label: 'Generated acceptance provider metadata',
+      maxBytes: MAX_GENERATION_PROVIDER_METADATA_BYTES,
+      maxNodes: MAX_GENERATION_PROVIDER_METADATA_NODES,
+      maxDepth: MAX_GENERATION_PROVIDER_METADATA_DEPTH,
+    });
   }
   const decodedBytes = base64DecodedByteLength(output.data);
   if (decodedBytes < 1 || decodedBytes > MAX_GENERATED_OUTPUT_BYTES) throw new Error('Generated acceptance input exceeds the preview byte contract.');
@@ -609,30 +675,50 @@ export function assertNormalizeGenerationAcceptanceUtilityResponse(
 }
 
 function isMimeType(value: unknown): value is string {
-  return typeof value === 'string' && /^[^\s/]+\/[^\s/]+$/.test(value);
+  return isBoundedUtilityString(value, 256, false) && /^[^\s/]+\/[^\s/]+$/.test(value);
 }
 
 function isExtension(value: unknown): value is string {
-  return typeof value === 'string' && /^[a-z0-9][a-z0-9-]*$/i.test(value);
+  return isBoundedUtilityString(value, 32, false) && /^[a-z0-9][a-z0-9-]*$/i.test(value);
 }
 
 function isLeafName(value: unknown, required: boolean): value is string | undefined {
   if (value === undefined) return !required;
-  return typeof value === 'string' && value.length > 0 && value !== '.' && value !== '..' && !value.includes('\0') && !/[\\/]/.test(value);
+  return isBoundedUtilityString(value, 1_024, false) && value !== '.' && value !== '..' && !value.includes('\0') && !/[\\/]/.test(value);
 }
 
-function isStringArray(value: unknown): value is string[] {
-  if (!Array.isArray(value)) return false;
-  for (const entry of value) if (typeof entry !== 'string') return false;
-  return true;
+function assertBoundedStringArray(value: unknown, label: string, malformedMessage: string): asserts value is string[] {
+  if (!Array.isArray(value)) throw new Error(malformedMessage);
+  if (value.length > MAX_UTILITY_REPORT_ENTRIES) throw new Error(`${label} exceeds its ${MAX_UTILITY_REPORT_ENTRIES}-entry limit.`);
+  for (const entry of value) if (!isBoundedUtilityString(entry, MAX_UTILITY_TEXT_BYTES)) throw new Error(malformedMessage);
+  assertUtilityJsonBudget(value, {
+    label,
+    maxBytes: MAX_UTILITY_REPORT_SERIALIZED_BYTES,
+    maxNodes: MAX_UTILITY_REPORT_ENTRIES + 1,
+    maxDepth: 2,
+  });
 }
 
-function assertSerializedExportMember(value: unknown, label: 'artifact' | 'companion', nameRequired: boolean): void {
-  if (!value || typeof value !== 'object') throw new Error(`Raster utility returned a malformed export ${label}.`);
-  const member = value as { dataBase64?: unknown; extension?: unknown; mimeType?: unknown; name?: unknown };
-  if (!isExtension(member.extension) || !isMimeType(member.mimeType) || !isLeafName(member.name, nameRequired) || !isCanonicalBase64(member.dataBase64)) {
+function assertSerializedExportMember(value: unknown, label: 'artifact' | 'companion', nameRequired: boolean): number {
+  if (!isRecord(value) || label === 'companion' && !hasOnlyKeys(value, ['dataBase64', 'extension', 'mimeType', 'name']) || !hasKeys(value, ['dataBase64', 'extension', 'mimeType'])) throw new Error(`Raster utility returned a malformed export ${label}.`);
+  const member = value as { dataBase64: unknown; extension: unknown; mimeType: unknown; name?: unknown };
+  if (!isExtension(member.extension) || !isMimeType(member.mimeType) || !isLeafName(member.name, nameRequired)
+    || typeof member.dataBase64 !== 'string' || member.dataBase64.length > MAX_EXPORT_UTILITY_BASE64_CHARACTERS
+    || !isCanonicalBase64(member.dataBase64)) {
     throw new Error(`Raster utility returned a malformed export ${label}.`);
   }
+  const decodedBytes = base64DecodedByteLength(member.dataBase64);
+  if (decodedBytes < 1) throw new Error(`Raster utility returned a malformed export ${label}.`);
+  return decodedBytes;
+}
+
+function hasExportMemberIdentity(
+  member: { extension: string; mimeType: string; name?: string },
+  expected: ExportArtifactMemberIdentity,
+): boolean {
+  return member.extension === expected.extension
+    && member.mimeType === expected.mimeType
+    && member.name === expected.name;
 }
 
 /** Validate the existing serialized export envelope before any permissive Buffer base64 decode. */
@@ -640,17 +726,41 @@ export function assertExportUtilityResponse(
   request: ExportUtilityRequest,
   value: unknown,
 ): asserts value is Extract<UtilityResponse, { ok: true; kind: 'export-document' }> {
-  if (!value || typeof value !== 'object') throw new Error('Raster utility returned a malformed export artifact.');
+  if (!isRecord(value)) throw new Error('Raster utility returned a malformed export artifact.');
   const response = value as { kind?: unknown; artifact?: unknown };
-  if (response.kind !== request.kind || !response.artifact || typeof response.artifact !== 'object') throw new Error('Raster utility returned a malformed export artifact.');
-  const artifact = response.artifact as SerializedExportArtifact;
-  assertSerializedExportMember(artifact, 'artifact', false);
-  if (!artifact.report || !isStringArray(artifact.report.warnings) || !isStringArray(artifact.report.rasterized)) throw new Error('Raster utility returned a malformed export artifact.');
-  if (artifact.companion !== undefined) assertSerializedExportMember(artifact.companion, 'companion', false);
-  if (artifact.companions !== undefined) {
-    if (!Array.isArray(artifact.companions)) throw new Error('Raster utility returned a malformed export companion.');
-    for (const companion of artifact.companions) assertSerializedExportMember(companion, 'companion', true);
+  if (response.kind !== request.kind || !isRecord(response.artifact)
+    || !hasOnlyKeys(response.artifact, ['dataBase64', 'mimeType', 'extension', 'report', 'companion', 'companions'])
+    || !hasKeys(response.artifact, ['dataBase64', 'mimeType', 'extension', 'report'])) throw new Error('Raster utility returned a malformed export artifact.');
+  const artifact = response.artifact as unknown as SerializedExportArtifact;
+  const expected = expectedExportArtifactIdentity(request.document, request.format);
+  if (!expected || !hasExportMemberIdentity(artifact, expected.primary)) throw new Error('Raster utility returned a malformed export artifact.');
+  const decodedLengths = [assertSerializedExportMember(artifact, 'artifact', false)];
+  if (!isRecord(artifact.report) || !hasOnlyKeys(artifact.report, ['warnings', 'rasterized']) || !hasKeys(artifact.report, ['warnings', 'rasterized'])) throw new Error('Raster utility returned a malformed export artifact.');
+  assertBoundedStringArray(artifact.report.warnings, 'Raster utility export warnings', 'Raster utility returned a malformed export artifact.');
+  assertBoundedStringArray(artifact.report.rasterized, 'Raster utility export rasterization report', 'Raster utility returned a malformed export artifact.');
+  if (artifact.companion !== undefined && artifact.companions !== undefined) throw new Error('Raster utility returned a malformed export companion.');
+  if (expected.companion) {
+    if (!artifact.companion || artifact.companions !== undefined) throw new Error('Raster utility returned a malformed export companion.');
+    decodedLengths.push(assertSerializedExportMember(artifact.companion, 'companion', false));
+    if (!hasExportMemberIdentity(artifact.companion, expected.companion)) throw new Error('Raster utility returned a malformed export companion.');
+  } else if (expected.companions) {
+    if (artifact.companion !== undefined || !Array.isArray(artifact.companions)) throw new Error('Raster utility returned a malformed export companion.');
+    if (artifact.companions.length > MAX_EXPORT_UTILITY_MEMBERS - 1) throw new Error(`Raster utility export result exceeds its ${MAX_EXPORT_UTILITY_MEMBERS}-member limit.`);
+    if (artifact.companions.length !== expected.companions.length) throw new Error('Raster utility returned a malformed export companion.');
+    const expectedByName = new Map(expected.companions.map((companion) => [companion.name, companion]));
+    const names = new Set<string>();
+    for (const companion of artifact.companions) {
+      decodedLengths.push(assertSerializedExportMember(companion, 'companion', true));
+      if (names.has(companion.name)) throw new Error('Raster utility returned duplicate export companion names.');
+      names.add(companion.name);
+      const expectedCompanion = expectedByName.get(companion.name);
+      if (!expectedCompanion || !hasExportMemberIdentity(companion, expectedCompanion)) throw new Error('Raster utility returned a malformed export companion.');
+    }
+  } else if (artifact.companion !== undefined || artifact.companions !== undefined) {
+    throw new Error('Raster utility returned a malformed export companion.');
   }
+  if (decodedLengths.length > MAX_EXPORT_UTILITY_MEMBERS) throw new Error(`Raster utility export result exceeds its ${MAX_EXPORT_UTILITY_MEMBERS}-member limit.`);
+  assertUtilityAggregateByteLimit(decodedLengths, MAX_EXPORT_UTILITY_TOTAL_DECODED_BYTES, 'Raster utility export result');
 }
 
 /** Apply the established document migration/schema gate before imported output reaches callers. */
@@ -664,7 +774,13 @@ export function validateImportUtilityResponse(
   if (response.documents.length < 1 || response.documents.length > MAX_IMPORT_UTILITY_DOCUMENTS) {
     throw new Error(`Raster utility import result must contain 1–${MAX_IMPORT_UTILITY_DOCUMENTS} documents.`);
   }
-  if (!isStringArray(response.warnings)) throw new Error('Raster utility returned malformed import warnings.');
+  assertBoundedStringArray(response.warnings, 'Raster utility import warnings', 'Raster utility returned malformed import warnings.');
+  assertUtilityJsonBudget(response.documents, {
+    label: 'Raster utility imported documents',
+    maxBytes: MAX_IMPORT_UTILITY_SERIALIZED_BYTES,
+    maxNodes: MAX_IMPORT_UTILITY_NODES,
+    maxDepth: MAX_IMPORT_UTILITY_DEPTH,
+  });
   const documents: AIDrawDocument[] = [];
   for (const document of response.documents) {
     try { documents.push(migrateDocument(document)); }

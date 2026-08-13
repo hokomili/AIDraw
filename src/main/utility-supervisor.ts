@@ -8,6 +8,7 @@ import {
   assertNormalizeGenerationAcceptanceInput,
   assertNormalizeGenerationAcceptanceUtilityResponse,
   assertGenerationUtilityResponse,
+  isBoundedUtilityErrorResponse,
   isGenerationProgressUtilityResponse,
   assertObservationUtilityResponse,
   assertQuantizeUtilityResponse,
@@ -543,7 +544,7 @@ export class RasterUtilitySupervisor {
         this.rejectInvalidResponse(worker, task, error instanceof Error ? error : new Error(String(error)));
         return;
       }
-    } else if (!response.error || typeof response.error.code !== 'string' || typeof response.error.message !== 'string') {
+    } else if (!isBoundedUtilityErrorResponse(response.error)) {
       this.rejectInvalidResponse(worker, task, new Error('Raster utility returned a malformed error response.'));
       return;
     }
