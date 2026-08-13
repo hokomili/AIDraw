@@ -116,6 +116,7 @@ import { alignIllustrationObjects, distributeIllustrationObjects, type Alignment
 import { actorClientLabel, actorIdentityLabel } from "../common/actor-identity";
 import { AGENT_CLIENTS, type AgentClientId, type AgentClientSetupResult } from "../common/agent-clients";
 import { cropImageToAspect, resetImageCrop } from "../common/image-crop";
+import { BrushLibraryDialog } from "./components/BrushLibraryDialog";
 import { ImageCropFields } from "./components/ImageCropFields";
 import { flattenLayerTree, layerTreeDescendants, moveLayerTreeEntry } from "../common/layer-tree";
 import { assignWangTile, deleteWangColor, deleteWangSet, upsertWangColor, upsertWangSet } from "../common/wang-authoring";
@@ -1412,6 +1413,7 @@ function ContextBar({ document }: { document: AIDrawDocument }) {
   const currentPixelIndex = useEditorStore((state) => state.pixelIndex);
   const apply = useEditorStore((state) => state.apply);
   const [brushEditor, setBrushEditor] = useState<{ preset: RasterBrushPreset; existing: boolean }>();
+  const [brushLibraryOpen, setBrushLibraryOpen] = useState(false);
   const isBrush = [
     "pen",
     "pencil",
@@ -1480,7 +1482,7 @@ function ContextBar({ document }: { document: AIDrawDocument }) {
                 </select>
               </label>
             )}
-          {document.kind === "illustration" && tool === "brush" && <button type="button" className="context-action-button" onClick={openBrushEditor}>{activeCustomBrush ? "Edit preset" : "Customize"}</button>}
+          {document.kind === "illustration" && tool === "brush" && <><button type="button" className="context-action-button" onClick={openBrushEditor}>{activeCustomBrush ? "Edit preset" : "Customize"}</button><button type="button" className="context-action-button" onClick={() => setBrushLibraryOpen(true)}>Brush library</button></>}
           {document.kind === "illustration" && (
             <label className="range-field">
               <span>Opacity</span>
@@ -1536,6 +1538,17 @@ function ContextBar({ document }: { document: AIDrawDocument }) {
       }}
       onDelete={async () => {
         if (await apply("Delete custom brush", [{ kind: "illustration.brush-presets.replace", presets: customBrushes.filter((entry) => entry.id !== brushEditor.preset.id) }])) { chooseBrush("hard-round"); setBrushEditor(undefined); }
+      }}
+    />}
+    {brushLibraryOpen && document.kind === "illustration" && <BrushLibraryDialog
+      document={document}
+      onClose={() => setBrushLibraryOpen(false)}
+      onApply={async (plan) => {
+        const applied = await apply(plan.mode === "replace" ? "Replace custom brush library" : "Add custom brush copies", plan.operations);
+        const operation = plan.operations[0];
+        const imported = operation?.kind === "illustration.brush-presets.replace" ? operation.presets.find((preset) => preset.id === plan.importedIds[0]) : undefined;
+        if (applied && imported) { setBrushPreset(imported.id); setSize(imported.size); setOpacity(imported.opacity); }
+        return applied;
       }}
     />}
     </>

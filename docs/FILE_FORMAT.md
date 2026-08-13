@@ -39,6 +39,14 @@ Tile bundles carry canonical 32-bit-GID stamps plus references for every tileset
 
 Both kinds require at least one stamp, reject unknown envelope fields, and retain the canonical limits of 1,024 stamps and 65,536 cells per stamp. Interchange adds a 16 MiB UTF-8 JSON ceiling and 262,144-cell aggregate ceiling. Append is the default and allocates fresh stamp IDs plus case-insensitively unique names; explicit replace preserves the imported stamp IDs and removes the current same-kind library. Loading, parsing, and previewing do not mutate the document; Apply submits the planned palette/library operations together as one ordinary transaction. Any document revision change after preview disables Apply until the user previews the current result again.
 
+## Custom brush-library JSON
+
+Custom brush-library transfer is separate from the native container and grants no filesystem authority. Its strict envelope is `{ "format": "aidraw-brush-library", "version": 1, "presets": [...] }`. Every preset carries the complete canonical custom raster-dab recipe: ID, name, default size/opacity/hardness/flow, tip, spacing, stabilization, scatter, size/opacity jitter, angle, roundness, wetness, and granulation. Unknown fields, invalid values, duplicate IDs, built-in reserved IDs, empty libraries, more than 256 presets, and UTF-8 JSON above 1 MiB reject before planning.
+
+**Add copies** is the default: the current document library stays intact and every imported preset receives a fresh non-built-in ID plus a case-insensitively unique custom name. Explicit **Replace library** removes only the current custom presets and preserves the imported IDs. Existing strokes are not relinked or rewritten because each stroke already embeds its complete recipe and seed. Loading, parsing, and previewing do not mutate the document; Apply rebuilds the plan and submits one ordinary `illustration.brush-presets.replace` transaction. A document revision change after preview disables Apply until the result is previewed again.
+
+The bundle does not include built-in presets, strokes, bitmap tip images, folders/tags, or application-global settings, and it is not a third-party brush format. Copy and one user-selected JSON file are the only source UI paths established here; no background directory access or native-container schema change is implied.
+
 ## Profile recovery state
 
 Crash recovery is profile-local and separate from the portable `.aidraw` container. New document journals are named `document-<sha256(documentId)>.jsonl`, so an imported opaque ID never becomes a path component and case-distinct IDs remain distinct on case-insensitive filesystems. A safe direct-child legacy `<documentId>.jsonl` remains readable and appendable until the next successful compaction writes the hashed form; only then is that legacy file removed. Compaction and the fixed `workspace.json` index use exclusive unique temporary siblings followed by atomic replacement.

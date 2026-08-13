@@ -93,31 +93,31 @@ export function StampLibraryDialog({ document, map, onApply, onClose }: StampLib
   return <EditorDialog
     title={`${kind === 'pixel' ? 'Pixel' : 'Tile'} stamp library JSON`}
     description={`Copy or import the reusable ${kind} stamps owned by this document. Parsing and preview do not change the document.`}
-    className="stamp-library-dialog"
+    className="library-interchange-dialog"
     onClose={onClose}
   >
-    <div className="stamp-library-body">
-      <section className="stamp-library-current">
+    <div className="library-interchange-body">
+      <section className="library-interchange-current">
         <span><strong>Current library</strong><small>{currentCount} reusable {kind} stamp{currentCount === 1 ? '' : 's'}</small></span>
         <button type="button" disabled={currentCount === 0 || busy} onClick={() => void copyCurrent()}>Copy current JSON</button>
       </section>
-      <div className="stamp-library-compatibility">
+      <div className="library-interchange-boundary">
         <strong>Compatibility boundary</strong>
         {kind === 'pixel'
           ? <p>Referenced colors match exactly by value. Missing colors are appended; import fails if the 256-color palette is full. Colors are never approximated.</p>
           : <p>Tile stamps import only into a map with the exact exported tileset and source-sprite identities, revisions, GID ranges, and geometry. Tileset pixels are not bundled or rebased.</p>}
       </div>
-      <label className="dialog-field stamp-library-json"><span>Paste or load AIDraw stamp-library JSON</span><textarea autoFocus rows={10} maxLength={MAX_STAMP_LIBRARY_BYTES} spellCheck={false} value={json} onChange={(event) => changeJson(event.target.value)} placeholder='{"format":"aidraw-stamp-library","version":1,…}' /></label>
-      <div className="stamp-library-actions"><label className="stamp-library-file">Load JSON file<input type="file" accept="application/json,.json" disabled={busy} onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ''; if (file) void loadFile(file); }} /></label><small>16 MiB · 262,144 cells · canonical per-library and per-stamp limits still apply</small></div>
-      <fieldset className="stamp-library-modes"><legend>Import behavior</legend>
+      <label className="dialog-field library-interchange-json"><span>Paste or load AIDraw stamp-library JSON</span><textarea autoFocus rows={10} maxLength={MAX_STAMP_LIBRARY_BYTES} spellCheck={false} value={json} onChange={(event) => changeJson(event.target.value)} placeholder='{"format":"aidraw-stamp-library","version":1,…}' /></label>
+      <div className="library-interchange-actions"><label className="library-interchange-file">Load JSON file<input type="file" accept="application/json,.json" disabled={busy} onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ''; if (file) void loadFile(file); }} /></label><small>16 MiB · 262,144 cells · canonical per-library and per-stamp limits still apply</small></div>
+      <fieldset className="library-interchange-modes"><legend>Import behavior</legend>
         <label><input type="radio" name="stamp-library-mode" checked={mode === 'append'} onChange={() => changeMode('append')} /><span><strong>Add copies</strong><small>Keep this library; imported stamps receive fresh IDs and unique names.</small></span></label>
         <label><input type="radio" name="stamp-library-mode" checked={mode === 'replace'} onChange={() => changeMode('replace')} /><span><strong>Replace library</strong><small>Remove the current {kind} stamps and preserve the imported library IDs.</small></span></label>
       </fieldset>
-      {plan && previewIsCurrent && <div className="stamp-library-summary" role="status"><strong>Preview ready</strong><span>{plan.incomingCount} incoming → {plan.totalCount} total stamp{plan.totalCount === 1 ? '' : 's'}{addedColors > 0 ? ` · ${addedColors} exact palette color${addedColors === 1 ? '' : 's'} added` : ''}</span><small>No document operation has run yet.</small></div>}
+      {plan && previewIsCurrent && <div className="library-interchange-summary" role="status"><strong>Preview ready</strong><span>{plan.incomingCount} incoming → {plan.totalCount} total stamp{plan.totalCount === 1 ? '' : 's'}{addedColors > 0 ? ` · ${addedColors} exact palette color${addedColors === 1 ? '' : 's'} added` : ''}</span><small>No document operation has run yet.</small></div>}
       {plan && !previewIsCurrent && <p className="entry-dialog-error" role="status">The document changed after preview. Preview again before applying.</p>}
-      {notice && <p className="stamp-library-notice" role="status">{notice}</p>}
+      {notice && <p className="library-interchange-notice" role="status">{notice}</p>}
       {error && <p className="entry-dialog-error" role="alert">{error}</p>}
     </div>
-    <footer className="modal-footer stamp-library-footer"><button type="button" className="secondary-modal-button" onClick={onClose}>Cancel</button><button type="button" disabled={busy || !json.trim()} onClick={preview}>Preview import</button><button type="button" className="primary-modal-button" disabled={busy || !previewIsCurrent} onClick={() => void applyPreview()}>{busy ? 'Applying…' : mode === 'replace' ? 'Replace library' : 'Add copies'}</button></footer>
+    <footer className="modal-footer library-interchange-footer"><button type="button" className="secondary-modal-button" onClick={onClose}>Cancel</button><button type="button" disabled={busy || !json.trim()} onClick={preview}>Preview import</button><button type="button" className="primary-modal-button" disabled={busy || !previewIsCurrent} onClick={() => void applyPreview()}>{busy ? 'Applying…' : mode === 'replace' ? 'Replace library' : 'Add copies'}</button></footer>
   </EditorDialog>;
 }
