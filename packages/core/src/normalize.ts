@@ -27,6 +27,20 @@ function record(value: unknown): Record<string, unknown> {
   return isRecord(value) ? value : {};
 }
 
+function assertUniqueNormalizedEntityIds(
+  source: Record<string, unknown>,
+  label: string,
+  include: (candidate: Record<string, unknown>) => boolean = () => true,
+): void {
+  const ids = new Set<string>();
+  for (const [key, value] of Object.entries(source)) {
+    if (!isRecord(value) || !include(value)) continue;
+    const id = typeof value.id === 'string' && value.id.trim() ? value.id : key;
+    if (ids.has(id)) throw new Error(`Duplicate persisted pixel ${label} ID: ${id}.`);
+    ids.add(id);
+  }
+}
+
 function text(value: unknown, fallback: string): string {
   return typeof value === 'string' && value.trim() ? value : fallback;
 }
@@ -72,6 +86,7 @@ function rootLayerIds<T extends { type: string; childIds?: string[] }>(orderedLa
 function normalizeSprite(value: Record<string, unknown>, current: PixelSprite | undefined, timestamp: string, actorId: string): PixelSprite {
   const assetBase = entityBase(value, text(value.id, 'recovered-sprite'), 'Recovered sprite', current, timestamp, actorId);
   const layerSource = record(value.layers);
+  assertUniqueNormalizedEntityIds(layerSource, 'sprite layer', (candidate) => candidate.type === 'pixel' || candidate.type === 'group');
   const layers: Record<string, PixelLayer> = {};
   for (const [key, candidate] of Object.entries(layerSource)) {
     if (!isRecord(candidate) || (candidate.type !== 'pixel' && candidate.type !== 'group')) continue;
@@ -96,6 +111,7 @@ function normalizeSprite(value: Record<string, unknown>, current: PixelSprite | 
   const layerIds = rootLayerIds(orderedLayerIds, layers);
 
   const frameSource = record(value.frames);
+  assertUniqueNormalizedEntityIds(frameSource, 'sprite frame');
   const frames: Record<string, PixelFrame> = {};
   for (const [key, candidate] of Object.entries(frameSource)) {
     if (!isRecord(candidate)) continue;
@@ -109,6 +125,7 @@ function normalizeSprite(value: Record<string, unknown>, current: PixelSprite | 
   const frameIds = orderedIds(value.frameIds, frames);
 
   const celSource = record(value.cels);
+  assertUniqueNormalizedEntityIds(celSource, 'sprite cel', (candidate) => typeof candidate.layerId === 'string' && typeof candidate.frameId === 'string');
   const cels: Record<string, PixelCel> = {};
   for (const [key, candidate] of Object.entries(celSource)) {
     if (!isRecord(candidate) || typeof candidate.layerId !== 'string' || typeof candidate.frameId !== 'string') continue;
@@ -190,6 +207,7 @@ function normalizeTileset(value: Record<string, unknown>, current: PixelTileset 
 function normalizeTilemap(value: Record<string, unknown>, current: PixelTilemap | undefined, timestamp: string, actorId: string): PixelTilemap {
   const base = entityBase(value, text(value.id, 'recovered-tilemap'), 'Recovered tilemap', current, timestamp, actorId);
   const source = record(value.layers);
+  assertUniqueNormalizedEntityIds(source, 'tilemap layer', (candidate) => ['tile', 'object', 'group'].includes(String(candidate.type)));
   const layers: Record<string, TilemapLayer> = {};
   for (const [key, candidate] of Object.entries(source)) {
     if (!isRecord(candidate) || !['tile', 'object', 'group'].includes(String(candidate.type))) continue;
@@ -239,8 +257,12 @@ export function normalizePixelDocument(document: PixelDocument): PixelDocument {
   normalized.tileStamps = Array.isArray(normalized.tileStamps) ? normalized.tileStamps : [];
   normalized.bitmapFonts = Array.isArray(normalized.bitmapFonts) && normalized.bitmapFonts.length ? normalized.bitmapFonts : [createDefaultBitmapFont()];
   normalized.paletteCycles = Array.isArray(normalized.paletteCycles) ? normalized.paletteCycles : [];
+  if (normalized.linkedAssets === undefined) normalized.linkedAssets = [];
+  if (normalized.conversionDefaults === undefined) normalized.conversionDefaults = { resample: 'area', paletteMetric: 'oklab', dithering: 'none', alphaThreshold: 0.5 };
   const assets: PixelDocument['pixelAssets'] = {};
-  for (const [key, value] of Object.entries(record(normalized.pixelAssets))) {
+  const assetSource = record(normalized.pixelAssets);
+  assertUniqueNormalizedEntityIds(assetSource, 'asset', (candidate) => ['sprite', 'tileset', 'tilemap'].includes(String(candidate.type)));
+  for (const [key, value] of Object.entries(assetSource)) {
     const asset = normalizePixelAsset(value, undefined, normalized.updatedAt, 'system');
     if (asset) assets[asset.id || key] = asset;
   }

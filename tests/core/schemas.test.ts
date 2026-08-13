@@ -8,10 +8,16 @@ import {
   NewDocumentOptionsSchema,
   createIllustrationDocument,
   createId,
+  createPixelDocument,
   createPixelSprite,
+  createPixelTilemap,
+  createPixelTileset,
   migrateDocument,
   nowIso,
+  writePixels,
+  writeTiles,
   type ShapeObject,
+  type TilemapLayer,
 } from '@aidraw/core';
 
 describe('canvas operation schemas', () => {
@@ -326,5 +332,102 @@ describe('persisted illustration schemas', () => {
       const document = illustrationDocument(); mutate(document);
       expect(() => migrateDocument(document)).toThrow(error);
     }
+  });
+});
+
+describe('persisted pixel schemas', () => {
+  function pixelDocument() {
+    const document = createPixelDocument('project', 'Persisted pixel project');
+    const sprite = document.pixelAssets[document.activeAssetId];
+    if (sprite.type !== 'sprite') throw new Error('Expected sprite');
+    const firstFrameId = sprite.frameIds[0]; const firstCel = Object.values(sprite.cels)[0]; const timestamp = nowIso();
+    writePixels(firstCel, [{ x: 1, y: 2, index: 3 }]);
+    const secondFrameId = 'persisted-frame-two'; const secondCelId = 'persisted-cel-two';
+    sprite.frameIds.push(secondFrameId);
+    sprite.frames[secondFrameId] = { id: secondFrameId, revision: 0, name: 'Frame 2', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, durationMs: 140 };
+    sprite.cels[secondCelId] = { id: secondCelId, revision: 0, name: 'Pixels · Frame 2', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, layerId: sprite.layerIds[0], frameId: secondFrameId, chunks: {}, linkedToCelId: 'missing-linked-cel' };
+    sprite.tags = [{ id: 'persisted-tag', name: 'Loop', fromFrameId: firstFrameId, toFrameId: secondFrameId, direction: 'ping-pong', color: '#31a6a0' }];
+    sprite.paletteOverrides[firstFrameId] = structuredClone(document.palette);
+
+    const tileset = createPixelTileset('Persisted terrain', sprite.id, 16, 16, 2, 1);
+    tileset.tiles[0] = {
+      id: 0, sourceX: 0, sourceY: 0, probability: 1, animation: [{ tileId: 1, durationMs: 120 }],
+      collisions: [{ id: 'persisted-collision', type: 'rectangle', x: 0, y: 0, width: 16, height: 16, properties: { solid: true } }],
+      properties: { terrain: 'grass' },
+    };
+    tileset.wangSets = [{
+      id: 'persisted-wang', name: 'Grass', type: 'mixed',
+      colors: [{ id: 1, name: 'Grass', color: '#31a6a0', tileId: 0, probability: 1 }],
+      tiles: [{ tileId: 0, wangId: [1, 1, 1, 1, 1, 1, 1, 1] }],
+    }];
+
+    const map = createPixelTilemap('Persisted map'); map.tilesetIds = [tileset.id];
+    const tileLayer = map.layers[map.layerIds[0]]; if (tileLayer.type !== 'tile' || !tileLayer.chunks) throw new Error('Expected tile layer');
+    writeTiles(tileLayer.chunks, [{ x: -1, y: 2, gid: 1 }]);
+    const objectLayer: TilemapLayer = {
+      id: 'persisted-object-layer', revision: 0, name: 'Objects', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
+      type: 'object', visible: true, locked: false, opacity: 1, parallaxX: 1, parallaxY: 1,
+      objects: [{ id: 'persisted-map-object', type: 'polygon', x: 2, y: 3, points: [{ x: 0, y: 0 }, { x: 8, y: 0 }, { x: 4, y: 6 }], properties: { role: 'spawn' } }],
+    };
+    map.layers[objectLayer.id] = objectLayer; map.layerIds.push(objectLayer.id);
+    document.pixelAssets[tileset.id] = tileset; document.pixelAssets[map.id] = map; document.assetIds.push(tileset.id, map.id); document.activeAssetId = map.id;
+    document.paletteCycles = [{ id: 'persisted-cycle', name: 'Shimmer', fromIndex: 1, toIndex: 3, direction: 'forward', stepMs: 120 }];
+    document.stamps = [{ id: 'persisted-stamp', name: 'Dot', width: 1, height: 1, anchorX: 0, anchorY: 0, cells: [{ x: 0, y: 0, index: 2 }] }];
+    document.tileStamps = [{ id: 'persisted-tile-stamp', name: 'Tile', width: 1, height: 1, anchorX: 0, anchorY: 0, cells: [{ x: 0, y: 0, gid: 1 }] }];
+    document.linkedAssets = [{ id: 'persisted-link', name: 'Missing but recoverable source', mode: 'embedded', sha256: 'a'.repeat(64), cachedPreviewAssetId: 'missing-cache-asset' }];
+    document.conversionDefaults = { resample: 'area', paletteMetric: 'oklab', dithering: 'bayer-4x4', alphaThreshold: 0.4 };
+    return { document, sprite, tileset, map, firstCel, objectLayer };
+  }
+
+  it('normalizes recoverable key aliases and absent preferences before exact canonical validation', () => {
+    const { document, sprite } = pixelDocument(); const layer = sprite.layers[sprite.layerIds[0]]; const frame = sprite.frames[sprite.frameIds[0]]; const cel = Object.values(sprite.cels)[0];
+    sprite.layers = { 'legacy-layer-key': layer }; sprite.frames = { 'legacy-frame-key': frame, [sprite.frameIds[1]]: sprite.frames[sprite.frameIds[1]] }; sprite.cels = { 'legacy-cel-key': cel, 'legacy-second-cel-key': sprite.cels['persisted-cel-two'] };
+    document.pixelAssets = { 'legacy-sprite-key': sprite, [document.assetIds[1]]: document.pixelAssets[document.assetIds[1]], [document.assetIds[2]]: document.pixelAssets[document.assetIds[2]] };
+    const migrated = migrateDocument(document); if (migrated.kind !== 'pixel') throw new Error('Expected pixel document'); const recovered = migrated.pixelAssets[sprite.id]; if (recovered.type !== 'sprite') throw new Error('Expected sprite');
+    expect(recovered.layers[layer.id]).toMatchObject({ id: layer.id }); expect(recovered.frames[frame.id]).toMatchObject({ id: frame.id }); expect(recovered.cels[cel.id]).toMatchObject({ id: cel.id });
+    expect(recovered.cels['persisted-cel-two'].linkedToCelId).toBe('missing-linked-cel');
+    expect(migrated.linkedAssets[0].cachedPreviewAssetId).toBe('missing-cache-asset');
+
+    const absent = pixelDocument().document as unknown as Record<string, unknown>;
+    delete absent.paletteCycles; delete absent.stamps; delete absent.tileStamps; delete absent.bitmapFonts; delete absent.linkedAssets; delete absent.conversionDefaults;
+    const defaulted = migrateDocument(absent); if (defaulted.kind !== 'pixel') throw new Error('Expected pixel document');
+    expect(defaulted).toMatchObject({ paletteCycles: [], stamps: [], tileStamps: [], linkedAssets: [], conversionDefaults: { resample: 'area', paletteMetric: 'oklab', dithering: 'none', alphaThreshold: 0.5 } });
+    expect(defaulted.bitmapFonts).toHaveLength(1);
+  });
+
+  it('rejects malformed canonical pixel palettes, libraries, assets, links, and conversion state', () => {
+    const cases: Array<[string, (fixture: ReturnType<typeof pixelDocument>) => void]> = [
+      ['Invalid persisted pixel palette metadata.', ({ document }) => { document.palette[0].color = '#000000ff'; }],
+      ['Invalid persisted pixel palette metadata.', ({ document }) => { document.palette[1].id = document.palette[0].id; }],
+      ['Invalid persisted pixel library metadata.', ({ document }) => { document.paletteCycles[0].toIndex = document.palette.length; }],
+      ['Invalid persisted pixel library metadata.', ({ document }) => { document.stamps.push(structuredClone(document.stamps[0])); }],
+      ['Invalid persisted pixel library metadata.', ({ document }) => { document.bitmapFonts.push(structuredClone(document.bitmapFonts[0])); }],
+      ['Invalid persisted pixel link metadata.', ({ document }) => { document.linkedAssets.push(structuredClone(document.linkedAssets[0])); }],
+      ['Invalid persisted pixel conversion metadata.', ({ document }) => { document.conversionDefaults.alphaThreshold = 2; }],
+      ['Duplicate persisted pixel asset ID:', ({ document, sprite }) => { document.pixelAssets['duplicate-asset-key'] = structuredClone(sprite); }],
+      ['Invalid persisted pixel asset metadata.', ({ firstCel }) => { Object.values(firstCel.chunks)[0].data = 'AAAA'; }],
+      ['Invalid persisted pixel asset metadata.', ({ firstCel }) => { const chunk = Object.values(firstCel.chunks)[0]; chunk.data = `!${chunk.data.slice(1)}`; }],
+      ['Invalid persisted pixel asset metadata.', ({ firstCel }) => { const [key, chunk] = Object.entries(firstCel.chunks)[0]; delete firstCel.chunks[key]; firstCel.chunks['wrong-key'] = chunk; }],
+      ['Invalid persisted pixel asset metadata.', ({ firstCel }) => { (Object.values(firstCel.chunks)[0] as unknown as Record<string, unknown>).unexpected = true; }],
+      ['Invalid persisted pixel asset metadata.', ({ sprite, firstCel }) => { const duplicate = structuredClone(firstCel); duplicate.id = 'duplicate-exposure'; sprite.cels[duplicate.id] = duplicate; }],
+      ['Invalid persisted pixel asset metadata.', ({ tileset }) => { tileset.tiles[0].id = 1; }],
+      ['Invalid persisted pixel asset metadata.', ({ tileset }) => { tileset.wangSets[0].tiles[0].wangId[0] = 2; }],
+      ['Invalid persisted pixel asset metadata.', ({ objectLayer }) => { delete objectLayer.objects?.[0].points; }],
+      ['Invalid persisted pixel asset metadata.', ({ map }) => { const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile' || !layer.chunks) throw new Error('Expected tile layer'); Object.values(layer.chunks)[0].x = 1; }],
+      ['Invalid persisted pixel asset metadata.', ({ document }) => { (document as unknown as Record<string, unknown>).scope = 'archive'; }],
+      ['Invalid persisted pixel link metadata.', ({ document }) => { (document as unknown as Record<string, unknown>).linkedAssets = 'not-a-link-list'; }],
+    ];
+    for (const [error, mutate] of cases) {
+      const fixture = pixelDocument(); mutate(fixture);
+      expect(() => migrateDocument(fixture.document)).toThrow(error);
+    }
+  });
+
+  it('uses the same strict nested schemas for newly supplied pixel assets and libraries', () => {
+    const { map, document } = pixelDocument(); const tileLayer = map.layers[map.layerIds[0]]; if (tileLayer.type !== 'tile' || !tileLayer.chunks) throw new Error('Expected tile layer');
+    Object.values(tileLayer.chunks)[0].data = 'AAAA';
+    expect(CanvasOperationSchema.safeParse({ kind: 'pixel.asset.replace', asset: map, expectedRevision: 0 }).success).toBe(false);
+    expect(CanvasOperationSchema.safeParse({ kind: 'pixel.stamps.replace', stamps: [document.stamps[0], structuredClone(document.stamps[0])] }).success).toBe(false);
+    expect(CanvasOperationSchema.safeParse({ kind: 'pixel.palette-cycles.replace', cycles: [document.paletteCycles[0], structuredClone(document.paletteCycles[0])] }).success).toBe(false);
   });
 });

@@ -1,6 +1,6 @@
 import { defaultIllustrationAnimation } from './animation';
 import { nowIso } from './ids';
-import { validateDocument } from './schemas';
+import { validateDocument, validateNormalizedPixelDocument } from './schemas';
 import type { AIDrawDocument } from './model';
 import { normalizePixelDocument } from './normalize';
 import { assertAcyclicReferences } from './reference-graph';
@@ -34,7 +34,7 @@ export function migrateDocument(value: unknown): AIDrawDocument {
   if (version !== CURRENT_SCHEMA_VERSION) throw new Error(`No migration path exists from AIDraw schema ${version}.`);
   let document = validateDocument(source);
   if (document.kind === 'pixel') {
-    document = normalizePixelDocument(document);
+    document = validateNormalizedPixelDocument(normalizePixelDocument(document));
     for (const asset of Object.values(document.pixelAssets)) if (asset.type === 'sprite') {
       assertAcyclicReferences(asset.cels, (cel) => cel.linkedToCelId ? [cel.linkedToCelId] : [], 'Pixel sprite cel links contain a cycle.');
     }

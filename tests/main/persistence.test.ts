@@ -4,7 +4,7 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate';
-import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createId, createIllustrationDocument, createPixelDocument, duplicatePixelFrame, nowIso, readPixel, readTileAt, resolvePixelCel, writePixels, writeTiles, type CanvasTransaction, type GroupObject, type IllustrationLayer, type PixelLayer, type ShapeObject, type TilemapLayer } from '@aidraw/core';
+import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createId, createIllustrationDocument, createPixelDocument, createPixelTilemap, createPixelTileset, duplicatePixelFrame, nowIso, readPixel, readTileAt, resolvePixelCel, writePixels, writeTiles, type CanvasTransaction, type GroupObject, type IllustrationLayer, type PixelLayer, type ShapeObject, type TilemapLayer } from '@aidraw/core';
 import type { TransactionTraceEntry } from '@common/contracts';
 import { MAX_TRANSACTION_SERIALIZED_BYTES } from '@common/transaction-limits';
 import { nativeSaveFileSystem, readNativeDocument, writeNativeDocument, type NativeSaveFileSystem } from '@main/persistence';
@@ -484,6 +484,56 @@ describe('.aidraw persistence', () => {
 
     const invalidSave = structuredClone(document); invalidSave.objects[object.id].transform.x = Number.POSITIVE_INFINITY;
     await expect(writeNativeDocument(sourcePath, invalidSave, '1.0.1')).rejects.toThrow('Invalid persisted illustration object metadata.');
+    expect(await readFile(sourcePath)).toEqual(sourceBytes);
+    expect((await readdir(root)).some((entry) => entry.endsWith('.tmp'))).toBe(false);
+  });
+
+  it('validates normalized native pixel state before renderer/export consumers or destination replacement', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-persistence-pixel-schema-')); temporaryPaths.push(root);
+    const document = createPixelDocument('project', 'Native pixel schema fixture'); const sprite = document.pixelAssets[document.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('Expected sprite');
+    const cel = Object.values(sprite.cels)[0]; writePixels(cel, [{ x: 2, y: 3, index: 4 }]);
+    const tileset = createPixelTileset('Native terrain', sprite.id, 16, 16, 2, 1);
+    tileset.tiles[0] = { id: 0, sourceX: 0, sourceY: 0, probability: 1, animation: [], collisions: [], properties: { terrain: 'grass' } };
+    const map = createPixelTilemap('Native map'); map.tilesetIds = [tileset.id]; const tileLayer = map.layers[map.layerIds[0]]; if (tileLayer.type !== 'tile' || !tileLayer.chunks) throw new Error('Expected tile layer'); writeTiles(tileLayer.chunks, [{ x: -1, y: 2, gid: 1 }]);
+    const timestamp = nowIso(); const objectLayer: TilemapLayer = {
+      id: 'native-pixel-object-layer', revision: 0, name: 'Objects', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
+      type: 'object', visible: true, locked: false, opacity: 1, parallaxX: 1, parallaxY: 1,
+      objects: [{ id: 'native-pixel-object', type: 'polygon', x: 1, y: 2, points: [{ x: 0, y: 0 }, { x: 8, y: 0 }, { x: 4, y: 6 }], properties: { role: 'spawn' } }],
+    };
+    map.layers[objectLayer.id] = objectLayer; map.layerIds.push(objectLayer.id);
+    document.pixelAssets[tileset.id] = tileset; document.pixelAssets[map.id] = map; document.assetIds.push(tileset.id, map.id); document.activeAssetId = map.id;
+
+    const sourcePath = await writeNativeDocument(join(root, 'source.aidraw'), document, '1.0.0'); const sourceBytes = await readFile(sourcePath);
+    const files = unzipSync(new Uint8Array(sourceBytes)); const persisted = JSON.parse(strFromU8(files['document.json'])) as Record<string, unknown>;
+    const valid = await readNativeDocument(sourcePath); if (valid.document.kind !== 'pixel') throw new Error('Expected pixel document');
+    const validSprite = valid.document.pixelAssets[sprite.id]; const validMap = valid.document.pixelAssets[map.id];
+    expect(validSprite.type === 'sprite' ? readPixel(Object.values(validSprite.cels)[0], 2, 3) : undefined).toBe(4);
+    expect(validMap.type === 'tilemap' ? readTileAt((validMap.layers[validMap.layerIds[0]] as TilemapLayer).chunks ?? {}, -1, 2) : undefined).toBe(1);
+    expect(validMap.type === 'tilemap' ? validMap.layers[objectLayer.id] : undefined).toMatchObject({ type: 'object', objects: [{ id: 'native-pixel-object', properties: { role: 'spawn' } }] });
+
+    const mutations: Array<[string, string, (value: Record<string, unknown>) => void]> = [
+      ['invalid-palette', 'Invalid persisted pixel palette metadata.', (value) => { ((value.palette as Array<Record<string, unknown>>)[0]).color = '#000000ff'; }],
+      ['invalid-pixel-chunk', 'Invalid persisted pixel asset metadata.', (value) => {
+        const assets = value.pixelAssets as Record<string, Record<string, unknown>>; const cels = assets[sprite.id].cels as Record<string, Record<string, unknown>>; const chunks = Object.values(cels)[0].chunks as Record<string, Record<string, unknown>>; const chunk = Object.values(chunks)[0]; chunk.data = `!${String(chunk.data).slice(1)}`;
+      }],
+      ['invalid-tile-identity', 'Invalid persisted pixel asset metadata.', (value) => {
+        const assets = value.pixelAssets as Record<string, Record<string, unknown>>; const tiles = assets[tileset.id].tiles as Record<string, Record<string, unknown>>; tiles['0'].id = 1;
+      }],
+      ['invalid-map-object', 'Invalid persisted pixel asset metadata.', (value) => {
+        const assets = value.pixelAssets as Record<string, Record<string, unknown>>; const layers = assets[map.id].layers as Record<string, Record<string, unknown>>; const objects = layers[objectLayer.id].objects as Array<Record<string, unknown>>; delete objects[0].points;
+      }],
+      ['duplicate-asset-identity', 'Duplicate persisted pixel asset ID:', (value) => {
+        const assets = value.pixelAssets as Record<string, Record<string, unknown>>; assets['duplicate-native-key'] = structuredClone(assets[sprite.id]);
+      }],
+    ];
+    for (const [name, error, mutate] of mutations) {
+      const value = structuredClone(persisted); mutate(value);
+      const path = join(root, `${name}.aidraw`); await writeFile(path, zipSync({ ...files, 'document.json': strToU8(JSON.stringify(value)) }, { level: 6 }));
+      await expect(readNativeDocument(path)).rejects.toThrow(error);
+    }
+
+    const invalidSave = structuredClone(document); const invalidSprite = invalidSave.pixelAssets[sprite.id]; if (invalidSprite.type !== 'sprite') throw new Error('Expected sprite'); Object.values(Object.values(invalidSprite.cels)[0].chunks)[0].data = 'AAAA';
+    await expect(writeNativeDocument(sourcePath, invalidSave, '1.0.1')).rejects.toThrow('Invalid persisted pixel asset metadata.');
     expect(await readFile(sourcePath)).toEqual(sourceBytes);
     expect((await readdir(root)).some((entry) => entry.endsWith('.tmp'))).toBe(false);
   });

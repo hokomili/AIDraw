@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { appendFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { HUMAN_ACTOR, createId, createIllustrationDocument, createPixelDocument, nowIso, type CanvasTransaction } from '@aidraw/core';
+import { HUMAN_ACTOR, createId, createIllustrationDocument, createPixelDocument, nowIso, writePixels, type CanvasTransaction } from '@aidraw/core';
 import { RecoveryJournal } from '@main/journal';
 
 const temporaryPaths: string[] = [];
@@ -173,6 +173,18 @@ describe('crash recovery journal', () => {
   it('isolates a malformed illustration snapshot without suppressing a valid sibling journal', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aidraw-recovery-illustration-schema-')); temporaryPaths.push(root);
     const journal = new RecoveryJournal(root); const valid = createIllustrationDocument('Valid recovery sibling'); const malformed = createIllustrationDocument('Malformed recovery sibling'); malformed.artboard.width = 0;
+    await journal.compact(valid);
+    await writeFile(journalPath(root, malformed.id), `${JSON.stringify({ type: 'snapshot', document: malformed })}\n`, 'utf8');
+    await journal.compactWorkspace([malformed.id, valid.id], malformed.id);
+    const recovered = await journal.recoverWorkspace();
+    expect(recovered.documents).toEqual([expect.objectContaining({ id: valid.id, name: valid.name })]);
+    expect(recovered.activeDocumentId).toBeUndefined();
+  });
+
+  it('isolates malformed normalized pixel content without suppressing a valid sibling journal', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-recovery-pixel-schema-')); temporaryPaths.push(root);
+    const journal = new RecoveryJournal(root); const valid = createPixelDocument('sprite', 'Valid pixel recovery sibling'); const malformed = createPixelDocument('sprite', 'Malformed pixel recovery sibling');
+    const sprite = malformed.pixelAssets[malformed.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('Expected sprite'); const cel = Object.values(sprite.cels)[0]; writePixels(cel, [{ x: 1, y: 2, index: 3 }]); Object.values(cel.chunks)[0].data = 'AAAA';
     await journal.compact(valid);
     await writeFile(journalPath(root, malformed.id), `${JSON.stringify({ type: 'snapshot', document: malformed })}\n`, 'utf8');
     await journal.compactWorkspace([malformed.id, valid.id], malformed.id);
