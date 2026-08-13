@@ -1,7 +1,7 @@
-import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { readFile } from 'node:fs/promises';
 import { NewDocumentOptionsSchema, createId, nowIso } from '@aidraw/core';
 import type { DocumentPreset, DocumentPresetInput } from '../common/contracts';
+import { replacePrivateJsonFile, type PrivateJsonFileReplacer } from './private-json-file';
 
 interface PersistedDocumentPresets {
   version: 1;
@@ -9,6 +9,11 @@ interface PersistedDocumentPresets {
 }
 
 const MAX_PRESETS = 64;
+
+export interface DocumentPresetStoreOptions {
+  /** Narrow deterministic seam for replacement failure/concurrency coverage. */
+  replaceFile?: PrivateJsonFileReplacer;
+}
 
 function normalizePreset(value: unknown): DocumentPreset | undefined {
   if (!value || typeof value !== 'object') return undefined;
@@ -32,44 +37,56 @@ function normalizePreset(value: unknown): DocumentPreset | undefined {
 export class DocumentPresetStore {
   private presets = new Map<string, DocumentPreset>();
   private loaded = false;
+  private requestQueue: Promise<void> = Promise.resolve();
 
-  constructor(private readonly filePath: string) {}
+  constructor(private readonly filePath: string, private readonly options: DocumentPresetStoreOptions = {}) {}
 
   async list(): Promise<DocumentPreset[]> {
-    await this.load();
-    return [...this.presets.values()]
-      .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
-      .map((preset) => structuredClone(preset));
+    return this.exclusive(async () => {
+      await this.load();
+      return [...this.presets.values()]
+        .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+        .map((preset) => structuredClone(preset));
+    });
   }
 
   async save(input: DocumentPresetInput): Promise<DocumentPreset> {
-    await this.load();
-    const name = input.name.trim();
-    if (!name || name.length > 80) throw new Error('Preset name must contain 1 to 80 characters.');
-    const parsed = NewDocumentOptionsSchema.parse(input.options);
-    if (parsed.name !== undefined) throw new Error('Document presets cannot store a document name.');
-    const existing = input.id ? this.presets.get(input.id) : undefined;
-    if (input.id && !existing) throw new Error('Document preset not found.');
-    if (!existing && this.presets.size >= MAX_PRESETS) throw new Error(`AIDraw supports up to ${MAX_PRESETS} custom document presets.`);
-    const timestamp = nowIso();
-    const preset: DocumentPreset = {
-      id: existing?.id ?? createId('document-preset'),
-      name,
-      kind: parsed.kind,
-      options: parsed,
-      createdAt: existing?.createdAt ?? timestamp,
-      updatedAt: timestamp,
-    };
-    this.presets.set(preset.id, preset);
-    await this.persist();
-    return structuredClone(preset);
+    return this.exclusive(async () => {
+      await this.load();
+      const name = input.name.trim();
+      if (!name || name.length > 80) throw new Error('Preset name must contain 1 to 80 characters.');
+      const parsed = NewDocumentOptionsSchema.parse(input.options);
+      if (parsed.name !== undefined) throw new Error('Document presets cannot store a document name.');
+      const existing = input.id ? this.presets.get(input.id) : undefined;
+      if (input.id && !existing) throw new Error('Document preset not found.');
+      if (!existing && this.presets.size >= MAX_PRESETS) throw new Error(`AIDraw supports up to ${MAX_PRESETS} custom document presets.`);
+      const timestamp = nowIso();
+      const preset: DocumentPreset = {
+        id: existing?.id ?? createId('document-preset'),
+        name,
+        kind: parsed.kind,
+        options: parsed,
+        createdAt: existing?.createdAt ?? timestamp,
+        updatedAt: timestamp,
+      };
+      const nextPresets = new Map(this.presets);
+      nextPresets.set(preset.id, preset);
+      await this.persist(nextPresets);
+      this.presets = nextPresets;
+      return structuredClone(preset);
+    });
   }
 
   async delete(id: string): Promise<{ deleted: boolean }> {
-    await this.load();
-    const deleted = this.presets.delete(id);
-    if (deleted) await this.persist();
-    return { deleted };
+    return this.exclusive(async () => {
+      await this.load();
+      if (!this.presets.has(id)) return { deleted: false };
+      const nextPresets = new Map(this.presets);
+      nextPresets.delete(id);
+      await this.persist(nextPresets);
+      this.presets = nextPresets;
+      return { deleted: true };
+    });
   }
 
   private async load(): Promise<void> {
@@ -87,16 +104,14 @@ export class DocumentPresetStore {
     }
   }
 
-  private async persist(): Promise<void> {
-    await mkdir(dirname(this.filePath), { recursive: true });
-    const temporary = `${this.filePath}.${process.pid}.${Date.now()}.tmp`;
-    const value: PersistedDocumentPresets = { version: 1, presets: [...this.presets.values()] };
-    await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
-    try {
-      await rename(temporary, this.filePath);
-    } catch (error) {
-      await unlink(temporary).catch(() => undefined);
-      throw error;
-    }
+  private async persist(presets: ReadonlyMap<string, DocumentPreset>): Promise<void> {
+    const value: PersistedDocumentPresets = { version: 1, presets: [...presets.values()] };
+    await replacePrivateJsonFile(this.filePath, value, this.options.replaceFile);
+  }
+
+  private exclusive<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.requestQueue.then(operation, operation);
+    this.requestQueue = result.then(() => undefined, () => undefined);
+    return result;
   }
 }

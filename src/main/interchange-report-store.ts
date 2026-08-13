@@ -1,12 +1,17 @@
-import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { readFile } from 'node:fs/promises';
 import { createId, nowIso } from '@aidraw/core';
 import type { Actor } from '@aidraw/core';
 import type { InterchangeReport, InterchangeReportInput } from '../common/contracts';
 import { normalizeInterchangeFidelityEntries } from '../common/interchange-fidelity';
+import { replacePrivateJsonFile, type PrivateJsonFileReplacer } from './private-json-file';
 
 interface PersistedReports { version: 1; reports: InterchangeReport[] }
 const MAX_REPORTS = 200;
+
+export interface InterchangeReportStoreOptions {
+  /** Narrow deterministic seam for replacement failure/concurrency coverage. */
+  replaceFile?: PrivateJsonFileReplacer;
+}
 
 function strings(value: unknown, maximum = 1_000): string[] {
   return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === 'string').slice(0, maximum) : [];
@@ -48,30 +53,37 @@ function normalize(value: unknown): InterchangeReport | undefined {
 export class InterchangeReportStore {
   private reports: InterchangeReport[] = [];
   private loaded = false;
+  private requestQueue: Promise<void> = Promise.resolve();
 
-  constructor(private readonly filePath: string) {}
+  constructor(private readonly filePath: string, private readonly options: InterchangeReportStoreOptions = {}) {}
 
   async list(documentId?: string): Promise<InterchangeReport[]> {
-    await this.load();
-    return this.reports
-      .filter((report) => !documentId || report.documentIds.includes(documentId))
-      .map((report) => structuredClone(report));
+    return this.exclusive(async () => {
+      await this.load();
+      return this.reports
+        .filter((report) => !documentId || report.documentIds.includes(documentId))
+        .map((report) => structuredClone(report));
+    });
   }
 
   async get(id: string): Promise<InterchangeReport | undefined> {
-    await this.load();
-    const report = this.reports.find((entry) => entry.id === id);
-    return report ? structuredClone(report) : undefined;
+    return this.exclusive(async () => {
+      await this.load();
+      const report = this.reports.find((entry) => entry.id === id);
+      return report ? structuredClone(report) : undefined;
+    });
   }
 
   async record(input: InterchangeReportInput): Promise<InterchangeReport> {
-    await this.load();
-    const report = normalize({ ...input, id: createId('interchange-report'), createdAt: nowIso() });
-    if (!report) throw new Error('The interchange report is invalid.');
-    this.reports.unshift(report);
-    this.reports.splice(MAX_REPORTS);
-    await this.persist();
-    return structuredClone(report);
+    return this.exclusive(async () => {
+      await this.load();
+      const report = normalize({ ...input, id: createId('interchange-report'), createdAt: nowIso() });
+      if (!report) throw new Error('The interchange report is invalid.');
+      const nextReports = [report, ...this.reports].slice(0, MAX_REPORTS);
+      await this.persist(nextReports);
+      this.reports = nextReports;
+      return structuredClone(report);
+    });
   }
 
   private async load(): Promise<void> {
@@ -85,11 +97,13 @@ export class InterchangeReportStore {
     }
   }
 
-  private async persist(): Promise<void> {
-    await mkdir(dirname(this.filePath), { recursive: true });
-    const temporary = `${this.filePath}.${process.pid}.${Date.now()}.tmp`;
-    await writeFile(temporary, `${JSON.stringify({ version: 1, reports: this.reports } satisfies PersistedReports, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
-    try { await rename(temporary, this.filePath); }
-    catch (error) { await unlink(temporary).catch(() => undefined); throw error; }
+  private async persist(reports: InterchangeReport[]): Promise<void> {
+    await replacePrivateJsonFile(this.filePath, { version: 1, reports } satisfies PersistedReports, this.options.replaceFile);
+  }
+
+  private exclusive<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.requestQueue.then(operation, operation);
+    this.requestQueue = result.then(() => undefined, () => undefined);
+    return result;
   }
 }
