@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { ImageData } from '@napi-rs/canvas';
 import { readPsd, writePsdBuffer, type Layer as PsdLayer } from 'ag-psd';
 import { describe, expect, it } from 'vitest';
-import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createId, createIllustrationDocument, createPixelDocument, nowIso, writePixels, type IllustrationLayer, type PixelLayer, type ShapeObject, type TextObject } from '@aidraw/core';
+import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createId, createIllustrationDocument, createPixelDocument, nowIso, readPixel, writePixels, type IllustrationLayer, type PixelLayer, type ShapeObject, type TextObject } from '@aidraw/core';
 import { illustrationTransformMatrix } from '@common/psd-text';
 import { exportDocument } from '@main/export-document';
 import { importDocument } from '@main/import-document';
@@ -89,6 +89,55 @@ describe('PSD interchange', () => {
     expect(decoded.children?.find((entry) => entry.name === emptyGroup.name)).toMatchObject({ children: [], blendMode: 'difference' });
     expect(artifact.report.warnings).toContainEqual(expect.stringMatching(/current frame.*layer\/group hierarchy/i));
     expect(artifact.report.fidelity).toEqual([{ code: 'animation-frames-omitted', subjectType: 'document', subjectId: document.id, subjectName: document.name, detail: '1 later animation frame is not included in the PSD.' }]);
+
+    const directory = await mkdtemp(join(tmpdir(), 'aidraw-pixel-psd-hierarchy-'));
+    try {
+      const path = join(directory, 'pixel-hierarchy.psd'); await writeFile(path, artifact.data); const imported = await importDocument(path, true); const reopened = imported.documents[0];
+      if (reopened.kind !== 'pixel') throw new Error('Expected pixel document');
+      expect(reopened.assetIds).toHaveLength(1); const reopenedSprite = reopened.pixelAssets[reopened.activeAssetId]; if (reopenedSprite?.type !== 'sprite') throw new Error('Expected imported sprite');
+      expect(reopenedSprite.width).toBe(sprite.width); expect(reopenedSprite.height).toBe(sprite.height); expect(reopenedSprite.frameIds).toHaveLength(1);
+      expect(reopenedSprite.layerIds.map((id) => reopenedSprite.layers[id]?.name)).toEqual([group.name, emptyGroup.name]);
+      const reopenedGroup = Object.values(reopenedSprite.layers).find((entry) => entry.name === group.name); const reopenedEmpty = Object.values(reopenedSprite.layers).find((entry) => entry.name === emptyGroup.name); const reopenedLayer = Object.values(reopenedSprite.layers).find((entry) => entry.name === layer.name);
+      expect(reopenedGroup).toMatchObject({ type: 'group', visible: true, locked: true, opacity: 0.8, blendMode: 'multiply' });
+      expect(reopenedEmpty).toMatchObject({ type: 'group', visible: true, locked: false, opacity: 0.2, blendMode: 'difference', childIds: [] });
+      expect(reopenedLayer).toMatchObject({ type: 'pixel', parentId: reopenedGroup?.id, visible: false, locked: true, blendMode: 'screen' }); expect(reopenedLayer?.opacity).toBeCloseTo(Math.round(0.25 * 255) / 255, 10);
+      if (!reopenedLayer) throw new Error('Expected imported raster layer'); const reopenedCel = Object.values(reopenedSprite.cels).find((entry) => entry.layerId === reopenedLayer.id); if (!reopenedCel) throw new Error('Expected imported raster cel');
+      expect(readPixel(reopenedCel, 0, 0)).toBe(2); expect(imported.warnings).toContainEqual(expect.stringMatching(/one current-frame sprite hierarchy/i));
+
+      const reexported = await exportDocument(reopened, 'psd'); const redecoded = readPsd(reexported.data, { useImageData: true, logMissingFeatures: false }); const redecodedGroup = redecoded.children?.find((entry) => entry.name === group.name); const redecodedLayer = redecodedGroup?.children?.find((entry) => entry.name === layer.name);
+      expect(redecoded.children?.map((entry) => entry.name)).toEqual([group.name, emptyGroup.name]); expect(redecodedGroup?.children?.map((entry) => entry.name)).toEqual([layer.name]);
+      expect(redecodedLayer).toMatchObject({ hidden: true, blendMode: 'screen', transparencyProtected: true, protected: { transparency: false } }); expect(redecodedLayer?.imageData?.data[3]).toBe(255);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it('keeps decoded PSD raster offsets in one pixel sprite without flattening folder structure', async () => {
+    const source = new ImageData(Uint8ClampedArray.from([108, 59, 120, 255, 255, 107, 122, 255]), 2, 1); const composite = new ImageData(new Uint8ClampedArray(4 * 3 * 4), 4, 3);
+    const bytes = writePsdBuffer({ width: 4, height: 3, imageData: composite, children: [{ name: 'Offset folder', children: [{ name: 'Signed crop', left: -1, top: 2, right: 1, bottom: 3, imageData: source }, { name: 'Non-raster metadata' }] }, { name: 'Empty folder', children: [] }] });
+    const directory = await mkdtemp(join(tmpdir(), 'aidraw-pixel-psd-offset-'));
+    try {
+      const path = join(directory, 'signed-offset.psd'); await writeFile(path, bytes); const imported = await importDocument(path, true); const document = imported.documents[0];
+      if (document.kind !== 'pixel') throw new Error('Expected pixel document'); const sprite = document.pixelAssets[document.activeAssetId]; if (sprite?.type !== 'sprite') throw new Error('Expected imported sprite');
+      expect(sprite.layerIds.map((id) => sprite.layers[id]?.name)).toEqual(['Offset folder', 'Empty folder']);
+      const group = Object.values(sprite.layers).find((entry) => entry.name === 'Offset folder'); const empty = Object.values(sprite.layers).find((entry) => entry.name === 'Empty folder'); const layer = Object.values(sprite.layers).find((entry) => entry.name === 'Signed crop');
+      expect(group).toMatchObject({ type: 'group', childIds: [layer?.id] }); expect(empty).toMatchObject({ type: 'group', childIds: [] }); expect(layer).toMatchObject({ type: 'pixel', parentId: group?.id });
+      if (!layer) throw new Error('Expected offset layer'); const cel = Object.values(sprite.cels).find((entry) => entry.layerId === layer.id); if (!cel) throw new Error('Expected offset cel');
+      expect(readPixel(cel, -1, 2)).toBe(2); expect(readPixel(cel, 0, 2)).toBe(4); expect(readPixel(cel, 1, 2)).toBe(0);
+      expect(imported.warnings).toContain('1 PSD layer without decoded raster pixels was omitted from the pixel sprite.');
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it('keeps an editable fallback layer when a PSD has folders but no decoded raster leaf', async () => {
+    const bytes = writePsdBuffer({ width: 2, height: 2, imageData: new ImageData(new Uint8ClampedArray(16), 2, 2), children: [{ name: 'Empty only', children: [] }, { name: 'Metadata only' }] });
+    const directory = await mkdtemp(join(tmpdir(), 'aidraw-pixel-psd-fallback-'));
+    try {
+      const path = join(directory, 'no-raster-layers.psd'); await writeFile(path, bytes); const imported = await importDocument(path, true); const document = imported.documents[0];
+      if (document.kind !== 'pixel') throw new Error('Expected pixel document'); const sprite = document.pixelAssets[document.activeAssetId]; if (sprite?.type !== 'sprite') throw new Error('Expected imported sprite');
+      expect(sprite.layerIds.map((id) => sprite.layers[id]?.name)).toEqual(['Empty only', 'Pixels']);
+      expect(Object.values(sprite.layers).find((layer) => layer.name === 'Empty only')).toMatchObject({ type: 'group', childIds: [] });
+      const fallback = Object.values(sprite.layers).find((layer) => layer.name === 'Pixels'); expect(fallback).toMatchObject({ type: 'pixel', visible: true, opacity: 1, blendMode: 'normal' });
+      expect(Object.values(sprite.cels)).toEqual([expect.objectContaining({ layerId: fallback?.id, chunks: {} })]);
+      expect(imported.warnings).toContain('1 PSD layer without decoded raster pixels was omitted from the pixel sprite.');
+    } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
   it('reports partial PSD locks without widening them to AIDraw lock-all', async () => {
@@ -100,6 +149,10 @@ describe('PSD interchange', () => {
       if (reopened.kind !== 'illustration') throw new Error('Expected illustration');
       expect(Object.values(reopened.layers).find((layer) => layer.name === 'Transparency only')).toMatchObject({ locked: false });
       expect(imported.warnings).toContainEqual(expect.stringMatching(/partial .* lock.*imported unlocked/i));
+      const pixelImported = await importDocument(path, true); const pixelDocument = pixelImported.documents[0]; if (pixelDocument.kind !== 'pixel') throw new Error('Expected pixel document');
+      const sprite = pixelDocument.pixelAssets[pixelDocument.activeAssetId]; if (sprite?.type !== 'sprite') throw new Error('Expected pixel sprite');
+      expect(Object.values(sprite.layers).find((layer) => layer.name === 'Transparency only')).toMatchObject({ type: 'pixel', locked: false });
+      expect(pixelImported.warnings).toContainEqual(expect.stringMatching(/partial .* lock.*imported unlocked/i));
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 });

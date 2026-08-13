@@ -25,6 +25,8 @@ import {
   type IllustrationLayer,
   type ImageObject,
   type PaletteEntry,
+  type PixelCel,
+  type PixelLayer,
   type PixelSprite,
   type TextObject,
   type TextStyleRange,
@@ -408,17 +410,13 @@ function psdLayerIsGroup(layer: PsdLayer): layer is PsdLayer & { children: PsdLa
   return Array.isArray(layer.children);
 }
 
-function flattenPsdLayers(layers: PsdLayer[] | undefined, prefix = '', depth = 0, budget = { count: 0, pixels: 0 }): Array<{ layer: PsdLayer; name: string }> {
+function inspectPsdLayers(layers: PsdLayer[] | undefined, depth = 0, budget = { count: 0, pixels: 0 }): void {
   if (depth > MAX_PSD_LAYER_NESTING_DEPTH) throw new Error(`PSD layer nesting exceeds the ${MAX_PSD_LAYER_NESTING_DEPTH}-level safety limit.`);
-  const flattened: Array<{ layer: PsdLayer; name: string }> = [];
-  for (const [index, layer] of (layers ?? []).entries()) {
+  for (const layer of layers ?? []) {
     budget.count += 1; if (budget.count > MAX_PSD_LAYER_RECORDS) throw new Error(`PSD exceeds the ${MAX_PSD_LAYER_RECORDS.toLocaleString('en-US')}-layer safety limit.`);
     if (layer.imageData) { budget.pixels += psdImagePixels(layer.imageData, `PSD layer ${budget.count}`); if (budget.pixels > MAX_PSD_EXPANDED_LAYER_PIXELS) throw new Error('PSD layer pixels exceed the 64-megapixel expanded safety budget.'); }
-    if (psdLayerIsGroup(layer)) {
-      if (layer.children.length) flattened.push(...flattenPsdLayers(layer.children, `${prefix}${layer.name ?? `Group ${index + 1}`}/`, depth + 1, budget));
-    } else flattened.push({ layer, name: `${prefix}${layer.name ?? `Layer ${index + 1}`}` });
+    if (psdLayerIsGroup(layer)) inspectPsdLayers(layer.children, depth + 1, budget);
   }
-  return flattened;
 }
 
 function canvasImageData(source: NonNullable<PsdLayer['imageData']>): ImageData {
@@ -481,19 +479,48 @@ function importPsd(bytes: Buffer, name: string, pixelMode: boolean): ImportResul
   assertImageDimensions(psd.width, psd.height, 'Decoded PSD canvas');
   if (psd.width !== inspected.width || psd.height !== inspected.height) throw new Error('Decoded PSD canvas dimensions disagree with its file header.');
   if (psd.imageData) { psdImagePixels(psd.imageData, 'Decoded PSD composite'); if (psd.imageData.width !== psd.width || psd.imageData.height !== psd.height) throw new Error('Decoded PSD composite dimensions disagree with its canvas.'); }
-  const flattened = flattenPsdLayers(psd.children);
+  inspectPsdLayers(psd.children);
   if (pixelMode) {
     const document = createPixelDocument('project', name);
-    document.assetIds = []; document.pixelAssets = {};
-    for (const { layer, name: layerName } of flattened) {
-      if (!layer.imageData) continue;
-      const rgba = canvasImageData(layer.imageData).data; const sprite = createPixelSprite(layerName, layer.imageData.width, layer.imageData.height);
-      const cel = Object.values(sprite.cels)[0]; writePixels(cel, quantizeRgbaToPalette(rgba, sprite.width, sprite.height, document.palette, { alphaThreshold: document.conversionDefaults.alphaThreshold, dithering: document.conversionDefaults.dithering }));
-      document.pixelAssets[sprite.id] = sprite; document.assetIds.push(sprite.id); if (!document.activeAssetId) document.activeAssetId = sprite.id;
+    const sprite = createPixelSprite(name, psd.width, psd.height); const frameId = sprite.frameIds[0];
+    const fallbackLayerId = sprite.layerIds[0]; const fallbackLayer = sprite.layers[fallbackLayerId]; const fallbackCel = Object.values(sprite.cels)[0];
+    sprite.layerIds = []; sprite.layers = {}; sprite.cels = {};
+    const stats = { rasterLayers: 0, omittedLayers: 0, partialLocks: 0 };
+    const addLayers = (layers: PsdLayer[] | undefined, parentId?: string): void => {
+      for (const [index, source] of (layers ?? []).entries()) {
+        const isGroup = psdLayerIsGroup(source); const imageData = source.imageData; const layerName = source.name ?? `${isGroup ? 'Group' : 'Layer'} ${index + 1}`;
+        if (psdLayerHasPartialLock(source)) stats.partialLocks += 1;
+        if (!isGroup && !imageData) { stats.omittedLayers += 1; continue; }
+        const timestamp = nowIso(); const id = createId('layer');
+        const common = { id, revision: 0, name: layerName, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, visible: !source.hidden, locked: psdLayerIsLockedAll(source), opacity: source.opacity ?? 1, blendMode: aidrawPsdBlendMode(source.blendMode), ...(parentId ? { parentId } : {}) };
+        const layer: PixelLayer = isGroup ? { ...common, type: 'group', childIds: [] } : { ...common, type: 'pixel' };
+        sprite.layers[id] = layer;
+        if (parentId) {
+          const parent = sprite.layers[parentId]; if (parent?.type === 'group') parent.childIds?.push(id);
+        } else sprite.layerIds.push(id);
+        if (isGroup) { addLayers(source.children, id); continue; }
+        if (!imageData) throw new Error(INVALID_CANONICAL_PSD_ERROR);
+
+        const celId = createId('cel'); const cel: PixelCel = { id: celId, revision: 0, name: layerName, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, layerId: id, frameId, chunks: {} };
+        sprite.cels[celId] = cel; stats.rasterLayers += 1;
+        const left = source.left ?? 0; const top = source.top ?? 0;
+        if (!Number.isSafeInteger(left) || !Number.isSafeInteger(top)) throw new Error(INVALID_CANONICAL_PSD_ERROR);
+        const changes = quantizeRgbaToPalette(canvasImageData(imageData).data, imageData.width, imageData.height, document.palette, { alphaThreshold: document.conversionDefaults.alphaThreshold, dithering: document.conversionDefaults.dithering });
+        for (const change of changes) { change.x += left; change.y += top; }
+        writePixels(cel, changes);
+      }
+    };
+    addLayers(psd.children);
+    if (!stats.rasterLayers) {
+      sprite.layers[fallbackLayerId] = fallbackLayer; sprite.layerIds.push(fallbackLayerId); sprite.cels[fallbackCel.id] = fallbackCel;
     }
-    if (!document.assetIds.length) { const sprite = createPixelSprite('Composite', psd.width, psd.height); document.pixelAssets[sprite.id] = sprite; document.assetIds = [sprite.id]; document.activeAssetId = sprite.id; }
+    document.pixelAssets = { [sprite.id]: sprite }; document.assetIds = [sprite.id]; document.activeAssetId = sprite.id;
     document.dirty = true;
-    return { documents: [validateImportedPsdDocument(document)], warnings: ['PSD layers were independently quantized into pixel sprites. Unsupported effects use decoded raster fallbacks.'] };
+    const warnings = ['PSD pixel import restored available folders and raster layers as one current-frame sprite hierarchy; raster pixels were independently quantized to the document palette. Unsupported effects use decoded raster fallbacks.'];
+    if (stats.omittedLayers) warnings.push(`${stats.omittedLayers} PSD layer${stats.omittedLayers === 1 ? '' : 's'} without decoded raster pixels ${stats.omittedLayers === 1 ? 'was' : 'were'} omitted from the pixel sprite.`);
+    if (stats.partialLocks) warnings.push(`${stats.partialLocks} PSD layer${stats.partialLocks === 1 ? '' : 's'} used a partial transparency, position, composite, or artboard lock and imported unlocked; AIDraw maps only Photoshop lock-all to its binary layer lock.`);
+    if (psd.bitsPerChannel !== undefined && psd.bitsPerChannel !== 8) warnings.push(`The ${psd.bitsPerChannel}-bit PSD was decoded into AIDraw's 8-bit indexed workflow.`);
+    return { documents: [validateImportedPsdDocument(document)], warnings };
   }
   const document = createIllustrationDocument(name); document.artboard.width = psd.width; document.artboard.height = psd.height; document.artboard.background = null;
   const initialLayers = [...document.layerIds]; for (const id of initialLayers) delete document.layers[id]; document.layerIds = [];
