@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -17,7 +17,7 @@ import {
 } from '@aidraw/core';
 import { DocumentService } from '@main/document-service';
 import { RecoveryJournal } from '@main/journal';
-import { validateInlineDocumentAsset } from '@main/transaction-policy';
+import { validateInlineDocumentAsset, type ImageDecodeValidator } from '@main/transaction-policy';
 
 const temporaryPaths: string[] = [];
 const services: DocumentService[] = [];
@@ -44,10 +44,10 @@ function pngAsset(id = createId('asset'), overrides: Partial<DocumentAsset> = {}
   };
 }
 
-async function serviceFixture(): Promise<DocumentService> {
+async function serviceFixture(imageDecoder?: ImageDecodeValidator): Promise<DocumentService> {
   const root = await mkdtemp(join(tmpdir(), 'aidraw-policy-'));
   temporaryPaths.push(root);
-  const service = new DocumentService(new RecoveryJournal(root), '1.0.0');
+  const service = new DocumentService(new RecoveryJournal(root), '1.0.0', undefined, imageDecoder);
   services.push(service);
   service.initialize();
   return service;
@@ -56,10 +56,15 @@ async function serviceFixture(): Promise<DocumentService> {
 describe('transaction trust policy', () => {
   it('accepts a verified raster and rejects forged length, hash, MIME, and dimensions', async () => {
     const valid = pngAsset('valid');
-    await expect(validateInlineDocumentAsset(valid)).resolves.toBeUndefined();
+    const decoder = vi.fn<ImageDecodeValidator>(async (_bytes, expected) => {
+      expect(expected).toEqual({ mimeType: 'image/png', width: 1, height: 1 });
+    });
+    await expect(validateInlineDocumentAsset(valid, decoder)).resolves.toBeUndefined();
+    expect(decoder).toHaveBeenCalledOnce();
     await expect(validateInlineDocumentAsset({ ...valid, byteLength: valid.byteLength + 1 })).rejects.toThrow('declared');
     await expect(validateInlineDocumentAsset({ ...valid, sha256: '0'.repeat(64) })).rejects.toThrow('SHA-256');
     await expect(validateInlineDocumentAsset({ ...valid, mimeType: 'image/svg+xml' })).rejects.toThrow('declares image/svg+xml');
+    await expect(validateInlineDocumentAsset(valid, async () => { throw new Error('isolated decoder rejected the payload'); })).rejects.toThrow('could not be decoded safely: isolated decoder rejected the payload');
 
     const oversizedHeader = Buffer.from(valid.data!, 'base64');
     oversizedHeader.writeUInt32BE(8_193, 16);
@@ -69,6 +74,27 @@ describe('transaction trust policy', () => {
       sha256: createHash('sha256').update(oversizedHeader).digest('hex'),
     });
     await expect(validateInlineDocumentAsset(oversized)).rejects.toThrow('safety limit');
+  });
+
+  it('routes live asset admission through the injected isolated decoder and preserves the document on rejection', async () => {
+    const decoder = vi.fn<ImageDecodeValidator>(async () => undefined);
+    const service = await serviceFixture(decoder);
+    const document = service.snapshot().activeDocument!;
+    const accepted = pngAsset('isolated-accepted');
+    expect((await service.apply({
+      id: createId('tx'), clientOperationId: createId('op'), documentId: document.id, actor: AGENT,
+      label: 'Accept isolated asset', createdAt: nowIso(), operations: [{ kind: 'asset.add', asset: accepted }],
+    })).status).toBe('committed');
+    expect(decoder).toHaveBeenCalledOnce();
+
+    const rejected = pngAsset('isolated-rejected');
+    decoder.mockRejectedValueOnce(new Error('decoder process exited'));
+    const response = await service.apply({
+      id: createId('tx'), clientOperationId: createId('op'), documentId: document.id, actor: AGENT,
+      label: 'Reject isolated asset', createdAt: nowIso(), operations: [{ kind: 'asset.add', asset: rejected }],
+    });
+    expect(response).toMatchObject({ status: 'conflict', message: expect.stringContaining('decoder process exited') });
+    expect(service.getDocument(document.id)?.assets[rejected.id]).toBeUndefined();
   });
 
   it('owns entity attribution and preserves the normalized identity through undo, redo, and replacement', async () => {

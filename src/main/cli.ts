@@ -4,6 +4,8 @@ import process from 'node:process';
 import type { ExportFormat } from '../common/contracts';
 import { exportDocument, normalizeExportScale, type ExportArtifact } from './export-document';
 import { readNativeDocument } from './persistence';
+import { RasterUtilitySupervisor } from './utility-supervisor';
+import type { ImageDecodeValidator } from './transaction-policy';
 
 const formats: ExportFormat[] = ['png', 'jpeg', 'webp', 'svg', 'pdf', 'psd', 'gif', 'apng', 'sprite-sheet', 'tiled-json', 'tiled-xml'];
 
@@ -141,31 +143,40 @@ async function atomicWrite(filePath: string, data: Buffer, overwrite: boolean): 
   }
 }
 
-export async function executeBatchExport(command: Extract<CliCommand, { kind: 'batch-export' }>): Promise<BatchExportResult> {
-  const inputPath = resolve(command.inputPath);
-  if (extname(inputPath).toLowerCase() !== '.aidraw') throw new Error('Batch export input must be an .aidraw file.');
-  const loaded = await readNativeDocument(inputPath);
-  const format = command.format ?? inferFormat(command.outputPath);
-  if (!format) throw new Error('Cannot infer the export format. Add --format <format>.');
-  if (!extensionMatches(format, command.outputPath)) throw new Error(`The output extension does not match --format ${format}.`);
-  let animationTagId: string | undefined;
-  if (command.animationTag) {
-    if (!['gif', 'apng', 'sprite-sheet'].includes(format) || loaded.document.kind !== 'pixel') throw new Error('--animation-tag requires a GIF, APNG, or sprite-sheet export from a pixel sprite.');
-    const sprite = loaded.document.pixelAssets[loaded.document.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('--animation-tag requires an active pixel sprite.'); const tag = sprite.tags.find((entry) => entry.id === command.animationTag || entry.name.toLocaleLowerCase() === command.animationTag!.toLocaleLowerCase()); if (!tag) throw new Error(`Animation tag “${command.animationTag}” does not exist.`); animationTagId = tag.id;
+export async function executeBatchExport(
+  command: Extract<CliCommand, { kind: 'batch-export' }>,
+  imageDecoder?: ImageDecodeValidator,
+): Promise<BatchExportResult> {
+  const ownedUtilities = imageDecoder ? undefined : new RasterUtilitySupervisor();
+  const decode = imageDecoder ?? ((bytes, expected) => ownedUtilities!.validateImage(bytes, expected));
+  try {
+    const inputPath = resolve(command.inputPath);
+    if (extname(inputPath).toLowerCase() !== '.aidraw') throw new Error('Batch export input must be an .aidraw file.');
+    const loaded = await readNativeDocument(inputPath, decode);
+    const format = command.format ?? inferFormat(command.outputPath);
+    if (!format) throw new Error('Cannot infer the export format. Add --format <format>.');
+    if (!extensionMatches(format, command.outputPath)) throw new Error(`The output extension does not match --format ${format}.`);
+    let animationTagId: string | undefined;
+    if (command.animationTag) {
+      if (!['gif', 'apng', 'sprite-sheet'].includes(format) || loaded.document.kind !== 'pixel') throw new Error('--animation-tag requires a GIF, APNG, or sprite-sheet export from a pixel sprite.');
+      const sprite = loaded.document.pixelAssets[loaded.document.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('--animation-tag requires an active pixel sprite.'); const tag = sprite.tags.find((entry) => entry.id === command.animationTag || entry.name.toLocaleLowerCase() === command.animationTag!.toLocaleLowerCase()); if (!tag) throw new Error(`Animation tag “${command.animationTag}” does not exist.`); animationTagId = tag.id;
+    }
+    const artifact = await exportDocument(loaded.document, format, { scale: command.scale, animationTagId });
+    const requested = resolve(command.outputPath);
+    const target = extname(requested) ? requested : `${requested}.${artifact.extension}`;
+    const entries = outputEntries(artifact, format, target);
+    if (!command.overwrite) for (const entry of entries) if (await exists(entry.path)) throw new Error(`Output already exists: ${entry.path}. Pass --overwrite to replace it.`);
+    for (const entry of entries) await atomicWrite(entry.path, entry.data, command.overwrite);
+    return {
+      inputPath,
+      outputPath: target,
+      companionPaths: entries.slice(1).map((entry) => entry.path),
+      format,
+      scale: command.scale,
+      byteLength: artifact.data.byteLength,
+      warnings: [...loaded.warnings, ...artifact.report.warnings],
+    };
+  } finally {
+    ownedUtilities?.stop();
   }
-  const artifact = await exportDocument(loaded.document, format, { scale: command.scale, animationTagId });
-  const requested = resolve(command.outputPath);
-  const target = extname(requested) ? requested : `${requested}.${artifact.extension}`;
-  const entries = outputEntries(artifact, format, target);
-  if (!command.overwrite) for (const entry of entries) if (await exists(entry.path)) throw new Error(`Output already exists: ${entry.path}. Pass --overwrite to replace it.`);
-  for (const entry of entries) await atomicWrite(entry.path, entry.data, command.overwrite);
-  return {
-    inputPath,
-    outputPath: target,
-    companionPaths: entries.slice(1).map((entry) => entry.path),
-    format,
-    scale: command.scale,
-    byteLength: artifact.data.byteLength,
-    warnings: [...loaded.warnings, ...artifact.report.warnings],
-  };
 }

@@ -23,8 +23,13 @@ import {
   parseCheckpointRecord,
   parseCheckpointSummary,
 } from './checkpoint-policy';
-import { inspectImageHeader } from './transaction-policy';
+import {
+  inspectDocumentImageAsset,
+  inspectImageHeader,
+  type ImageDecodeValidator,
+} from './transaction-policy';
 import { parseTransactionTraceEntry, parseTransactionTraceJsonl } from './trace-policy';
+import { MAX_NATIVE_BINARY_ENTRY_BYTES } from './native-container-limits';
 
 const TRANSPARENT_PREVIEW = Uint8Array.from(
   Buffer.from(
@@ -35,7 +40,6 @@ const TRANSPARENT_PREVIEW = Uint8Array.from(
 
 const MAX_NATIVE_ARCHIVE_BYTES = 512 * 1024 * 1024;
 const MAX_NATIVE_EXPANDED_BYTES = 512 * 1024 * 1024;
-const MAX_NATIVE_ENTRY_BYTES = 128 * 1024 * 1024;
 const MAX_NATIVE_METADATA_BYTES = 64 * 1024 * 1024;
 const MAX_NATIVE_MANIFEST_BYTES = 1024 * 1024;
 const MAX_NATIVE_ENTRIES = 20_000;
@@ -98,7 +102,7 @@ function unzipNativeArchive(bytes: Uint8Array): ReturnType<typeof unzipSync> {
     if (entries > MAX_NATIVE_ENTRIES) throw new Error(`AIDraw container exceeds the ${MAX_NATIVE_ENTRIES.toLocaleString()}-entry limit.`);
     if (!safeArchiveEntryName(entry.name)) throw new Error(`AIDraw container contains an unsafe entry path: ${entry.name}`);
     if (names.has(entry.name)) throw new Error(`AIDraw container contains a duplicate entry: ${entry.name}`); names.add(entry.name);
-    const entryLimit = entry.name === 'manifest.json' ? MAX_NATIVE_MANIFEST_BYTES : entry.name.endsWith('.json') || entry.name.endsWith('.jsonl') ? MAX_NATIVE_METADATA_BYTES : MAX_NATIVE_ENTRY_BYTES;
+    const entryLimit = entry.name === 'manifest.json' ? MAX_NATIVE_MANIFEST_BYTES : entry.name.endsWith('.json') || entry.name.endsWith('.jsonl') ? MAX_NATIVE_METADATA_BYTES : MAX_NATIVE_BINARY_ENTRY_BYTES;
     if (!Number.isSafeInteger(entry.originalSize) || entry.originalSize < 0 || entry.originalSize > entryLimit) throw new Error(`AIDraw container entry ${entry.name} exceeds its expanded-size limit.`);
     expandedBytes += entry.originalSize;
     if (!Number.isSafeInteger(expandedBytes) || expandedBytes > MAX_NATIVE_EXPANDED_BYTES) throw new Error('AIDraw container exceeds the 512 MiB expanded-size limit.');
@@ -237,12 +241,27 @@ function nativeAssetMetadata(assetId: string, candidate: unknown): DocumentAsset
   return candidate as unknown as DocumentAsset;
 }
 
-function hydrateNativeAssets(
+async function validateNativeImageAsset(asset: DocumentAsset, imageDecoder?: ImageDecodeValidator): Promise<void> {
+  const inspected = inspectDocumentImageAsset(asset, {
+    maxBytes: MAX_NATIVE_BINARY_ENTRY_BYTES,
+    limitLabel: '128 MiB',
+    label: `AIDraw asset ${asset.id}`,
+  });
+  if (imageDecoder) {
+    try { await imageDecoder(inspected.bytes, inspected.expected); }
+    catch (error) {
+      throw new Error(`AIDraw asset ${asset.id} could not be decoded safely: ${error instanceof Error ? error.message : 'unsupported image'}.`);
+    }
+  }
+}
+
+async function hydrateNativeAssets(
   document: AIDrawDocument,
   archive: ReturnType<typeof unzipSync>,
   warnings: string[],
   checkpoint = false,
-): void {
+  imageDecoder?: ImageDecodeValidator,
+): Promise<void> {
   for (const [assetId, candidate] of Object.entries(document.assets)) {
     const asset = nativeAssetMetadata(assetId, candidate);
     delete asset.data;
@@ -257,6 +276,30 @@ function hydrateNativeAssets(
       continue;
     }
     asset.data = Buffer.from(bytes).toString('base64');
+    try {
+      await validateNativeImageAsset(asset, imageDecoder);
+    } catch {
+      delete asset.data;
+      warnings.push(`Embedded data for ${label} “${asset.name}” is not a valid decodable image and was ignored.`);
+    }
+  }
+}
+
+async function validateSuppliedNativeAssets(
+  document: AIDrawDocument,
+  checkpoints: DocumentCheckpointRecord[],
+  imageDecoder?: ImageDecodeValidator,
+): Promise<void> {
+  const documents = [document, ...checkpoints.slice(-32).map((checkpoint) => checkpoint.document)];
+  for (const value of documents) for (const [assetId, candidate] of Object.entries(value.assets)) {
+    const asset = nativeAssetMetadata(assetId, candidate);
+    if (asset.data !== undefined) {
+      const bytes = Buffer.from(asset.data, 'base64');
+      if (bytes.toString('base64') !== asset.data || bytes.byteLength !== asset.byteLength || createHash('sha256').update(bytes).digest('hex') !== asset.sha256.toLowerCase()) {
+        throw new Error('AIDraw asset data does not match its content metadata.');
+      }
+      await validateNativeImageAsset(asset, imageDecoder);
+    }
   }
 }
 
@@ -443,7 +486,7 @@ function buildArchive(document: AIDrawDocument, appVersion: string, preview?: Ui
   return zipSync(files, { level: 6 });
 }
 
-export async function readNativeDocument(filePath: string): Promise<LoadedNativeDocument> {
+export async function readNativeDocument(filePath: string, imageDecoder?: ImageDecodeValidator): Promise<LoadedNativeDocument> {
   const archive = unzipNativeArchive(new Uint8Array(await readFile(filePath)));
   if (!archive['manifest.json'] || !archive['document.json']) {
     throw new Error('This file is not a valid AIDraw container.');
@@ -463,7 +506,7 @@ export async function readNativeDocument(filePath: string): Promise<LoadedNative
     if (parsed.ignored === 1) warnings.push('A malformed transaction trace entry was ignored.');
     else if (parsed.ignored > 1) warnings.push(`${parsed.ignored.toLocaleString('en-US')} malformed transaction trace entries were ignored.`);
   }
-  hydrateNativeAssets(document, archive, warnings);
+  await hydrateNativeAssets(document, archive, warnings, false, imageDecoder);
   validateLoadedPaintTileCaches(document, warnings);
   if (archive['checkpoints/index.json']) {
     try {
@@ -480,7 +523,7 @@ export async function readNativeDocument(filePath: string): Promise<LoadedNative
           if (!parsed || !checkpointMetadataMatches(summary, parsed)) throw new Error('Checkpoint metadata is inconsistent.');
           const checkpointDocument = migrateDocument(parsed.document);
           if (!checkpointDocumentMatchesMetadata(parsed, checkpointDocument)) throw new Error('Checkpoint metadata is inconsistent.');
-          hydrateNativeAssets(checkpointDocument, archive, warnings, true);
+          await hydrateNativeAssets(checkpointDocument, archive, warnings, true, imageDecoder);
           validateLoadedPaintTileCaches(checkpointDocument, warnings);
           checkpoints.push({ ...parsed, document: checkpointDocument });
         } catch { warnings.push(`Checkpoint “${summary.id}” is corrupt and was ignored.`); }
@@ -504,6 +547,8 @@ export interface NativeSaveFileSystem {
   remove(filePath: string): Promise<void>;
 }
 
+export type NativePreviewSource = Uint8Array | (() => Promise<Uint8Array>);
+
 export const nativeSaveFileSystem: NativeSaveFileSystem = {
   openExclusive: async (filePath) => {
     const handle = await open(filePath, 'wx');
@@ -521,15 +566,18 @@ export async function writeNativeDocument(
   filePath: string,
   document: AIDrawDocument,
   appVersion: string,
-  preview?: Uint8Array,
+  preview?: NativePreviewSource,
   trace: TransactionTraceEntry[] = [],
   checkpoints: DocumentCheckpointRecord[] = [],
   fileSystem: NativeSaveFileSystem = nativeSaveFileSystem,
+  imageDecoder?: ImageDecodeValidator,
 ): Promise<string> {
   const destination = normalizePath(filePath);
+  await validateSuppliedNativeAssets(document, checkpoints, imageDecoder);
+  const resolvedPreview = typeof preview === 'function' ? await preview() : preview;
   await mkdir(dirname(destination), { recursive: true });
   const temp = `${destination}.${process.pid}.${Date.now()}.tmp`;
-  const bytes = buildArchive(document, appVersion, preview, trace, checkpoints);
+  const bytes = buildArchive(document, appVersion, resolvedPreview, trace, checkpoints);
   try {
     const handle = await fileSystem.openExclusive(temp);
     try {
@@ -538,7 +586,7 @@ export async function writeNativeDocument(
     } finally {
       await handle.close();
     }
-    const persisted = (await readNativeDocument(temp)).document;
+    const persisted = (await readNativeDocument(temp, imageDecoder)).document;
     await fileSystem.replace(temp, destination);
     adoptPaintTileCaches(document, persisted);
   } catch (error) {

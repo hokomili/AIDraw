@@ -3,12 +3,14 @@ import { runImportUtilityRequest } from './utility-import';
 import {
   assertNormalizeGenerationAcceptanceInput,
   assertQuantizeUtilityParameters,
+  assertValidateImageUtilityRequest,
   isGenerationProgressUtilityResponse,
   MAX_QUANTIZE_UTILITY_BASE64_CHARACTERS,
   type SerializedExportArtifact,
   type UtilityRequest,
   type UtilityResponse,
 } from './utility-contract';
+import { validateUtilityImage } from './utility-image-validation';
 import { boundedUtilityErrorMessage } from './utility-resource-policy';
 import { isAbsolute } from 'node:path';
 import { validateSpriteSheetSliceOptions } from '../common/sprite-sheet';
@@ -53,7 +55,11 @@ const generationControllers = new Map<string, AbortController>();
 function validateRequest(value: unknown): UtilityRequest {
   if (!value || typeof value !== 'object') throw new Error('Utility request must be an object.');
   const base = value as { id?: unknown; kind?: unknown };
-  if (typeof base.id !== 'string' || !base.id || !['quantize-image', 'export-document', 'import-document', 'capture-observation', 'generation-run', 'normalize-generation-acceptance', 'containment-probe'].includes(String(base.kind))) throw new Error('Unknown utility request.');
+  if (typeof base.id !== 'string' || !base.id || !['validate-image', 'quantize-image', 'export-document', 'import-document', 'capture-observation', 'generation-run', 'normalize-generation-acceptance', 'containment-probe'].includes(String(base.kind))) throw new Error('Unknown utility request.');
+  if (base.kind === 'validate-image') {
+    assertValidateImageUtilityRequest(value);
+    return value;
+  }
   if (base.kind === 'containment-probe') {
     const request = value as Partial<Extract<UtilityRequest, { kind: 'containment-probe' }>>;
     if (request.mode !== 'crash' && request.mode !== 'hang' && request.mode !== 'pressure-gate') throw new Error('Unknown utility containment probe mode.');
@@ -160,7 +166,13 @@ process.parentPort.on('message', (event) => {
     try {
       const request = validateRequest(event.data);
       id = request.id;
-      if (request.kind === 'containment-probe') {
+      if (request.kind === 'validate-image') {
+        const decoded = await validateUtilityImage(
+          Buffer.from(request.encodedBase64, 'base64'),
+          { mimeType: request.mimeType, width: request.width, height: request.height },
+        );
+        process.parentPort!.postMessage({ id, ok: true, kind: request.kind, ...decoded } satisfies UtilityResponse);
+      } else if (request.kind === 'containment-probe') {
         if (request.mode === 'crash') setTimeout(() => process.crash(), 100);
         if (request.mode === 'crash' || request.mode === 'hang') await new Promise<never>(() => undefined);
         await new Promise((resolveWait) => setTimeout(resolveWait, 1_500));

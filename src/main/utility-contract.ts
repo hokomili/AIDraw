@@ -12,7 +12,8 @@ import {
   type GeneratedOutput,
   type GenerationRequest,
 } from '../common/generation';
-import { inspectImageHeader, MAX_INLINE_ASSET_BYTES, MAX_INLINE_IMAGE_DIMENSION, MAX_INLINE_IMAGE_PIXELS } from './transaction-policy';
+import { displayImageDimensions, inspectImageHeader, MAX_INLINE_ASSET_BYTES, MAX_INLINE_IMAGE_DIMENSION, MAX_INLINE_IMAGE_PIXELS } from './transaction-policy';
+import { MAX_NATIVE_BINARY_ENTRY_BYTES } from './native-container-limits';
 import type { Fnd09QuantizationResultFault } from './utility-quantization-result-e2e-contract';
 import type { Fnd09ExportResultFault } from './utility-export-result-e2e-contract';
 import type { Fnd09ImportResultFault } from './utility-import-result-e2e-contract';
@@ -53,6 +54,8 @@ export {
 
 export const MAX_QUANTIZE_UTILITY_SOURCE_BYTES = MAX_INLINE_ASSET_BYTES;
 export const MAX_QUANTIZE_UTILITY_BASE64_CHARACTERS = 2_000_000;
+export const MAX_IMAGE_VALIDATION_UTILITY_SOURCE_BYTES = MAX_NATIVE_BINARY_ENTRY_BYTES;
+export const MAX_IMAGE_VALIDATION_UTILITY_BASE64_CHARACTERS = Math.ceil(MAX_IMAGE_VALIDATION_UTILITY_SOURCE_BYTES / 3) * 4;
 const MAX_EXPORT_UTILITY_BASE64_CHARACTERS = Math.ceil(MAX_EXPORT_UTILITY_TOTAL_DECODED_BYTES / 3) * 4;
 /** PDF is the only multi-document importer and already caps its page/result count here. */
 export const MAX_IMPORT_UTILITY_DOCUMENTS = 256;
@@ -70,6 +73,15 @@ interface QuantizeUtilityParameters {
   height?: unknown;
   palette?: unknown;
   options?: { dithering?: unknown; alphaThreshold?: unknown } | null;
+}
+
+export interface ValidateImageUtilityRequest {
+  id: string;
+  kind: 'validate-image';
+  encodedBase64: string;
+  mimeType: string;
+  width: number;
+  height: number;
 }
 
 /** Keep supervisor admission and worker validation on the same quantization limits. */
@@ -164,9 +176,10 @@ export interface SerializedExportArtifact {
   companions?: Array<{ dataBase64: string; extension: string; mimeType: string; name: string }>;
 }
 
-export type UtilityRequest = QuantizeUtilityRequest | ExportUtilityRequest | ImportUtilityRequest | ObservationUtilityRequest | GenerationUtilityRequest | NormalizeGenerationAcceptanceUtilityRequest | UtilityContainmentProbeRequest;
+export type UtilityRequest = ValidateImageUtilityRequest | QuantizeUtilityRequest | ExportUtilityRequest | ImportUtilityRequest | ObservationUtilityRequest | GenerationUtilityRequest | NormalizeGenerationAcceptanceUtilityRequest | UtilityContainmentProbeRequest;
 
 export type UtilityResponse =
+  | { id: string; ok: true; kind: 'validate-image'; width: number; height: number }
   | { id: string; ok: true; kind: 'quantize-image'; changes: Array<{ x: number; y: number; index: number }> }
   | { id: string; ok: true; kind: 'export-document'; artifact: SerializedExportArtifact }
   | { id: string; ok: true; kind: 'import-document'; documents: AIDrawDocument[]; warnings: string[] }
@@ -251,6 +264,51 @@ function isNonNegativeInteger(value: unknown): value is number {
 
 function isNonEmptyString(value: unknown): value is string {
   return isBoundedUtilityString(value, MAX_UTILITY_TEXT_BYTES, false);
+}
+
+export function assertValidateImageUtilityRequest(value: unknown): asserts value is ValidateImageUtilityRequest {
+  if (!isRecord(value)
+    || !hasOnlyKeys(value, ['id', 'kind', 'encodedBase64', 'mimeType', 'width', 'height'])
+    || !hasKeys(value, ['id', 'kind', 'encodedBase64', 'mimeType', 'width', 'height'])
+    || typeof value.id !== 'string' || !value.id
+    || value.kind !== 'validate-image'
+    || typeof value.encodedBase64 !== 'string'
+    || value.encodedBase64.length > MAX_IMAGE_VALIDATION_UTILITY_BASE64_CHARACTERS
+    || !isCanonicalBase64(value.encodedBase64)
+    || !isPositiveInteger(value.width)
+    || !isPositiveInteger(value.height)
+    || typeof value.mimeType !== 'string') {
+    throw new Error('Image validation utility request is malformed.');
+  }
+  if (base64DecodedByteLength(value.encodedBase64) > MAX_IMAGE_VALIDATION_UTILITY_SOURCE_BYTES) {
+    throw new Error('Image validation utility source exceeds the native binary-entry limit.');
+  }
+  if (value.width > MAX_INLINE_IMAGE_DIMENSION
+    || value.height > MAX_INLINE_IMAGE_DIMENSION
+    || value.width * value.height > MAX_INLINE_IMAGE_PIXELS) {
+    throw new Error('Image validation utility source exceeds the image safety limit.');
+  }
+  const bytes = Buffer.from(value.encodedBase64, 'base64');
+  const header = inspectImageHeader(bytes);
+  const display = displayImageDimensions(header);
+  if (value.mimeType !== header.mimeType || value.width !== display.width || value.height !== display.height) {
+    throw new Error('Image validation utility request disagrees with its source header.');
+  }
+}
+
+export function assertValidateImageUtilityResponse(
+  request: ValidateImageUtilityRequest,
+  value: unknown,
+): asserts value is Extract<UtilityResponse, { ok: true; kind: 'validate-image' }> {
+  if (!isRecord(value)
+    || !hasOnlyKeys(value, ['id', 'ok', 'kind', 'width', 'height'])
+    || value.id !== request.id
+    || value.ok !== true
+    || value.kind !== 'validate-image'
+    || value.width !== request.width
+    || value.height !== request.height) {
+    throw new Error('Raster utility returned a malformed image-validation result.');
+  }
 }
 
 /**

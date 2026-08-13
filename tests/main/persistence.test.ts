@@ -1,9 +1,10 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate';
+import { createCanvas } from '@napi-rs/canvas';
 import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createId, createIllustrationDocument, createPixelDocument, createPixelTilemap, createPixelTileset, duplicatePixelFrame, nowIso, readPixel, readTileAt, resolvePixelCel, writePixels, writeTiles, type CanvasTransaction, type GroupObject, type IllustrationLayer, type PixelLayer, type ShapeObject, type TilemapLayer } from '@aidraw/core';
 import type { TransactionTraceEntry } from '@common/contracts';
 import { MAX_TRANSACTION_SERIALIZED_BYTES } from '@common/transaction-limits';
@@ -543,9 +544,9 @@ describe('.aidraw persistence', () => {
     expect((await readdir(root)).some((entry) => entry.endsWith('.tmp'))).toBe(false);
   });
 
-  it('hydrates only hash- and length-matched native asset entries and never trusts inline document bytes', async () => {
+  it('hydrates only hash-, MIME-, header-, and decoder-matched native asset entries and never trusts inline document bytes', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aidraw-persistence-assets-')); temporaryPaths.push(root);
-    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const canvas = createCanvas(2, 2); canvas.getContext('2d').fillRect(0, 0, 2, 2); const bytes = canvas.toBuffer('image/png');
     const sha256 = createHash('sha256').update(bytes).digest('hex');
     const document = createIllustrationDocument('Asset integrity fixture');
     document.assets['asset-integrity'] = {
@@ -556,6 +557,17 @@ describe('.aidraw persistence', () => {
     const valid = await readNativeDocument(sourcePath);
     expect(valid.document.assets['asset-integrity'].data).toBe(bytes.toString('base64'));
     expect(valid.warnings).toEqual([]);
+    const decoder = vi.fn(async (_source: Buffer, expected: { mimeType: string; width: number; height: number }) => {
+      expect(expected).toEqual({ mimeType: 'image/png', width: 2, height: 2 });
+    });
+    const decoded = await readNativeDocument(sourcePath, decoder);
+    expect(decoded.document.assets['asset-integrity'].data).toBe(bytes.toString('base64'));
+    expect(decoder).toHaveBeenCalledOnce();
+
+    const rejectingDecoder = vi.fn(async () => { throw new Error('decoder process exited unexpectedly'); });
+    const undecodable = await readNativeDocument(sourcePath, rejectingDecoder);
+    expect(undecodable.document.assets['asset-integrity'].data).toBeUndefined();
+    expect(undecodable.warnings).toContain('Embedded data for asset “Integrity asset” is not a valid decodable image and was ignored.');
 
     const sourceArchiveBytes = await readFile(sourcePath);
     const invalidSave = structuredClone(document);
@@ -565,6 +577,24 @@ describe('.aidraw persistence', () => {
     expect(await readFile(sourcePath)).toEqual(sourceArchiveBytes);
 
     const sourceFiles = unzipSync(new Uint8Array(sourceArchiveBytes));
+    const wrongMimeFiles = { ...sourceFiles };
+    const wrongMimeDocument = JSON.parse(strFromU8(wrongMimeFiles['document.json'])) as typeof document;
+    wrongMimeDocument.assets['asset-integrity'].mimeType = 'image/jpeg';
+    wrongMimeFiles['document.json'] = strToU8(JSON.stringify(wrongMimeDocument));
+    const wrongMimePath = join(root, 'wrong-mime.aidraw');
+    await writeFile(wrongMimePath, zipSync(wrongMimeFiles));
+    const wrongMime = await readNativeDocument(wrongMimePath);
+    expect(wrongMime.document.assets['asset-integrity'].data).toBeUndefined();
+    expect(wrongMime.warnings).toContain('Embedded data for asset “Integrity asset” is not a valid decodable image and was ignored.');
+
+    const invalidMimeSave = structuredClone(document); invalidMimeSave.assets['asset-integrity'].mimeType = 'image/jpeg';
+    await expect(writeNativeDocument(sourcePath, invalidMimeSave, '1.0.1')).rejects.toThrow('declares image/jpeg but its bytes are image/png');
+    const untrustedPreview = vi.fn(async () => Buffer.from('must not render'));
+    await expect(writeNativeDocument(sourcePath, document, '1.0.1', untrustedPreview, [], [], nativeSaveFileSystem, rejectingDecoder)).rejects.toThrow('could not be decoded safely: decoder process exited unexpectedly');
+    expect(untrustedPreview).not.toHaveBeenCalled();
+    expect(await readFile(sourcePath)).toEqual(sourceArchiveBytes);
+    expect((await readdir(root)).some((entry) => entry.endsWith('.tmp'))).toBe(false);
+
     const corruptBytes = Uint8Array.from(sourceFiles[`assets/${sha256}`]); corruptBytes[0] ^= 0xff;
     const corruptPath = join(root, 'corrupt-hash.aidraw');
     await writeFile(corruptPath, zipSync({ ...sourceFiles, [`assets/${sha256}`]: corruptBytes }));

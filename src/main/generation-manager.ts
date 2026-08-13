@@ -31,7 +31,6 @@ import { normalizeGeneratedOutputForAcceptance } from './normalize-generation-ou
 import { quantizeToPalette } from './quantize';
 import { renderDocument } from './render-document';
 import { runGenerationProvider, type GenerationProviderRunner } from './generation-provider-runner';
-import { validateInlineDocumentAsset } from './transaction-policy';
 
 type ComparisonRenderer = (document: Parameters<typeof renderDocument>[0]) => Promise<{ data: string; width: number; height: number }>;
 type GenerationQuantizer = (encoded: Buffer, width: number, height: number, palette: PaletteEntry[], alphaThreshold: number, dithering: 'none' | 'bayer-4x4' | 'floyd-steinberg') => Promise<Array<{ x: number; y: number; index: number }>>;
@@ -135,10 +134,6 @@ export class GenerationManager {
       id: createId('asset'), name: `Generated ${result.request.provider} image${prepared.normalization ? ' (normalized for acceptance)' : ''}`, mimeType: prepared.mimeType, byteLength: bytes.byteLength,
       sha256, source: 'generated', data: prepared.data,
     };
-    try { await validateInlineDocumentAsset(asset); }
-    catch (error) {
-      return { accepted: false, message: `Acceptance validation failed; the original provider preview remains available and the document is unchanged. ${error instanceof Error ? error.message : String(error)}` };
-    }
     const modelOrWorkflow = result.request.provider === 'openai'
       ? 'gpt-image-2'
       : result.request.provider === 'stability'

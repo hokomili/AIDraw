@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto';
-import { loadImage } from '@napi-rs/canvas';
 import type {
   AIDrawDocument,
   Actor,
@@ -25,8 +24,22 @@ export interface ImageHeader {
   orientation?: JpegExifOrientation;
 }
 
+export interface ExpectedDecodedImage {
+  mimeType: DocumentAsset['mimeType'];
+  width: number;
+  height: number;
+}
+
+export interface InspectedDocumentImageAsset {
+  bytes: Buffer;
+  expected: ExpectedDecodedImage;
+}
+
+export type ImageDecodeValidator = (bytes: Buffer, expected: ExpectedDecodedImage) => Promise<void>;
+
 export interface TransactionPolicyOptions {
   trustedProvenance?: boolean;
+  imageDecoder?: ImageDecodeValidator;
 }
 
 function pngHeader(bytes: Buffer): ImageHeader | undefined {
@@ -118,7 +131,7 @@ function webpHeader(bytes: Buffer): ImageHeader | undefined {
 
 export function inspectImageHeader(bytes: Buffer): ImageHeader {
   const header = pngHeader(bytes) ?? gifHeader(bytes) ?? jpegHeader(bytes) ?? webpHeader(bytes);
-  if (!header) throw new Error('Inline assets must be a supported PNG, APNG, JPEG, WebP, or GIF image with a valid header.');
+  if (!header) throw new Error('Image assets must be a supported PNG, APNG, JPEG, WebP, or GIF image with a valid header.');
   return header;
 }
 
@@ -128,30 +141,38 @@ export function displayImageDimensions(header: ImageHeader): { width: number; he
     : { width: header.width, height: header.height };
 }
 
-export async function validateInlineDocumentAsset(asset: DocumentAsset): Promise<void> {
-  if (!asset.data) throw new Error(`Inline asset ${asset.id} is missing base64 data.`);
+export function inspectDocumentImageAsset(
+  asset: DocumentAsset,
+  options: { maxBytes: number; limitLabel: string; label?: string } = {
+    maxBytes: MAX_INLINE_ASSET_BYTES,
+    limitLabel: '1.5 MB',
+  },
+): InspectedDocumentImageAsset {
+  const label = options.label ?? `Inline asset ${asset.id}`;
+  if (!asset.data) throw new Error(`${label} is missing base64 data.`);
   if (asset.data.length % 4 !== 0 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(asset.data)) {
-    throw new Error(`Inline asset ${asset.id} is not canonical base64.`);
+    throw new Error(`${label} is not canonical base64.`);
   }
   const bytes = Buffer.from(asset.data, 'base64');
-  if (bytes.byteLength > MAX_INLINE_ASSET_BYTES) throw new Error(`Inline asset ${asset.id} exceeds the 1.5 MB decoded-byte limit.`);
-  if (asset.byteLength !== bytes.byteLength) throw new Error(`Inline asset ${asset.id} declared ${asset.byteLength} bytes but decoded to ${bytes.byteLength}.`);
+  if (bytes.byteLength > options.maxBytes) throw new Error(`${label} exceeds the ${options.limitLabel} decoded-byte limit.`);
+  if (asset.byteLength !== bytes.byteLength) throw new Error(`${label} declared ${asset.byteLength} bytes but decoded to ${bytes.byteLength}.`);
   const digest = createHash('sha256').update(bytes).digest('hex');
-  if (asset.sha256.toLowerCase() !== digest) throw new Error(`Inline asset ${asset.id} SHA-256 does not match its decoded bytes.`);
+  if (asset.sha256.toLowerCase() !== digest) throw new Error(`${label} SHA-256 does not match its decoded bytes.`);
 
   const header = inspectImageHeader(bytes);
-  if (asset.mimeType !== header.mimeType) throw new Error(`Inline asset ${asset.id} declares ${asset.mimeType} but its bytes are ${header.mimeType}.`);
+  if (asset.mimeType !== header.mimeType) throw new Error(`${label} declares ${asset.mimeType} but its bytes are ${header.mimeType}.`);
   const display = displayImageDimensions(header);
   if (display.width < 1 || display.height < 1 || display.width > MAX_INLINE_IMAGE_DIMENSION || display.height > MAX_INLINE_IMAGE_DIMENSION || display.width * display.height > MAX_INLINE_IMAGE_PIXELS) {
-    throw new Error(`Inline asset ${asset.id} dimensions ${display.width}×${display.height} exceed the 8192 px / 16 MP safety limit.`);
+    throw new Error(`${label} dimensions ${display.width}×${display.height} exceed the 8192 px / 16 MP safety limit.`);
   }
+  return { bytes, expected: { mimeType: header.mimeType, width: display.width, height: display.height } };
+}
+
+export async function validateInlineDocumentAsset(asset: DocumentAsset, imageDecoder?: ImageDecodeValidator): Promise<void> {
+  const inspected = inspectDocumentImageAsset(asset);
+  if (!imageDecoder) return;
   try {
-    const decoded = await loadImage(bytes);
-    if (decoded.width !== display.width || decoded.height !== display.height) {
-      throw new Error(header.mimeType === 'image/jpeg' && header.orientation !== undefined
-        ? 'decoded dimensions differ from the file header and EXIF orientation'
-        : 'decoded dimensions differ from the file header');
-    }
+    await imageDecoder(inspected.bytes, inspected.expected);
   } catch (error) {
     throw new Error(`Inline asset ${asset.id} could not be decoded safely: ${error instanceof Error ? error.message : 'unsupported image'}.`);
   }
@@ -232,7 +253,7 @@ export async function prepareTransactionForCommit(
   for (const sourceOperation of transaction.operations) {
     const operation = normalizeEntityOperation(document, sourceOperation, transaction.actor, timestamp);
     if (operation.kind === 'asset.add') {
-      await validateInlineDocumentAsset(operation.asset);
+      await validateInlineDocumentAsset(operation.asset, options.imageDecoder);
       operations.push({
         ...operation,
         asset: transaction.actor.kind === 'agent' ? { ...operation.asset, source: 'embedded' } : operation.asset,

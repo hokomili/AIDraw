@@ -35,7 +35,7 @@ import { RecoveryJournal } from './journal';
 import { readNativeDocument, writeNativeDocument } from './persistence';
 import { renderDocument } from './render-document';
 import { TransactionTraceStore } from './trace-store';
-import { prepareTransactionForCommit } from './transaction-policy';
+import { prepareTransactionForCommit, type ImageDecodeValidator } from './transaction-policy';
 import { rebaseRestoredEntityRevisions } from '../common/document-branch';
 import { checkpointMergeCandidates, checkpointMergeOperations } from '../common/checkpoint-merge';
 import { MAX_TRANSACTION_SERIALIZED_BYTES } from '../common/transaction-limits';
@@ -93,6 +93,7 @@ export class DocumentService extends EventEmitter {
     private readonly journal: RecoveryJournal,
     private readonly appVersion: string,
     private readonly traceStore?: TransactionTraceStore,
+    private readonly imageDecoder?: ImageDecodeValidator,
   ) {
     super();
   }
@@ -322,7 +323,10 @@ export class DocumentService extends EventEmitter {
     }
 
     try {
-      transaction = await prepareTransactionForCommit(current, transaction, nowIso(), { trustedProvenance: options.trustedProvenance });
+      transaction = await prepareTransactionForCommit(current, transaction, nowIso(), {
+        trustedProvenance: options.trustedProvenance,
+        imageDecoder: this.imageDecoder,
+      });
       const result = applyTransaction(current, transaction, { status: options.activityStatus });
       const historyTargets = committedHistoryTargets(current, transaction, result.document, result.inverse);
       this.comparisons.set(current.id, { transactionId: transaction.id, before: structuredClone(current), afterRevision: result.document.revision });
@@ -545,7 +549,7 @@ export class DocumentService extends EventEmitter {
     const warnings: string[] = [];
     for (const filePath of filePaths) {
       try {
-        const loaded = await readNativeDocument(filePath);
+        const loaded = await readNativeDocument(filePath, this.imageDecoder);
         const existing = [...this.documents.values()].find((entry) => entry.filePath === filePath);
         if (existing) {
           this.activeDocumentId = existing.id;
@@ -577,7 +581,16 @@ export class DocumentService extends EventEmitter {
     const document = this.documents.get(documentId);
     if (!document) throw new Error('Document is not open.');
     const trace = await this.listTrace(documentId);
-    const destination = await writeNativeDocument(filePath, document, this.appVersion, (await renderDocument(document)).toBuffer('image/png'), trace, this.listCheckpointRecords(documentId));
+    const destination = await writeNativeDocument(
+      filePath,
+      document,
+      this.appVersion,
+      async () => (await renderDocument(document)).toBuffer('image/png'),
+      trace,
+      this.listCheckpointRecords(documentId),
+      undefined,
+      this.imageDecoder,
+    );
     document.filePath = destination;
     document.dirty = false;
     document.updatedAt = nowIso();

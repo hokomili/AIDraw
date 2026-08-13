@@ -7,6 +7,7 @@ import { MAX_QUEUED_UTILITY_TASKS, RasterUtilitySupervisor, type UtilityProcessL
 import { MAX_EXPORT_UTILITY_MEMBERS, MAX_GENERATED_OUTPUT_BYTES, MAX_GENERATION_PROGRESS_MESSAGE_BYTES, MAX_GENERATION_PROVIDER_METADATA_BYTES, MAX_IMPORT_UTILITY_DOCUMENTS, MAX_OBSERVATION_PNG_BYTES, MAX_OBSERVATION_UTILITY_RESULT_SERIALIZED_BYTES, MAX_QUANTIZE_UTILITY_BASE64_CHARACTERS, MAX_QUANTIZE_UTILITY_SOURCE_BYTES, MAX_UTILITY_ERROR_MESSAGE_BYTES, MAX_UTILITY_REPORT_SERIALIZED_BYTES, MAX_UTILITY_TEXT_BYTES, type UtilityResponse } from '@main/utility-contract';
 import type { GeneratedOutput, GenerationRequest } from '../../src/common/generation';
 import { normalizeGeneratedOutputForAcceptance } from '../../src/main/normalize-generation-output';
+import { validateUtilityImage } from '../../src/main/utility-image-validation';
 
 class FakeUtility extends EventEmitter implements UtilityProcessLike {
   readonly messages: unknown[] = [];
@@ -91,6 +92,53 @@ function oversizedGeneratedOutput(): GeneratedOutput {
 afterEach(() => vi.unstubAllEnvs());
 
 describe('RasterUtilitySupervisor', () => {
+  it('keeps native image decoding in the supervised lane and recovers after decoder-process exit', async () => {
+    const bytes = createCanvas(2, 3).toBuffer('image/png');
+    await expect(validateUtilityImage(bytes, { mimeType: 'image/png', width: 2, height: 3 })).resolves.toEqual({ width: 2, height: 3 });
+    await expect(validateUtilityImage(bytes, { mimeType: 'image/png', width: 2, height: 3 }, async () => ({ width: 3, height: 2 }))).rejects.toThrow('disagree');
+
+    const workers = [new FakeUtility(), new FakeUtility()];
+    const fork = vi.fn(() => workers[fork.mock.calls.length - 1]);
+    const supervisor = new RasterUtilitySupervisor(fork);
+    const crashed = supervisor.validateImage(bytes, { mimeType: 'image/png', width: 2, height: 3 });
+    const recovered = supervisor.validateImage(bytes, { mimeType: 'image/png', width: 2, height: 3 });
+    await nextTurn();
+    expect(workers[0].messages).toHaveLength(1);
+    expect(workers[0].messages[0]).toMatchObject({ kind: 'validate-image', mimeType: 'image/png', width: 2, height: 3 });
+    workers[0].exit(139);
+    await expect(crashed).rejects.toThrow('exited unexpectedly with code 139');
+
+    await nextTurn();
+    const request = workers[1].messages[0] as { id: string };
+    workers[1].respond({ id: request.id, ok: true, kind: 'validate-image', width: 2, height: 3 });
+    await expect(recovered).resolves.toBeUndefined();
+    expect(fork).toHaveBeenCalledTimes(2);
+    supervisor.stop();
+  });
+
+  it('rejects a contradictory image-validation result and retires that worker', async () => {
+    const bytes = createCanvas(2, 3).toBuffer('image/png');
+    const worker = new FakeUtility();
+    const supervisor = new RasterUtilitySupervisor(() => worker);
+    const pending = supervisor.validateImage(bytes, { mimeType: 'image/png', width: 2, height: 3 });
+    await nextTurn();
+    const request = worker.messages[0] as { id: string };
+    worker.respond({ id: request.id, ok: true, kind: 'validate-image', width: 3, height: 2 });
+    await expect(pending).rejects.toThrow('malformed image-validation result');
+    expect(worker.killed).toBe(true);
+    supervisor.stop();
+  });
+
+  it('rejects unsafe image geometry before starting a decoder worker', async () => {
+    const header = Buffer.from(createCanvas(1, 1).toBuffer('image/png').subarray(0, 24));
+    header.writeUInt32BE(8_193, 16);
+    const fork = vi.fn(() => new FakeUtility());
+    const supervisor = new RasterUtilitySupervisor(fork);
+    await expect(supervisor.validateImage(header, { mimeType: 'image/png', width: 8_193, height: 1 })).rejects.toThrow('image safety limit');
+    expect(fork).not.toHaveBeenCalled();
+    supervisor.stop();
+  });
+
   it('runs raster tasks one at a time through one supervised process', async () => {
     const worker = new FakeUtility();
     const supervisor = new RasterUtilitySupervisor(() => worker);

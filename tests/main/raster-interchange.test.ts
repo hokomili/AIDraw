@@ -91,7 +91,10 @@ describe('standalone raster interchange', () => {
     expect(image).toMatchObject({ width: 16, height: 24, sourceWidth: 16, sourceHeight: 24 });
     const asset = document.assets[image.assetId];
     expect(asset).toMatchObject({ mimeType: 'image/jpeg', byteLength: 948, sha256: fixtureSha256, data: bytes.toString('base64') });
-    await expect(validateInlineDocumentAsset(asset)).resolves.toBeUndefined();
+    await expect(validateInlineDocumentAsset(asset, async (source, expected) => {
+      const decoded = await loadImage(source);
+      expect({ width: decoded.width, height: decoded.height }).toEqual({ width: expected.width, height: expected.height });
+    })).resolves.toBeUndefined();
 
     const nativePath = await writeNativeDocument(join(directory, 'orientation-roundtrip'), document, '0.1.0-alpha.1');
     const reopened = (await readNativeDocument(nativePath)).document;

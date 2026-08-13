@@ -40,13 +40,14 @@ export class EngineRuntime {
 
   constructor(private readonly options: EngineRuntimeOptions) {
     const { userDataPath, appVersion } = options;
+    this.rasterUtilities = new RasterUtilitySupervisor();
+    this.generationUtilities = new RasterUtilitySupervisor();
     this.service = new DocumentService(
       new RecoveryJournal(join(userDataPath, 'recovery')),
       appVersion,
       new TransactionTraceStore(join(userDataPath, 'traces')),
+      (bytes, expected) => this.rasterUtilities.validateImage(bytes, expected),
     );
-    this.rasterUtilities = new RasterUtilitySupervisor();
-    this.generationUtilities = new RasterUtilitySupervisor();
     this.providerCredentials = new ProviderCredentialStore(join(userDataPath, 'credentials', 'generation.json'));
     this.generationManager = new GenerationManager(
       this.service,

@@ -13,6 +13,8 @@ import {
   assertObservationUtilityResponse,
   assertQuantizeUtilityResponse,
   assertQuantizeUtilityParameters,
+  assertValidateImageUtilityResponse,
+  MAX_IMAGE_VALIDATION_UTILITY_SOURCE_BYTES,
   validateImportUtilityResponse,
   MAX_QUANTIZE_UTILITY_SOURCE_BYTES,
   type ExportUtilityRequest,
@@ -21,7 +23,15 @@ import {
   type UtilityContainmentProbeRequest,
   type UtilityRequest,
   type UtilityResponse,
+  type ValidateImageUtilityRequest,
 } from './utility-contract';
+import {
+  displayImageDimensions,
+  inspectImageHeader,
+  MAX_INLINE_IMAGE_DIMENSION,
+  MAX_INLINE_IMAGE_PIXELS,
+  type ExpectedDecodedImage,
+} from './transaction-policy';
 import type { SpriteSheetSliceOptions } from '../common/sprite-sheet';
 import type { ObservationRequest } from './capture-observation';
 import type { GeneratedAcceptancePreparation, GeneratedOutput, GenerationRequest } from '../common/generation';
@@ -116,6 +126,37 @@ export class RasterUtilitySupervisor {
   private stopped = false;
 
   constructor(private readonly fork: UtilityFork = electronUtilityFork) {}
+
+  validateImage(
+    encoded: Buffer,
+    expected: ExpectedDecodedImage,
+    control: { signal?: AbortSignal; timeoutMs?: number } = {},
+  ): Promise<void> {
+    try {
+      if (encoded.byteLength > MAX_IMAGE_VALIDATION_UTILITY_SOURCE_BYTES) throw new Error('Image validation utility source exceeds the native binary-entry limit.');
+      const header = inspectImageHeader(encoded);
+      const display = displayImageDimensions(header);
+      if (expected.mimeType !== header.mimeType || expected.width !== display.width || expected.height !== display.height) {
+        throw new Error('Image validation utility request disagrees with its source header.');
+      }
+      if (display.width > MAX_INLINE_IMAGE_DIMENSION || display.height > MAX_INLINE_IMAGE_DIMENSION || display.width * display.height > MAX_INLINE_IMAGE_PIXELS) {
+        throw new Error('Image validation utility source exceeds the image safety limit.');
+      }
+    } catch (error) {
+      return Promise.reject(error instanceof Error ? error : new Error(String(error)));
+    }
+    const request: ValidateImageUtilityRequest = {
+      id: createId('utility'),
+      kind: 'validate-image',
+      encodedBase64: encoded.toString('base64'),
+      mimeType: expected.mimeType,
+      width: expected.width,
+      height: expected.height,
+    };
+    return this.enqueue(request, control).then((response) => {
+      if (response.kind !== 'validate-image') throw new Error('Raster utility returned the wrong image-validation result kind.');
+    });
+  }
 
   quantizeImage(
     encoded: Buffer,
@@ -531,6 +572,7 @@ export class RasterUtilitySupervisor {
     if (response.ok) {
       try {
         if (response.kind !== task.request.kind) throw new Error('Raster utility returned the wrong result kind.');
+        if (task.request.kind === 'validate-image') assertValidateImageUtilityResponse(task.request, response);
         if (task.request.kind === 'quantize-image') assertQuantizeUtilityResponse(task.request, response);
         if (task.request.kind === 'export-document') assertExportUtilityResponse(task.request, response);
         if (task.request.kind === 'capture-observation') assertObservationUtilityResponse(task.request, response);
