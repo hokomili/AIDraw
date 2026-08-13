@@ -294,6 +294,27 @@ describe('animated pixel import', () => {
     const sheet = await exportDocument(document, 'sprite-sheet'); const decodedSheet = UPNG.decode(Uint8Array.from(sheet.data).buffer); expect([decodedSheet.width, decodedSheet.height]).toEqual([4, 1]); expect(Buffer.from(UPNG.toRGBA8(decodedSheet)[0])).toEqual(Buffer.concat(fixture.expectedFrames.map((frame) => Buffer.from(frame)))); const metadata = JSON.parse(sheet.companion!.data.toString()); expect(metadata.meta.frameOrder).toEqual(sprite.frameIds); expect(metadata.meta.size).toEqual({ w: 4, h: 1 });
   });
 
+  it('exports exact partial-alpha normal-layer composites to PNG, APNG, and sprite sheets', async () => {
+    const document = createPixelDocument('sprite', 'Normal composite output'); const sprite = document.pixelAssets[document.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('Expected sprite');
+    sprite.width = 2; sprite.height = 1; document.palette[1].color = '#ff000080'; document.palette[2].color = '#0000ff80';
+    const bottomLayer = sprite.layers[sprite.layerIds[0]]; const bottomCel = Object.values(sprite.cels)[0]; const topLayerId = 'normal-composite-top'; const topCelId = 'normal-composite-top-cel';
+    sprite.layers[topLayerId] = { ...structuredClone(bottomLayer), id: topLayerId, name: 'Top' }; sprite.layerIds.push(topLayerId);
+    sprite.cels[topCelId] = { ...structuredClone(bottomCel), id: topCelId, name: 'Top cel', layerId: topLayerId, chunks: {} };
+    writePixels(bottomCel, [{ x: 0, y: 0, index: 1 }, { x: 1, y: 0, index: 1 }]); writePixels(sprite.cels[topCelId], [{ x: 0, y: 0, index: 2 }]);
+    const expected = Buffer.from([85, 0, 170, 192, 255, 0, 0, 128]);
+    const secondFrameId = 'normal-composite-second-frame'; sprite.frameIds.push(secondFrameId);
+    sprite.frames[secondFrameId] = { ...structuredClone(sprite.frames[sprite.frameIds[0]]), id: secondFrameId, name: 'Frame 2' };
+    sprite.cels['normal-composite-second-bottom-cel'] = { ...structuredClone(bottomCel), id: 'normal-composite-second-bottom-cel', name: 'Second bottom cel', frameId: secondFrameId };
+    sprite.cels['normal-composite-second-top-cel'] = { ...structuredClone(sprite.cels[topCelId]), id: 'normal-composite-second-top-cel', name: 'Second top cel', frameId: secondFrameId };
+
+    const png = await exportDocument(document, 'png'); const decodedPng = UPNG.decode(Uint8Array.from(png.data).buffer);
+    expect(Buffer.from(UPNG.toRGBA8(decodedPng)[0])).toEqual(expected);
+    const apng = decodeApng((await exportDocument(document, 'apng')).data)!;
+    expect(apng.frames.map(({ rgba }) => Buffer.from(rgba))).toEqual([expected, expected]);
+    const sheet = await exportDocument(document, 'sprite-sheet'); const decodedSheet = UPNG.decode(Uint8Array.from(sheet.data).buffer);
+    expect(Buffer.from(UPNG.toRGBA8(decodedSheet)[0])).toEqual(Buffer.concat([expected, expected]));
+  });
+
   it('imports exact GIF local color tables as frame palette overrides', () => {
     const fixture = frameLocalPaletteGif(); const imported = importGifBytes(fixture.bytes, 'Local-palette GIF'); const document = imported.documents[0]; if (document.kind !== 'pixel') throw new Error('Expected pixel'); const sprite = document.pixelAssets[document.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('Expected sprite');
     expect(imported.warnings).toEqual([]); expect([document.palette[1].color, document.palette[2].color]).toEqual(['#010203', '#040506']); expect([sprite.paletteOverrides[sprite.frameIds[1]][1].color, sprite.paletteOverrides[sprite.frameIds[1]][2].color]).toEqual(['#070809', '#0a0b0c']);

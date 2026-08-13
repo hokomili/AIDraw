@@ -71,14 +71,16 @@ export function pixelSpriteRegionPlan(sprite: PixelSprite, source: PixelSpriteRe
   };
 }
 
-function visibleLayers(sprite: PixelSprite, onlyLayerId?: string): Array<{ layer: PixelSprite['layers'][string]; opacity: number }> {
-  const result: Array<{ layer: PixelSprite['layers'][string]; opacity: number }> = [];
-  const visit = (id: string, opacity = 1) => {
+/** Flattens visible leaves in canonical draw order and retains path-wide composite eligibility. */
+export function pixelSpriteVisibleLayers(sprite: PixelSprite, onlyLayerId?: string): Array<{ layer: PixelSprite['layers'][string]; opacity: number; normalBlend: boolean }> {
+  const result: Array<{ layer: PixelSprite['layers'][string]; opacity: number; normalBlend: boolean }> = [];
+  const visit = (id: string, opacity = 1, normalBlend = true) => {
     const layer = sprite.layers[id];
     if (!layer?.visible) return;
     const combined = opacity * layer.opacity;
-    if (layer.type === 'group') for (const childId of layer.childIds ?? []) visit(childId, combined);
-    else result.push({ layer, opacity: combined });
+    const combinedNormalBlend = normalBlend && layer.blendMode === 'normal';
+    if (layer.type === 'group') for (const childId of layer.childIds ?? []) visit(childId, combined, combinedNormalBlend);
+    else result.push({ layer, opacity: combined, normalBlend: combinedNormalBlend });
   };
   if (onlyLayerId) visit(onlyLayerId);
   else for (const id of sprite.layerIds) visit(id);
@@ -131,7 +133,7 @@ export function drawPixelSpriteRegion(
   context.save();
   try {
     context.imageSmoothingEnabled = false;
-    for (const { layer, opacity } of visibleLayers(sprite, options.onlyLayerId)) {
+    for (const { layer, opacity } of pixelSpriteVisibleLayers(sprite, options.onlyLayerId)) {
       if (layer.type !== 'pixel') continue;
       const cel = pixelCelForFrame(sprite, layer.id, frameId);
       if (!cel) continue;

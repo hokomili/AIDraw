@@ -19,7 +19,7 @@ import {
   type PixelTilemap,
   type PixelTileset,
 } from '@aidraw/core';
-import { exactSingleLayerAnimationFrame, exactSingleLayerGifFrame } from '../common/animation-palette';
+import { exactNormalCompositeAnimationFrame, exactSingleLayerGifFrame } from '../common/animation-palette';
 import { splitColorAlpha } from '../common/color';
 import { AIDRAW_PSD_EDITABLE_TEXT_SUFFIX, aidrawPsdLockFields, aidrawPsdTextMatrix } from '../common/psd-text';
 import { MAX_PSD_EXPANDED_LAYER_PIXELS, MAX_PSD_LAYER_RECORDS, assertPsdLayerStructureBudget } from '../common/psd-limits';
@@ -329,7 +329,7 @@ async function raster(document: AIDrawDocument, format: 'png' | 'jpeg' | 'webp',
   if (format === 'png' && document.kind === 'pixel') {
     const sprite = document.pixelAssets[document.activeAssetId];
     if (sprite?.type === 'sprite') {
-      const exact = exactSingleLayerAnimationFrame(document.palette, sprite, sprite.frameIds[0]);
+      const exact = exactNormalCompositeAnimationFrame(document.palette, sprite, sprite.frameIds[0]);
       if (exact) {
         const scaled = nearestNeighborFrame(exact, sprite.width, sprite.height, scale);
         return { data: encodeLosslessRgbaPng(scaled, dimensions.width * scale, dimensions.height * scale), mimeType: 'image/png', extension: 'png', report: { warnings: scaleWarnings(scale), rasterized: [] } };
@@ -859,9 +859,9 @@ async function spriteSheet(document: PixelDocument, sprite: PixelSprite, scale =
     const x = index % columns * frameWidth; const y = Math.floor(index / columns) * frameHeight;
     const key = frames[frameId] ? `${frameId}#${index}` : frameId; frames[key] = { frame: { x, y, w: frameWidth, h: frameHeight }, sourceFrameId: frameId, sourceSize: { w: sprite.width, h: sprite.height }, scale, duration: sprite.frames[frameId]?.durationMs ?? 100 };
   });
-  const firstExact = exactSingleLayerAnimationFrame(document.palette, sprite, frameIds[0]); let exactSheet = firstExact ? new Uint8Array(sheetWidth * sheetHeight * 4) : undefined;
+  const firstExact = exactNormalCompositeAnimationFrame(document.palette, sprite, frameIds[0]); let exactSheet = firstExact ? new Uint8Array(sheetWidth * sheetHeight * 4) : undefined;
   if (exactSheet) for (let index = 0; index < frameIds.length; index += 1) {
-    const frame = index === 0 ? firstExact : exactSingleLayerAnimationFrame(document.palette, sprite, frameIds[index]);
+    const frame = index === 0 ? firstExact : exactNormalCompositeAnimationFrame(document.palette, sprite, frameIds[index]);
     if (!frame) { exactSheet = undefined; break; }
     const scaled = nearestNeighborFrame(frame, sprite.width, sprite.height, scale); const targetX = index % columns * frameWidth; const targetY = Math.floor(index / columns) * frameHeight;
     for (let y = 0; y < frameHeight; y += 1) exactSheet.set(scaled.subarray(y * frameWidth * 4, (y + 1) * frameWidth * 4), ((targetY + y) * sheetWidth + targetX) * 4);
@@ -882,7 +882,7 @@ async function animatedImage(document: PixelDocument, sprite: PixelSprite, forma
   const delays = frameIds.map((frameId) => sprite.frames[frameId]?.durationMs ?? 100); const warnings = animationExportWarnings(sprite, tagId, scale);
   if (format === 'apng') {
     const frames = frameIds.map((frameId) => {
-      const exact = exactSingleLayerAnimationFrame(document.palette, sprite, frameId);
+      const exact = exactNormalCompositeAnimationFrame(document.palette, sprite, frameId);
       const rgba = exact ?? renderSprite(document, sprite, frameId).getContext('2d').getImageData(0, 0, sprite.width, sprite.height).data;
       return nearestNeighborFrame(rgba, sprite.width, sprite.height, scale);
     });

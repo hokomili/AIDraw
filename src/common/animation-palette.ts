@@ -5,6 +5,7 @@ import {
   type PaletteEntry,
   type PixelSprite,
 } from '@aidraw/core';
+import { pixelSpriteVisibleLayers } from './pixel-sprite-render';
 
 interface ColorAssignment {
   color: number;
@@ -169,28 +170,23 @@ interface SingleLayerAnimationFrame {
   indexes: Uint8Array;
 }
 
-/**
- * Resolves the simple single-pixel-layer shape produced by GIF/APNG import.
- * More complex layer composites keep using the established renderer.
- */
-function singleLayerAnimationFrame(
-  palette: PaletteEntry[],
-  sprite: PixelSprite,
-  frameId: string,
-): SingleLayerAnimationFrame | undefined {
-  if (sprite.layerIds.length !== 1 || Object.keys(sprite.layers).length !== 1) return undefined;
-  const layer = sprite.layers[sprite.layerIds[0]];
-  if (!layer || layer.type !== 'pixel' || layer.opacity !== 1 || layer.blendMode !== 'normal') return undefined;
-  const indexes = new Uint8Array(sprite.width * sprite.height);
+function animationFrameColors(palette: PaletteEntry[], sprite: PixelSprite, frameId: string): SingleLayerAnimationFrame['colors'] | undefined {
   const sourcePalette = sprite.paletteOverrides?.[frameId] ?? palette;
   if (sourcePalette.length < 2 || sourcePalette.length > 256) return undefined;
-  const colors = sourcePalette.map(({ color }) => {
+  return sourcePalette.map(({ color }) => {
     const packed = paletteColor(color);
     return [packed >>> 24, packed >>> 16 & 0xff, packed >>> 8 & 0xff, packed & 0xff] as const;
   });
-  if (!layer.visible) return { colors, indexes };
-  const cel = pixelCelForFrame(sprite, layer.id, frameId);
-  if (!cel) return { colors, indexes };
+}
+
+function visitPixelLayerIndexes(
+  sprite: PixelSprite,
+  layerId: string,
+  frameId: string,
+  visit: (index: number, pixel: number) => boolean,
+): boolean {
+  const cel = pixelCelForFrame(sprite, layerId, frameId);
+  if (!cel) return true;
   const chunks = cel.chunks ?? {};
   const writeChunk = (chunk: (typeof chunks)[string]): boolean => {
     if (chunk.x >= sprite.width || chunk.y >= sprite.height || chunk.x + chunk.width <= 0 || chunk.y + chunk.height <= 0) return true;
@@ -199,9 +195,7 @@ function singleLayerAnimationFrame(
       const documentX = chunk.x + x; const documentY = chunk.y + y;
       if (documentX < 0 || documentY < 0 || documentX >= sprite.width || documentY >= sprite.height) continue;
       const index = decoded[y * chunk.width + x] ?? 0;
-      if (!index) continue;
-      if (!colors[index]) return false;
-      indexes[documentY * sprite.width + documentX] = index;
+      if (index && !visit(index, documentY * sprite.width + documentX)) return false;
     }
     return true;
   };
@@ -209,27 +203,104 @@ function singleLayerAnimationFrame(
   if (chunkColumns * chunkRows < Object.keys(chunks).length) {
     for (let chunkY = 0; chunkY < chunkRows; chunkY += 1) for (let chunkX = 0; chunkX < chunkColumns; chunkX += 1) {
       const chunk = chunks[`${chunkX},${chunkY}`];
-      if (chunk && !writeChunk(chunk)) return undefined;
+      if (chunk && !writeChunk(chunk)) return false;
     }
   } else {
-    for (const chunk of Object.values(chunks)) if (!writeChunk(chunk)) return undefined;
+    for (const chunk of Object.values(chunks)) if (!writeChunk(chunk)) return false;
   }
-  return { colors, indexes };
+  return true;
 }
 
 /**
- * Returns raw indexed RGBA for a simple imported animation shape. Avoiding a
- * Canvas readback preserves stored partial-alpha channels during APNG export.
+ * Resolves the simple single-pixel-layer shape produced by GIF/APNG import.
+ * More complex layer composites keep using the established renderer.
  */
-export function exactSingleLayerAnimationFrame(
+function singlePixelLayerAnimationFrame(
+  palette: PaletteEntry[],
+  sprite: PixelSprite,
+  frameId: string,
+  layerId: string,
+): SingleLayerAnimationFrame | undefined {
+  const layer = sprite.layers[layerId];
+  if (!layer || layer.type !== 'pixel') return undefined;
+  const indexes = new Uint8Array(sprite.width * sprite.height);
+  const colors = animationFrameColors(palette, sprite, frameId);
+  if (!colors) return undefined;
+  if (!layer.visible) return { colors, indexes };
+  if (!visitPixelLayerIndexes(sprite, layer.id, frameId, (index, pixel) => {
+    if (!colors[index]) return false;
+    indexes[pixel] = index; return true;
+  })) return undefined;
+  return { colors, indexes };
+}
+
+function singleLayerAnimationFrame(
+  palette: PaletteEntry[],
+  sprite: PixelSprite,
+  frameId: string,
+): SingleLayerAnimationFrame | undefined {
+  if (sprite.layerIds.length !== 1 || Object.keys(sprite.layers).length !== 1) return undefined;
+  const layer = sprite.layers[sprite.layerIds[0]];
+  if (!layer || layer.type !== 'pixel' || layer.opacity !== 1 || layer.blendMode !== 'normal') return undefined;
+  return singlePixelLayerAnimationFrame(palette, sprite, frameId, layer.id);
+}
+
+function roundedRatio(numerator: number, denominator: number): number {
+  return Math.floor((numerator + denominator / 2) / denominator);
+}
+
+function sourceOverPixel(
+  output: Uint8ClampedArray,
+  offset: number,
+  source: readonly [number, number, number, number],
+): void {
+  const sourceAlpha = source[3];
+  if (sourceAlpha === 0) return;
+  if (sourceAlpha === 255 || output[offset + 3] === 0) {
+    output.set(source, offset);
+    return;
+  }
+  const destinationAlpha = output[offset + 3];
+  const inverseSourceAlpha = 255 - sourceAlpha;
+  const alphaNumerator = sourceAlpha * 255 + destinationAlpha * inverseSourceAlpha;
+  for (let channel = 0; channel < 3; channel += 1) {
+    const colorNumerator = source[channel] * sourceAlpha * 255
+      + output[offset + channel] * destinationAlpha * inverseSourceAlpha;
+    output[offset + channel] = roundedRatio(colorNumerator, alphaNumerator);
+  }
+  output[offset + 3] = roundedRatio(alphaNumerator, 255);
+}
+
+/**
+ * Returns deterministic unpremultiplied RGBA for the ordinary normal-composite
+ * pixel subset. Visible nested leaves must retain full opacity and normal blend;
+ * richer composites deliberately keep using the established Canvas renderer.
+ */
+export function exactNormalCompositeAnimationFrame(
   palette: PaletteEntry[],
   sprite: PixelSprite,
   frameId: string,
 ): Uint8ClampedArray | undefined {
-  const frame = singleLayerAnimationFrame(palette, sprite, frameId);
-  if (!frame) return undefined;
+  const visible = pixelSpriteVisibleLayers(sprite);
+  if (visible.some(({ layer, opacity, normalBlend }) => layer.type !== 'pixel' || opacity !== 1 || !normalBlend)) return undefined;
+  const colors = animationFrameColors(palette, sprite, frameId);
+  if (!colors) return undefined;
   const output = new Uint8ClampedArray(sprite.width * sprite.height * 4);
-  frame.indexes.forEach((index, pixel) => { if (index) output.set(frame.colors[index], pixel * 4); });
+  if (visible.length === 1) {
+    if (!visitPixelLayerIndexes(sprite, visible[0].layer.id, frameId, (index, pixel) => {
+      if (!colors[index]) return false;
+      output.set(colors[index], pixel * 4); return true;
+    })) return undefined;
+    return output;
+  }
+  for (const { layer } of visible) {
+    if (!visitPixelLayerIndexes(sprite, layer.id, frameId, (index, pixel) => {
+      const color = colors[index];
+      if (!color || color[3] === 0) return false;
+      sourceOverPixel(output, pixel * 4, color);
+      return true;
+    })) return undefined;
+  }
   return output;
 }
 
