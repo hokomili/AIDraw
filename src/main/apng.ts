@@ -157,6 +157,18 @@ function clearRect(canvas: Uint8ClampedArray, canvasWidth: number, control: Fram
   for (let y = 0; y < control.height; y += 1) canvas.fill(0, ((control.y + y) * canvasWidth + control.x) * 4, ((control.y + y) * canvasWidth + control.x + control.width) * 4);
 }
 
+function validateChunkType(bytes: Buffer, typeOffset: number, chunkOffset: number): string {
+  const typeBytes = bytes.subarray(typeOffset, typeOffset + 4);
+  if (typeBytes.length !== 4 || typeBytes.some((byte) => !((byte >= 0x41 && byte <= 0x5a) || (byte >= 0x61 && byte <= 0x7a)))) throw new Error(`PNG chunk at ${chunkOffset} has an invalid four-letter type code.`);
+  const type = typeBytes.toString('ascii');
+  if (typeBytes[2] >= 0x61) throw new Error(`PNG chunk ${type} at ${chunkOffset} uses the reserved lowercase type bit.`);
+  return type;
+}
+
+function isCriticalChunk(type: string): boolean {
+  return type.charCodeAt(0) >= 0x41 && type.charCodeAt(0) <= 0x5a;
+}
+
 function containsAnimationControl(bytes: Buffer): boolean {
   let offset = 8;
   while (offset + 12 <= bytes.length) {
@@ -175,7 +187,7 @@ export function decodeApng(bytes: Buffer): DecodedApng | undefined {
   let offset = 8; let header: Header | undefined; let declaredFrameCount: number | undefined; let expectedSequence = 0; let sawImageData = false; let imageDataClosed = false; let sawPalette = false; let sawTransparency = false; let sawEnd = false;
   let palette: Uint8Array | undefined; let transparency: Uint8Array | undefined; const defaultImageChunks: Buffer[] = []; const frames: CompressedFrame[] = []; let current: CompressedFrame | undefined;
   while (offset + 12 <= bytes.length) {
-    const chunkOffset = offset; const length = bytes.readUInt32BE(offset); const type = bytes.toString('ascii', offset + 4, offset + 8); const start = offset + 8; const end = start + length;
+    const chunkOffset = offset; const length = bytes.readUInt32BE(offset); const type = validateChunkType(bytes, offset + 4, chunkOffset); const start = offset + 8; const end = start + length;
     if (end + 4 > bytes.length) throw new Error(`PNG chunk ${type} at ${chunkOffset} declares ${length} bytes beyond the ${bytes.length}-byte file boundary.`);
     if ((crc32(bytes.subarray(chunkOffset + 4, end)) >>> 0) !== bytes.readUInt32BE(end)) throw new Error(`PNG chunk ${type} at ${chunkOffset} has an invalid CRC.`);
     const data = bytes.subarray(start, end); offset = end + 4;
@@ -216,7 +228,7 @@ export function decodeApng(bytes: Buffer): DecodedApng | undefined {
     } else if (type === 'IEND') {
       if (length !== 0 || offset !== bytes.length) throw new Error('PNG IEND must be empty and end the file.');
       sawEnd = true; break;
-    }
+    } else if (isCriticalChunk(type)) throw new Error(`APNG contains unsupported critical PNG chunk ${type}.`);
   }
   if (!sawEnd) throw new Error('APNG is missing its final IEND chunk.');
   if (!header) throw new Error('PNG must begin with exactly one 13-byte IHDR chunk.');

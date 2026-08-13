@@ -690,6 +690,18 @@ Focused pinned-Node-24 typecheck/targeted ESLint and **3 files / 57 tests** pass
 
 This checkpoint changes no APNG byte/dimension/frame/aggregate ceiling, animation canvas origin, Adam7/noninterlaced reconstruction, color conversion, canonical sprite/cel/palette schema, transaction, export encoder/layout, MIME policy, source-retention contract, or general static-PNG decoder. It proves one generated fallback-excluded layout plus the named contradictions, not external producers, every legal ancillary ordering, color management, packaged file-dialog/import presentation, broad APNG compatibility, Level 3, RC, or stable-v1 readiness. PIX-14, IO-07, QA-03, and QA-08 remain Working.
 
+## Latest headless APNG chunk-type checkpoint
+
+Headless PIX-14/IO-07/QA-03/QA-08 evidence (2026-08-12): after `acTL` selected the editable-frame parser, every unrecognized PNG chunk was previously ignored. That is correct only for ancillary chunks. A type whose first letter is uppercase is critical, so decoding its surrounding standard chunks while ignoring its required semantics can produce a plausible but incorrect animation. The parser also did not enforce PNG's four-letter ASCII chunk alphabet or the reserved uppercase third type bit.
+
+One parser-local validator now requires every APNG chunk type byte to be `A`–`Z` or `a`–`z` and rejects a lowercase third byte. After all supported PNG/APNG types have been processed, an unrecognized uppercase-first type rejects before pixel conversion; an unrecognized lowercase-first ancillary type remains ignored. The original source buffer is still embedded rather than reconstructed, so an accepted ancillary chunk survives byte-for-byte. Static PNGs without `acTL` still return before this path and remain under the established general raster decoder.
+
+The positive control inserts private ancillary `vpAg` with three data bytes before `acTL` in the generated 2×1 16-bit truecolor fixture. Exact RGBA remains identical, editable import stays 2×1 at 60 ms, and the embedded source equals the mutated bytes. Three CRC-valid matched variants independently reject unknown critical `ABCD`, reserved-third-bit `abcz`, and non-letter `a1Cd` before document creation.
+
+Focused pinned-Node-24 typecheck/targeted ESLint and **3 files / 59 tests** pass. The complete safe gate passes portability for **369 tracked + 76 prospective** paths, TypeScript, full ESLint, and **151 files / 883 tests**. The formal performance gate passes **1/1** at **857.75 MiB** RSS; 5,000 vectors take **21.63 ms**, editable 4K paint **61.38 ms**, cold/warm materialized paint **168.76 / 156.1 ms**, 65,536 addressed tiles **147.3 ms**, map/sprite sparse regions **1.46 / 0.35 ms**, 100,000-object filtering **42.4 ms**, native save **125.49 ms**, PNG export **42.22 ms**, one-million-sample accounting **1.71 ms**, and flood **164.73 ms**. `/private/tmp/aidraw-apng-critical-chunk-performance-gate.json` is temporary diagnostics, not retained release evidence.
+
+This checkpoint changes no known-chunk semantics, CRC/order/default-image/color/frame validation, resource ceiling, canonical state, transaction, export encoder/layout, MIME/source-retention contract, or static-PNG behavior. It proves only one private ancillary type and three malformed/critical mutations, not every ancillary extension, external producers, color management, packaged import presentation, broad APNG/PNG compatibility, Level 3, RC, or stable-v1 readiness. PIX-14, IO-07, QA-03, and QA-08 remain Working.
+
 ## Failure severity and reruns
 
 | Severity | Meaning | Gate effect |

@@ -292,6 +292,23 @@ describe('animated pixel import', () => {
     for (const [name, bytes, message] of cases) expect(() => importApngBytes(bytes, `Invalid APNG ${name}`)).toThrow(message);
   });
 
+  it('ignores a well-formed unknown ancillary APNG chunk while retaining exact source bytes', () => {
+    const fixture = truecolor16TransparencyApng(); const bytes = insertPngChunkBefore(fixture.bytes, 'acTL', 'vpAg', Buffer.from([1, 2, 3]));
+    const decoded = decodeApng(bytes); expect(decoded).toBeTruthy(); expect(Buffer.from(decoded!.frames[0].rgba)).toEqual(Buffer.from(fixture.expected));
+    const imported = importApngBytes(bytes, 'Ancillary APNG')!; const document = imported.documents[0]; if (document.kind !== 'pixel') throw new Error('Expected pixel'); const sprite = document.pixelAssets[document.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('Expected sprite');
+    expect([sprite.width, sprite.height, sprite.frames[sprite.frameIds[0]].durationMs]).toEqual([2, 1, 60]); expect(Object.values(document.assets)[0].data).toBe(bytes.toString('base64'));
+  });
+
+  it('rejects unknown critical and malformed APNG chunk type codes before import', () => {
+    const valid = truecolor16TransparencyApng().bytes;
+    const cases: Array<[string, Buffer, RegExp]> = [
+      ['unknown-critical', insertPngChunkBefore(valid, 'acTL', 'ABCD', Buffer.from([1])), /unsupported critical PNG chunk ABCD/],
+      ['reserved-bit', insertPngChunkBefore(valid, 'acTL', 'abcz', Buffer.alloc(0)), /abcz .* reserved lowercase type bit/],
+      ['non-letter', insertPngChunkBefore(valid, 'acTL', 'a1Cd', Buffer.alloc(0)), /invalid four-letter type code/],
+    ];
+    for (const [name, bytes, message] of cases) expect(() => importApngBytes(bytes, `Invalid APNG ${name}`)).toThrow(message);
+  });
+
   it('composites GIF background disposal before the following frame', () => {
     const encoder = GIFEncoder(); const palette = [[0, 0, 0], [255, 107, 122], [155, 227, 194], [57, 120, 184]];
     encoder.writeFrame(Uint8Array.from([1, 0, 0]), 3, 1, { palette, transparent: true, transparentIndex: 0, delay: 60, dispose: 0 }); encoder.writeFrame(Uint8Array.from([0, 2, 0]), 3, 1, { palette, transparent: true, transparentIndex: 0, delay: 70, dispose: 2 }); encoder.writeFrame(Uint8Array.from([0, 0, 3]), 3, 1, { palette, transparent: true, transparentIndex: 0, delay: 80 }); encoder.finish();
