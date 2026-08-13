@@ -853,11 +853,14 @@ export function assertExportUtilityResponse(
   assertUtilityAggregateByteLimit(decodedLengths, MAX_EXPORT_UTILITY_TOTAL_DECODED_BYTES, 'Raster utility export result');
 }
 
-/** Apply the established document migration/schema gate before imported output reaches callers. */
-export function validateImportUtilityResponse(
+/**
+ * Apply the exact transfer envelope before an import result crosses the utility
+ * process boundary. The main process repeats this check and remains authority.
+ */
+export function assertImportUtilityResponseEnvelope(
   request: ImportUtilityRequest,
   value: unknown,
-): { documents: AIDrawDocument[]; warnings: string[] } {
+): { documents: unknown[]; warnings: string[] } {
   if (!value || typeof value !== 'object') throw new Error('Raster utility returned a malformed import result.');
   const response = value as { kind?: unknown; documents?: unknown; warnings?: unknown };
   if (response.kind !== request.kind || !Array.isArray(response.documents)) throw new Error('Raster utility returned a malformed import result.');
@@ -871,6 +874,15 @@ export function validateImportUtilityResponse(
     maxNodes: MAX_IMPORT_UTILITY_NODES,
     maxDepth: MAX_IMPORT_UTILITY_DEPTH,
   });
+  return { documents: response.documents, warnings: response.warnings };
+}
+
+/** Apply the established document migration/schema gate before imported output reaches callers. */
+export function validateImportUtilityResponse(
+  request: ImportUtilityRequest,
+  value: unknown,
+): { documents: AIDrawDocument[]; warnings: string[] } {
+  const response = assertImportUtilityResponseEnvelope(request, value);
   const documents: AIDrawDocument[] = [];
   for (const document of response.documents) {
     try {

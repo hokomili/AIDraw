@@ -5,7 +5,7 @@ import { crc32, deflateSync } from 'node:zlib';
 import { PDFDocument, concatTransformationMatrix, drawObject, popGraphicsState, pushGraphicsState, rgb } from 'pdf-lib';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createCanvas, type Canvas } from '@napi-rs/canvas';
-import { readTileAt, type PixelTilemap } from '@aidraw/core';
+import { MAX_ILLUSTRATION_TEXT_LENGTH, readTileAt, type PixelTilemap } from '@aidraw/core';
 
 vi.mock('electron', () => ({ nativeImage: { createFromBuffer: () => ({ isEmpty: () => true }) } }));
 const decoderBoundary = vi.hoisted(() => ({ calls: 0, reportedWidthOffset: 0 }));
@@ -32,7 +32,7 @@ vi.mock('ag-psd', async (importOriginal) => {
     },
   };
 });
-const pdfBoundary = vi.hoisted((): { mode: 'real' | 'page-count' | 'page-dimension' | 'expanded'; getDocumentCalls: number; getPageCalls: number; renderCalls: number; cleanupCalls: number; destroyCalls: number; cleanupFailure: boolean; destroyFailure: boolean; events: string[] } => ({ mode: 'real', getDocumentCalls: 0, getPageCalls: 0, renderCalls: 0, cleanupCalls: 0, destroyCalls: 0, cleanupFailure: false, destroyFailure: false, events: [] }));
+const pdfBoundary = vi.hoisted((): { mode: 'real' | 'page-count' | 'page-dimension' | 'expanded'; getDocumentCalls: number; getPageCalls: number; renderCalls: number; cleanupCalls: number; destroyCalls: number; cleanupFailure: boolean; destroyFailure: boolean; events: string[]; textItems?: Array<{ str: string; width: number; height: number; transform: number[]; fontName: string; dir: 'ltr'; hasEOL: boolean }> } => ({ mode: 'real', getDocumentCalls: 0, getPageCalls: 0, renderCalls: 0, cleanupCalls: 0, destroyCalls: 0, cleanupFailure: false, destroyFailure: false, events: [] }));
 vi.mock('pdfjs-dist/legacy/build/pdf.mjs', async (importOriginal) => {
   const original = await importOriginal<typeof import('pdfjs-dist/legacy/build/pdf.mjs')>();
   return {
@@ -48,6 +48,7 @@ vi.mock('pdfjs-dist/legacy/build/pdf.mjs', async (importOriginal) => {
               return new Proxy(page, {
                 get(pageTarget, pageProperty) {
                   if (pageProperty === 'render') return (...renderArgs: Parameters<typeof pageTarget.render>) => { pdfBoundary.renderCalls += 1; pdfBoundary.events.push(`render:${pageNumber}`); return pageTarget.render(...renderArgs); };
+                  if (pageProperty === 'getTextContent' && pdfBoundary.textItems) return async () => ({ items: pdfBoundary.textItems!, styles: Object.create(null), lang: null }) as unknown as Awaited<ReturnType<typeof pageTarget.getTextContent>>;
                   if (pageProperty === 'cleanup') return (...cleanupArgs: Parameters<typeof pageTarget.cleanup>) => { pdfBoundary.cleanupCalls += 1; pdfBoundary.events.push(`cleanup:${pageNumber}`); const cleaned = pageTarget.cleanup(...cleanupArgs); if (pdfBoundary.cleanupFailure) throw new Error('Injected PDF page cleanup failure.'); return cleaned; };
                   const value = Reflect.get(pageTarget, pageProperty, pageTarget); return typeof value === 'function' ? value.bind(pageTarget) : value;
                 },
@@ -85,9 +86,10 @@ vi.mock('pdfjs-dist/legacy/build/pdf.mjs', async (importOriginal) => {
   };
 });
 
-import { importDocument, MAX_STRUCTURED_IMPORT_BYTES, renderPdfPagePng } from '../../src/main/import-document';
+import { accountPdfEditableText, importDocument, MAX_STRUCTURED_IMPORT_BYTES, renderPdfPagePng } from '../../src/main/import-document';
 import { inspectImageHeader } from '../../src/main/transaction-policy';
 import { runImportUtilityRequest } from '../../src/main/utility-import';
+import { MAX_IMPORT_UTILITY_SERIALIZED_BYTES } from '../../src/main/utility-contract';
 
 const temporaryDirectories: string[] = [];
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
@@ -408,7 +410,7 @@ async function temporaryDirectory(): Promise<string> {
 afterEach(async () => {
   decoderBoundary.calls = 0; decoderBoundary.reportedWidthOffset = 0;
   psdBoundary.calls = 0; psdBoundary.reportedWidthOffset = 0; psdBoundary.truncateCompositeBytes = false; psdBoundary.totalMemoryLimit = undefined;
-  pdfBoundary.mode = 'real'; pdfBoundary.getDocumentCalls = 0; pdfBoundary.getPageCalls = 0; pdfBoundary.renderCalls = 0; pdfBoundary.cleanupCalls = 0; pdfBoundary.destroyCalls = 0; pdfBoundary.cleanupFailure = false; pdfBoundary.destroyFailure = false; pdfBoundary.events = [];
+  pdfBoundary.mode = 'real'; pdfBoundary.getDocumentCalls = 0; pdfBoundary.getPageCalls = 0; pdfBoundary.renderCalls = 0; pdfBoundary.cleanupCalls = 0; pdfBoundary.destroyCalls = 0; pdfBoundary.cleanupFailure = false; pdfBoundary.destroyFailure = false; pdfBoundary.events = []; pdfBoundary.textItems = undefined;
   await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
 
@@ -653,6 +655,29 @@ describe('untrusted import limits', () => {
     const imported = await runImportUtilityRequest({ id: 'minimal-pdf', kind: 'import-document', filePath, pixelMode: false }); const document = imported.documents[0]; if (document.kind !== 'illustration') throw new Error('Expected illustration document');
     expect(document.artboard).toMatchObject({ width: 16, height: 12 }); expect(imported.warnings).toEqual([expect.stringContaining('faithful raster fallback')]);
     expect(pdfBoundary).toMatchObject({ getDocumentCalls: 1, getPageCalls: 1, renderCalls: 1, cleanupCalls: 1, destroyCalls: 1 });
+  });
+
+  it('accounts PDF editable text against existing canonical and transfer limits without allocating the transfer ceiling', () => {
+    expect(accountPdfEditableText(0, '\u0000')).toBe(8);
+    expect(accountPdfEditableText(MAX_IMPORT_UTILITY_SERIALIZED_BYTES - 3, 'x')).toBe(MAX_IMPORT_UTILITY_SERIALIZED_BYTES);
+    expect(() => accountPdfEditableText(MAX_IMPORT_UTILITY_SERIALIZED_BYTES - 2, 'x')).toThrow('512 MiB imported-document transfer limit');
+    expect(() => accountPdfEditableText(0, 'x'.repeat(MAX_ILLUSTRATION_TEXT_LENGTH + 1))).toThrow("canonical illustration limits");
+  });
+
+  it('admits only canonical PDF extracted text before direct import returns', async () => {
+    const directory = await temporaryDirectory(); const filePath = join(directory, 'canonical-text.pdf'); await writeFile(filePath, await minimalPdf());
+    const item = (str: string, width = 100) => ({ str, width, height: 12, transform: [12, 0, 0, 12, 1, 11], fontName: 'sans-serif', dir: 'ltr' as const, hasEOL: false });
+    pdfBoundary.textItems = [item('x'.repeat(MAX_ILLUSTRATION_TEXT_LENGTH))];
+    const imported = await runImportUtilityRequest({ id: 'pdf-canonical-text-boundary', kind: 'import-document', filePath, pixelMode: false });
+    const document = imported.documents[0]; if (document.kind !== 'illustration') throw new Error('Expected illustration document.');
+    const extracted = Object.values(document.objects).find((object) => object.type === 'text');
+    expect(extracted).toMatchObject({ type: 'text', text: 'x'.repeat(MAX_ILLUSTRATION_TEXT_LENGTH), width: 100, height: 12 });
+
+    pdfBoundary.textItems = [item('x'.repeat(MAX_ILLUSTRATION_TEXT_LENGTH + 1))];
+    await expect(runImportUtilityRequest({ id: 'pdf-overlong-text', kind: 'import-document', filePath, pixelMode: false })).rejects.toThrow("PDF extracted text exceeds AIDraw's canonical illustration limits.");
+    pdfBoundary.textItems = [item('finite text', Number.POSITIVE_INFINITY)]; pdfBoundary.cleanupFailure = true;
+    await expect(runImportUtilityRequest({ id: 'pdf-nonfinite-text-geometry', kind: 'import-document', filePath, pixelMode: false })).rejects.toThrow("PDF extracted text exceeds AIDraw's canonical illustration limits.");
+    expect(pdfBoundary).toMatchObject({ getDocumentCalls: 3, getPageCalls: 3, renderCalls: 3, cleanupCalls: 3, destroyCalls: 3 });
   });
 
   it('releases a PDF page canvas after both successful encoding and render failure', async () => {

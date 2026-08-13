@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { createIllustrationDocument } from '@aidraw/core';
+import { assertImportUtilityResponseEnvelope, type ImportUtilityRequest } from '@main/utility-contract';
 import {
   MAX_EXPORT_UTILITY_TOTAL_DECODED_BYTES,
   MAX_UTILITY_ERROR_MESSAGE_BYTES,
@@ -54,6 +56,18 @@ describe('utility-process result resource policy', () => {
       'Export fixture',
     )).toThrow(`${MAX_EXPORT_UTILITY_TOTAL_DECODED_BYTES}-byte aggregate limit`);
     expect(() => assertUtilityAggregateByteLimit([-1], 1, 'Export fixture')).toThrow('invalid byte length');
+  });
+
+  it('preflights imported documents and warnings with the main-owned envelope before transfer', () => {
+    const request: ImportUtilityRequest = { id: 'pre-transfer-import', kind: 'import-document', filePath: '/approved/source.pdf', pixelMode: false };
+    const canonical = createIllustrationDocument('Pre-transfer import');
+    expect(assertImportUtilityResponseEnvelope(request, { kind: request.kind, documents: [canonical], warnings: ['Raster fallback retained.'] })).toEqual({ documents: [canonical], warnings: ['Raster fallback retained.'] });
+
+    const cyclic: Record<string, unknown> = {}; cyclic.self = cyclic;
+    expect(() => assertImportUtilityResponseEnvelope(request, { kind: request.kind, documents: [cyclic], warnings: [] })).toThrow('cyclic and cannot be serialized');
+    let deep: Record<string, unknown> = {};
+    for (let index = 0; index < 129; index += 1) deep = { next: deep };
+    expect(() => assertImportUtilityResponseEnvelope(request, { kind: request.kind, documents: [deep], warnings: [] })).toThrow('128-level depth limit');
   });
 
   it('bounds UTF-8 text and truncates worker errors without splitting characters', () => {

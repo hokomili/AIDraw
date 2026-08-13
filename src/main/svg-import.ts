@@ -6,6 +6,7 @@ import {
   IDENTITY_TRANSFORM,
   createId,
   createIllustrationDocument,
+  MAX_ILLUSTRATION_TEXT_LENGTH,
   nowIso,
   validateDocument,
   type BlendMode,
@@ -52,7 +53,6 @@ const MAX_ILLUSTRATION_IMAGE_SIZE = 1_000_000;
 const MAX_CANONICAL_ENTITY_NAME_LENGTH = 200;
 const MAX_CANONICAL_COLOR_SOURCE_LENGTH = 256;
 const MAX_CANONICAL_GRADIENT_STOPS = 32;
-const MAX_CANONICAL_TEXT_LENGTH = 100_000;
 const MAX_CANONICAL_TEXT_RANGES = 100_000;
 const NON_FINITE_SVG_TRANSFORM_ERROR = 'SVG transform produces non-finite canonical geometry.';
 const INVALID_CANONICAL_SVG_ERROR = "SVG import produced content outside AIDraw's canonical illustration limits.";
@@ -570,7 +570,7 @@ export function importEditableSvg(source: string, name: string): SvgImportResult
       const ranges: TextStyleRange[] = []; let content = '';
       const appendText = (text: string, rangeStyle: Style) => {
         if (!text) return;
-        if (content.length + text.length > MAX_CANONICAL_TEXT_LENGTH || ranges.length >= MAX_CANONICAL_TEXT_RANGES) throw new Error(INVALID_CANONICAL_SVG_ERROR);
+        if (content.length + text.length > MAX_ILLUSTRATION_TEXT_LENGTH || ranges.length >= MAX_CANONICAL_TEXT_RANGES) throw new Error(INVALID_CANONICAL_SVG_ERROR);
         const start = content.length; content += text; const fontSize = Math.max(1, finite(rangeStyle['font-size'], 48)); const fill = rangeStyle.fill === 'currentColor' ? rangeStyle.color ?? '#000000' : rangeStyle.fill;
         ranges.push({ start, end: content.length, fontFamily: boundedFontFamily(rangeStyle['font-family']), fontSize, fontWeight: Math.max(1, finite(rangeStyle['font-weight'], 400)), fontStyle: rangeStyle['font-style'] === 'italic' ? 'italic' : 'normal', color: canonicalColor(fill), letterSpacing: finite(rangeStyle['letter-spacing']), underline: rangeStyle['text-decoration']?.includes('underline') });
       };

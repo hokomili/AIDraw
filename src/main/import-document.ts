@@ -9,12 +9,14 @@ import { XMLParser } from 'fast-xml-parser';
 import {
   HUMAN_ACTOR,
   IDENTITY_TRANSFORM,
+  MAX_ILLUSTRATION_TEXT_LENGTH,
   createId,
   createIllustrationDocument,
   createPixelDocument,
   createPixelSprite,
   createPixelTileset,
   nowIso,
+  validateDocument,
   writePixels,
   writeTiles,
   type AIDrawDocument,
@@ -39,7 +41,8 @@ import { aidrawPsdTextGeometry, aidrawPsdTextObjectName, psdLayerHasPartialLock,
 import { MAX_PSD_EXPANDED_LAYER_PIXELS, MAX_PSD_LAYER_NESTING_DEPTH, MAX_PSD_LAYER_RECORDS } from '../common/psd-limits';
 import { displayImageDimensions, inspectImageHeader, MAX_INLINE_IMAGE_DIMENSION, MAX_INLINE_IMAGE_PIXELS } from './transaction-policy';
 import { importEditableSvg } from './svg-import';
-import { MAX_IMPORT_UTILITY_DOCUMENTS } from './utility-contract';
+import { MAX_IMPORT_UTILITY_DOCUMENTS, MAX_IMPORT_UTILITY_SERIALIZED_BYTES } from './utility-contract';
+import { jsonStringSerializedByteLength } from './utility-resource-policy';
 
 initializePsdCanvas(createCanvas as unknown as (width: number, height: number) => HTMLCanvasElement);
 
@@ -54,6 +57,8 @@ const MAX_SPRITE_SHEET_EXPANDED_PIXELS = 64 * 1024 * 1024;
 const MAX_PSD_DECODED_BYTES = (MAX_PSD_EXPANDED_LAYER_PIXELS + MAX_INLINE_IMAGE_PIXELS) * 4;
 const MAX_PDF_PAGES = MAX_IMPORT_UTILITY_DOCUMENTS;
 const MAX_PDF_EXPANDED_PIXELS = 64 * 1024 * 1024;
+const INVALID_CANONICAL_PDF_ERROR = "PDF extracted text exceeds AIDraw's canonical illustration limits.";
+const PDF_TEXT_TRANSFER_LIMIT_ERROR = `PDF editable text exceeds the ${Math.floor(MAX_IMPORT_UTILITY_SERIALIZED_BYTES / 1024 / 1024)} MiB imported-document transfer limit.`;
 const MAX_TILED_LAYERS = 4_096;
 const MAX_TILED_DEPTH = 64;
 const MAX_TILED_LAYER_CELLS = 4_194_304;
@@ -78,6 +83,19 @@ export async function renderPdfPagePng(
     canvas.width = 1;
     canvas.height = 1;
   }
+}
+
+export function accountPdfEditableText(serializedBytes: number, text: string): number {
+  if (!Number.isSafeInteger(serializedBytes) || serializedBytes < 0 || serializedBytes > MAX_IMPORT_UTILITY_SERIALIZED_BYTES) throw new Error(PDF_TEXT_TRANSFER_LIMIT_ERROR);
+  if (text.length > MAX_ILLUSTRATION_TEXT_LENGTH) throw new Error(INVALID_CANONICAL_PDF_ERROR);
+  const itemBytes = jsonStringSerializedByteLength(text);
+  if (itemBytes > MAX_IMPORT_UTILITY_SERIALIZED_BYTES - serializedBytes) throw new Error(PDF_TEXT_TRANSFER_LIMIT_ERROR);
+  return serializedBytes + itemBytes;
+}
+
+function validateImportedPdfDocument(document: AIDrawDocument): AIDrawDocument {
+  try { return validateDocument(document); }
+  catch { throw new Error(INVALID_CANONICAL_PDF_ERROR); }
 }
 
 function safeJson(bytes: Buffer, label: string): Record<string, any> {
@@ -689,7 +707,7 @@ async function importPdf(bytes: Buffer, name: string, pixelMode: boolean): Promi
     for (let pageNumber = 1; pageNumber <= source.numPages; pageNumber += 1) {
       const page = await source.getPage(pageNumber); acquiredPages.push(page); const viewport = page.getViewport({ scale: 1 }); const width = Math.max(1, Math.ceil(viewport.width)); const height = Math.max(1, Math.ceil(viewport.height)); assertImageDimensions(width, height, `PDF page ${pageNumber}`); expandedPixels += width * height; if (expandedPixels > MAX_PDF_EXPANDED_PIXELS) throw new Error('PDF pages exceed the 64-megapixel expanded import budget.'); pages.push({ pageNumber, page, viewport, width, height });
     }
-    let extractedTextItems = 0;
+    let extractedTextItems = 0; let extractedTextSerializedBytes = 0;
     for (const { pageNumber, page, viewport, width, height } of pages) {
       let pageFailed = false; let pageError: unknown;
       try {
@@ -697,10 +715,10 @@ async function importPdf(bytes: Buffer, name: string, pixelMode: boolean): Promi
         const pageName = source.numPages > 1 ? `${name} · Page ${pageNumber}` : name; const imported = await importRaster(png, pageName, 'image/png', pixelMode); const document = imported.documents[0];
         if (document.kind === 'illustration') {
           const timestamp = nowIso(); const textLayer: IllustrationLayer = { id: createId('layer'), revision: 0, name: 'Editable PDF text (hidden)', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, interchangeRole: 'pdf-extracted-text', visible: false, locked: false, opacity: 1, blendMode: 'normal', type: 'vector', objectIds: [] }; const text = await page.getTextContent(); extractedTextItems += text.items.length; if (extractedTextItems > 250_000) throw new Error('PDF exceeds the 250,000-item editable-text extraction limit.');
-          for (const item of text.items) if ('str' in item && item.str) { const fontSize = Math.max(1, Math.hypot(item.transform[0], item.transform[1])); const object: TextObject = { ...entityBase(item.str.slice(0, 32), textLayer.id), type: 'text', text: item.str, width: Math.max(1, item.width), height: Math.max(1, item.height || fontSize), align: 'left', lineHeight: 1.2, ranges: [{ start: 0, end: item.str.length, fontFamily: item.fontName || 'sans-serif', fontSize, fontWeight: 400, fontStyle: 'normal', color: '#000000', letterSpacing: 0 }] }; object.transform.x = item.transform[4]; object.transform.y = viewport.height - item.transform[5] - fontSize; document.objects[object.id] = object; textLayer.objectIds.push(object.id); }
+          for (const item of text.items) if ('str' in item && item.str) { extractedTextSerializedBytes = accountPdfEditableText(extractedTextSerializedBytes, item.str); const fontSize = Math.max(1, Math.hypot(item.transform[0], item.transform[1])); const object: TextObject = { ...entityBase(item.str.slice(0, 32), textLayer.id), type: 'text', text: item.str, width: Math.max(1, item.width), height: Math.max(1, item.height || fontSize), align: 'left', lineHeight: 1.2, ranges: [{ start: 0, end: item.str.length, fontFamily: item.fontName || 'sans-serif', fontSize, fontWeight: 400, fontStyle: 'normal', color: '#000000', letterSpacing: 0 }] }; object.transform.x = item.transform[4]; object.transform.y = viewport.height - item.transform[5] - fontSize; document.objects[object.id] = object; textLayer.objectIds.push(object.id); }
           if (textLayer.objectIds.length) { document.layers[textLayer.id] = textLayer; document.layerIds.push(textLayer.id); }
         }
-        documents.push(document);
+        documents.push(validateImportedPdfDocument(document));
       } catch (error) { pageFailed = true; pageError = error; }
       cleanupPage(page);
       if (pageFailed) throw pageError;

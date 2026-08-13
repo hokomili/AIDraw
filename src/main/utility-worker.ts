@@ -2,6 +2,7 @@ import { quantizeImageToPalette } from './quantize-image';
 import { runImportUtilityRequest } from './utility-import';
 import {
   assertNormalizeGenerationAcceptanceInput,
+  assertImportUtilityResponseEnvelope,
   assertQuantizeUtilityParameters,
   assertValidateImageUtilityRequest,
   isGenerationProgressUtilityResponse,
@@ -211,6 +212,7 @@ process.parentPort.on('message', (event) => {
         process.parentPort!.postMessage({ id, ok: true, kind: request.kind, artifact: serialized } satisfies UtilityResponse);
       } else if (request.kind === 'import-document') {
         const imported = await runImportUtilityRequest(request);
+        assertImportUtilityResponseEnvelope(request, { kind: request.kind, documents: imported.documents, warnings: imported.warnings });
         const returned = request.e2eResultFault
           ? createFnd09InvalidImportResult(imported, request.e2eResultFault)
           : imported;

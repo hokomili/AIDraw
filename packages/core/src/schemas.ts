@@ -51,6 +51,7 @@ const OperationKindSchema = z.enum([
 const IdSchema = z.string().min(1);
 const ExpectedRevisionSchema = z.number().int().nonnegative().optional();
 const FiniteNumberSchema = z.number().refine(Number.isFinite, 'Expected a finite number');
+export const MAX_ILLUSTRATION_TEXT_LENGTH = 100_000;
 const ColorInputSchema = z.string().regex(/^#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?$/);
 const BlendModeInputSchema = z.enum([
   'normal', 'multiply', 'screen', 'overlay', 'darken', 'lighten', 'color-dodge', 'color-burn',
@@ -310,8 +311,8 @@ const IllustrationObjectBaseInputShape = {
   shadow: z.object({ color: ColorInputSchema, blur: FiniteNumberSchema.min(0).max(4_096), offsetX: FiniteNumberSchema, offsetY: FiniteNumberSchema }).strict().optional(),
 };
 const TextStyleRangeInputSchema = z.object({
-  start: FiniteNumberSchema.int().nonnegative().max(100_000),
-  end: FiniteNumberSchema.int().nonnegative().max(100_000),
+  start: FiniteNumberSchema.int().nonnegative().max(MAX_ILLUSTRATION_TEXT_LENGTH),
+  end: FiniteNumberSchema.int().nonnegative().max(MAX_ILLUSTRATION_TEXT_LENGTH),
   fontFamily: z.string().trim().min(1).max(200),
   fontSize: FiniteNumberSchema.min(1).max(500),
   fontWeight: FiniteNumberSchema.int().min(100).max(900),
@@ -351,7 +352,7 @@ const IllustrationObjectInputSchema = z.discriminatedUnion('type', [
   z.object({
     ...IllustrationObjectBaseInputShape,
     type: z.literal('text'),
-    text: z.string().max(100_000),
+    text: z.string().max(MAX_ILLUSTRATION_TEXT_LENGTH),
     width: FiniteNumberSchema.min(0).max(1_000_000),
     height: FiniteNumberSchema.min(0).max(1_000_000),
     align: z.enum(['left', 'center', 'right', 'justify']),
