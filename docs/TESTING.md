@@ -538,6 +538,18 @@ Focused pinned-Node-24 typecheck/ESLint and 6 files / 22 tests pass. The complet
 
 This checkpoint changes no canonical chunk/GID/transform/schema/Tiled bytes. Cell art still scales into the canonical map cell rectangle; native-size tall-tile overhang/offset and tileset alignment are not implemented. Non-square diagonal-transform geometry, infinite-map viewport expansion beyond nominal map bounds, packaged layout/pointer/visual acceptance, external Tiled visual equivalence, broad compatibility, Level 3, RC, and stable-v1 readiness remain unclaimed. MAP-08 stays Working.
 
+## Latest headless map-object raster-parity checkpoint
+
+Headless MAP-09 evidence (2026-08-12): visible map-object layers are canonical map content, but `renderTilemap` previously skipped them all. The interactive editor therefore showed rectangles, ellipses, polygons, and polylines that authenticated headless observation and production raster export omitted. One shared overlay renderer now owns those paths and AIDraw's fill/stroke style. The editor additionally requests advisory selection handles; headless surfaces do not. Lock state continues to constrain editing rather than visibility.
+
+The headless layer loop renders object layers in their canonical flattened position, so below-tile objects can be covered and above-tile objects can cover; hidden layers are omitted and nested layer opacity remains multiplicative. Orthogonal objects use canonical coordinates. Isometric objects use the same shared affine projection as the editor. Headless observation and export use canonical pan zero, so authored parallax contributes no displacement; viewport-specific parallax remains an interactive concern. Rendering visible canonical content was chosen over preserving an editor-only decoration because the latter made raster observation and export disagree with the document users edited.
+
+Pure coverage proves exact rectangle/ellipse/polygon/polyline path, style, closure, dash, and selected-handle behavior without depending on a browser. Production coverage proves an orthogonal object above a tile changes the expected pixel, moving it below the tile or hiding it restores the exact base raster, an object-only layer renders nonempty output, and ordinary PNG export matches the headless pixels. A separate one-cell 8×4 isometric case proves shared aspect/projection and 50% cumulative layer opacity, while its hidden twin is exactly transparent. Source coverage binds the same helper to both renderers and keeps the headless branch inside the visible flattened layer loop.
+
+Focused pinned-Node-24 typecheck/ESLint and 5 files / 23 tests pass. The complete safe gate passes portability for 369 tracked plus 62 prospective paths, TypeScript, full ESLint, and 142 files / 835 tests. The formal performance gate passes 1/1 at 817.33 MiB RSS growth; the one-million-cell flood takes 172.37 ms, the 65,536-tile orthogonal render takes 38.51 ms, native save takes 127.82 ms, and every established metric remains under budget. `/private/tmp/aidraw-map-object-render-performance-gate.json` is temporary self-authored diagnostics, not retained release evidence. The non-certifying audit remains Level 3 `BLOCKED` 2 and stable v1 `BLOCKED` 5, with 25 unfinished P0, 57 selected-v1 P1 rows unclosed, and 144 dirty paths.
+
+This checkpoint changes no canonical map-object schema, transaction, Tiled metadata, or Tiled export bytes. AIDraw's deterministic overlay style is not claimed to match Tiled-native object visualization. Packaged layout/pointer/drag acceptance, viewport-specific headless parallax, broad Tiled fidelity, Level 3, RC, and stable-v1 readiness remain unclaimed. MAP-09 stays Working.
+
 ## Failure severity and reruns
 
 | Severity | Meaning | Gate effect |

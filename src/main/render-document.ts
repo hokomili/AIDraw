@@ -16,7 +16,8 @@ import {
   type PixelTilemap,
 } from '@aidraw/core';
 import { colorWithOpacity } from '../common/color';
-import { isometricCellRect, isometricProjectionExtent } from '../common/isometric-projection';
+import { isometricCellRect, isometricObjectMatrix, isometricProjectionExtent } from '../common/isometric-projection';
+import { drawMapObjectOverlay } from '../common/map-object-render';
 import { paintTileCachePlan } from '../common/paint-tile-cache';
 import { renderRasterStroke } from '../common/raster-brush';
 import { renderStyledText } from '../common/text-layout';
@@ -283,8 +284,20 @@ export function renderTilemap(document: PixelDocument, map: PixelTilemap, onlyLa
   const sources = new Map<string, Canvas>();
   const visibleLayers: Array<{ layer: PixelTilemap['layers'][string]; opacity: number }> = []; const visit = (id: string, opacity = 1) => { const layer = map.layers[id]; if (!layer?.visible) return; const combined = opacity * layer.opacity; if (layer.type === 'group') for (const childId of layer.childIds ?? []) visit(childId, combined); else visibleLayers.push({ layer, opacity: combined }); }; if (onlyLayerId) visit(onlyLayerId); else for (const id of map.layerIds) visit(id);
   for (const entry of visibleLayers) {
-    const { layer } = entry; if (layer.type !== 'tile' || !layer.chunks) continue;
+    const { layer } = entry;
     context.globalAlpha = entry.opacity;
+    if (layer.type === 'object') {
+      context.save();
+      if (isometric) {
+        const matrix = isometricObjectMatrix(map.height, map.tileWidth, map.tileHeight, map.tileWidth, map.tileHeight);
+        context.transform(matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f);
+      }
+      const unitScale = isometric ? map.tileWidth / Math.max(map.tileWidth, map.tileHeight) : 1;
+      for (const object of layer.objects ?? []) drawMapObjectOverlay(context, object, { unitScale });
+      context.restore();
+      continue;
+    }
+    if (layer.type !== 'tile' || !layer.chunks) continue;
     const drawCell = (tileX: number, tileY: number, raw: number) => {
       const decoded = decodeTiledGid(raw); if (!decoded.gid) return;
       const rect = isometric

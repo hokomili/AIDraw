@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { createCanvas, loadImage } from '@napi-rs/canvas';
 import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createIllustrationDocument, createPixelDocument, createPixelSprite, createPixelTilemap, createPixelTileset, encodeTiledGid, nowIso, writePixels, writeTiles, type GroupObject, type ShapeObject } from '@aidraw/core';
+import { exportDocument } from '@main/export-document';
 import { materializePaintTiles } from '@main/persistence';
 import { renderIllustration, renderSprite, renderTilemap } from '@main/render-document';
 
@@ -18,6 +20,50 @@ describe('native document rendering', () => {
     const rendered = renderTilemap(document, map);
     expect({ width: rendered.width, height: rendered.height }).toEqual({ width: 4, height: 2 });
     expect(Buffer.from(rendered.getContext('2d').getImageData(0, 0, 4, 2).data)).toEqual(Buffer.from(source));
+  });
+
+  it('includes visible orthogonal object layers in headless z-order and PNG export', async () => {
+    const document = createPixelDocument('tilemap', 'Object-layer raster parity'); const map = document.pixelAssets[document.activeAssetId]; if (map.type !== 'tilemap') throw new Error('Expected tilemap');
+    map.width = 1; map.height = 1; map.tileWidth = 16; map.tileHeight = 16;
+    const tileLayer = map.layers[map.layerIds[0]]; if (tileLayer.type !== 'tile' || !tileLayer.chunks) throw new Error('Expected tile layer');
+    writeTiles(tileLayer.chunks, [{ x: 0, y: 0, gid: 1 }]);
+    const timestamp = nowIso(); const objectLayer: typeof map.layers[string] = {
+      id: 'object-layer', revision: 0, name: 'Visible objects', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
+      type: 'object', visible: true, locked: false, opacity: 1, parallaxX: 1, parallaxY: 1,
+      objects: [{ id: 'object-rectangle', type: 'rectangle', x: 2, y: 2, width: 12, height: 12, properties: {} }],
+    };
+    const basePixel = [...renderTilemap(document, map).getContext('2d').getImageData(8, 8, 1, 1).data];
+    map.layers[objectLayer.id] = objectLayer; map.layerIds.push(objectLayer.id);
+    const abovePixel = [...renderTilemap(document, map).getContext('2d').getImageData(8, 8, 1, 1).data];
+    expect(abovePixel).not.toEqual(basePixel);
+    expect(renderTilemap(document, map, objectLayer.id).getContext('2d').getImageData(8, 8, 1, 1).data[3]).toBeGreaterThan(0);
+
+    map.layerIds = [objectLayer.id, tileLayer.id];
+    expect([...renderTilemap(document, map).getContext('2d').getImageData(8, 8, 1, 1).data]).toEqual(basePixel);
+    map.layerIds = [tileLayer.id, objectLayer.id]; objectLayer.visible = false;
+    expect([...renderTilemap(document, map).getContext('2d').getImageData(8, 8, 1, 1).data]).toEqual(basePixel);
+
+    objectLayer.visible = true;
+    const exported = await exportDocument(document, 'png'); const image = await loadImage(exported.data); const canvas = createCanvas(image.width, image.height); canvas.getContext('2d').drawImage(image, 0, 0);
+    expect(exported.report).toEqual({ warnings: [], rasterized: [] });
+    expect([...canvas.getContext('2d').getImageData(8, 8, 1, 1).data]).toEqual(abovePixel);
+  });
+
+  it('projects isometric object layers through authored aspect and opacity', () => {
+    const document = createPixelDocument('tilemap', 'Isometric object-layer parity'); const map = document.pixelAssets[document.activeAssetId]; if (map.type !== 'tilemap') throw new Error('Expected tilemap');
+    map.orientation = 'isometric'; map.width = 1; map.height = 1; map.tileWidth = 8; map.tileHeight = 4;
+    const timestamp = nowIso(); const objectLayer: typeof map.layers[string] = {
+      id: 'isometric-objects', revision: 0, name: 'Isometric objects', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
+      type: 'object', visible: true, locked: false, opacity: 0.5, parallaxX: 1, parallaxY: 1,
+      objects: [{ id: 'isometric-cell', type: 'rectangle', x: 0, y: 0, width: 8, height: 4, properties: {} }],
+    };
+    map.layers = { [objectLayer.id]: objectLayer }; map.layerIds = [objectLayer.id];
+    const rendered = renderTilemap(document, map); const context = rendered.getContext('2d');
+    expect({ width: rendered.width, height: rendered.height }).toEqual({ width: 8, height: 4 });
+    expect(context.getImageData(4, 2, 1, 1).data[3]).toBeGreaterThanOrEqual(18);
+    expect(context.getImageData(4, 2, 1, 1).data[3]).toBeLessThanOrEqual(20);
+    objectLayer.visible = false;
+    expect([...renderTilemap(document, map).getContext('2d').getImageData(0, 0, 8, 4).data].every((channel) => channel === 0)).toBe(true);
   });
 
   it('renders overlapping isometric cells right-down across reverse-inserted sparse chunks', () => {

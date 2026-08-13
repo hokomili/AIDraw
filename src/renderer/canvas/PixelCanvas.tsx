@@ -64,6 +64,7 @@ import { pixelSelectionBounds, transformPixelSelection, type PixelSelectionTrans
 import { captureGridSelection, combineGridSelection, placeGridClipboard, rasterizeGridLasso, scaleGridSelection, transformGridSelection, type GridSelectionClipboard } from '../../common/grid-selection';
 import { deleteMapObjectPoint, insertMapObjectPoint, mapObjectAtPoint, mapObjectBounds, moveMapObjectPoint, nearestMapObjectSegment, transformMapObject } from '../../common/map-objects';
 import { isometricCellRect, isometricCoordinateDeltaFromScreen, isometricObjectMatrix, isometricProjectionExtent, type IsometricCellRect } from '../../common/isometric-projection';
+import { drawMapObjectOverlay } from '../../common/map-object-render';
 import { TILE_VARIANT_SEED_PROPERTY, chooseTileVariant, nextTileVariantSeed, tileVariantCandidates, tileVariantGroup } from '../../common/tile-variants';
 import { isometricTileRenderCells } from '../../common/tile-render-order';
 import { DEFAULT_ONION_SKIN_SETTINGS, onionSkinLayers, type OnionSkinSettings } from '../../common/onion-skin';
@@ -494,17 +495,13 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
         if (layer.type === 'object') {
           context.globalAlpha = entry.opacity;
           for (const source of layer.objects ?? []) {
-            const object = mapObjectGesture?.layerId === layer.id && mapObjectGesture.objectId === source.id ? previewMapObject(mapObjectGesture) : source; const selected = selectedEntityId === object.id; const width = object.width ?? 1; const height = object.height ?? 1; const unitScale = view.scale / Math.max(tilemap.tileWidth, tilemap.tileHeight);
+            const object = mapObjectGesture?.layerId === layer.id && mapObjectGesture.objectId === source.id ? previewMapObject(mapObjectGesture) : source; const selected = selectedEntityId === object.id; const unitScale = view.scale / Math.max(tilemap.tileWidth, tilemap.tileHeight);
             context.save();
             if (tilemap.orientation === 'isometric') {
               const matrix = isometricObjectMatrix(tilemap.height, tilemap.tileWidth, tilemap.tileHeight, view.scale, isometricCellHeight);
               context.transform(matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f);
             } else context.scale(view.scale / tilemap.tileWidth, view.scale / tilemap.tileHeight);
-            context.fillStyle = selected ? 'rgba(130,104,221,.22)' : 'rgba(49,166,160,.15)'; context.strokeStyle = selected ? '#7454d8' : '#2b958e'; context.lineWidth = (selected ? 2 : 1.25) / Math.max(.001, unitScale); context.setLineDash(object.type === 'polyline' ? [5 / Math.max(.001, unitScale), 3 / Math.max(.001, unitScale)] : []); context.beginPath();
-            if (object.type === 'rectangle') context.rect(object.x, object.y, width, height); else if (object.type === 'ellipse') context.ellipse(object.x + width / 2, object.y + height / 2, Math.abs(width / 2), Math.abs(height / 2), 0, 0, Math.PI * 2); else if (object.points?.length) { object.points.forEach((point, index) => { if (index) context.lineTo(object.x + point.x, object.y + point.y); else context.moveTo(object.x + point.x, object.y + point.y); }); if (object.type === 'polygon') context.closePath(); }
-            if (object.type !== 'polyline') context.fill(); context.stroke(); context.setLineDash([]);
-            if (selected && (object.type === 'rectangle' || object.type === 'ellipse')) { const handleSize = 8 / Math.max(.001, unitScale); context.fillStyle = '#fff'; context.fillRect(object.x + width - handleSize / 2, object.y + height - handleSize / 2, handleSize, handleSize); context.strokeStyle = '#7454d8'; context.strokeRect(object.x + width - handleSize / 2, object.y + height - handleSize / 2, handleSize, handleSize); }
-            if (selected && object.points) { const radius = 4 / Math.max(.001, unitScale); for (const point of object.points) { context.fillStyle = '#fff'; context.beginPath(); context.arc(object.x + point.x, object.y + point.y, radius, 0, Math.PI * 2); context.fill(); context.strokeStyle = '#7454d8'; context.stroke(); } }
+            drawMapObjectOverlay(context, object, { selected, unitScale });
             context.restore();
           }
           context.restore(); continue;
