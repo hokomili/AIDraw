@@ -275,13 +275,38 @@ async function illustrationSvg(document: IllustrationDocument): Promise<ExportAr
   const paintLayerFallbacks: Record<string, string> = {};
   const rasterized: string[] = [];
   const warnings = new Set<string>();
-  for (const layer of Object.values(document.layers)) {
-    if (layer.type === 'paint' && layer.strokes.length) {
-      const source = structuredClone(document); const sourceLayer = source.layers[layer.id];
-      if (sourceLayer?.type === 'paint') { sourceLayer.opacity = 1; sourceLayer.blendMode = 'normal'; sourceLayer.filters = []; delete sourceLayer.maskLayerId; }
-      paintLayerFallbacks[layer.id] = (await renderIllustration(source, layer.id, false)).toBuffer('image/png').toString('base64');
+  const fidelity: InterchangeFidelityEntry[] = [];
+  let fidelityTruncated = false;
+  const recordFidelity = (entry: InterchangeFidelityEntry) => { if (!tryAppendInterchangeFidelityEntry(fidelity, entry)) fidelityTruncated = true; };
+  const reachableVisibleLayerIds = new Set<string>();
+  const collectVisibleLayer = (layerId: string) => {
+    if (reachableVisibleLayerIds.has(layerId)) return;
+    const layer = document.layers[layerId];
+    if (!layer?.visible) return;
+    reachableVisibleLayerIds.add(layerId);
+    if (layer.type === 'group') for (const childId of layer.childIds) collectVisibleLayer(childId);
+  };
+  for (const layerId of document.layerIds) collectVisibleLayer(layerId);
+  for (const layerId of reachableVisibleLayerIds) {
+    const layer = document.layers[layerId];
+    if (!layer) continue;
+    const embedsPaintFallback = layer.type === 'paint' && layer.strokes.length > 0;
+    if (embedsPaintFallback) {
+      const source = await renderIllustrationLayerSource(document, layer.id);
+      try { paintLayerFallbacks[layer.id] = source.toBuffer('image/png').toString('base64'); }
+      finally { source.width = 1; source.height = 1; }
       rasterized.push(layer.name);
+      recordFidelity({
+        code: 'raster-fallback',
+        subjectType: 'layer',
+        subjectId: layer.id,
+        subjectName: layer.name,
+        detail: 'SVG export embeds this paint layer as a transparent PNG; authored paint, adjustment filters, and a vector layer mask are baked into the fallback where present.',
+      });
     }
+  }
+  for (const layer of Object.values(document.layers)) {
+    if (layer.type === 'paint') continue;
     if (layer.filters?.length) warnings.add(`Layer “${layer.name}” adjustment filters may vary between SVG viewers.`);
     if (layer.maskLayerId) warnings.add(`Layer mask on “${layer.name}” is not portable in SVG and should be visually checked.`);
   }
@@ -292,7 +317,7 @@ async function illustrationSvg(document: IllustrationDocument): Promise<ExportAr
     if (object.type === 'image' && !document.assets[object.assetId]?.data) warnings.add(`Image “${object.name}” is missing its embedded source and was omitted.`);
   }
   if (rasterized.length) warnings.add('Paint layers are embedded as transparent PNG fallbacks so erasing and natural-media brushes remain visually faithful.');
-  return { data: Buffer.from(illustrationToSvg(document, paintLayerFallbacks)), mimeType: 'image/svg+xml', extension: 'svg', report: { warnings: [...warnings], rasterized } };
+  return { data: Buffer.from(illustrationToSvg(document, paintLayerFallbacks)), mimeType: 'image/svg+xml', extension: 'svg', report: boundedInterchangeExportReport([...warnings], rasterized, fidelity, fidelityTruncated) };
 }
 
 async function raster(document: AIDrawDocument, format: 'png' | 'jpeg' | 'webp', scale = 1): Promise<ExportArtifact> {

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { createCanvas, loadImage } from '@napi-rs/canvas';
 import {
   HUMAN_ACTOR,
   IDENTITY_TRANSFORM,
@@ -19,6 +20,7 @@ import {
 } from '@aidraw/core';
 import { MAX_PSD_LAYER_NESTING_DEPTH, MAX_PSD_LAYER_RECORDS, assertPsdLayerStructureBudget } from '@common/psd-limits';
 import { assertPsdLayerRasterBudget, boundedInterchangeExportReport, exportDocument, illustrationToSvg, plannedExportCompanionPaths } from '@main/export-document';
+import { renderIllustrationLayerSource } from '@main/render-document';
 import { MAX_UTILITY_REPORT_SERIALIZED_BYTES, MAX_UTILITY_TEXT_BYTES, assertUtilityJsonBudget } from '@main/utility-resource-policy';
 import { decompressFrames, parseGIF } from 'gifuct-js';
 import UPNG from 'upng-js';
@@ -115,6 +117,62 @@ describe('interchange exporters', () => {
     const artifact = await exportDocument(document, 'svg'); const svg = artifact.data.toString();
     expect(svg).toContain('href="data:image/png;base64,'); expect(svg).not.toContain('<polyline');
     expect(artifact.report.rasterized).toEqual([layer.name]); expect(artifact.report.warnings).toContainEqual(expect.stringMatching(/Paint layers are embedded/));
+  });
+
+  it('bakes authored paint filters and vector masks into the SVG fallback without baking root composite metadata', async () => {
+    const document = createIllustrationDocument('Paint SVG fidelity'); document.artboard = { ...document.artboard, width: 16, height: 16, background: null };
+    const paintLayer = Object.values(document.layers).find((entry) => entry.type === 'paint');
+    const maskLayer = Object.values(document.layers).find((entry) => entry.type === 'vector');
+    if (!paintLayer || paintLayer.type !== 'paint' || !maskLayer || maskLayer.type !== 'vector') throw new Error('Expected paint and vector layers');
+    paintLayer.opacity = 0.5; paintLayer.blendMode = 'multiply'; paintLayer.filters = [{ type: 'brightness', value: -1 }]; paintLayer.maskLayerId = maskLayer.id;
+    paintLayer.strokes.push({ id: 'masked-paint', actorId: HUMAN_ACTOR.id, points: [{ x: 2, y: 8, pressure: 0.5 }, { x: 14, y: 8, pressure: 0.5 }], color: '#ff0000', size: 8, opacity: 1, hardness: 1, flow: 1, mode: 'paint', preset: 'hard-round' });
+    maskLayer.visible = false;
+    const timestamp = nowIso(); const mask: ShapeObject = {
+      id: 'paint-mask', revision: 0, name: 'Left half mask', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
+      layerId: maskLayer.id, type: 'shape', shape: 'rectangle', width: 8, height: 16, transform: IDENTITY_TRANSFORM, visible: true, locked: false,
+      opacity: 1, blendMode: 'normal', fill: { kind: 'solid', color: '#ffffff' }, stroke: { paint: { kind: 'none' }, width: 0, opacity: 1, lineCap: 'round', lineJoin: 'round', dash: [] },
+    };
+    document.objects[mask.id] = mask; maskLayer.objectIds.push(mask.id);
+    const before = structuredClone(document);
+    const expected = await renderIllustrationLayerSource(document, paintLayer.id);
+    const expectedPixels = Buffer.from(expected.getContext('2d').getImageData(0, 0, 16, 16).data); expected.width = 1; expected.height = 1;
+
+    const artifact = await exportDocument(document, 'svg'); const svg = artifact.data.toString();
+    const embedded = /href="data:image\/png;base64,([^"]+)"/.exec(svg)?.[1];
+    if (!embedded) throw new Error('Expected embedded paint fallback');
+    const image = await loadImage(Buffer.from(embedded, 'base64')); const actual = createCanvas(16, 16); actual.getContext('2d').drawImage(image, 0, 0);
+    const actualPixels = Buffer.from(actual.getContext('2d').getImageData(0, 0, 16, 16).data); actual.width = 1; actual.height = 1;
+    expect(actualPixels).toEqual(expectedPixels);
+    expect([...actualPixels.subarray((8 * 16 + 4) * 4, (8 * 16 + 4) * 4 + 4)]).toEqual([0, 0, 0, 255]);
+    expect([...actualPixels.subarray((8 * 16 + 12) * 4, (8 * 16 + 12) * 4 + 4)]).toEqual([0, 0, 0, 0]);
+    expect(svg).toContain(`<g id="${paintLayer.id}" opacity="0.5" style="mix-blend-mode:multiply">`);
+    expect(artifact.report).toEqual({
+      warnings: ['Paint layers are embedded as transparent PNG fallbacks so erasing and natural-media brushes remain visually faithful.'],
+      rasterized: [paintLayer.name],
+      fidelity: [{
+        code: 'raster-fallback',
+        subjectType: 'layer',
+        subjectId: paintLayer.id,
+        subjectName: paintLayer.name,
+        detail: 'SVG export embeds this paint layer as a transparent PNG; authored paint, adjustment filters, and a vector layer mask are baked into the fallback where present.',
+      }],
+    });
+    expect(document).toEqual(before);
+
+    paintLayer.visible = false;
+    const hidden = await exportDocument(document, 'svg');
+    expect(hidden.data.toString()).not.toContain('data:image/png;base64');
+    expect(hidden.report).toEqual({ warnings: [], rasterized: [] });
+
+    paintLayer.visible = true; document.layerIds = document.layerIds.filter((layerId) => layerId !== paintLayer.id);
+    const unreachable = await exportDocument(document, 'svg');
+    expect(unreachable.data.toString()).not.toContain('data:image/png;base64');
+    expect(unreachable.report).toEqual({ warnings: [], rasterized: [] });
+
+    document.layerIds.push(paintLayer.id); paintLayer.strokes = []; paintLayer.tileAssetIds = { '0,0': 'orphan-cache-record' };
+    const empty = await exportDocument(document, 'svg');
+    expect(empty.data.toString()).not.toContain('data:image/png;base64');
+    expect(empty.report).toEqual({ warnings: [], rasterized: [] });
   });
 
   it('keeps supported illustration geometry and text native in hybrid PDF exports', async () => {
