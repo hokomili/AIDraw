@@ -39,20 +39,29 @@ describe('professional editor density contract', () => {
   });
 
   it('binds the BrowserWindow and CSS shell to the shared size and density contract', async () => {
-    const [main, styles] = await Promise.all([
+    const [main, styles, electronTypes] = await Promise.all([
       readFile(new URL('../../src/main/main.ts', import.meta.url), 'utf8'),
       readFile(new URL('../../src/renderer/styles.css', import.meta.url), 'utf8'),
+      readFile(new URL('../../node_modules/electron/electron.d.ts', import.meta.url), 'utf8'),
     ]);
     for (const property of ['defaultWidth', 'defaultHeight']) {
       expect(main).toContain(`EDITOR_CONTENT_VIEWPORT.${property}`);
     }
     expect(main).toContain('useContentSize: true');
+    expect(main).toContain("titleBarStyle: 'hiddenInset'");
+    expect(main).toContain("url.searchParams.set('native-titlebar', 'hidden-inset')");
+    expect(main).toContain("editorRendererUrl(MAIN_WINDOW_VITE_DEV_SERVER_URL ?? 'aidraw://app/index.html')");
+    expect(main).not.toContain('enableLargerThanScreen: true');
     expect(main).toContain('editorOuterMinimumSize(');
     expect(main).toContain('window.getSize()');
     expect(main).toContain('window.getContentSize()');
     expect(main).toContain('window.setMinimumSize(minimumOuterSize.width, minimumOuterSize.height)');
     expect(main).not.toMatch(/\bminWidth:\s*EDITOR_CONTENT_VIEWPORT/);
     expect(main).not.toMatch(/\bminHeight:\s*EDITOR_CONTENT_VIEWPORT/);
+    expect(electronTypes).toContain("titleBarStyle?: ('default' | 'hidden' | 'hiddenInset' | 'customButtonsOnHover')");
+    expect(electronTypes).toContain("The `width` and `height` would be used as web page's size");
+    expect(styles).toMatch(/html, body, #root \{[^}]*width: 100%;[^}]*height: 100%;[^}]*overflow: hidden;/);
+    expect(styles).toMatch(/\.app-shell \{[^}]*width: 100%; height: 100%; display: grid;[^}]*minmax\(0, 1fr\)/);
     const cssTokens: Array<[string, number]> = [
       ['ui-type-body', EDITOR_DENSITY.bodyType],
       ['ui-type-label', EDITOR_DENSITY.labelType],
@@ -70,6 +79,24 @@ describe('professional editor density contract', () => {
     for (const [name, value] of cssTokens) expect(styles).toContain(`--${name}: ${value}px;`);
     expect(styles).toContain(`@media (max-width: ${EDITOR_CONTENT_VIEWPORT.compactBreakpointWidth}px)`);
     expect(styles).toContain('var(--shell-sidebar-compact-width)');
+    expect(styles).toContain('html[data-native-titlebar="hidden-inset"] .topbar { -webkit-app-region: drag; }');
+    expect(styles).toContain('--macos-traffic-light-inset: 84px;');
+    expect(styles).toContain('html[data-native-titlebar="hidden-inset"] .brand { width: calc(118px + var(--macos-traffic-light-inset)); padding-left: var(--macos-traffic-light-inset); }');
+    expect(styles).toContain('html[data-native-titlebar="hidden-inset"] .topbar button,');
+    expect(styles).toContain('-webkit-app-region: no-drag;');
+  });
+
+  it('keeps the r2 host work area reachable instead of extending a decorated window below it', () => {
+    const hostWorkArea = { width: 1_920, height: 960 };
+    const r2ObservedContent = { width: 1_520, height: 928 };
+    const inferredDefaultFrameHeight = hostWorkArea.height - r2ObservedContent.height;
+    const largerThanScreenOuterHeight = EDITOR_CONTENT_VIEWPORT.defaultHeight + inferredDefaultFrameHeight;
+    expect(inferredDefaultFrameHeight).toBe(32);
+    expect(largerThanScreenOuterHeight - hostWorkArea.height).toBe(12);
+    expect(EDITOR_CONTENT_VIEWPORT.defaultWidth).toBeLessThanOrEqual(hostWorkArea.width);
+    expect(EDITOR_CONTENT_VIEWPORT.defaultHeight).toBeLessThanOrEqual(hostWorkArea.height);
+    expect(EDITOR_CONTENT_VIEWPORT.minimumWidth).toBeLessThanOrEqual(hostWorkArea.width);
+    expect(EDITOR_CONTENT_VIEWPORT.minimumHeight).toBeLessThanOrEqual(hostWorkArea.height);
   });
 
   it('keeps pixel canvas measurement and every CSS timeline height on the shared token', async () => {

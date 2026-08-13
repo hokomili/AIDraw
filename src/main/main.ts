@@ -937,11 +937,21 @@ function reportEditorWindowFailure(failure: EditorWindowFailure): void {
   process.stderr.write(`AIDraw editor recovery: ${detail}. The editor was detached without replacing canonical engine state.\n`);
 }
 
+function editorRendererUrl(baseUrl: string): string {
+  const url = new URL(baseUrl);
+  if (process.platform === 'darwin') url.searchParams.set('native-titlebar', 'hidden-inset');
+  return url.toString();
+}
+
 function createElectronWindow(): BrowserWindow {
   const window = new BrowserWindow({
     width: EDITOR_CONTENT_VIEWPORT.defaultWidth,
     height: EDITOR_CONTENT_VIEWPORT.defaultHeight,
     useContentSize: true,
+    // Keep macOS traffic lights while letting the existing app top bar own the
+    // vertical chrome; a separate native title bar would exceed the supported
+    // 940 px content viewport on the reviewed 960 px-tall work area.
+    ...(process.platform === 'darwin' ? { titleBarStyle: 'hiddenInset' as const } : {}),
     backgroundColor: '#eeeae4',
     title: 'AIDraw',
     show: false,
@@ -997,8 +1007,7 @@ const editorWindowLifecycle = new EditorWindowLifecycle<BrowserWindow>({
   createWindow: createElectronWindow,
   bindWindowEvents: bindElectronWindowEvents,
   loadWindow: async (window) => {
-    if (MAIN_WINDOW_VITE_DEV_SERVER_URL) await window.loadURL(MAIN_WINDOW_VITE_DEV_SERVER_URL);
-    else await window.loadURL('aidraw://app/index.html');
+    await window.loadURL(editorRendererUrl(MAIN_WINDOW_VITE_DEV_SERVER_URL ?? 'aidraw://app/index.html'));
   },
   revealWindow: (window) => {
     if (window.isMinimized()) window.restore();

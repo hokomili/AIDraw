@@ -5,6 +5,9 @@ import { RendererErrorBoundary } from './RendererErrorBoundary';
 import { ensureBundledBrowserCanvasFonts } from './canvas-fonts';
 import './styles.css';
 
+const nativeTitlebar = new URL(window.location.href).searchParams.get('native-titlebar');
+if (nativeTitlebar === 'hidden-inset') document.documentElement.dataset.nativeTitlebar = nativeTitlebar;
+
 async function bootstrap(): Promise<void> {
   try { await ensureBundledBrowserCanvasFonts(); }
   catch (error) { console.error('Could not load AIDraw bundled Canvas fonts.', error); }

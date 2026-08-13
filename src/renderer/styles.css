@@ -31,6 +31,7 @@
   --shell-tool-rail-width: 62px;
   --shell-sidebar-width: 318px;
   --shell-sidebar-compact-width: 286px;
+  --macos-traffic-light-inset: 84px;
 }
 
 .renderer-recovery {
@@ -88,6 +89,15 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 
 .topbar { grid-area: top; display: flex; align-items: center; min-width: 0; height: var(--shell-topbar-height); background: rgba(255, 253, 249, .97); border-bottom: 1px solid var(--border); user-select: none; z-index: 30; }
 .brand { display: flex; align-items: center; gap: 9px; width: 132px; height: 100%; padding: 0 14px; flex: 0 0 auto; }
+html[data-native-titlebar="hidden-inset"] .topbar { -webkit-app-region: drag; }
+html[data-native-titlebar="hidden-inset"] .topbar button,
+html[data-native-titlebar="hidden-inset"] .topbar input,
+html[data-native-titlebar="hidden-inset"] .topbar select,
+html[data-native-titlebar="hidden-inset"] .topbar textarea,
+html[data-native-titlebar="hidden-inset"] .topbar a,
+html[data-native-titlebar="hidden-inset"] .topbar [role="menu"],
+html[data-native-titlebar="hidden-inset"] .topbar [role="dialog"] { -webkit-app-region: no-drag; }
+html[data-native-titlebar="hidden-inset"] .brand { width: calc(118px + var(--macos-traffic-light-inset)); padding-left: var(--macos-traffic-light-inset); }
 .brand-name { font-size: 15px; font-weight: 760; letter-spacing: -.35px; }
 .brand-mark { width: 24px; height: 24px; border-radius: 8px; background: #392e4d; display: flex; align-items: end; justify-content: center; gap: 2px; padding: 5px; transform: rotate(-3deg); box-shadow: 0 2px 5px rgba(38, 26, 52, .2); }
 .brand-mark span { width: 3px; border-radius: 2px; transform: rotate(20deg); }
@@ -414,6 +424,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 @media (max-width: 1120px) {
   .app-shell { grid-template-columns: var(--shell-tool-rail-width) minmax(0, 1fr) var(--shell-sidebar-compact-width); }
   .brand { width: 70px; padding: 0 12px; }.brand-name { display: none; }
+  html[data-native-titlebar="hidden-inset"] .brand { width: calc(56px + var(--macos-traffic-light-inset)); padding-left: var(--macos-traffic-light-inset); }
   .file-actions { gap: 1px; padding-right: 5px; }
   .topbar-right { padding: 0 7px; }
   .agent-pill { width: var(--ui-hit-primary); padding: 0; justify-content: center; }
