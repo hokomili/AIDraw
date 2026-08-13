@@ -59,6 +59,33 @@ function packSample(bytes: Uint8Array, rowBytes: number, x: number, y: number, d
   bytes[offset] = (bytes[offset] & ~mask) | (sample << shift);
 }
 
+function uint16(bytes: Uint8Array, offset: number): number {
+  return (bytes[offset] << 8) | bytes[offset + 1];
+}
+
+function validateColorMetadata(header: Header, palette: Uint8Array | undefined, transparency: Uint8Array | undefined): void {
+  let paletteEntries = 0;
+  if (palette) {
+    if (header.colorType === 0 || header.colorType === 4 || palette.length < 3 || palette.length > 768 || palette.length % 3 !== 0) throw new Error('APNG PLTE palette is invalid for its PNG color type.');
+    paletteEntries = palette.length / 3;
+    if (header.colorType === 3 && paletteEntries > 2 ** header.depth) throw new Error('Indexed APNG PLTE palette exceeds its bit depth.');
+  } else if (header.colorType === 3) throw new Error('Indexed APNG is missing its PLTE palette.');
+  if (!transparency) return;
+  if (header.colorType === 0) {
+    if (transparency.length !== 2 || uint16(transparency, 0) > (header.depth === 16 ? 65_535 : 2 ** header.depth - 1)) throw new Error('Grayscale APNG tRNS transparency is invalid for its bit depth.');
+  } else if (header.colorType === 2) {
+    if (transparency.length !== 6 || header.depth === 8 && (transparency[0] !== 0 || transparency[2] !== 0 || transparency[4] !== 0)) throw new Error('Truecolor APNG tRNS transparency is invalid for its bit depth.');
+  } else if (header.colorType === 3) {
+    if (!transparency.length || transparency.length > paletteEntries) throw new Error('Indexed APNG tRNS transparency exceeds its PLTE palette.');
+  } else throw new Error(`APNG color type ${header.colorType} cannot use tRNS transparency.`);
+}
+
+function matchesTransparentSample(bytes: Uint8Array, sourceOffset: number, depth: number, transparency: Uint8Array, transparencyOffset: number): boolean {
+  return depth === 16
+    ? bytes[sourceOffset] === transparency[transparencyOffset] && bytes[sourceOffset + 1] === transparency[transparencyOffset + 1]
+    : transparency[transparencyOffset] === 0 && bytes[sourceOffset] === transparency[transparencyOffset + 1];
+}
+
 function unfilter(compressed: Buffer[], width: number, height: number, channels: number, depth: number, interlace: number): Uint8Array {
   if (interlace !== 0 && interlace !== 1) throw new Error(`APNG interlace method ${interlace} is unsupported.`);
   const expected = interlace === 0
@@ -100,10 +127,10 @@ function rgbaFrame(header: Header, control: FrameControl, compressed: Buffer[], 
   for (let y = 0; y < control.height; y += 1) for (let x = 0; x < control.width; x += 1) {
     const pixel = y * control.width + x;
     if (header.colorType === 6) { const offset = y * rowBytes + x * (header.depth === 16 ? 8 : 4); write(pixel, bytes[offset], bytes[offset + (header.depth === 16 ? 2 : 1)], bytes[offset + (header.depth === 16 ? 4 : 2)], bytes[offset + (header.depth === 16 ? 6 : 3)]); }
-    else if (header.colorType === 2) { const offset = y * rowBytes + x * (header.depth === 16 ? 6 : 3); const red = bytes[offset]; const green = bytes[offset + (header.depth === 16 ? 2 : 1)]; const blue = bytes[offset + (header.depth === 16 ? 4 : 2)]; const transparent = transparency?.length === 6 && red === transparency[1] && green === transparency[3] && blue === transparency[5]; write(pixel, red, green, blue, transparent ? 0 : 255); }
+    else if (header.colorType === 2) { const stride = header.depth === 16 ? 2 : 1; const offset = y * rowBytes + x * 3 * stride; const red = bytes[offset]; const green = bytes[offset + stride]; const blue = bytes[offset + stride * 2]; const transparent = transparency !== undefined && matchesTransparentSample(bytes, offset, header.depth, transparency, 0) && matchesTransparentSample(bytes, offset + stride, header.depth, transparency, 2) && matchesTransparentSample(bytes, offset + stride * 2, header.depth, transparency, 4); write(pixel, red, green, blue, transparent ? 0 : 255); }
     else if (header.colorType === 4) { const offset = y * rowBytes + x * (header.depth === 16 ? 4 : 2); const gray = bytes[offset]; write(pixel, gray, gray, gray, bytes[offset + (header.depth === 16 ? 2 : 1)]); }
-    else if (header.colorType === 3) { if (!palette) throw new Error('Indexed APNG is missing its PLTE palette.'); const index = unpackSample(bytes, rowBytes, x, y, header.depth); write(pixel, palette[index * 3] ?? 0, palette[index * 3 + 1] ?? 0, palette[index * 3 + 2] ?? 0, transparency?.[index] ?? 255); }
-    else { const maximum = (1 << Math.min(8, header.depth)) - 1; const sample = header.depth === 16 ? bytes[y * rowBytes + x * 2] : unpackSample(bytes, rowBytes, x, y, header.depth); const gray = header.depth >= 8 ? sample : Math.round(sample * 255 / maximum); const transparent = transparency?.length === 2 && sample === transparency[1]; write(pixel, gray, gray, gray, transparent ? 0 : 255); }
+    else if (header.colorType === 3) { if (!palette) throw new Error('Indexed APNG is missing its PLTE palette.'); const index = unpackSample(bytes, rowBytes, x, y, header.depth); const paletteEntries = palette.length / 3; if (index >= paletteEntries) throw new Error(`Indexed APNG pixel references palette index ${index} outside its ${paletteEntries}-entry PLTE palette.`); write(pixel, palette[index * 3], palette[index * 3 + 1], palette[index * 3 + 2], transparency?.[index] ?? 255); }
+    else { const maximum = (1 << Math.min(8, header.depth)) - 1; const sampleOffset = y * rowBytes + x * 2; const sample = header.depth === 16 ? bytes[sampleOffset] : unpackSample(bytes, rowBytes, x, y, header.depth); const gray = header.depth >= 8 ? sample : Math.round(sample * 255 / maximum); const transparent = transparency !== undefined && (header.depth === 16 ? matchesTransparentSample(bytes, sampleOffset, 16, transparency, 0) : unpackSample(bytes, rowBytes, x, y, header.depth) === uint16(transparency, 0)); write(pixel, gray, gray, gray, transparent ? 0 : 255); }
   }
   return rgba;
 }
@@ -138,7 +165,7 @@ function containsAnimationControl(bytes: Buffer): boolean {
 export function decodeApng(bytes: Buffer): DecodedApng | undefined {
   if (bytes.length < 33 || !bytes.subarray(0, 8).equals(PNG_SIGNATURE)) throw new Error('The input is not a PNG file.');
   if (!containsAnimationControl(bytes)) return undefined;
-  let offset = 8; let header: Header | undefined; let declaredFrameCount: number | undefined; let expectedSequence = 0; let sawImageData = false; let sawEnd = false;
+  let offset = 8; let header: Header | undefined; let declaredFrameCount: number | undefined; let expectedSequence = 0; let sawImageData = false; let sawPalette = false; let sawTransparency = false; let sawEnd = false;
   let palette: Uint8Array | undefined; let transparency: Uint8Array | undefined; const frames: CompressedFrame[] = []; let current: CompressedFrame | undefined;
   while (offset + 12 <= bytes.length) {
     const chunkOffset = offset; const length = bytes.readUInt32BE(offset); const type = bytes.toString('ascii', offset + 4, offset + 8); const start = offset + 8; const end = start + length;
@@ -154,9 +181,11 @@ export function decodeApng(bytes: Buffer): DecodedApng | undefined {
     else if (type === 'acTL') {
       if (length !== 8 || declaredFrameCount !== undefined || sawImageData) throw new Error('APNG animation control must appear once before image data.');
       declaredFrameCount = data.readUInt32BE(0); if (declaredFrameCount < 1 || declaredFrameCount > MAX_APNG_FRAMES) throw new Error(`APNG frame count ${declaredFrameCount} exceeds AIDraw limits.`);
-    } else if (type === 'PLTE') palette = Uint8Array.from(data);
-    else if (type === 'tRNS') transparency = Uint8Array.from(data);
-    else if (type === 'fcTL') {
+    } else if (type === 'PLTE') {
+      if (sawPalette || sawTransparency || sawImageData) throw new Error('APNG PLTE must appear at most once before tRNS and image data.'); sawPalette = true; palette = Uint8Array.from(data);
+    } else if (type === 'tRNS') {
+      if (sawTransparency || sawImageData || header.colorType === 3 && !sawPalette) throw new Error('APNG tRNS must appear at most once after indexed PLTE and before image data.'); sawTransparency = true; transparency = Uint8Array.from(data);
+    } else if (type === 'fcTL') {
       if (declaredFrameCount === undefined || length !== 26) throw new Error('APNG frame control is invalid.');
       const sequence = data.readUInt32BE(0); if (sequence !== expectedSequence) throw new Error(`APNG sequence number ${sequence} appears where ${expectedSequence} was required.`); expectedSequence += 1;
       const denominator = data.readUInt16BE(22) || 100; const control: FrameControl = { width: data.readUInt32BE(4), height: data.readUInt32BE(8), x: data.readUInt32BE(12), y: data.readUInt32BE(16), delayMs: Math.max(1, Math.round(data.readUInt16BE(20) * 1000 / denominator)), dispose: data[24] as 0 | 1 | 2, blend: data[25] as 0 | 1 };
@@ -179,6 +208,7 @@ export function decodeApng(bytes: Buffer): DecodedApng | undefined {
   if (declaredFrameCount === undefined || frames.length !== declaredFrameCount) throw new Error(`APNG declares ${declaredFrameCount ?? 0} frames but contains ${frames.length} frame controls.`);
   if (!frames.length || frames.some((frame) => !frame.chunks.length)) throw new Error('APNG contains incomplete frame data.');
   if (header.width * header.height * frames.length > MAX_APNG_PIXELS) throw new Error('APNG expands beyond the 256-million-pixel animation limit.');
+  validateColorMetadata(header, palette, transparency);
   const canvas = new Uint8ClampedArray(header.width * header.height * 4); const decoded: DecodedApngFrame[] = [];
   for (const frame of frames) { const previous = frame.control.dispose === 2 ? canvas.slice() : undefined; const patch = rgbaFrame(header, frame.control, frame.chunks, palette, transparency); composite(canvas, header.width, frame.control, patch); decoded.push({ rgba: canvas.slice(), delayMs: frame.control.delayMs, dispose: frame.control.dispose, blend: frame.control.blend }); if (frame.control.dispose === 1) clearRect(canvas, header.width, frame.control); else if (frame.control.dispose === 2 && previous) canvas.set(previous); }
   return { width: header.width, height: header.height, frames: decoded };

@@ -16,7 +16,7 @@ const ADAM7_PASSES = [
 ] as const;
 type Rgba = readonly [number, number, number, number];
 
-function pngChunk(type: string, data = Buffer.alloc(0)): Buffer {
+function pngChunk(type: string, data: Buffer = Buffer.alloc(0)): Buffer {
   const typeBytes = Buffer.from(type, 'ascii'); const chunk = Buffer.alloc(data.byteLength + 12);
   chunk.writeUInt32BE(data.byteLength, 0); typeBytes.copy(chunk, 4); data.copy(chunk, 8);
   chunk.writeUInt32BE(crc32(Buffer.concat([typeBytes, data])) >>> 0, data.byteLength + 8);
@@ -36,6 +36,28 @@ function rewritePngChunk(bytes: Buffer, targetType: string, occurrence: number, 
     offset = end + 4;
   }
   throw new Error(`PNG test fixture is missing ${targetType} occurrence ${occurrence}.`);
+}
+
+function replacePngChunkData(bytes: Buffer, targetType: string, occurrence: number, data: Buffer): Buffer {
+  let offset = 8; let matched = 0;
+  while (offset + 12 <= bytes.length) {
+    const length = bytes.readUInt32BE(offset); const type = bytes.toString('ascii', offset + 4, offset + 8); const end = offset + 12 + length;
+    if (end > bytes.length) break;
+    if (type === targetType && matched++ === occurrence) return Buffer.concat([bytes.subarray(0, offset), pngChunk(type, data), bytes.subarray(end)]);
+    offset = end;
+  }
+  throw new Error(`PNG test fixture is missing ${targetType} occurrence ${occurrence}.`);
+}
+
+function insertPngChunkBefore(bytes: Buffer, targetType: string, type: string, data: Buffer): Buffer {
+  let offset = 8;
+  while (offset + 12 <= bytes.length) {
+    const length = bytes.readUInt32BE(offset); const currentType = bytes.toString('ascii', offset + 4, offset + 8); const end = offset + 12 + length;
+    if (end > bytes.length) break;
+    if (currentType === targetType) return Buffer.concat([bytes.subarray(0, offset), pngChunk(type, data), bytes.subarray(offset)]);
+    offset = end;
+  }
+  throw new Error(`PNG test fixture is missing ${targetType}.`);
 }
 
 function rgbaScanlines(width: number, height: number, rgbaAt: (x: number, y: number) => Rgba, interlaced: boolean): Buffer {
@@ -109,6 +131,42 @@ function interlacedIndexedApng(): { bytes: Buffer; expected: Uint8ClampedArray }
   };
 }
 
+function truecolor16TransparencyApng(): { bytes: Buffer; expected: Uint8ClampedArray } {
+  const transparent = Buffer.from([0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc]); const opaque = Buffer.from([0x12, 0x35, 0x56, 0x78, 0x9a, 0xbc]);
+  const header = Buffer.alloc(13); header.writeUInt32BE(2, 0); header.writeUInt32BE(1, 4); header[8] = 16; header[9] = 2;
+  const animation = Buffer.alloc(8); animation.writeUInt32BE(1, 0);
+  return {
+    bytes: Buffer.concat([
+      PNG_SIGNATURE,
+      pngChunk('IHDR', header),
+      pngChunk('tRNS', transparent),
+      pngChunk('acTL', animation),
+      pngChunk('fcTL', apngFrameControl(0, 2, 1, 0, 0, 6, 0, 0)),
+      pngChunk('IDAT', deflateSync(Buffer.concat([Buffer.from([0]), transparent, opaque]))),
+      pngChunk('IEND'),
+    ]),
+    expected: Uint8ClampedArray.from([0x12, 0x56, 0x9a, 0, 0x12, 0x56, 0x9a, 255]),
+  };
+}
+
+function grayscale16TransparencyApng(): { bytes: Buffer; expected: Uint8ClampedArray } {
+  const transparent = Buffer.from([0x34, 0x56]); const opaque = Buffer.from([0x34, 0x57]);
+  const header = Buffer.alloc(13); header.writeUInt32BE(2, 0); header.writeUInt32BE(1, 4); header[8] = 16;
+  const animation = Buffer.alloc(8); animation.writeUInt32BE(1, 0);
+  return {
+    bytes: Buffer.concat([
+      PNG_SIGNATURE,
+      pngChunk('IHDR', header),
+      pngChunk('tRNS', transparent),
+      pngChunk('acTL', animation),
+      pngChunk('fcTL', apngFrameControl(0, 2, 1, 0, 0, 6, 0, 0)),
+      pngChunk('IDAT', deflateSync(Buffer.concat([Buffer.from([0]), transparent, opaque]))),
+      pngChunk('IEND'),
+    ]),
+    expected: Uint8ClampedArray.from([0x34, 0x34, 0x34, 0, 0x34, 0x34, 0x34, 255]),
+  };
+}
+
 function animatedFixture() {
   const document = createPixelDocument('sprite', 'Round trip'); const sprite = document.pixelAssets[document.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('Expected sprite'); sprite.width = 4; sprite.height = 3; const firstCel = Object.values(sprite.cels)[0]; sprite.frames[sprite.frameIds[0]].durationMs = 80; writePixels(firstCel, [{ x: 0, y: 0, index: 4 }, { x: 3, y: 2, index: 2 }]);
   const timestamp = nowIso(); const frameId = 'frame-two'; const celId = 'cel-two'; sprite.frameIds.push(frameId); sprite.frames[frameId] = { id: frameId, revision: 0, name: 'Frame 2', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, durationMs: 170 }; sprite.cels[celId] = { id: celId, revision: 0, name: 'Frame 2', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, layerId: sprite.layerIds[0], frameId, chunks: {} }; writePixels(sprite.cels[celId], [{ x: 1, y: 1, index: 7 }]); return { document, sprite };
@@ -148,6 +206,32 @@ describe('animated pixel import', () => {
       ['frame-count', rewritePngChunk(valid, 'acTL', 0, (data) => data.writeUInt32BE(3, 0)), /declares 3 frames but contains 2 frame controls/],
       ['missing-end', valid.subarray(0, -12), /missing its final IEND chunk/],
       ['trailing-data', Buffer.concat([valid, Buffer.from([0])]), /IEND must be empty and end the file/],
+    ];
+    for (const [name, bytes, message] of cases) expect(() => importApngBytes(bytes, `Invalid APNG ${name}`)).toThrow(message);
+  });
+
+  it('compares all 16 bits of grayscale and truecolor tRNS samples before high-byte conversion', () => {
+    for (const [name, fixture] of [['grayscale', grayscale16TransparencyApng()], ['truecolor', truecolor16TransparencyApng()]] as const) {
+      const decoded = decodeApng(fixture.bytes); expect(decoded).toBeTruthy(); expect(Buffer.from(decoded!.frames[0].rgba)).toEqual(Buffer.from(fixture.expected));
+      const imported = importApngBytes(fixture.bytes, `16-bit ${name} transparent APNG`)!; const document = imported.documents[0]; if (document.kind !== 'pixel') throw new Error('Expected pixel'); const sprite = document.pixelAssets[document.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('Expected sprite'); const cel = Object.values(sprite.cels)[0];
+      expect([sprite.width, sprite.height, sprite.frames[sprite.frameIds[0]].durationMs]).toEqual([2, 1, 60]); expect(readPixel(cel, 0, 0)).toBe(0); expect(readPixel(cel, 1, 0)).not.toBe(0); expect(Object.values(document.assets)[0].data).toBe(fixture.bytes.toString('base64'));
+    }
+  });
+
+  it('rejects malformed APNG palettes, transparency metadata, and indexed samples before import', () => {
+    const indexed = interlacedIndexedApng().bytes; const rgba = interlacedRgbaApng().bytes; const grayscale = grayscale16TransparencyApng().bytes; const truecolor = truecolor16TransparencyApng().bytes;
+    let paletteOverflow = replacePngChunkData(indexed, 'PLTE', 0, Buffer.from([0, 0, 0])); paletteOverflow = replacePngChunkData(paletteOverflow, 'tRNS', 0, Buffer.from([0]));
+    const cases: Array<[string, Buffer, RegExp]> = [
+      ['palette-shape', replacePngChunkData(indexed, 'PLTE', 0, Buffer.from([0, 0, 0, 255])), /PLTE palette is invalid/],
+      ['palette-depth', replacePngChunkData(indexed, 'PLTE', 0, Buffer.from([0, 0, 0, 255, 107, 122, 49, 166, 160])), /PLTE palette exceeds its bit depth/],
+      ['transparency-length', replacePngChunkData(indexed, 'tRNS', 0, Buffer.from([0, 255, 255])), /tRNS transparency exceeds its PLTE palette/],
+      ['palette-overflow', paletteOverflow, /palette index 1 outside its 1-entry PLTE palette/],
+      ['duplicate-palette', insertPngChunkBefore(indexed, 'tRNS', 'PLTE', Buffer.from([0, 0, 0, 255, 107, 122])), /PLTE must appear at most once/],
+      ['duplicate-transparency', insertPngChunkBefore(indexed, 'acTL', 'tRNS', Buffer.from([0])), /tRNS must appear at most once/],
+      ['grayscale-palette', insertPngChunkBefore(grayscale, 'tRNS', 'PLTE', Buffer.from([0, 0, 0])), /PLTE palette is invalid/],
+      ['grayscale-transparency-range', rewritePngChunk(grayscale, 'IHDR', 0, (data) => { data[8] = 8; }), /Grayscale APNG tRNS transparency is invalid/],
+      ['truecolor-transparency-range', rewritePngChunk(truecolor, 'IHDR', 0, (data) => { data[8] = 8; }), /Truecolor APNG tRNS transparency is invalid/],
+      ['rgba-transparency', insertPngChunkBefore(rgba, 'acTL', 'tRNS', Buffer.from([0, 0])), /color type 6 cannot use tRNS transparency/],
     ];
     for (const [name, bytes, message] of cases) expect(() => importApngBytes(bytes, `Invalid APNG ${name}`)).toThrow(message);
   });
