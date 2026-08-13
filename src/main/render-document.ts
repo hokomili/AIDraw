@@ -26,6 +26,7 @@ import { MAX_STATIC_RASTER_PIXELS, MAX_STATIC_RASTER_SIDE, assertStaticRasterDim
 import { renderStyledText } from '../common/text-layout';
 import { tileAnimationFrameAt, tilesetTileSourceRect } from '../common/tile-animation';
 import { isometricTileRenderCells } from '../common/tile-render-order';
+import { tilemapChunksIntersectingRegion } from '../common/tilemap-region';
 
 type Context = ReturnType<Canvas['getContext']>;
 type LoadedImage = Awaited<ReturnType<typeof loadImage>>;
@@ -324,6 +325,12 @@ function renderTilemapSurface(document: PixelDocument, map: PixelTilemap, region
       continue;
     }
     if (layer.type !== 'tile' || !layer.chunks) continue;
+    const candidateChunks = tilemapChunksIntersectingRegion(Object.values(layer.chunks), {
+      orientation: map.orientation,
+      rows: map.height,
+      tileWidth: map.tileWidth,
+      tileHeight: map.tileHeight,
+    }, region);
     const drawCell = (tileX: number, tileY: number, raw: number) => {
       const decoded = decodeTiledGid(raw); if (!decoded.gid) return;
       const rect = isometric
@@ -342,8 +349,8 @@ function renderTilemapSurface(document: PixelDocument, map: PixelTilemap, region
         } finally { source.release(); }
       } else { const visibleGid = resolved ? resolved.tileset.firstGid + animatedLocalId(resolved.tileset, resolved.localId) : decoded.gid; context.fillStyle = `hsl(${visibleGid * 47 % 360} 55% 60%)`; context.fillRect(rect.x, rect.y, rect.width, rect.height); }
     };
-    if (isometric) for (const cell of isometricTileRenderCells(Object.values(layer.chunks), (chunk) => decodeTilemapChunk(chunk))) drawCell(cell.x, cell.y, cell.raw);
-    else for (const chunk of Object.values(layer.chunks)) {
+    if (isometric) for (const cell of isometricTileRenderCells(candidateChunks, (chunk) => decodeTilemapChunk(chunk))) drawCell(cell.x, cell.y, cell.raw);
+    else for (const chunk of candidateChunks) {
       const values = decodeTilemapChunk(chunk);
       for (let y = 0; y < 32; y += 1) for (let x = 0; x < 32; x += 1) drawCell(chunk.x + x, chunk.y + y, values[y * 32 + x] ?? 0);
     }

@@ -604,6 +604,18 @@ Focused pinned-Node-24 typecheck/targeted ESLint and **9 files / 131 tests** pas
 
 This checkpoint changes no canonical map/sprite/tileset shape, chunk coordinate or visibility rule, GID/transform, static time, map origin, nominal bounds, Tiled import/export byte, or compatibility promise. Signed sparse chunks outside the nominal rectangle remain clipped, and observation still accepts only nonnegative raster coordinates. Checkpoint comparison, clipboard, generation-comparison, and other non-observation full-preview callers now reject oversized maps through the central whole-raster guard; choosing adaptive previews for those user workflows is a separate product decision. Packaged/native UI behavior, infinite-view expansion, broad Tiled fidelity, Level 3, RC, and stable-v1 readiness remain unclaimed.
 
+## Latest headless regional tilemap traversal checkpoint
+
+Headless MAP-07/MAP-08/FND-12 traversal evidence (2026-08-12): bounded nominal tilemap observation already avoided allocating the complete map but still decoded every stored 32×32 GID payload and visited every stored cell before per-cell clipping. A pure pre-decode filter now computes each chunk's conservative projected cell envelope for orthogonal or isometric geometry, pads it by half the larger tile axis so any rectangular cell under the existing stored transform matrix remains a candidate, and retains only envelopes intersecting the allocation-aware backing region.
+
+Filtering preserves input order. The existing isometric right-down iterator therefore keeps its deterministic cross-chunk order, while orthogonal rendering retains record order. The filter inspects every chunk's four geometry fields once; this is O(total chunks) metadata work that removes irrelevant payload decode and 1,024-cell traversal, not a spatial index. It does not inspect occupied cells, rewrite chunk records, or infer visible bounds from storage.
+
+Pure regressions cover boundary-only exclusion, conservative rectangular-transform padding, signed isometric candidates, retained order, and invalid geometry. A production million-column far-edge observation adds a nonintersecting chunk whose payload throws on access; the exact 16×16 result succeeds, proving that production regional rendering never decodes that payload. A source-wiring regression also requires the filtered candidates to feed the established headless isometric iterator. Focused pinned-Node-24 typecheck/targeted ESLint and **5 files / 22 tests** pass. The complete safe gate passes portability for **369 tracked + 75 prospective** paths, TypeScript, full ESLint, and **150 files / 863 tests**.
+
+The formal performance fixture adds 4,096 canonical 32×32 chunks across a 2,048×2,048 nominal map, requests one pixel from the final chunk, and includes both metadata scanning and production region rendering under a **100 ms** tripwire. The final local Apple Silicon run passes at **1.46 ms** and **874.91 MiB** peak RSS growth; the existing 65,536 addressed maximum-sheet render is **149.35 ms**, native save **133.97 ms**, PNG export **42.02 ms**, one-million-sample accounting **1.39 ms**, and flood **166.56 ms**. `/private/tmp/aidraw-region-chunk-culling-performance-gate-final.json` is temporary self-authored diagnostics, not independent release evidence.
+
+This checkpoint changes no pixels, object-layer traversal, nominal or signed stored bounds, map origin, chunks or GIDs, transform behavior, Tiled bytes, or infinite-map policy. It adds no interactive spatial index or viewport-performance claim. Packaged/native behavior, broad Tiled fidelity, Level 3, RC, and stable-v1 readiness remain unclaimed.
+
 ## Failure severity and reruns
 
 | Severity | Meaning | Gate effect |

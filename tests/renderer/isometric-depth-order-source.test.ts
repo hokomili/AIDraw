@@ -9,6 +9,8 @@ describe('isometric depth-order source wiring', () => {
     expect(interactive).toContain("tilemap.orientation === 'isometric'");
     expect(interactive).toContain('isometricTileRenderCells(Object.values(layer.chunks), safeDecodeTilemapChunk)');
     expect(headless).toContain("import { isometricTileRenderCells } from '../common/tile-render-order'");
-    expect(headless).toContain('isometricTileRenderCells(Object.values(layer.chunks), (chunk) => decodeTilemapChunk(chunk))');
+    expect(headless).toContain("import { tilemapChunksIntersectingRegion } from '../common/tilemap-region'");
+    expect(headless).toContain('const candidateChunks = tilemapChunksIntersectingRegion(Object.values(layer.chunks)');
+    expect(headless).toContain('isometricTileRenderCells(candidateChunks, (chunk) => decodeTilemapChunk(chunk))');
   });
 });

@@ -25,7 +25,7 @@ import {
 import { exportDocument } from '@main/export-document';
 import { transactionSamples, visibleOperations } from '@main/playback-scheduler';
 import { materializePaintTiles, writeNativeDocument } from '@main/persistence';
-import { renderIllustration, renderTilemap } from '@main/render-document';
+import { renderIllustration, renderTilemap, renderTilemapRegion } from '@main/render-document';
 
 const budgets = {
   vector5000RenderMs: 3_000,
@@ -33,6 +33,7 @@ const budgets = {
   coldCachedFour4kPaintRenderMs: 8_000,
   warmCachedFour4kPaintRenderMs: 3_000,
   tilemap65536RenderMs: 5_000,
+  tilemap4096ChunkRegionRenderMs: 100,
   nativeSaveMs: 5_000,
   pngExportMs: 5_000,
   millionSampleAccountingMs: 500,
@@ -120,6 +121,17 @@ function mapFixture() {
   return { document, map };
 }
 
+function sparseMapRegionFixture() {
+  const document = createPixelDocument('tilemap', '4,096-chunk regional performance fixture');
+  const map = document.pixelAssets[document.activeAssetId];
+  if (map.type !== 'tilemap') throw new Error('Sparse regional map fixture is missing.');
+  map.width = 2_048; map.height = 2_048; map.tileWidth = 1; map.tileHeight = 1;
+  const layer = map.layers[map.layerIds[0]];
+  if (layer.type !== 'tile' || !layer.chunks) throw new Error('Sparse regional tile layer is missing.');
+  writeTileRuns(layer.chunks, Array.from({ length: 4_096 }, (_, index) => ({ x: index % 64 * 32, y: Math.floor(index / 64) * 32, length: 1, gid: 1 })));
+  return { document, map, region: { x: 2_016, y: 2_016, width: 1, height: 1 } };
+}
+
 function floodFillFixture() {
   const document = createPixelDocument('sprite', 'One million cell flood-fill fixture');
   const sprite = document.pixelAssets[document.activeAssetId];
@@ -158,6 +170,11 @@ describe('Windows v1 non-GUI performance gate', () => {
     const afterMapRss = process.memoryUsage().rss;
     memoryProfile.push(memorySnapshot('after-tilemap-render', startingRss));
     releaseMeasuredCanvas(tilemapRender.value);
+    const sparseMapRegionFixtureValue = sparseMapRegionFixture();
+    const sparseMapRegionRender = await measured(() => renderTilemapRegion(sparseMapRegionFixtureValue.document, sparseMapRegionFixtureValue.map, sparseMapRegionFixtureValue.region));
+    const afterSparseMapRegionRss = process.memoryUsage().rss;
+    memoryProfile.push(memorySnapshot('after-4096-chunk-region-render', startingRss));
+    releaseMeasuredCanvas(sparseMapRegionRender.value);
     const root = await mkdtemp(join(tmpdir(), 'aidraw-performance-')); temporaryPaths.push(root);
     const nativeSave = await measured(() => writeNativeDocument(join(root, 'vectors.aidraw'), vector, 'performance-gate'));
     memoryProfile.push(memorySnapshot('after-native-save', startingRss));
@@ -171,20 +188,21 @@ describe('Windows v1 non-GUI performance gate', () => {
     memoryProfile.push(memorySnapshot('after-million-cell-flood-fixture', startingRss));
     const floodFill = await measured(() => floodPixelRegion({ width: floodFixture.sprite.width, height: floodFixture.sprite.height, start: { x: 0, y: 0 }, read: floodFixture.read }));
     memoryProfile.push(memorySnapshot('after-million-cell-flood-fill', startingRss));
-    const peakRss = Math.max(afterVectorRss, afterPaintRss, afterMapRss, process.memoryUsage().rss);
+    const peakRss = Math.max(afterVectorRss, afterPaintRss, afterMapRss, afterSparseMapRegionRss, process.memoryUsage().rss);
     const metrics = {
       vector5000RenderMs: vectorRender.durationMs,
       four4kPaintRenderMs: paintRender.durationMs,
       coldCachedFour4kPaintRenderMs: coldCachedPaintRender.durationMs,
       warmCachedFour4kPaintRenderMs: warmCachedPaintRender.durationMs,
       tilemap65536RenderMs: tilemapRender.durationMs,
+      tilemap4096ChunkRegionRenderMs: sparseMapRegionRender.durationMs,
       nativeSaveMs: nativeSave.durationMs,
       pngExportMs: pngExport.durationMs,
       millionSampleAccountingMs: queueAccounting.durationMs,
       millionCellFloodFillMs: floodFill.durationMs,
       rssGrowthMiB: Number(((peakRss - startingRss) / 1024 / 1024).toFixed(2)),
     };
-    const report = { version: 1, createdAt: new Date().toISOString(), build: process.env.GITHUB_SHA ?? 'local', machine: { hostname: hostname(), platform: platform(), release: release(), arch: process.arch, cpu: cpus()[0]?.model, logicalCpus: cpus().length, totalMemoryMiB: Math.round(totalmem() / 1024 / 1024), freeMemoryMiB: Math.round(freemem() / 1024 / 1024), node: process.version }, coverage: { automated: ['5,000 vector render', 'four 4096×4096 editable paint layers', 'cold and warm four-layer 4096×4096 materialized sparse paint render', '65,536 addressed tiles from an 8192×8192 sparse source sheet', 'native save', 'PNG export', 'one-million-sample compact accounting', 'one-million-cell bounded flood fill', 'RSS growth'], deferredToPackagedComputerUse: ['pointer-to-preview latency', 'requestAnimationFrame pacing', 'human input during four visible agent lanes', '200% display scaling and tablet latency'] }, budgets, metrics, diagnostics: { memoryProfile } };
+    const report = { version: 1, createdAt: new Date().toISOString(), build: process.env.GITHUB_SHA ?? 'local', machine: { hostname: hostname(), platform: platform(), release: release(), arch: process.arch, cpu: cpus()[0]?.model, logicalCpus: cpus().length, totalMemoryMiB: Math.round(totalmem() / 1024 / 1024), freeMemoryMiB: Math.round(freemem() / 1024 / 1024), node: process.version }, coverage: { automated: ['5,000 vector render', 'four 4096×4096 editable paint layers', 'cold and warm four-layer 4096×4096 materialized sparse paint render', '65,536 addressed tiles from an 8192×8192 sparse source sheet', 'one-pixel regional render across 4,096 stored map chunks', 'native save', 'PNG export', 'one-million-sample compact accounting', 'one-million-cell bounded flood fill', 'RSS growth'], deferredToPackagedComputerUse: ['pointer-to-preview latency', 'requestAnimationFrame pacing', 'human input during four visible agent lanes', '200% display scaling and tablet latency'] }, budgets, metrics, diagnostics: { memoryProfile } };
     const reportPath = process.env.AIDRAW_PERFORMANCE_REPORT ?? join(process.cwd(), 'test-results', 'performance-gate.json');
     await mkdir(dirname(reportPath), { recursive: true }); await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
     expect(queueAccounting.value.samples).toBe(1_000_000); expect((queueAccounting.value.midpoint[0] as Extract<CanvasOperation, { kind: 'pixel.cel.region' }>).runs.reduce((sum, run) => sum + run.length, 0)).toBe(500_000);

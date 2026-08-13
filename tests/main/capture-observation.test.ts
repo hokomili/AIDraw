@@ -16,6 +16,10 @@ describe('bounded tilemap observation', () => {
     const map = createPixelTilemap('Million-column map'); map.width = 1_000_000; map.height = 1; map.tileWidth = 16; map.tileHeight = 16; map.tilesetIds = [tileset.id];
     const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile' || !layer.chunks) throw new Error('Expected tile layer');
     writeTiles(layer.chunks, [{ x: map.width - 1, y: 0, gid: 1 }]);
+    layer.chunks['0,0'] = {
+      x: 0, y: 0, width: 32, height: 32,
+      get data(): string { throw new Error('A nonintersecting chunk was decoded.'); },
+    };
     document.pixelAssets = { [sprite.id]: sprite, [tileset.id]: tileset, [map.id]: map }; document.assetIds = [sprite.id, tileset.id, map.id]; document.activeAssetId = map.id;
     const region = { x: (map.width - 1) * map.tileWidth, y: 0, width: 16, height: 16 };
 
