@@ -419,6 +419,41 @@ describe('.aidraw persistence', () => {
     await expect(readNativeDocument(invalidJsonPath)).rejects.toThrow('AIDraw manifest is malformed.');
   });
 
+  it('rejects malformed native activity and provenance before canonical consumers or destination replacement', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-persistence-attribution-')); temporaryPaths.push(root);
+    const document = createIllustrationDocument('Native attribution fixture');
+    document.activity = [{
+      id: 'activity-native', transactionId: 'transaction-native', actor: HUMAN_ACTOR,
+      label: 'Native attributed edit', timestamp: nowIso(), status: 'committed', operationCount: 1,
+    }];
+    document.provenance = [{
+      id: 'provenance-native', assetId: 'asset-output-not-present', provider: 'external',
+      modelOrWorkflow: 'Offline imported result', sourceAssetIds: ['asset-source-not-present'], createdAt: nowIso(),
+    }];
+    const sourcePath = await writeNativeDocument(join(root, 'source.aidraw'), document, '1.0.0');
+    const sourceBytes = await readFile(sourcePath); const files = unzipSync(new Uint8Array(sourceBytes));
+    const persisted = JSON.parse(strFromU8(files['document.json'])) as Record<string, unknown>;
+    const valid = await readNativeDocument(sourcePath);
+    expect(valid.document.activity).toEqual(document.activity); expect(valid.document.provenance).toEqual(document.provenance);
+
+    const mutations: Array<[string, string, (value: Record<string, unknown>) => void]> = [
+      ['invalid-activity-actor', 'Invalid persisted document activity metadata.', (value) => { ((value.activity as Array<Record<string, unknown>>)[0]).actor = null; }],
+      ['invalid-provenance-sources', 'Invalid persisted document provenance metadata.', (value) => { ((value.provenance as Array<Record<string, unknown>>)[0]).sourceAssetIds = 'asset-source'; }],
+      ['duplicate-provenance-id', 'Invalid persisted document provenance metadata.', (value) => { const entries = value.provenance as Array<Record<string, unknown>>; entries.push(structuredClone(entries[0])); }],
+    ];
+    for (const [name, error, mutate] of mutations) {
+      const value = structuredClone(persisted); mutate(value);
+      const path = join(root, `${name}.aidraw`); await writeFile(path, zipSync({ ...files, 'document.json': strToU8(JSON.stringify(value)) }, { level: 6 }));
+      await expect(readNativeDocument(path)).rejects.toThrow(error);
+    }
+
+    const invalidSave = structuredClone(document);
+    (invalidSave.activity[0] as unknown as Record<string, unknown>).actor = null;
+    await expect(writeNativeDocument(sourcePath, invalidSave, '1.0.1')).rejects.toThrow('Invalid persisted document activity metadata.');
+    expect(await readFile(sourcePath)).toEqual(sourceBytes);
+    expect((await readdir(root)).some((entry) => entry.endsWith('.tmp'))).toBe(false);
+  });
+
   it('hydrates only hash- and length-matched native asset entries and never trusts inline document bytes', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aidraw-persistence-assets-')); temporaryPaths.push(root);
     const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);

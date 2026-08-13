@@ -663,6 +663,17 @@ export const ActorSchema = z.object({
   }).strict().optional(),
 });
 
+const ActivityEntryInputSchema = z.object({
+  id: IdSchema,
+  transactionId: IdSchema,
+  actor: ActorSchema,
+  label: z.string().min(1).max(200),
+  timestamp: z.string().min(1),
+  status: z.enum(['committed', 'partial', 'undone', 'failed', 'cancelled']),
+  operationCount: FiniteNumberSchema.int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  details: z.string().optional(),
+}).strict();
+
 export const CanvasOperationSchema = z
   .object({
     kind: OperationKindSchema,
@@ -704,10 +715,22 @@ export const PersistedDocumentSchema = z
     updatedAt: z.string(),
     dirty: z.boolean(),
     assets: z.record(z.string(), z.unknown()),
-    activity: z.array(z.unknown()),
-    provenance: z.array(z.unknown()),
+    activity: z.array(ActivityEntryInputSchema),
+    provenance: z.array(ProvenanceInputSchema),
   })
   .loose()
+  .superRefine((value, context) => {
+    const activityIds = new Set<string>();
+    for (const [index, entry] of value.activity.entries()) {
+      if (activityIds.has(entry.id)) context.addIssue({ code: 'custom', path: ['activity', index, 'id'], message: `Duplicate activity ID: ${entry.id}` });
+      activityIds.add(entry.id);
+    }
+    const provenanceIds = new Set<string>();
+    for (const [index, entry] of value.provenance.entries()) {
+      if (provenanceIds.has(entry.id)) context.addIssue({ code: 'custom', path: ['provenance', index, 'id'], message: `Duplicate provenance ID: ${entry.id}` });
+      provenanceIds.add(entry.id);
+    }
+  })
   .transform((value) => value as unknown as AIDrawDocument);
 
 function assertAcyclicGroupChildren(entries: Record<string, any>, cycleError: string): void {
@@ -715,7 +738,13 @@ function assertAcyclicGroupChildren(entries: Record<string, any>, cycleError: st
 }
 
 export function validateDocument(value: unknown): AIDrawDocument {
-  const document = PersistedDocumentSchema.parse(value);
+  const parsed = PersistedDocumentSchema.safeParse(value);
+  if (!parsed.success) {
+    if (parsed.error.issues.some((issue) => issue.path[0] === 'activity')) throw new Error('Invalid persisted document activity metadata.');
+    if (parsed.error.issues.some((issue) => issue.path[0] === 'provenance')) throw new Error('Invalid persisted document provenance metadata.');
+    throw parsed.error;
+  }
+  const document = parsed.data;
   if (document.kind === 'illustration') {
     if (!Array.isArray(document.layerIds) || typeof document.layers !== 'object' || typeof document.objects !== 'object') {
       throw new Error('Invalid illustration document structure');

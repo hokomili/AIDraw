@@ -9,6 +9,7 @@ import {
   createIllustrationDocument,
   createId,
   createPixelSprite,
+  migrateDocument,
   nowIso,
 } from '@aidraw/core';
 
@@ -209,5 +210,57 @@ describe('canvas operation schemas', () => {
       ],
     }).success).toBe(false);
     expect(CanvasOperationSchema.safeParse({ kind: 'pixel.links.replace', linkedAssets: [], expectedRevision: -1 }).success).toBe(false);
+  });
+});
+
+describe('persisted attribution schemas', () => {
+  function attributedDocument() {
+    const document = createIllustrationDocument('Persisted attribution');
+    document.activity = [{
+      id: 'activity-persisted', transactionId: 'transaction-persisted', actor: HUMAN_ACTOR,
+      label: 'Persisted edit', timestamp: nowIso(), status: 'committed', operationCount: 1,
+      details: 'Exact activity detail',
+    }];
+    document.provenance = [{
+      id: 'provenance-persisted', assetId: 'asset-output-not-present', provider: 'external',
+      modelOrWorkflow: 'Offline imported result', sourceAssetIds: ['asset-source-not-present'],
+      createdAt: nowIso(), conversion: { resample: 'area' },
+    }];
+    return document;
+  }
+
+  it('accepts exact activity and provenance while preserving missing-reference recovery', () => {
+    const source = attributedDocument();
+    const migrated = migrateDocument(source);
+    expect(migrated.activity).toEqual(source.activity);
+    expect(migrated.provenance).toEqual(source.provenance);
+  });
+
+  it('rejects malformed, expanded, and duplicate persisted activity entries', () => {
+    const candidates = [
+      (document: ReturnType<typeof attributedDocument>) => { (document.activity[0] as unknown as Record<string, unknown>).actor = null; },
+      (document: ReturnType<typeof attributedDocument>) => { (document.activity[0] as unknown as Record<string, unknown>).status = 'invented'; },
+      (document: ReturnType<typeof attributedDocument>) => { (document.activity[0] as unknown as Record<string, unknown>).operationCount = Number.MAX_SAFE_INTEGER + 1; },
+      (document: ReturnType<typeof attributedDocument>) => { (document.activity[0] as unknown as Record<string, unknown>).unexpected = true; },
+      (document: ReturnType<typeof attributedDocument>) => { document.activity.push(structuredClone(document.activity[0])); },
+    ];
+    for (const mutate of candidates) {
+      const document = attributedDocument(); mutate(document);
+      expect(() => migrateDocument(document)).toThrow('Invalid persisted document activity metadata.');
+    }
+  });
+
+  it('rejects malformed, expanded, and duplicate persisted provenance entries', () => {
+    const candidates = [
+      (document: ReturnType<typeof attributedDocument>) => { (document.provenance[0] as unknown as Record<string, unknown>).provider = 'invented'; },
+      (document: ReturnType<typeof attributedDocument>) => { (document.provenance[0] as unknown as Record<string, unknown>).sourceAssetIds = 'asset-source'; },
+      (document: ReturnType<typeof attributedDocument>) => { (document.provenance[0] as unknown as Record<string, unknown>).conversion = []; },
+      (document: ReturnType<typeof attributedDocument>) => { (document.provenance[0] as unknown as Record<string, unknown>).unexpected = true; },
+      (document: ReturnType<typeof attributedDocument>) => { document.provenance.push(structuredClone(document.provenance[0])); },
+    ];
+    for (const mutate of candidates) {
+      const document = attributedDocument(); mutate(document);
+      expect(() => migrateDocument(document)).toThrow('Invalid persisted document provenance metadata.');
+    }
   });
 });
