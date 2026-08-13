@@ -14,7 +14,6 @@ import type { GenerationManager } from './generation-manager';
 import { EngineRuntime } from './engine-runtime';
 import type { GenerationRequest } from '../common/generation';
 import type { ExportFormat } from './export-document';
-import { renderDocument } from './render-document';
 import { cliHelp, executeBatchExport, parseCliArguments, type CliCommand } from './cli';
 import { validateSpriteSheetSliceOptions, type SpriteSheetSliceOptions } from '../common/sprite-sheet';
 import { buildRendererDiagnostics, type RendererFailureDetail } from './renderer-diagnostics';
@@ -48,6 +47,7 @@ import {
   pasteFromClipboard,
   type ClipboardWorkflowDependencies,
 } from './clipboard-workflows';
+import { buildCheckpointComparison } from './checkpoint-comparison';
 
 declare const MAIN_WINDOW_VITE_DEV_SERVER_URL: string | undefined;
 declare const MAIN_WINDOW_VITE_NAME: string;
@@ -466,15 +466,11 @@ function registerIpc(): void {
   handle(IPC.checkpointCompare, async (_event, documentId: string, checkpointId: string) => {
     const current = service.getDocument(documentId); const checkpoint = service.getCheckpoint(documentId, checkpointId);
     if (!current || !checkpoint) throw new Error('Checkpoint not found.');
-    const [currentCanvas, savedCanvas] = await Promise.all([renderDocument(current), renderDocument(checkpoint.document)]);
-    const encode = (canvas: Awaited<ReturnType<typeof renderDocument>>) => `data:image/png;base64,${canvas.toBuffer('image/png').toString('base64')}`;
     const summary = service.listCheckpoints(documentId).find((entry) => entry.id === checkpoint.id)!;
-    return {
-      checkpoint: summary,
-      current: { revision: current.revision, width: currentCanvas.width, height: currentCanvas.height, dataUrl: encode(currentCanvas) },
-      saved: { revision: checkpoint.sourceRevision, width: savedCanvas.width, height: savedCanvas.height, dataUrl: encode(savedCanvas) },
-      candidates: service.listCheckpointMergeCandidates(documentId, checkpointId),
-    };
+    const candidates = service.listCheckpointMergeCandidates(documentId, checkpointId);
+    return buildCheckpointComparison(current, checkpoint, summary, candidates, async (document) => (
+      await engineRuntime.rasterUtilities.exportDocument(document, 'png')
+    ).data);
   });
   handle(IPC.checkpointRestore, (_event, documentId: string, checkpointId: string) => service.restoreCheckpoint(documentId, checkpointId, HUMAN_ACTOR));
   handle(IPC.checkpointMerge, (_event, documentId: string, checkpointId: string, sourceIds: string[]) => service.mergeCheckpoint(documentId, checkpointId, sourceIds, HUMAN_ACTOR));
