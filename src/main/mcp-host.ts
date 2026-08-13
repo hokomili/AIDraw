@@ -76,6 +76,8 @@ import { AIDRAW_GUIDE_URI, AIDRAW_HELP_TOPICS, AIDRAW_MCP_GUIDE, AIDRAW_SERVER_I
 const PORT_START = 48200;
 const PORT_END = 48231;
 const MAX_HTTP_BODY = 2 * 1024 * 1024;
+const MAX_MCP_SESSIONS = 32;
+const MAX_MCP_RESOURCE_SUBSCRIPTIONS = 128;
 const AGENT_COLORS = ['#8268dd', '#e65f7d', '#2fa7a0', '#d58a35', '#4d83d1', '#a65dab'];
 
 interface McpSession {
@@ -83,6 +85,7 @@ interface McpSession {
   transport: NodeStreamableHTTPServerTransport;
   actor: Actor;
   subscriptions: Set<string>;
+  closed: boolean;
 }
 
 interface PortSettings { version: 1; preferredPort: number }
@@ -869,6 +872,9 @@ export class McpHost {
   private readonly batches: BatchManager;
   private readonly activeBatchTransactions = new Map<string, string>();
   private readonly sessions = new Map<string, McpSession>();
+  private initializingSessions = 0;
+  private sessionSequence = 0;
+  private stopping = false;
   private httpServer?: HttpServer;
   private token = '';
   private port?: number;
@@ -903,6 +909,7 @@ export class McpHost {
   }
 
   async start(token: string): Promise<{ port: number; url: string; tokenHint: string }> {
+    this.stopping = false;
     this.token = token;
     await this.batches.initialize();
     await this.readFolderTrust();
@@ -938,6 +945,7 @@ export class McpHost {
   }
 
   async stop(): Promise<void> {
+    this.stopping = true;
     for (const session of this.sessions.values()) await session.mcp.close().catch(() => undefined);
     this.sessions.clear();
     this.sessionTrustedFolders.clear();
@@ -1000,12 +1008,34 @@ export class McpHost {
         response.end(JSON.stringify({ error: sessionId ? 'unknown_session' : 'initialization_required' }));
         return;
       }
-      session = await this.createSession();
+      if (this.stopping) {
+        response.writeHead(503, { 'content-type': 'application/json', 'cache-control': 'no-store', 'retry-after': '1' });
+        response.end('{"error":"mcp_stopping"}');
+        return;
+      }
+      if (this.sessions.size + this.initializingSessions >= MAX_MCP_SESSIONS) {
+        response.writeHead(429, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+        response.end(JSON.stringify({ error: 'session_limit_reached', limit: MAX_MCP_SESSIONS, message: 'Terminate an existing MCP session with authenticated DELETE before retrying.' }));
+        return;
+      }
+      this.initializingSessions += 1;
+      let retained = false;
+      try {
+        session = await this.createSession();
+        await session.transport.handleRequest(request, response, body);
+        const assignedId = session.transport.sessionId;
+        if (assignedId && !session.closed && !this.stopping) {
+          this.sessions.set(assignedId, session);
+          retained = true;
+        }
+      } finally {
+        this.initializingSessions -= 1;
+        if (session && !retained) await session.mcp.close().catch(() => undefined);
+      }
+      return;
     }
 
     await session.transport.handleRequest(request, response, body);
-    const assignedId = session.transport.sessionId;
-    if (assignedId && !this.sessions.has(assignedId)) this.sessions.set(assignedId, session);
   }
 
   private async readBody(request: IncomingMessage): Promise<unknown> {
@@ -1022,16 +1052,34 @@ export class McpHost {
   }
 
   private async createSession(): Promise<McpSession> {
-    const actorIndex = this.sessions.size % AGENT_COLORS.length;
+    const sessionNumber = ++this.sessionSequence;
+    const actorIndex = (sessionNumber - 1) % AGENT_COLORS.length;
     const state: McpSession = {
-      actor: { id: createId('agent'), kind: 'agent', name: `Agent ${this.sessions.size + 1}`, color: AGENT_COLORS[actorIndex] },
+      actor: { id: createId('agent'), kind: 'agent', name: `Agent ${sessionNumber}`, color: AGENT_COLORS[actorIndex] },
       mcp: undefined as unknown as McpServer,
       transport: new NodeStreamableHTTPServerTransport({ sessionIdGenerator: () => randomUUID() }),
       subscriptions: new Set(),
+      closed: false,
     };
     state.mcp = this.buildServer(state);
     await state.mcp.connect(state.transport);
+    const protocolClose = state.transport.onclose;
+    state.transport.onclose = () => { protocolClose?.(); this.retireSession(state); };
     return state;
+  }
+
+  private retireSession(session: McpSession): void {
+    if (session.closed) return;
+    session.closed = true;
+    for (const [id, active] of this.sessions) if (active === session) this.sessions.delete(id);
+    this.documents.removePresence(session.actor.id);
+    this.sessionTrustedFolders.delete(session.actor.id);
+    session.subscriptions.clear();
+  }
+
+  private hasActiveSession(actorId: string): boolean {
+    for (const session of this.sessions.values()) if (!session.closed && session.actor.id === actorId) return true;
+    return false;
   }
 
   private buildServer(session: McpSession): McpServer {
@@ -1437,7 +1485,7 @@ export class McpHost {
     const subscribable = (uri: string) => uri === 'aidraw://documents' || /^aidraw:\/\/documents\/[^/]+\/(?:manifest|snapshot|trace|changes\/\d+)$/.test(uri);
     server.server.setRequestHandler('resources/subscribe', async (request) => {
       const uri = request.params.uri; if (!subscribable(uri)) throw new Error('Only AIDraw document resources can be subscribed.');
-      if (!session.subscriptions.has(uri) && session.subscriptions.size >= 128) throw new Error('A session may subscribe to at most 128 AIDraw resources.');
+      if (!session.subscriptions.has(uri) && session.subscriptions.size >= MAX_MCP_RESOURCE_SUBSCRIPTIONS) throw new Error(`A session may subscribe to at most ${MAX_MCP_RESOURCE_SUBSCRIPTIONS} AIDraw resources.`);
       session.subscriptions.add(uri); return {};
     });
     server.server.setRequestHandler('resources/unsubscribe', async (request) => { session.subscriptions.delete(request.params.uri); return {}; });
@@ -1469,7 +1517,10 @@ export class McpHost {
     // job was created. Preserve synchronous session-trust installation before
     // this async handler's first write so the next MCP call cannot race it.
     const result = job.result as { request?: { path?: unknown } } | undefined; if (typeof result?.request?.path !== 'string') return; const folder = this.normalizeFolder(dirname(resolve(result.request.path)));
-    if (decision === 'allow-session') { const folders = this.sessionTrustedFolders.get(job.actor.id) ?? new Set<string>(); folders.add(folder); this.sessionTrustedFolders.set(job.actor.id, folders); return; }
+    if (decision === 'allow-session') {
+      if (!this.hasActiveSession(job.actor.id)) return;
+      const folders = this.sessionTrustedFolders.get(job.actor.id) ?? new Set<string>(); folders.add(folder); this.sessionTrustedFolders.set(job.actor.id, folders); return;
+    }
     this.persistentTrustedFolders.add(folder); await mkdir(dirname(this.trustSettingsPath()), { recursive: true }); await writeFile(this.trustSettingsPath(), JSON.stringify({ version: 1, folders: [...this.persistentTrustedFolders] } satisfies FolderTrustSettings, null, 2), 'utf8');
   }
 

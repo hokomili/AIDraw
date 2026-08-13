@@ -4,6 +4,8 @@ The editor-independent server is stateful Streamable HTTP at `http://127.0.0.1:<
 
 `<AIDraw executable> --headless` starts the engine without a renderer. Closing the editor does not terminate sessions or documents. Animated transactions commit immediately while no editor is attached and retain their original operations for later trace replay. Launching AIDraw normally attaches the UI to the same process.
 
+AIDraw retains at most 32 authenticated MCP transport sessions, including capacity reserved by initializations in progress. A simultaneous 33rd initializer receives HTTP 429 with `session_limit_reached`; retry after terminating an unused session with an authenticated HTTP DELETE carrying that session's `Mcp-Session-Id`. Deleting a transport session removes its presence, resource subscriptions, and session-scoped folder trust. `session_manage` with `action: "leave"` removes presence only and deliberately does not terminate the transport. The engine does not silently evict idle sessions; full engine shutdown closes every session.
+
 For unattended first-run provisioning, an explicitly authorized launcher may add `--write-mcp-connection=<absolute-json-path>`. Once the authenticated server starts, AIDraw writes its URL, token, active document ID, and process ID to that exact path without creating a renderer. The output is a password-bearing bootstrap artifact: keep it private to the current OS user, import it into the MCP client, and delete it afterward. Without this explicit flag, the operating-system-protected token is disclosed only through guided in-app setup.
 
 ## Discovery and cold start
@@ -29,7 +31,7 @@ The same launcher may repeat `--trust-folder=<absolute-folder-path>` to grant pr
 - `aidraw://documents/{id}/changes/{revision}`
 - `aidraw://documents/{id}/trace` — append-only NDJSON transactions with actor, operations, outcome, and resulting revision
 
-Clients that negotiate subscriptions receive resource-updated notifications after revisions change.
+Clients that negotiate subscriptions receive resource-updated notifications after revisions change. Each session may retain at most 128 distinct resource subscriptions. Re-subscribing to an existing URI is idempotent and does not consume another slot; `resources/unsubscribe` frees that URI's slot.
 
 ## Tools
 

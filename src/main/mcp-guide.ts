@@ -166,6 +166,7 @@ const helpTopics: Record<AIDrawHelpTopic, AIDrawHelpResult> = {
       'Entity attribution is rewritten from the authenticated actor; caller-supplied creator/provenance claims do not grant authority.',
       'Observe revisions and human occupancy before edits. Human gestures and locks win; do not bypass or synthesize approval decisions.',
       'File operations address exact paths. Trust is scoped; overwrites remain reviewed; generation is always separate and potentially paid.',
+      'Terminate unused transport sessions with authenticated HTTP DELETE. session_manage leave removes presence only; it does not release one of the 32 transport slots.',
       'Use job summaries only for lifecycle state. Observe canonical documents/resources for final state; private raw job results remain server-internal.',
     ],
     invariants: sharedInvariants,
@@ -186,6 +187,7 @@ export const AIDRAW_SERVER_INSTRUCTIONS = [
   'Use session_manage join|inspect, then document_manage list and canvas_observe before canvas_apply.',
   'tools/list is authoritative for conditional action inputs; aidraw_help provides concise workflows and aidraw://guide provides the optional complete guide.',
   'Reuse clientOperationId only for the same logical transaction; honor expected revisions and human locks.',
+  'AIDraw retains at most 32 transports. Terminate an unused session with authenticated HTTP DELETE; session_manage leave removes presence only.',
   'File and generation calls may return owner-scoped jobs. A human alone approves in AIDraw; follow returned next guidance with job_manage wait|inspect.',
   'Job summaries are privacy-redacted. Read canonical state with canvas_observe or document resources after completion.',
 ].join(' ');
@@ -201,6 +203,12 @@ This guide is optional progressive reference. A client that supports only tools/
 3. Call document_manage with action=list; never invent document/entity IDs.
 4. Call canvas_observe before canvas_apply. Copy current revisions into operation expectedRevision fields.
 5. If a file or generation call returns jobId, follow its next field with owner-scoped job_manage. Only a human can approve in AIDraw.
+
+## Session lifecycle and subscription capacity
+
+AIDraw retains at most 32 authenticated transport sessions, counting initialization reservations. A simultaneous 33rd initialize receives HTTP 429. Release capacity by sending authenticated HTTP DELETE with the retained Mcp-Session-Id; this also retires presence, resource subscriptions, and session-scoped folder trust. session_manage leave removes presence only. There is no implicit idle eviction, and engine shutdown closes every transport.
+
+Each session may retain at most 128 distinct resource subscriptions. A duplicate subscribe is idempotent; resources/unsubscribe frees one slot.
 
 ## Conditional action contracts
 

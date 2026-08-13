@@ -204,9 +204,17 @@ describe('authenticated stateful MCP contract', () => {
     }
   });
 
-  it('supports 32 concurrent clients, resources, and idempotent transactions', async () => {
+  it('caps concurrent clients at 32, retires terminated sessions, and preserves resources plus idempotent transactions', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aidraw-mcp-')); temporaryPaths.push(root); const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0', new TransactionTraceStore(join(root, 'traces'))); documents.initialize(); const host = new McpHost(documents, '1.0.0', join(root, 'port.json')); hosts.push(host); const started = await host.start('parallel-token');
-    const clients = await Promise.all(Array.from({ length: 32 }, (_, index) => initializeClient(started.url, 'parallel-token', `client-${index}`))); expect(new Set(clients.map((client) => client.sessionId)).size).toBe(32);
+    const attempts = await Promise.all(Array.from({ length: 33 }, async (_, index) => {
+      const response = await fetch(started.url, { method: 'POST', headers: { authorization: 'Bearer parallel-token', accept: 'application/json, text/event-stream', 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2026-07-28', capabilities: {}, clientInfo: { name: `client-${index}`, version: '1.0.0' } } }) });
+      return { status: response.status, sessionId: response.headers.get('mcp-session-id'), cacheControl: response.headers.get('cache-control'), body: await response.text() };
+    }));
+    const accepted = attempts.filter((attempt) => attempt.status === 200); const refused = attempts.filter((attempt) => attempt.status === 429);
+    expect(accepted).toHaveLength(32); expect(new Set(accepted.map((attempt) => attempt.sessionId)).size).toBe(32); expect(accepted.every((attempt) => parseMcp(attempt.body).result)).toBe(true);
+    expect(refused).toHaveLength(1); expect(refused[0]).toMatchObject({ sessionId: null, cacheControl: 'no-store' }); expect(JSON.parse(refused[0].body)).toEqual({ error: 'session_limit_reached', limit: 32, message: 'Terminate an existing MCP session with authenticated DELETE before retrying.' });
+    const clients = accepted.map((attempt) => ({ sessionId: attempt.sessionId!, headers: { authorization: 'Bearer parallel-token', accept: 'application/json, text/event-stream', 'content-type': 'application/json', 'mcp-session-id': attempt.sessionId! } }));
+    await Promise.all(clients.map((client) => fetch(started.url, { method: 'POST', headers: client.headers, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) })));
     const first = clients[0]; const resource = await fetch(started.url, { method: 'POST', headers: first.headers, body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'resources/read', params: { uri: 'aidraw://documents' } }) }); expect(parseMcp(await resource.text()).result).toBeTruthy();
     const document = documents.snapshot().activeDocument!; const params = { name: 'canvas_apply', arguments: { documentId: document.id, clientOperationId: 'mcp-idempotent-op', label: 'MCP rename', operations: [{ kind: 'document.rename', name: 'Shared drawing' }], playback: { mode: 'instant', speed: 1 } } };
     const apply = async (id: number) => parseMcp(await (await fetch(started.url, { method: 'POST', headers: first.headers, body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params }) })).text());
@@ -214,6 +222,11 @@ describe('authenticated stateful MCP contract', () => {
     const traceResponse = await fetch(started.url, { method: 'POST', headers: first.headers, body: JSON.stringify({ jsonrpc: '2.0', id: 5, method: 'resources/read', params: { uri: `aidraw://documents/${document.id}/trace` } }) });
     const traceMessage = parseMcp(await traceResponse.text()); const traceContents = traceMessage.result?.contents as Array<{ text?: string }> | undefined;
     expect(traceContents?.[0]?.text).toContain('mcp-idempotent-op');
+    const joined = await callTool(started.url, first.headers, 6, 'session_manage', { action: 'join', name: 'Capacity probe' }); const retiredActorId = String((joined.actor as { id: string }).id);
+    const terminated = await fetch(started.url, { method: 'DELETE', headers: first.headers }); expect(terminated.status).toBe(200);
+    expect(documents.getMcpInfo().sessions.map((entry) => entry.actor.id)).not.toContain(retiredActorId);
+    const stale = await fetch(started.url, { method: 'POST', headers: first.headers, body: JSON.stringify({ jsonrpc: '2.0', id: 7, method: 'tools/list', params: {} }) }); expect(stale.status).toBe(404); expect(await stale.json()).toEqual({ error: 'unknown_session' });
+    const replacement = await initializeClient(started.url, 'parallel-token', 'replacement-client'); expect(replacement.sessionId).not.toBe(first.sessionId);
   });
 
   it('serves manifest/snapshot/change resources and emits negotiated resource updates', async () => {
@@ -226,6 +239,17 @@ describe('authenticated stateful MCP contract', () => {
     expect(await callTool(started.url, client.headers, 5, 'canvas_apply', { documentId: document.id, clientOperationId: 'subscription-change', label: 'Subscription change', playback: { mode: 'instant', speed: 1 }, operations: [{ kind: 'document.rename', name: 'Subscribed drawing' }] })).toMatchObject({ status: 'committed', revision: document.revision + 1 });
     const eventText = await readSseUntil(events, new RegExp(`notifications/resources/updated[\\s\\S]*${document.id}/snapshot`)); controller.abort(); expect(eventText).toContain(`aidraw://documents/${document.id}/snapshot`);
     const changes = await readResource(6, `aidraw://documents/${document.id}/changes/${document.revision}`); const changePayload = JSON.parse(String((changes.result?.contents as Array<{ text: string }>)[0].text)); expect(changePayload).toEqual([expect.objectContaining({ revision: document.revision + 1, transaction: expect.objectContaining({ documentId: document.id, clientOperationId: 'subscription-change' }) })]);
+  });
+
+  it('caps each session at 128 distinct resource subscriptions and frees capacity on unsubscribe', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-mcp-subscription-cap-')); temporaryPaths.push(root); const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0'); documents.initialize(); const host = new McpHost(documents, '1.0.0', join(root, 'port.json')); hosts.push(host); const started = await host.start('subscription-cap-token'); const client = await initializeClient(started.url, 'subscription-cap-token', 'subscription-cap-client'); const document = documents.snapshot().activeDocument!;
+    const request = async (id: number, method: 'resources/subscribe' | 'resources/unsubscribe', uri: string) => parseMcp(await (await fetch(started.url, { method: 'POST', headers: client.headers, body: JSON.stringify({ jsonrpc: '2.0', id, method, params: { uri } }) })).text());
+    const uris = Array.from({ length: 129 }, (_, index) => `aidraw://documents/${document.id}/changes/${index}`);
+    for (let index = 0; index < 128; index += 1) expect(await request(index + 2, 'resources/subscribe', uris[index])).toMatchObject({ result: {} });
+    expect(await request(130, 'resources/subscribe', uris[0])).toMatchObject({ result: {} });
+    expect(JSON.stringify(await request(131, 'resources/subscribe', uris[128]))).toContain('at most 128 AIDraw resources');
+    expect(await request(132, 'resources/unsubscribe', uris[0])).toMatchObject({ result: {} });
+    expect(await request(133, 'resources/subscribe', uris[128])).toMatchObject({ result: {} });
   });
 
   it('lets an authenticated agent start one bounded non-mutating durable trace replay with explicit busy state', async () => {
