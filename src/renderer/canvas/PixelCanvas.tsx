@@ -55,6 +55,7 @@ import { useEditorStore } from '../store';
 import { CelExposureGrid } from '../components/CelExposureGrid';
 import { OnionSkinSettingsPanel } from '../components/OnionSkinSettingsPanel';
 import { PlaybackLanes } from '../components/PlaybackLanes';
+import { StampLibraryDialog } from '../components/StampLibraryDialog';
 import { collectReplayMasks, replayPointKey, replayTileLayerKey } from '../replay';
 import { EditorDialog, EntryDialog } from '../components/EditorDialog';
 import { bresenham } from './geometry';
@@ -235,6 +236,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const [stampPreview, setStampPreview] = useState<Array<PixelPoint & { index: number }>>([]);
   const [activeStampId, setActiveStampId] = useState<string>();
   const [stampCaptureOpen, setStampCaptureOpen] = useState(false);
+  const [stampLibraryOpen, setStampLibraryOpen] = useState(false);
   const [tileStampPreview, setTileStampPreview] = useState<Array<PixelPoint & { gid: number }>>([]);
   const [activeTileStampId, setActiveTileStampId] = useState<string>();
   const [lockPromise, setLockPromise] = useState<Promise<{ acquired: boolean; lockId?: string }>>();
@@ -1131,6 +1133,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
         {tool === 'stamp' && (sprite || tilemap) && <>
           {sprite ? <select aria-label="Active reusable stamp" value={activeStamp?.id ?? 'builtin-plus'} onChange={(event) => setActiveStampId(event.target.value === 'builtin-plus' ? undefined : event.target.value)} title="Reusable stamp library"><option value="builtin-plus">Built-in plus</option>{document.stamps.map((stamp) => <option key={stamp.id} value={stamp.id}>{stamp.name}</option>)}</select> : <select aria-label="Active reusable tile stamp" value={activeTileStamp?.id ?? 'builtin-tile'} onChange={(event) => setActiveTileStampId(event.target.value === 'builtin-tile' ? undefined : event.target.value)} title="Reusable tile stamp library"><option value="builtin-tile">Current tile</option>{document.tileStamps.map((stamp) => <option key={stamp.id} value={stamp.id}>{stamp.name}</option>)}</select>}
           <button disabled={!selection.length} onClick={() => setStampCaptureOpen(true)} title="Capture the current selection as a reusable stamp"><Copy size={13} /> Capture</button>
+          <button onClick={() => { setStampCaptureOpen(false); setStampLibraryOpen(true); }} title="Copy or import a bounded reusable stamp library as AIDraw JSON"><ClipboardPaste size={13} /> Library JSON</button>
           <button disabled={sprite ? !activeStamp : !activeTileStamp} onClick={() => void transformActiveStamp('flip-horizontal')} title="Flip saved stamp horizontally"><FlipHorizontal2 size={13} /></button>
           <button disabled={sprite ? !activeStamp : !activeTileStamp} onClick={() => void transformActiveStamp('flip-vertical')} title="Flip saved stamp vertically"><FlipVertical2 size={13} /></button>
           <button disabled={sprite ? !activeStamp : !activeTileStamp} onClick={() => void transformActiveStamp('rotate-clockwise')} title="Rotate saved stamp 90° clockwise"><RotateCw size={13} /></button>
@@ -1187,6 +1190,20 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
         preview={() => { const bounds = pixelSelectionBounds(selection); return <><strong>Indexed footprint</strong><span>{bounds ? `${bounds.width} × ${bounds.height}${sprite ? 'px' : ' tiles'} · ${selection.length} selected cells` : 'Selection unavailable'}</span></>; }}
         onSubmit={captureSelectionAsStamp}
         onClose={() => setStampCaptureOpen(false)}
+      />}
+      {stampLibraryOpen && (sprite || tilemap) && <StampLibraryDialog
+        document={document}
+        map={tilemap}
+        onApply={async (plan) => {
+          const applied = await apply(`Import reusable ${plan.kind} stamp library`, plan.operations);
+          if (applied) {
+            const activeId = plan.importedIds.at(-1);
+            if (plan.kind === 'pixel') setActiveStampId(activeId);
+            else setActiveTileStampId(activeId);
+          }
+          return applied;
+        }}
+        onClose={() => setStampLibraryOpen(false)}
       />}
       {selectionScaleOpen && <EntryDialog
         title="Integer-scale selection"
