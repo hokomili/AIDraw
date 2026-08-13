@@ -1,7 +1,7 @@
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import { createId, nowIso, type Actor, type AsyncJob } from '@aidraw/core';
+import { ActorSchema, createId, nowIso, type Actor, type AsyncJob } from '@aidraw/core';
 import type { ApplyTransactionResponse } from '../common/contracts';
 import type { DocumentService } from './document-service';
 
@@ -41,6 +41,50 @@ export interface BatchPreparation {
 
 const MAX_BATCHES = 500;
 const MAX_BATCH_TRANSACTIONS = 10_000;
+const StrictActorSchema = ActorSchema.strict();
+const BATCH_LEDGER_KEYS = new Set(['version', 'batches']);
+const BATCH_STATE_KEYS = new Set([
+  'version', 'jobId', 'documentId', 'label', 'totalTransactions', 'nextSequence', 'tokenHash', 'actor',
+  'createdAt', 'updatedAt', 'status', 'clientOperationIds', 'transactionIds', 'inFlight', 'message', 'error',
+]);
+const BATCH_IN_FLIGHT_KEYS = new Set(['sequence', 'clientOperationId']);
+const BATCH_ERROR_KEYS = new Set(['code', 'message', 'retryable']);
+
+export interface BatchManagerOptions {
+  /** Narrow deterministic seam for atomic-ledger replacement failure coverage. */
+  replaceFile?: (source: string, destination: string) => Promise<void>;
+}
+
+function plainRecord(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function exactKeys(value: Record<string, unknown>, keys: ReadonlySet<string>): boolean {
+  return Object.keys(value).every((key) => keys.has(key));
+}
+
+function writerTimestamp(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const milliseconds = Date.parse(value);
+  return Number.isFinite(milliseconds) && new Date(milliseconds).toISOString() === value;
+}
+
+function writerString(value: unknown, maximum?: number): value is string {
+  return typeof value === 'string' && value.length > 0 && (maximum === undefined || value.length <= maximum);
+}
+
+function writerError(value: unknown): value is NonNullable<AsyncJob['error']> {
+  if (!plainRecord(value) || !exactKeys(value, BATCH_ERROR_KEYS)) return false;
+  return writerString(value.code) && writerString(value.message) && typeof value.retryable === 'boolean';
+}
+
+function writerActor(actor: Actor): Actor {
+  const parsed = StrictActorSchema.safeParse(actor);
+  if (!parsed.success) throw new Error('The batch actor is invalid.');
+  return structuredClone(parsed.data);
+}
 
 function tokenHash(token: string): string {
   return createHash('sha256').update(token).digest('hex');
@@ -53,34 +97,63 @@ function tokenMatches(token: string, expected: string): boolean {
 }
 
 function isBatchState(value: unknown): value is BatchState {
-  if (!value || typeof value !== 'object') return false;
-  const state = value as Partial<BatchState>;
-  return state.version === 1 && typeof state.jobId === 'string' && typeof state.documentId === 'string' && typeof state.label === 'string'
-    && Number.isInteger(state.totalTransactions) && Number(state.totalTransactions) >= 1 && Number(state.totalTransactions) <= MAX_BATCH_TRANSACTIONS
-    && Number.isInteger(state.nextSequence) && Number(state.nextSequence) >= 0 && Number(state.nextSequence) <= Number(state.totalTransactions)
-    && typeof state.tokenHash === 'string' && /^[0-9a-f]{64}$/.test(state.tokenHash)
-    && Boolean(state.actor && typeof state.actor.id === 'string') && ['queued', 'running', 'completed', 'cancelled'].includes(String(state.status))
-    && Array.isArray(state.clientOperationIds) && Array.isArray(state.transactionIds);
+  if (!plainRecord(value) || !exactKeys(value, BATCH_STATE_KEYS)) return false;
+  const state = value;
+  if (state.version !== 1 || !writerString(state.jobId) || !writerString(state.documentId) || !writerString(state.label, 200)
+    || typeof state.totalTransactions !== 'number' || !Number.isInteger(state.totalTransactions) || state.totalTransactions < 1 || state.totalTransactions > MAX_BATCH_TRANSACTIONS
+    || typeof state.nextSequence !== 'number' || !Number.isInteger(state.nextSequence) || state.nextSequence < 0 || state.nextSequence > state.totalTransactions
+    || typeof state.tokenHash !== 'string' || !/^[0-9a-f]{64}$/.test(state.tokenHash)
+    || !StrictActorSchema.safeParse(state.actor).success || !writerTimestamp(state.createdAt) || !writerTimestamp(state.updatedAt)
+    || state.updatedAt < state.createdAt
+    || !['queued', 'running', 'completed', 'cancelled'].includes(String(state.status)) || !writerString(state.message)
+    || !Array.isArray(state.clientOperationIds) || state.clientOperationIds.length !== state.nextSequence
+    || state.clientOperationIds.some((id) => !writerString(id, 200))
+    || new Set(state.clientOperationIds).size !== state.clientOperationIds.length
+    || !Array.isArray(state.transactionIds) || state.transactionIds.length !== state.nextSequence
+    || state.transactionIds.some((id) => !writerString(id))
+    || (state.error !== undefined && (!writerError(state.error) || state.status !== 'queued'))) return false;
+  if (state.inFlight !== undefined) {
+    if (!plainRecord(state.inFlight) || !exactKeys(state.inFlight, BATCH_IN_FLIGHT_KEYS)
+      || !Number.isInteger(state.inFlight.sequence) || state.inFlight.sequence !== state.nextSequence
+      || state.inFlight.sequence < 0 || state.inFlight.sequence >= state.totalTransactions
+      || !writerString(state.inFlight.clientOperationId, 200) || state.clientOperationIds.includes(state.inFlight.clientOperationId)
+      || state.status !== 'running') return false;
+  } else if (state.status === 'running') return false;
+  return state.status === 'completed' ? state.nextSequence === state.totalTransactions : state.nextSequence < state.totalTransactions;
+}
+
+function isBatchLedger(value: unknown): value is { version: 1; batches: unknown[] } {
+  return plainRecord(value) && exactKeys(value, BATCH_LEDGER_KEYS) && value.version === 1 && Array.isArray(value.batches);
 }
 
 export class BatchManager {
   private readonly states = new Map<string, BatchState>();
+  private readonly replaceFile: (source: string, destination: string) => Promise<void>;
   private mutationQueue: Promise<void> = Promise.resolve();
 
-  constructor(private readonly documents: DocumentService, private readonly statePath: string) {}
+  constructor(
+    private readonly documents: DocumentService,
+    private readonly statePath: string,
+    options: BatchManagerOptions = {},
+  ) {
+    this.replaceFile = options.replaceFile ?? rename;
+  }
 
   async initialize(): Promise<void> {
     await this.exclusive(async () => {
-      let parsed: PersistedBatches | undefined;
-      try { parsed = JSON.parse(await readFile(this.statePath, 'utf8')) as PersistedBatches; } catch { parsed = undefined; }
-      if (parsed?.version === 1 && Array.isArray(parsed.batches)) {
-        for (const candidate of parsed.batches.slice(-MAX_BATCHES)) if (isBatchState(candidate)) this.states.set(candidate.jobId, structuredClone(candidate));
+      let parsed: unknown;
+      try { parsed = JSON.parse(await readFile(this.statePath, 'utf8')) as unknown; } catch { parsed = undefined; }
+      const nextStates = new Map<string, BatchState>();
+      if (isBatchLedger(parsed)) {
+        for (const candidate of parsed.batches.slice(-MAX_BATCHES)) {
+          if (isBatchState(candidate)) nextStates.set(candidate.jobId, structuredClone(candidate));
+        }
       }
-      for (const state of this.states.values()) {
+      for (const state of nextStates.values()) {
         if (state.inFlight) await this.reconcileInFlight(state);
-        this.documents.upsertJob(this.toJob(state));
       }
-      await this.persist();
+      await this.commitStates(nextStates);
+      for (const state of nextStates.values()) this.documents.upsertJob(this.toJob(state));
     });
   }
 
@@ -88,6 +161,7 @@ export class BatchManager {
     return this.exclusive(async () => {
       if (!this.documents.getDocument(documentId)) throw new Error('The batch document is not open.');
       if (!Number.isInteger(totalTransactions) || totalTransactions < 1 || totalTransactions > MAX_BATCH_TRANSACTIONS) throw new Error(`A batch requires 1–${MAX_BATCH_TRANSACTIONS} transactions.`);
+      if (!writerString(label, 200)) throw new Error('A batch label requires 1–200 characters.');
       const resumeToken = randomBytes(32).toString('base64url');
       const timestamp = nowIso();
       const state: BatchState = {
@@ -98,7 +172,7 @@ export class BatchManager {
         totalTransactions,
         nextSequence: 0,
         tokenHash: tokenHash(resumeToken),
-        actor: structuredClone(actor),
+        actor: writerActor(actor),
         createdAt: timestamp,
         updatedAt: timestamp,
         status: 'queued',
@@ -106,9 +180,10 @@ export class BatchManager {
         transactionIds: [],
         message: `Ready for transaction 1 of ${totalTransactions}.`,
       };
-      this.prune();
-      this.states.set(state.jobId, state);
-      await this.persist();
+      const nextStates = new Map(this.states);
+      this.prune(nextStates);
+      nextStates.set(state.jobId, state);
+      await this.commitStates(nextStates);
       const job = this.toJob(state); this.documents.upsertJob(job);
       return { job, resumeToken, nextSequence: 0 };
     });
@@ -118,11 +193,13 @@ export class BatchManager {
     return this.exclusive(async () => {
       const state = this.states.get(jobId);
       if (!state || !tokenMatches(resumeToken, state.tokenHash)) return undefined;
-      state.actor = structuredClone(actor);
-      state.updatedAt = nowIso();
-      state.message = state.status === 'completed' ? 'Batch is already complete.' : state.status === 'cancelled' ? 'Batch was cancelled.' : `Resume at transaction ${state.nextSequence + 1} of ${state.totalTransactions}.`;
-      await this.persist();
-      const job = this.toJob(state); this.documents.upsertJob(job); return job;
+      const nextState = structuredClone(state);
+      nextState.actor = writerActor(actor);
+      nextState.updatedAt = nowIso();
+      nextState.message = nextState.status === 'completed' ? 'Batch is already complete.' : nextState.status === 'cancelled' ? 'Batch was cancelled.' : `Resume at transaction ${nextState.nextSequence + 1} of ${nextState.totalTransactions}.`;
+      const nextStates = new Map(this.states); nextStates.set(nextState.jobId, nextState);
+      await this.commitStates(nextStates);
+      const job = this.toJob(nextState); this.documents.upsertJob(job); return job;
     });
   }
 
@@ -141,13 +218,18 @@ export class BatchManager {
         return { accepted: false, duplicate, expectedSequence: state.nextSequence, response: duplicate ? { status: 'duplicate', message: 'This batch transaction was already committed.' } : { status: 'conflict', message: `Batch sequence ${metadata.sequence} is already occupied by another operation.` } };
       }
       if (metadata.sequence !== state.nextSequence) return { accepted: false, expectedSequence: state.nextSequence, response: { status: 'conflict', message: `Expected batch sequence ${state.nextSequence}, received ${metadata.sequence}.` } };
+      const priorSequence = state.clientOperationIds.indexOf(clientOperationId);
+      if (priorSequence >= 0) return { accepted: false, expectedSequence: state.nextSequence, response: { status: 'conflict', message: `This clientOperationId was already committed at batch sequence ${priorSequence}; use a fresh idempotency key for sequence ${state.nextSequence}.` } };
       if (state.inFlight) return { accepted: false, expectedSequence: state.nextSequence, response: { status: 'busy', message: 'The expected batch transaction is already in flight.' } };
-      state.actor = structuredClone(actor);
-      state.inFlight = { sequence: metadata.sequence, clientOperationId };
-      state.status = 'running'; state.updatedAt = nowIso(); state.error = undefined;
-      state.message = `Running transaction ${metadata.sequence + 1} of ${state.totalTransactions}.`;
-      await this.persist(); this.documents.upsertJob(this.toJob(state));
-      return { accepted: true, expectedSequence: state.nextSequence };
+      if (!writerString(clientOperationId, 200)) throw new Error('A batch clientOperationId requires 1–200 characters.');
+      const nextState = structuredClone(state);
+      nextState.actor = writerActor(actor);
+      nextState.inFlight = { sequence: metadata.sequence, clientOperationId };
+      nextState.status = 'running'; nextState.updatedAt = nowIso(); nextState.error = undefined;
+      nextState.message = `Running transaction ${metadata.sequence + 1} of ${nextState.totalTransactions}.`;
+      const nextStates = new Map(this.states); nextStates.set(nextState.jobId, nextState);
+      await this.commitStates(nextStates); this.documents.upsertJob(this.toJob(nextState));
+      return { accepted: true, expectedSequence: nextState.nextSequence };
     });
   }
 
@@ -155,21 +237,26 @@ export class BatchManager {
     return this.exclusive(async () => {
       const state = this.states.get(metadata.jobId);
       if (!state || state.inFlight?.sequence !== metadata.sequence || state.inFlight.clientOperationId !== clientOperationId) return state ? this.toJob(state) : undefined;
-      state.inFlight = undefined;
-      state.updatedAt = nowIso();
-      if (response.status === 'committed' || response.status === 'duplicate') {
-        state.clientOperationIds[metadata.sequence] = clientOperationId;
-        if (response.transactionId) state.transactionIds[metadata.sequence] = response.transactionId;
-        state.nextSequence = metadata.sequence + 1;
-        state.status = state.nextSequence >= state.totalTransactions ? 'completed' : 'queued';
-        state.message = state.status === 'completed' ? `Completed all ${state.totalTransactions} transactions.` : `Committed ${state.nextSequence} of ${state.totalTransactions}; ready for transaction ${state.nextSequence + 1}.`;
-        state.error = undefined;
+      const nextState = structuredClone(state);
+      nextState.inFlight = undefined;
+      nextState.updatedAt = nowIso();
+      const committed = response.status === 'committed' || response.status === 'duplicate';
+      if (committed && writerString(response.transactionId)) {
+        nextState.clientOperationIds[metadata.sequence] = clientOperationId;
+        nextState.transactionIds[metadata.sequence] = response.transactionId;
+        nextState.nextSequence = metadata.sequence + 1;
+        nextState.status = nextState.nextSequence >= nextState.totalTransactions ? 'completed' : 'queued';
+        nextState.message = nextState.status === 'completed' ? `Completed all ${nextState.totalTransactions} transactions.` : `Committed ${nextState.nextSequence} of ${nextState.totalTransactions}; ready for transaction ${nextState.nextSequence + 1}.`;
+        nextState.error = undefined;
       } else {
-        state.status = 'queued';
-        state.message = `Transaction ${metadata.sequence + 1} did not commit; retry sequence ${metadata.sequence}.`;
-        state.error = { code: `batch_${response.status}`, message: response.message ?? 'The transaction did not commit.', retryable: response.status !== 'cancelled' };
+        nextState.status = 'queued';
+        nextState.message = `Transaction ${metadata.sequence + 1} did not commit; retry sequence ${metadata.sequence}.`;
+        nextState.error = committed
+          ? { code: 'batch_invalid_result', message: 'The committed transaction did not include its durable transaction identity.', retryable: true }
+          : { code: `batch_${response.status}`, message: response.message ?? 'The transaction did not commit.', retryable: response.status !== 'cancelled' };
       }
-      await this.persist(); const job = this.toJob(state); this.documents.upsertJob(job); return job;
+      const nextStates = new Map(this.states); nextStates.set(nextState.jobId, nextState);
+      await this.commitStates(nextStates); const job = this.toJob(nextState); this.documents.upsertJob(job); return job;
     });
   }
 
@@ -177,8 +264,10 @@ export class BatchManager {
     return this.exclusive(async () => {
       const state = this.states.get(jobId);
       if (!state || state.actor.id !== actorId) return undefined;
-      if (state.status !== 'completed') { state.status = 'cancelled'; state.inFlight = undefined; state.updatedAt = nowIso(); state.message = `Cancelled after ${state.nextSequence} of ${state.totalTransactions} committed transactions.`; state.error = undefined; }
-      await this.persist(); const job = this.toJob(state); this.documents.upsertJob(job); return job;
+      const nextState = structuredClone(state);
+      if (nextState.status !== 'completed') { nextState.status = 'cancelled'; nextState.inFlight = undefined; nextState.updatedAt = nowIso(); nextState.message = `Cancelled after ${nextState.nextSequence} of ${nextState.totalTransactions} committed transactions.`; nextState.error = undefined; }
+      const nextStates = new Map(this.states); nextStates.set(nextState.jobId, nextState);
+      await this.commitStates(nextStates); const job = this.toJob(nextState); this.documents.upsertJob(job); return job;
     });
   }
 
@@ -217,18 +306,40 @@ export class BatchManager {
     };
   }
 
-  private prune(): void {
-    if (this.states.size < MAX_BATCHES) return;
-    const removable = [...this.states.values()].filter((state) => state.status === 'completed' || state.status === 'cancelled').sort((left, right) => left.updatedAt.localeCompare(right.updatedAt));
-    for (const state of removable) { if (this.states.size < MAX_BATCHES) break; this.states.delete(state.jobId); }
-    if (this.states.size >= MAX_BATCHES) throw new Error(`AIDraw retains at most ${MAX_BATCHES} durable batches; finish or cancel an existing batch first.`);
+  private prune(states: Map<string, BatchState>): void {
+    if (states.size < MAX_BATCHES) return;
+    const removable = [...states.values()].filter((state) => state.status === 'completed' || state.status === 'cancelled').sort((left, right) => left.updatedAt.localeCompare(right.updatedAt));
+    for (const state of removable) { if (states.size < MAX_BATCHES) break; states.delete(state.jobId); }
+    if (states.size >= MAX_BATCHES) throw new Error(`AIDraw retains at most ${MAX_BATCHES} durable batches; finish or cancel an existing batch first.`);
   }
 
-  private async persist(): Promise<void> {
-    await mkdir(dirname(this.statePath), { recursive: true });
-    const temporary = `${this.statePath}.tmp`;
-    await writeFile(temporary, JSON.stringify({ version: 1, batches: [...this.states.values()] } satisfies PersistedBatches, null, 2), 'utf8');
-    await rename(temporary, this.statePath);
+  private replaceStates(states: ReadonlyMap<string, BatchState>): void {
+    this.states.clear();
+    for (const [jobId, state] of states) this.states.set(jobId, state);
+  }
+
+  private async commitStates(states: Map<string, BatchState>): Promise<void> {
+    await this.persist(states);
+    this.replaceStates(states);
+  }
+
+  private async persist(states: ReadonlyMap<string, BatchState>): Promise<void> {
+    const contents = `${JSON.stringify({ version: 1, batches: [...states.values()] } satisfies PersistedBatches, null, 2)}\n`;
+    await mkdir(dirname(this.statePath), { recursive: true, mode: 0o700 });
+    const temporary = `${this.statePath}.${process.pid}.${randomUUID()}.tmp`;
+    let handle: Awaited<ReturnType<typeof open>> | undefined;
+    try {
+      handle = await open(temporary, 'wx', 0o600);
+      await handle.writeFile(contents, 'utf8');
+      await handle.sync();
+      await handle.close();
+      handle = undefined;
+      await this.replaceFile(temporary, this.statePath);
+    } catch (error) {
+      try { await handle?.close(); } catch { /* Preserve the primary persistence failure. */ }
+      try { await unlink(temporary); } catch { /* The temporary may not exist or may already be replaced. */ }
+      throw error;
+    }
   }
 
   private exclusive<T>(operation: () => Promise<T>): Promise<T> {

@@ -899,21 +899,23 @@ describe('authenticated stateful MCP contract', () => {
     const revisionAfterFirst = documents.getDocument(document.id)!.revision;
     expect(await callTool(firstStart.url, firstClient.headers, 5, 'canvas_apply', { documentId: document.id, clientOperationId: 'durable-batch-step-0', label: 'Idempotent retry', playback: { mode: 'instant', speed: 1 }, batch: { jobId: job.id, resumeToken, sequence: 0 }, operations: [{ kind: 'document.rename', name: 'Must remain unchanged' }] })).toMatchObject({ status: 'duplicate', batch: { expectedSequence: 1, duplicate: true } });
     expect(documents.getDocument(document.id)!.revision).toBe(revisionAfterFirst);
+    expect(await callTool(firstStart.url, firstClient.headers, 6, 'canvas_apply', { documentId: document.id, clientOperationId: 'durable-batch-step-0', label: 'Wrong sequence reuse', playback: { mode: 'instant', speed: 1 }, batch: { jobId: job.id, resumeToken, sequence: 1 }, operations: [{ kind: 'document.rename', name: 'Must still remain unchanged' }] })).toMatchObject({ status: 'conflict', message: expect.stringContaining('fresh idempotency key'), batch: { expectedSequence: 1 } });
+    expect(documents.getDocument(document.id)!.revision).toBe(revisionAfterFirst);
 
     await firstHost.stop();
     const secondHost = new McpHost(documents, '1.0.0', portPath); hosts.push(secondHost); const secondStart = await secondHost.start('batch-token-two');
     const secondClient = await initializeClient(secondStart.url, 'batch-token-two', 'batch-client-two');
-    expect(await callTool(secondStart.url, secondClient.headers, 6, 'job_manage', { action: 'resume-batch', jobId: job.id, resumeToken: 'invalid-resume-token-that-is-long-enough' })).toEqual({ error: 'job_not_found' });
-    const resumed = await callTool(secondStart.url, secondClient.headers, 7, 'job_manage', { action: 'resume-batch', jobId: job.id, resumeToken });
+    expect(await callTool(secondStart.url, secondClient.headers, 7, 'job_manage', { action: 'resume-batch', jobId: job.id, resumeToken: 'invalid-resume-token-that-is-long-enough' })).toEqual({ error: 'job_not_found' });
+    const resumed = await callTool(secondStart.url, secondClient.headers, 8, 'job_manage', { action: 'resume-batch', jobId: job.id, resumeToken });
     expect(resumed).toMatchObject({ nextSequence: 1, job: { status: 'queued', batch: { nextSequence: 1, totalTransactions: 2 } } });
-    const second = await callTool(secondStart.url, secondClient.headers, 8, 'canvas_apply', { documentId: document.id, clientOperationId: 'durable-batch-step-1', label: 'Durable step two', playback: { mode: 'instant', speed: 1 }, batch: { jobId: job.id, resumeToken, sequence: 1 }, operations: [{ kind: 'document.rename', name: 'Durable batch complete' }] });
+    const second = await callTool(secondStart.url, secondClient.headers, 9, 'canvas_apply', { documentId: document.id, clientOperationId: 'durable-batch-step-1', label: 'Durable step two', playback: { mode: 'instant', speed: 1 }, batch: { jobId: job.id, resumeToken, sequence: 1 }, operations: [{ kind: 'document.rename', name: 'Durable batch complete' }] });
     expect(second).toMatchObject({ status: 'committed', batch: { status: 'completed', progress: 1, nextSequence: 2 } });
     expect(documents.getDocument(document.id)?.name).toBe('Durable batch complete');
 
-    const cancelStart = await callTool(secondStart.url, secondClient.headers, 9, 'job_manage', { action: 'start-batch', documentId: document.id, totalTransactions: 2, label: 'Cancelled batch' });
+    const cancelStart = await callTool(secondStart.url, secondClient.headers, 10, 'job_manage', { action: 'start-batch', documentId: document.id, totalTransactions: 2, label: 'Cancelled batch' });
     const cancelJob = cancelStart.job as { id: string }; const cancelToken = cancelStart.resumeToken as string;
-    expect(await callTool(secondStart.url, secondClient.headers, 10, 'job_manage', { action: 'cancel', jobId: cancelJob.id })).toMatchObject({ kind: 'batch', status: 'cancelled', progress: 0 });
-    expect(await callTool(secondStart.url, secondClient.headers, 11, 'canvas_apply', { documentId: document.id, clientOperationId: 'cancelled-batch-step', label: 'Must stay cancelled', playback: { mode: 'instant', speed: 1 }, batch: { jobId: cancelJob.id, resumeToken: cancelToken, sequence: 0 }, operations: [{ kind: 'document.rename', name: 'Must not commit' }] })).toMatchObject({ status: 'cancelled' });
+    expect(await callTool(secondStart.url, secondClient.headers, 11, 'job_manage', { action: 'cancel', jobId: cancelJob.id })).toMatchObject({ kind: 'batch', status: 'cancelled', progress: 0 });
+    expect(await callTool(secondStart.url, secondClient.headers, 12, 'canvas_apply', { documentId: document.id, clientOperationId: 'cancelled-batch-step', label: 'Must stay cancelled', playback: { mode: 'instant', speed: 1 }, batch: { jobId: cancelJob.id, resumeToken: cancelToken, sequence: 0 }, operations: [{ kind: 'document.rename', name: 'Must not commit' }] })).toMatchObject({ status: 'cancelled' });
     expect(documents.getDocument(document.id)?.name).toBe('Durable batch complete');
   });
 
