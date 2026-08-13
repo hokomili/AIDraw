@@ -1293,9 +1293,11 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   return (
     <div className="canvas-container pixel-canvas-container" ref={containerRef}>
       <canvas
+        id="aidraw-canvas"
         ref={canvasRef}
         role="application"
         aria-label={`Pixel-art canvas for ${document.name}`}
+        aria-describedby="aidraw-canvas-keyboard-help"
         tabIndex={0}
         className={`drawing-canvas pixel-canvas tool-${tool}`}
         style={{ width: size.width, height: size.height }}

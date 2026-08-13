@@ -844,9 +844,11 @@ export function IllustrationCanvas({ document }: { document: IllustrationDocumen
   return (
     <div className="canvas-container illustration-canvas-container" ref={containerRef}>
       <canvas
+        id="aidraw-canvas"
         ref={canvasRef}
         role="application"
         aria-label={`Illustration canvas for ${document.name}`}
+        aria-describedby="aidraw-canvas-keyboard-help"
         tabIndex={0}
         className={`drawing-canvas tool-${tool}`}
         onPointerDown={onPointerDown}

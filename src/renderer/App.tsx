@@ -24,6 +24,7 @@ import {
   Grid3X3,
   Hand,
   Image,
+  Keyboard,
   Eye,
   EyeOff,
   Lasso,
@@ -144,6 +145,8 @@ import { IllustrationAnimationPanel } from "./components/IllustrationAnimationPa
 import { TileAnimationEditor } from "./components/TileAnimationEditor";
 import { TilesetSliceEditor } from "./components/TilesetSliceEditor";
 import { TileVariantPreview } from "./components/TileVariantPreview";
+import { ShortcutReferenceDialog } from "./components/ShortcutReferenceDialog";
+import { shortcutHelpRequested, toolRailFocusIndex } from "./shortcuts";
 
 type Icon = ComponentType<{ size?: number; strokeWidth?: number }>;
 
@@ -833,6 +836,7 @@ function DocumentTabs() {
     const onKeyDown = (event: KeyboardEvent) => {
       if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "n")
         return;
+      if (globalThis.document.querySelector('[aria-modal="true"]')) return;
       event.preventDefault();
       event.stopImmediatePropagation();
       setShowAll(false);
@@ -1090,7 +1094,7 @@ function SpriteSheetImportDialog({ selection, onClose }: { selection: SpriteShee
   </ModalShell>;
 }
 
-function TopBar() {
+function TopBar({ onOpenShortcuts }: { onOpenShortcuts: () => void }) {
   const open = useEditorStore((state) => state.open);
   const save = useEditorStore((state) => state.save);
   const undo = useEditorStore((state) => state.undo);
@@ -1269,6 +1273,16 @@ function TopBar() {
       <DocumentTabs />
       <div className="topbar-right">
         <button
+          type="button"
+          className="icon-button"
+          title="Keyboard shortcuts (F1 or ?)"
+          aria-label="Keyboard shortcuts"
+          aria-keyshortcuts="F1 ?"
+          onClick={onOpenShortcuts}
+        >
+          <Keyboard size={16} />
+        </button>
+        <button
           className="agent-pill"
           onClick={() => useEditorStore.getState().setRightPanel("activity")}
         >
@@ -1287,28 +1301,50 @@ function ToolRail({ document }: { document: AIDrawDocument }) {
   const selectedTool = useEditorStore((state) => state.selectedTool);
   const setTool = useEditorStore((state) => state.setTool);
   const tools = document.kind === "pixel" ? pixelTools : illustrationTools;
+  const [focusedToolId, setFocusedToolId] = useState<EditorTool>(selectedTool);
+  const rovingToolId = tools.some((tool) => tool.id === focusedToolId)
+    ? focusedToolId
+    : tools.some((tool) => tool.id === selectedTool)
+      ? selectedTool
+      : tools[0].id;
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (
+        globalThis.document.querySelector('[aria-modal="true"]') ||
         event.ctrlKey ||
         event.metaKey ||
         event.altKey ||
         event.target instanceof HTMLInputElement ||
-        event.target instanceof HTMLTextAreaElement
+        event.target instanceof HTMLTextAreaElement ||
+        event.target instanceof HTMLSelectElement ||
+        (event.target instanceof HTMLElement && event.target.isContentEditable)
       )
         return;
       const match = tools.find(
         (tool) => tool.shortcut?.toLowerCase() === event.key.toLowerCase(),
       );
-      if (match) setTool(match.id);
+      if (match) {
+        setFocusedToolId(match.id);
+        setTool(match.id);
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [setTool, tools]);
 
+  const handleToolRailKeys = (event: React.KeyboardEvent<HTMLElement>) => {
+    const buttons = [...event.currentTarget.querySelectorAll<HTMLButtonElement>(".tool-button")];
+    const currentIndex = buttons.indexOf(event.target as HTMLButtonElement);
+    const nextIndex = toolRailFocusIndex(event.key, currentIndex, buttons.length);
+    if (nextIndex === undefined) return;
+    event.preventDefault();
+    setFocusedToolId(tools[nextIndex].id);
+    buttons[nextIndex].focus();
+  };
+
   return (
-    <aside className="tool-rail" aria-label={`${document.kind} tools`}>
+    <aside className="tool-rail" role="toolbar" aria-orientation="vertical" aria-label={`${document.kind} tools`} onKeyDown={handleToolRailKeys}>
       {tools.map((tool, index) => {
         const IconComponent = tool.icon;
         const divider =
@@ -1321,7 +1357,10 @@ function ToolRail({ document }: { document: AIDrawDocument }) {
               onClick={() => setTool(tool.id)}
               title={`${tool.label}${tool.shortcut ? ` (${tool.shortcut})` : ""}`}
               aria-label={tool.label}
+              aria-keyshortcuts={tool.shortcut}
               aria-pressed={selectedTool === tool.id}
+              tabIndex={rovingToolId === tool.id ? 0 : -1}
+              onFocus={() => setFocusedToolId(tool.id)}
             >
               <IconComponent size={19} strokeWidth={1.8} />
             </button>
@@ -5558,12 +5597,30 @@ export function App() {
   const loading = useEditorStore((state) => state.loading);
   const toast = useEditorStore((state) => state.toast);
   const canvasAnimation = useEditorStore((state) => state.canvasAnimation);
+  const [shortcutReferenceOpen, setShortcutReferenceOpen] = useState(false);
   const document = snapshot?.activeDocument;
   const canvasDocument = useMemo(() => document?.kind === "illustration" && canvasAnimation?.illustrationTimeMs !== undefined ? illustrationAtTime(document, canvasAnimation.illustrationTimeMs) : document, [canvasAnimation, document]);
 
   useEffect(() => {
     void initialize();
   }, [initialize]);
+
+  useEffect(() => {
+    const onShortcutHelp = (event: KeyboardEvent) => {
+      if (!shortcutHelpRequested(event)) return;
+      if (event.key !== "F1" && (
+        event.target instanceof HTMLInputElement ||
+        event.target instanceof HTMLTextAreaElement ||
+        event.target instanceof HTMLSelectElement ||
+        (event.target instanceof HTMLElement && event.target.isContentEditable)
+      )) return;
+      if (globalThis.document.querySelector('[aria-modal="true"]')) return;
+      event.preventDefault();
+      setShortcutReferenceOpen(true);
+    };
+    window.addEventListener("keydown", onShortcutHelp);
+    return () => window.removeEventListener("keydown", onShortcutHelp);
+  }, []);
 
   useEffect(() => {
     const publish = (state = useEditorStore.getState()) => {
@@ -5584,10 +5641,12 @@ export function App() {
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
+      if (globalThis.document.querySelector('[aria-modal="true"]')) return;
       if (
         event.target instanceof HTMLInputElement ||
         event.target instanceof HTMLTextAreaElement ||
-        event.target instanceof HTMLSelectElement
+        event.target instanceof HTMLSelectElement ||
+        (event.target instanceof HTMLElement && event.target.isContentEditable)
       )
         return;
       if (event.key === "Delete" || event.key === "Backspace") {
@@ -5709,9 +5768,14 @@ export function App() {
   }, [title]);
 
   if (loading || !document) return <LoadingScreen />;
+  const shortcutTools = (document.kind === "pixel" ? pixelTools : illustrationTools)
+    .filter((tool): tool is ToolDefinition & { shortcut: string } => Boolean(tool.shortcut))
+    .map((tool) => ({ id: tool.id, label: tool.label, shortcut: tool.shortcut }));
   return (
     <div className="app-shell">
-      <TopBar />
+      <button type="button" className="skip-to-canvas" onClick={() => globalThis.document.getElementById("aidraw-canvas")?.focus()}>Skip to canvas</button>
+      <span id="aidraw-canvas-keyboard-help" className="visually-hidden">Press F1 for keyboard shortcuts. Use the focus-visible Skip to canvas control to return directly to this drawing surface.</span>
+      <TopBar onOpenShortcuts={() => setShortcutReferenceOpen(true)} />
       <ContextBar document={document} />
       <ToolRail document={document} />
       <main className="canvas-workspace">
@@ -5723,6 +5787,11 @@ export function App() {
       </main>
       <RightSidebar document={document} />
       <StatusBar document={document} />
+      {shortcutReferenceOpen && <ShortcutReferenceDialog
+        mode={document.kind === "illustration" ? "illustration" : "pixel"}
+        tools={shortcutTools}
+        onClose={() => setShortcutReferenceOpen(false)}
+      />}
       {toast && (
         <div className={`toast ${toast.tone}`} role="status">
           {toast.message}
