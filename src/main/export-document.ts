@@ -523,6 +523,15 @@ async function renderPsdLayerFallback(document: IllustrationDocument, layerId: s
   return rendered.getContext('2d').getImageData(0, 0, document.artboard.width, document.artboard.height);
 }
 
+function renderPsdPixelLayer(document: Extract<AIDrawDocument, { kind: 'pixel' }>, sprite: PixelSprite, layerId: string): NonNullable<PsdLayer['imageData']> {
+  const layer = sprite.layers[layerId];
+  if (!layer || layer.type !== 'pixel') throw new Error(`Pixel layer ${layerId} is missing.`);
+  const source: PixelSprite = { ...sprite, layers: { ...sprite.layers, [layerId]: { ...layer, visible: true, opacity: 1, blendMode: 'normal' } } };
+  const rendered = renderSprite(document, source, source.frameIds[0], layerId);
+  try { return rendered.getContext('2d').getImageData(0, 0, source.width, source.height); }
+  finally { rendered.width = 1; rendered.height = 1; }
+}
+
 async function psd(document: AIDrawDocument): Promise<ExportArtifact> {
   const report = { warnings: [] as string[], rasterized: [] as string[] };
   let width: number; let height: number; const children: PsdLayer[] = [];
@@ -553,12 +562,17 @@ async function psd(document: AIDrawDocument): Promise<ExportArtifact> {
     const asset = document.pixelAssets[document.activeAssetId];
     if (asset?.type !== 'sprite') throw new Error('PSD export from pixel mode requires an active sprite.');
     width = asset.width; height = asset.height;
-    for (const layerId of asset.layerIds) {
-      const layer = asset.layers[layerId]; if (layer.type !== 'pixel') continue;
-      const rendered = renderSprite(document, asset, asset.frameIds[0], layerId);
-      children.push({ name: layer.name, opacity: layer.opacity, hidden: !layer.visible, imageData: rendered.getContext('2d').getImageData(0, 0, width, height), ...aidrawPsdLockFields(layer.locked) });
-    }
-    report.warnings.push('Pixel PSD export writes current-frame cels as raster layers.');
+    const exportLayer = (layerId: string, ancestors = new Set<string>()): PsdLayer | undefined => {
+      const layer = asset.layers[layerId]; if (!layer) return undefined;
+      if (ancestors.has(layerId)) throw new Error('Pixel layer hierarchy contains a cycle.');
+      const common = { name: layer.name, opacity: layer.opacity, hidden: !layer.visible, blendMode: psdBlendMode(layer.blendMode), ...aidrawPsdLockFields(layer.locked) };
+      if (layer.type === 'pixel') return { ...common, imageData: renderPsdPixelLayer(document, asset, layerId) };
+      const next = new Set(ancestors); next.add(layerId);
+      const nested = (layer.childIds ?? []).map((childId) => exportLayer(childId, next)).filter((entry): entry is PsdLayer => Boolean(entry));
+      return { ...common, children: nested, opened: true };
+    };
+    children.push(...asset.layerIds.map((layerId) => exportLayer(layerId)).filter((entry): entry is PsdLayer => Boolean(entry)));
+    report.warnings.push('Pixel PSD export writes the current frame as a raster layer/group hierarchy; later animation frames are not included.');
   }
   const composite = await renderDocument(document);
   const value: Psd = { width, height, children, imageData: composite.getContext('2d').getImageData(0, 0, width, height) };

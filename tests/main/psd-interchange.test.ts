@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { ImageData } from '@napi-rs/canvas';
 import { readPsd, writePsdBuffer, type Layer as PsdLayer } from 'ag-psd';
 import { describe, expect, it } from 'vitest';
-import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createId, createIllustrationDocument, createPixelDocument, nowIso, type IllustrationLayer, type TextObject } from '@aidraw/core';
+import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createId, createIllustrationDocument, createPixelDocument, nowIso, writePixels, type IllustrationLayer, type PixelLayer, type TextObject } from '@aidraw/core';
 import { illustrationTransformMatrix } from '@common/psd-text';
 import { exportDocument } from '@main/export-document';
 import { importDocument } from '@main/import-document';
@@ -54,12 +54,22 @@ describe('PSD interchange', () => {
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
-  it('writes pixel-layer opacity through ag-psd normalized units', async () => {
+  it('writes the pixel layer hierarchy with raw source pixels and separate composite metadata', async () => {
     const document = createPixelDocument('sprite', 'Opacity sprite'); const sprite = document.pixelAssets[document.activeAssetId];
-    if (sprite?.type !== 'sprite') throw new Error('Expected sprite'); const layer = sprite.layers[sprite.layerIds[0]]; layer.locked = true; layer.opacity = 0.25;
+    if (sprite?.type !== 'sprite') throw new Error('Expected sprite'); const layer = sprite.layers[sprite.layerIds[0]]; const cel = Object.values(sprite.cels).find((entry) => entry.layerId === layer.id);
+    if (!cel) throw new Error('Expected pixel cel'); writePixels(cel, [{ x: 0, y: 0, index: 2 }]);
+    const timestamp = nowIso(); const group: PixelLayer = { id: createId('layer'), revision: 0, name: 'Pixel folder', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, type: 'group', visible: true, locked: true, opacity: 0.8, blendMode: 'multiply', childIds: [layer.id] };
+    const emptyGroup: PixelLayer = { ...structuredClone(group), id: createId('layer'), name: 'Empty pixel folder', locked: false, opacity: 0.2, blendMode: 'difference', childIds: [] };
+    layer.parentId = group.id; layer.name = 'Hidden ink'; layer.visible = false; layer.locked = true; layer.opacity = 0.25; layer.blendMode = 'screen';
+    sprite.layers[group.id] = group; sprite.layers[emptyGroup.id] = emptyGroup; sprite.layerIds = [group.id, emptyGroup.id];
     const artifact = await exportDocument(document, 'psd'); const decoded = readPsd(artifact.data, { useImageData: true, logMissingFeatures: false });
-    expect(decoded.children?.[0]).toMatchObject({ transparencyProtected: true, protected: { transparency: false } });
-    expect(decoded.children?.[0]?.opacity).toBeCloseTo(Math.round(0.25 * 255) / 255, 10);
+    const decodedGroup = decoded.children?.find((entry) => entry.name === group.name); const decodedLayer = decodedGroup?.children?.find((entry) => entry.name === layer.name);
+    expect(decoded.children?.map((entry) => entry.name)).toEqual([group.name, emptyGroup.name]); expect(decodedGroup?.children?.map((entry) => entry.name)).toEqual([layer.name]);
+    expect(decodedGroup).toMatchObject({ blendMode: 'multiply', transparencyProtected: true, protected: { transparency: false } }); expect(decodedGroup?.opacity).toBeCloseTo(0.8, 10);
+    expect(decodedLayer).toMatchObject({ hidden: true, blendMode: 'screen', transparencyProtected: true, protected: { transparency: false } }); expect(decodedLayer?.opacity).toBeCloseTo(Math.round(0.25 * 255) / 255, 10);
+    expect(decodedLayer?.imageData?.data[3]).toBe(255);
+    expect(decoded.children?.find((entry) => entry.name === emptyGroup.name)).toMatchObject({ children: [], blendMode: 'difference' });
+    expect(artifact.report.warnings).toContainEqual(expect.stringMatching(/current frame.*layer\/group hierarchy/i));
   });
 
   it('reports partial PSD locks without widening them to AIDraw lock-all', async () => {
