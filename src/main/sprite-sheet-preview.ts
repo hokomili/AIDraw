@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto';
-import { readFile, stat } from 'node:fs/promises';
 import { createCanvas, loadImage } from '@napi-rs/canvas';
 import { spriteSheetPreviewDimensions } from '../common/sprite-sheet';
 import {
@@ -10,6 +9,7 @@ import {
   MAX_INLINE_IMAGE_PIXELS,
 } from './transaction-policy';
 import { MAX_SPRITE_SHEET_PREVIEW_BYTES } from './utility-contract';
+import { readBoundedRegularFile } from './bounded-file-read';
 
 export type SpriteSheetSourceMimeType = 'image/png' | 'image/jpeg' | 'image/webp';
 
@@ -41,12 +41,14 @@ export function inspectSpriteSheetSource(bytes: Buffer): SpriteSheetSourceIdenti
 }
 
 export async function readBoundedSpriteSheetSource(filePath: string): Promise<Buffer> {
-  const details = await stat(filePath);
-  if (!details.isFile()) throw new Error('Sprite-sheet source is not a regular file.');
-  if (details.size < 1 || details.size > MAX_INLINE_ASSET_BYTES) throw new Error("Sprite-sheet source exceeds AIDraw's 1,500,000-byte editable-asset limit.");
-  const bytes = await readFile(filePath);
-  if (bytes.byteLength !== details.size) throw new Error('The selected sprite-sheet source changed while it was being read; choose it again.');
-  return bytes;
+  return readBoundedRegularFile(filePath, {
+    minBytes: 1,
+    maxBytes: MAX_INLINE_ASSET_BYTES,
+    notFileMessage: 'Sprite-sheet source is not a regular file.',
+    tooSmallMessage: "Sprite-sheet source exceeds AIDraw's 1,500,000-byte editable-asset limit.",
+    tooLargeMessage: "Sprite-sheet source exceeds AIDraw's 1,500,000-byte editable-asset limit.",
+    changedMessage: 'The selected sprite-sheet source changed while it was being read; choose it again.',
+  });
 }
 
 export async function inspectSpriteSheetBytes(bytes: Buffer): Promise<SpriteSheetInspection> {

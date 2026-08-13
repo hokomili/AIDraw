@@ -1,12 +1,12 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, net, protocol, safeStorage, session, shell, type IpcMainInvokeEvent } from 'electron';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
-import { link, mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { link, mkdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, isAbsolute, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { CanvasTransactionSchema, HUMAN_ACTOR, createId, nowIso, type AsyncJob, type CanvasOperation } from '@aidraw/core';
 import { IPC, type BatchDocumentResult, type DocumentPresetInput, type EngineStatus, type ExportOptions, type HumanLockRequest, type InterchangeReportInput, type NewDocumentOptions, type PixelLinkAction, type PixelLinkActionResult } from '../common/contracts';
-import { applyPortablePalette, parsePaletteFile, serializePaletteFile, type PaletteFileFormat, type PaletteImportMode } from '../common/palette-interchange';
+import { MAX_PALETTE_FILE_BYTES, applyPortablePalette, parsePaletteFile, serializePaletteFile, type PaletteFileFormat, type PaletteImportMode } from '../common/palette-interchange';
 import type { DocumentService } from './document-service';
 import type { McpHost } from './mcp-host';
 import type { ProviderCredentialStore } from './provider-credentials';
@@ -48,6 +48,7 @@ import {
   type ClipboardWorkflowDependencies,
 } from './clipboard-workflows';
 import { buildCheckpointComparison } from './checkpoint-comparison';
+import { readBoundedRegularFile } from './bounded-file-read';
 
 declare const MAIN_WINDOW_VITE_DEV_SERVER_URL: string | undefined;
 declare const MAIN_WINDOW_VITE_NAME: string;
@@ -336,6 +337,26 @@ async function writeApprovedTarget(filePath: string, data: Buffer, approved: Set
   }
 }
 
+async function readApprovedPaletteSource(filePath: string): Promise<Buffer> {
+  return readBoundedRegularFile(filePath, {
+    maxBytes: MAX_PALETTE_FILE_BYTES,
+    notFileMessage: 'Palette source is not a regular file.',
+    tooLargeMessage: `Palette file exceeds the ${MAX_PALETTE_FILE_BYTES / 1024} KiB safety limit.`,
+    changedMessage: 'Palette source changed while it was being read; choose or submit it again.',
+  });
+}
+
+async function readApprovedProjectLinkSource(filePath: string, changedMessage: string): Promise<Buffer> {
+  return readBoundedRegularFile(filePath, {
+    minBytes: 1,
+    maxBytes: MAX_PROJECT_LINK_BYTES,
+    notFileMessage: 'Relinked source images must be non-empty files no larger than 1.5 MB.',
+    tooSmallMessage: 'Relinked source images must be non-empty files no larger than 1.5 MB.',
+    tooLargeMessage: 'Relinked source images must be non-empty files no larger than 1.5 MB.',
+    changedMessage,
+  });
+}
+
 async function runApprovedFileJob(job: AsyncJob): Promise<void> {
   const result = job.result as { documentId?: string; request?: Record<string, unknown> } | undefined;
   const request = result?.request; if (!request) return;
@@ -347,8 +368,7 @@ async function runApprovedFileJob(job: AsyncJob): Promise<void> {
     if (job.kind === 'import' && action === 'open' && requestedPath) output = await service.open([requestedPath]);
     else if (job.kind === 'import' && action === 'project-link-relink' && requestedPath && result?.documentId && typeof request.projectLinkId === 'string') {
       const document = service.getDocument(result.documentId); if (!document || document.kind !== 'pixel') throw new Error('Project-link relink requires an open pixel document.');
-      const file = await stat(requestedPath); if (!file.isFile() || file.size < 1 || file.size > MAX_PROJECT_LINK_BYTES) throw new Error('Relinked source images must be non-empty files no larger than 1.5 MB.');
-      const bytes = await readFile(requestedPath); if (bytes.byteLength !== file.size) throw new Error('The relink source changed while it was being read; submit it again.');
+      const bytes = await readApprovedProjectLinkSource(requestedPath, 'The relink source changed while it was being read; submit it again.');
       const prepared = preparePixelLinkRelink(document, request.projectLinkId, requestedPath, bytes);
       const response = await service.apply({ id: createId('tx'), clientOperationId: createId('project-link-relink'), documentId: document.id, actor: job.actor, label: `Relink project asset · ${basename(requestedPath)}`, createdAt: nowIso(), operations: prepared.operations, playback: { mode: 'instant', speed: 1 } });
       if (response.status !== 'committed' && response.status !== 'duplicate') throw new Error(response.message ?? 'The project link could not be relinked.');
@@ -360,7 +380,7 @@ async function runApprovedFileJob(job: AsyncJob): Promise<void> {
       const spriteSheet = request.spriteSheet && typeof request.spriteSheet === 'object' ? validateSpriteSheetSliceOptions(request.spriteSheet as unknown as SpriteSheetSliceOptions) : undefined;
       if (paletteMode) {
         if (!result?.documentId) throw new Error('Palette import requires a target document.'); const document = service.getDocument(result.documentId); if (!document || document.kind !== 'pixel') throw new Error('Palette import requires an open pixel document.');
-        const bytes = await readFile(requestedPath); const parsed = parsePaletteFile(bytes, extname(requestedPath)); const applied = applyPortablePalette(document.palette, parsed.entries, paletteMode, () => createId('palette'));
+        const bytes = await readApprovedPaletteSource(requestedPath); const parsed = parsePaletteFile(bytes, extname(requestedPath)); const applied = applyPortablePalette(document.palette, parsed.entries, paletteMode, () => createId('palette'));
         const response = await service.apply({ id: createId('tx'), clientOperationId: createId('palette-import'), documentId: document.id, actor: job.actor, label: paletteMode === 'append-unique' ? `Append palette · ${parsed.name}` : `Import palette slots · ${parsed.name}`, createdAt: nowIso(), operations: [{ kind: 'pixel.palette.replace', palette: applied.palette }], playback: { mode: 'instant', speed: 1 } });
         if (response.status !== 'committed' && response.status !== 'duplicate') throw new Error(response.message ?? 'Palette import could not be committed.'); const warnings = [...parsed.warnings, ...applied.warnings];
         const report = await recordInterchangeReport({ kind: 'import', status: 'completed', actor: job.actor, documentIds: [document.id], documentNames: [document.name], format: `palette-${parsed.format}`, sourcePaths: [requestedPath], destinationPaths: [], warnings, rasterized: [] }); output = { imported: [document.id], added: applied.added, updated: applied.updated, skipped: applied.skipped, warnings, reportId: report.id };
@@ -589,7 +609,7 @@ function registerIpc(): void {
     const document = service.getDocument(documentId); if (!document || document.kind !== 'pixel') throw new Error('Palette import requires an open pixel document.');
     const result = await dialog.showOpenDialog(mainWindow!, { title: 'Import indexed palette', properties: ['openFile'], filters: [{ name: 'Palette files', extensions: ['json', 'gpl'] }, { name: 'AIDraw palette JSON', extensions: ['json'] }, { name: 'GIMP palette', extensions: ['gpl'] }] });
     if (result.canceled || !result.filePaths[0]) return { imported: false, cancelled: true, added: 0, updated: 0, skipped: 0, warnings: [] };
-    const filePath = result.filePaths[0]; const parsed = parsePaletteFile(await readFile(filePath), extname(filePath));
+    const filePath = result.filePaths[0]; const parsed = parsePaletteFile(await readApprovedPaletteSource(filePath), extname(filePath));
     const applied = applyPortablePalette(document.palette, parsed.entries, mode, () => createId('palette'));
     const response = await service.apply({ id: createId('tx'), clientOperationId: createId('palette-import'), documentId, actor: HUMAN_ACTOR, label: mode === 'append-unique' ? `Append palette · ${parsed.name}` : `Import palette slots · ${parsed.name}`, createdAt: nowIso(), operations: [{ kind: 'pixel.palette.replace', palette: applied.palette }], playback: { mode: 'instant', speed: 1 } });
     if (response.status !== 'committed' && response.status !== 'duplicate') throw new Error(response.message ?? 'Palette import could not be committed.');
@@ -652,10 +672,8 @@ function registerIpc(): void {
       filters: [{ name: 'Source images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'apng'] }],
     });
     if (result.canceled || !result.filePaths[0]) return { updated: false, cancelled: true };
-    const filePath = resolve(result.filePaths[0]); const file = await stat(filePath);
-    if (!file.isFile() || file.size < 1 || file.size > MAX_PROJECT_LINK_BYTES) throw new Error('Relinked source images must be non-empty files no larger than 1.5 MB.');
-    const bytes = await readFile(filePath);
-    if (bytes.byteLength !== file.size) throw new Error('The selected source changed while it was being read; choose it again.');
+    const filePath = resolve(result.filePaths[0]);
+    const bytes = await readApprovedProjectLinkSource(filePath, 'The selected source changed while it was being read; choose it again.');
     const prepared = preparePixelLinkRelink(document, linkId, filePath, bytes);
     await commit(`Relink project asset · ${linkedAsset.name}`, prepared.operations);
     return { updated: true, filePath, message: `Relinked ${linkedAsset.name}.` };

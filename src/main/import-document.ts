@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { readFile, realpath, stat } from 'node:fs/promises';
+import { realpath } from 'node:fs/promises';
 import { gunzipSync, inflateSync } from 'node:zlib';
 import { basename, dirname, extname, isAbsolute, relative, resolve } from 'node:path';
 import { createCanvas, DOMMatrix, ImageData, Path2D, loadImage, type Canvas } from '@napi-rs/canvas';
@@ -46,6 +46,7 @@ import { importEditableSvg } from './svg-import';
 import { MAX_IMPORT_UTILITY_DOCUMENTS, MAX_IMPORT_UTILITY_SERIALIZED_BYTES } from './utility-contract';
 import { jsonStringSerializedByteLength } from './utility-resource-policy';
 import { inspectSpriteSheetSource } from './sprite-sheet-preview';
+import { readBoundedRegularFile } from './bounded-file-read';
 
 initializePsdCanvas(createCanvas as unknown as (width: number, height: number) => HTMLCanvasElement);
 
@@ -137,12 +138,13 @@ function assertSafeXml(bytes: Buffer, label: string): string {
 }
 
 export async function readBoundedImportFile(filePath: string, maxBytes = MAX_BINARY_IMPORT_BYTES, label = 'Import file'): Promise<Buffer> {
-  const details = await stat(filePath);
-  if (!details.isFile()) throw new Error(`${label} is not a regular file.`);
-  if (details.size > maxBytes) throw new Error(`${label} exceeds the ${Math.floor(maxBytes / 1024 / 1024)} MiB safety limit.`);
-  const bytes = await readFile(filePath);
-  if (bytes.byteLength > maxBytes) throw new Error(`${label} grew beyond the ${Math.floor(maxBytes / 1024 / 1024)} MiB safety limit while it was being read.`);
-  return bytes;
+  const limit = Math.floor(maxBytes / 1024 / 1024);
+  return readBoundedRegularFile(filePath, {
+    maxBytes,
+    notFileMessage: `${label} is not a regular file.`,
+    tooLargeMessage: `${label} exceeds the ${limit} MiB safety limit.`,
+    changedMessage: `${label} changed or grew beyond the ${limit} MiB safety limit while it was being read.`,
+  });
 }
 
 async function readCompanionFile(rootFilePath: string, sourceFilePath: string, reference: string, maxBytes: number, label: string): Promise<{ bytes: Buffer; path: string }> {

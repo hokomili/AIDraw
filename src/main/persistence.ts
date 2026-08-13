@@ -1,7 +1,7 @@
 import { constants } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { crc32 } from 'node:zlib';
-import { access, mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
+import { access, mkdir, open, rename, unlink } from 'node:fs/promises';
 import { dirname, extname } from 'node:path';
 import { createCanvas } from '@napi-rs/canvas';
 import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate';
@@ -31,6 +31,7 @@ import {
 } from './transaction-policy';
 import { parseTransactionTraceEntry, parseTransactionTraceJsonl } from './trace-policy';
 import { MAX_NATIVE_BINARY_ENTRY_BYTES } from './native-container-limits';
+import { readBoundedRegularFile } from './bounded-file-read';
 
 const TRANSPARENT_PREVIEW = Uint8Array.from(
   Buffer.from(
@@ -475,7 +476,13 @@ function buildArchive(document: AIDrawDocument, appVersion: string, preview?: Ui
 }
 
 export async function readNativeDocument(filePath: string, imageDecoder?: ImageDecodeValidator): Promise<LoadedNativeDocument> {
-  const archive = unzipNativeArchive(new Uint8Array(await readFile(filePath)));
+  const bytes = await readBoundedRegularFile(filePath, {
+    maxBytes: MAX_NATIVE_ARCHIVE_BYTES,
+    notFileMessage: 'AIDraw container is not a regular file.',
+    tooLargeMessage: 'AIDraw container exceeds the 512 MiB compressed-size limit.',
+    changedMessage: 'AIDraw container changed while it was being read; open it again.',
+  });
+  const archive = unzipNativeArchive(new Uint8Array(bytes));
   if (!archive['manifest.json'] || !archive['document.json']) {
     throw new Error('This file is not a valid AIDraw container.');
   }
