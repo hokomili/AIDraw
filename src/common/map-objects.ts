@@ -43,6 +43,19 @@ export function transformMapObject(source: CollisionShape, mode: MapObjectTransf
   return object;
 }
 
+export function moveMapObjectSelection(source: readonly CollisionShape[], selectedIds: readonly string[], delta: MapPoint): CollisionShape[] {
+  const selected = new Set(selectedIds);
+  if (selected.size !== selectedIds.length) throw new Error('Map object selection IDs must be unique.');
+  let matched = 0;
+  const result = source.map((object) => {
+    if (!selected.has(object.id)) return object;
+    matched += 1;
+    return transformMapObject(object, 'move', delta);
+  });
+  if (matched !== selected.size) throw new Error('Every selected map object must exist in the source collection.');
+  return result;
+}
+
 export function moveMapObjectPoint(source: CollisionShape, pointIndex: number, delta: MapPoint): CollisionShape {
   if (source.type !== 'polygon' && source.type !== 'polyline') throw new Error('Only polygon and polyline map objects have editable points.');
   if (!source.points?.[pointIndex]) throw new Error(`Map object point ${pointIndex} does not exist.`);
