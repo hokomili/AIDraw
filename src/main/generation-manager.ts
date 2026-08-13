@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto';
-import { nativeImage } from 'electron';
 import {
   HUMAN_ACTOR,
   IDENTITY_TRANSFORM,
@@ -7,6 +6,7 @@ import {
   createPixelSprite,
   nowIso,
   writePixels,
+  type AIDrawDocument,
   type AsyncJob,
   type CanvasOperation,
   type CanvasTransaction,
@@ -21,35 +21,30 @@ import type {
   GeneratedAcceptancePreparation,
   GeneratedOutput,
   GenerationAcceptanceResult,
+  GenerationComparisonSource,
   GenerationJobResult,
   GenerationRequest,
 } from '../common/generation';
 import { validateGenerationRequest } from '../common/generation-capabilities';
+import { staticRasterDimensionsWithinLimits } from '../common/static-raster';
 import { DocumentService } from './document-service';
 import { ProviderCredentialStore } from './provider-credentials';
 import { normalizeGeneratedOutputForAcceptance } from './normalize-generation-output';
 import { quantizeToPalette } from './quantize';
-import { renderDocument } from './render-document';
+import { renderDocument, renderDocumentDimensions } from './render-document';
 import { runGenerationProvider, type GenerationProviderRunner } from './generation-provider-runner';
+import { inspectDocumentImageAsset, inspectImageHeader, MAX_INLINE_ASSET_BYTES } from './transaction-policy';
+import { MAX_EXPORT_UTILITY_TOTAL_DECODED_BYTES } from './utility-resource-policy';
 
-type ComparisonRenderer = (document: Parameters<typeof renderDocument>[0]) => Promise<{ data: string; width: number; height: number }>;
+type ComparisonRenderer = (document: AIDrawDocument) => Promise<Buffer>;
 type GenerationQuantizer = (encoded: Buffer, width: number, height: number, palette: PaletteEntry[], alphaThreshold: number, dithering: 'none' | 'bayer-4x4' | 'floyd-steinberg') => Promise<Array<{ x: number; y: number; index: number }>>;
 type GenerationAcceptanceNormalizer = (output: GeneratedOutput) => Promise<GeneratedAcceptancePreparation>;
 
-const renderComparisonDirect: ComparisonRenderer = async (document) => {
-  const canvas = await renderDocument(document);
-  return { data: canvas.toBuffer('image/png').toString('base64'), width: canvas.width, height: canvas.height };
-};
+const renderComparisonDirect: ComparisonRenderer = async (document) => (await renderDocument(document)).toBuffer('image/png');
 const quantizeGeneratedDirect: GenerationQuantizer = async (encoded, width, height, palette, alphaThreshold, dithering) => quantizeToPalette(encoded, width, height, palette, alphaThreshold, dithering);
 
-function mimeFromFormat(format: string | undefined): GeneratedOutput['mimeType'] {
-  return format === 'webp' ? 'image/webp' : format === 'jpeg' || format === 'jpg' ? 'image/jpeg' : 'image/png';
-}
-
-function dimensions(data: string): { width: number; height: number } {
-  const image = nativeImage.createFromBuffer(Buffer.from(data, 'base64'));
-  if (image.isEmpty()) throw new Error('A provider returned an unreadable image.');
-  return image.getSize();
+function comparisonMimeType(value: string): value is GenerationComparisonSource['mimeType'] {
+  return ['image/png', 'image/apng', 'image/webp', 'image/jpeg', 'image/gif'].includes(value);
 }
 
 function jobError(error: unknown): AsyncJob['error'] {
@@ -238,16 +233,31 @@ export class GenerationManager {
     }
   }
 
-  private async captureComparisonSource(request: GenerationRequest): Promise<GeneratedOutput> {
+  private async captureComparisonSource(request: GenerationRequest): Promise<GenerationComparisonSource> {
     const document = this.documents.getDocument(request.documentId);
     if (!document) throw new Error('Target document is not open.');
     const source = request.sourceAssetIds.map((id) => document.assets[id]).find((asset) => asset?.data && asset.mimeType.startsWith('image/'));
     if (source?.data) {
-      const size = dimensions(source.data);
-      return { id: createId('comparison-source'), mimeType: mimeFromFormat(source.mimeType.split('/')[1]), data: source.data, ...size };
+      const inspected = inspectDocumentImageAsset(source, { label: `Generation comparison source ${source.id}`, maxBytes: MAX_INLINE_ASSET_BYTES, limitLabel: '1.5 MB' });
+      if (!comparisonMimeType(inspected.expected.mimeType)) throw new Error('Generation comparison source has an unsupported image type.');
+      return { id: createId('comparison-source'), mimeType: inspected.expected.mimeType, data: source.data, width: inspected.expected.width, height: inspected.expected.height };
     }
-    const rendered = await this.comparisonRenderer(structuredClone(document));
-    return { id: createId('comparison-source'), mimeType: 'image/png', ...rendered };
+    const snapshot = structuredClone(document);
+    const expected = renderDocumentDimensions(snapshot);
+    if (!staticRasterDimensionsWithinLimits(expected.width, expected.height)) throw new Error('Generation comparison source exceeds the static-raster safety limit.');
+    const rendered = await this.comparisonRenderer(snapshot);
+    if (!Buffer.isBuffer(rendered) || rendered.byteLength < 1 || rendered.byteLength > MAX_EXPORT_UTILITY_TOTAL_DECODED_BYTES) {
+      throw new Error('Generation comparison renderer returned an invalid PNG.');
+    }
+    const bytes = Buffer.from(rendered);
+    let header: ReturnType<typeof inspectImageHeader>;
+    try { header = inspectImageHeader(bytes); }
+    catch { throw new Error('Generation comparison renderer returned an invalid PNG.'); }
+    if (header.mimeType !== 'image/png') throw new Error('Generation comparison renderer returned an invalid PNG.');
+    if (header.width !== expected.width || header.height !== expected.height) {
+      throw new Error('Generation comparison renderer returned contradictory PNG dimensions.');
+    }
+    return { id: createId('comparison-source'), mimeType: 'image/png', data: bytes.toString('base64'), width: expected.width, height: expected.height };
   }
 
   private validateRequest(request: GenerationRequest): void {

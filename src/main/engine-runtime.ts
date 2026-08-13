@@ -10,7 +10,6 @@ import { TransactionTraceStore } from './trace-store';
 import { RasterUtilitySupervisor } from './utility-supervisor';
 import { DocumentPresetStore } from './document-preset-store';
 import { InterchangeReportStore } from './interchange-report-store';
-import { renderDocumentDimensions } from './render-document';
 import type { GenerationProviderRunner } from './generation-provider-runner';
 
 export interface EngineRuntimeOptions {
@@ -55,10 +54,7 @@ export class EngineRuntime {
       this.providerCredentials,
       options.generationProviderRunner
         ?? ((input, control) => this.generationUtilities.generate(input.jobId, input.document, input.request, input.credential, control)),
-      async (document) => {
-        const artifact = await this.rasterUtilities.exportDocument(document, 'png');
-        return { data: artifact.data.toString('base64'), ...renderDocumentDimensions(document) };
-      },
+      async (document) => (await this.rasterUtilities.exportDocument(document, 'png')).data,
       (encoded, width, height, palette, alphaThreshold, dithering) => this.rasterUtilities.quantizeImage(encoded, width, height, palette, { alphaThreshold, dithering }),
       (output) => this.rasterUtilities.normalizeGeneratedOutput(output),
     );

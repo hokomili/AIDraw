@@ -99,6 +99,7 @@ import {
 import {
   MAX_PROVIDER_CREDENTIAL_BYTES,
   type GeneratedOutput,
+  type GenerationComparisonSource,
   type GenerationJobResult,
   type GenerationMode,
   type GenerationProvider,
@@ -4754,7 +4755,7 @@ function GenerationComparisonDialog({
   onAccept,
   onReject,
 }: {
-  source: GeneratedOutput;
+  source: GenerationComparisonSource;
   output: GeneratedOutput;
   onClose: () => void;
   onAccept: () => Promise<void>;
@@ -4800,7 +4801,7 @@ function GenerationPanel({ document }: { document: AIDrawDocument }) {
   const [comfyWorkflow, setComfyWorkflow] = useState<Record<string, unknown>>();
   const [comfyMappings, setComfyMappings] = useState<Record<string, string>>({});
   const [outpaint, setOutpaint] = useState({ left: 256, right: 256, up: 256, down: 256, creativity: 0.5 });
-  const [generationComparison, setGenerationComparison] = useState<{ jobId: string; source: GeneratedOutput; output: GeneratedOutput }>();
+  const [generationComparison, setGenerationComparison] = useState<{ jobId: string; source: GenerationComparisonSource; output: GeneratedOutput }>();
   const generationJobs = (snapshot?.jobs ?? []).filter(
     (job) =>
       job.kind === "generation" &&

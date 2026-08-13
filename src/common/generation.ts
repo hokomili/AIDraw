@@ -41,6 +41,14 @@ export interface GeneratedOutput {
   providerMetadata?: Record<string, unknown>;
 }
 
+export interface GenerationComparisonSource {
+  id: Id;
+  mimeType: 'image/png' | 'image/apng' | 'image/webp' | 'image/jpeg' | 'image/gif';
+  data: string;
+  width: number;
+  height: number;
+}
+
 /** Fixed descending acceptance ladder; the first same-geometry encoding within policy wins. */
 export const GENERATION_ACCEPTANCE_WEBP_QUALITIES = [100, 95, 90, 85, 80, 75, 70, 60, 50, 40, 30, 20, 10, 5, 1, 0] as const;
 
@@ -86,7 +94,7 @@ export interface GenerationJobResult {
   request: GenerationRequest;
   outputs: GeneratedOutput[];
   /** Frozen source/canvas preview captured before the paid request starts. */
-  comparisonSource?: GeneratedOutput;
+  comparisonSource?: GenerationComparisonSource;
   acceptedOutputId?: Id;
   /** Describes an accepted derivative without changing the retained provider output. */
   acceptedNormalization?: GenerationAcceptanceNormalization;

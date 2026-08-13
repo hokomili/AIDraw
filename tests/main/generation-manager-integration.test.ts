@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createCanvas } from '@napi-rs/canvas';
-import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createId, nowIso, readPixel, type Actor, type AsyncJob, type CanvasTransaction, type DocumentAsset, type ShapeObject } from '@aidraw/core';
+import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createId, nowIso, readPixel, type AIDrawDocument, type Actor, type AsyncJob, type CanvasTransaction, type DocumentAsset, type ShapeObject } from '@aidraw/core';
 
 vi.mock('electron', () => ({
   nativeImage: { createFromBuffer: () => ({ isEmpty: () => false, getSize: () => ({ width: 10, height: 10 }) }) },
@@ -48,9 +48,10 @@ afterEach(async () => {
 async function fixture(runner: GenerationProviderRunner, resultCount = 1) {
   const directory = await mkdtemp(join(tmpdir(), 'aidraw-generation-')); temporaryDirectories.push(directory); const documents = new DocumentService(new RecoveryJournal(join(directory, 'journal')), '0.1.0'); documentServices.push(documents); documents.initialize(); const document = documents.create({ kind: 'sprite', name: 'Generated sprite', width: 4, height: 4 }).activeDocument!;
   const canvas = createCanvas(2, 2); canvas.getContext('2d').fillStyle = '#ff6b7a'; canvas.getContext('2d').fillRect(0, 0, 2, 2); const data = canvas.toBuffer('image/png').toString('base64');
-  const manager = new GenerationManager(documents, new ProviderCredentialStore(join(directory, 'credentials.json')), runner, async () => ({ data, width: 2, height: 2 }), async () => [{ x: 0, y: 0, index: 3 }]);
+  const comparisonCanvas = createCanvas(4, 4); comparisonCanvas.getContext('2d').fillStyle = '#3978b8'; comparisonCanvas.getContext('2d').fillRect(0, 0, 4, 4); const comparisonData = comparisonCanvas.toBuffer('image/png').toString('base64');
+  const manager = new GenerationManager(documents, new ProviderCredentialStore(join(directory, 'credentials.json')), runner, async () => Buffer.from(comparisonData, 'base64'), async () => [{ x: 0, y: 0, index: 3 }]);
   const request: GenerationRequest = { documentId: document.id, provider: 'openai', mode: 'create', prompt: 'A coral sprite', sourceAssetIds: [], size: 'auto', resultCount, providerOptions: {} };
-  return { documents, document, manager, request, data };
+  return { directory, documents, document, manager, request, data, comparisonData };
 }
 
 async function waitForStatus(documents: DocumentService, jobId: string, status: AsyncJob['status']): Promise<AsyncJob> {
@@ -68,9 +69,76 @@ function oversizedValidPng(): Buffer {
 describe('generation manager orchestration', () => {
   it('routes a result through the provider seam, records partial completion, and accepts it as indexed content with provenance', async () => {
     let outputData = ''; const runner = vi.fn<GenerationProviderRunner>(async () => [{ id: 'result-one', mimeType: 'image/png', data: outputData, width: 2, height: 2 }]); const value = await fixture(runner, 2); outputData = value.data;
-    const started = await value.manager.startHuman(value.request); const completed = await waitForStatus(value.documents, started.jobId, 'completed'); expect(runner).toHaveBeenCalledTimes(1); expect(completed.message).toContain('1 of 2 requested results');
+    const started = await value.manager.startHuman(value.request); const completed = await waitForStatus(value.documents, started.jobId, 'completed'); expect(runner).toHaveBeenCalledTimes(1); expect(completed.message).toContain('1 of 2 requested results'); expect(completed.result).toMatchObject({ comparisonSource: { mimeType: 'image/png', data: value.comparisonData, width: 4, height: 4 } });
     const accepted = await value.manager.accept(started.jobId, 'result-one'); expect(accepted).toEqual({ accepted: true }); const document = value.documents.getDocument(value.document.id); if (!document || document.kind !== 'pixel') throw new Error('Expected pixel document'); const sprite = document.pixelAssets[document.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('Expected sprite');
     expect(sprite.layerIds).toHaveLength(2); expect(document.provenance).toEqual([expect.objectContaining({ provider: 'openai', modelOrWorkflow: 'gpt-image-2', prompt: 'A coral sprite', conversion: expect.objectContaining({ width: 4, height: 4 }) })]); expect(Object.values(document.assets)).toEqual([expect.objectContaining({ source: 'generated' })]);
+  });
+
+  it('retains an exact GIF source with its truthful MIME and header geometry', async () => {
+    let outputData = '';
+    const runner = vi.fn<GenerationProviderRunner>(async () => [{ id: 'gif-edit-result', mimeType: 'image/png', data: outputData, width: 2, height: 2 }]);
+    const value = await fixture(runner); outputData = value.data;
+    const gifBytes = Buffer.from('R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==', 'base64');
+    const source: DocumentAsset = {
+      id: 'comparison-gif', name: 'Animated source', mimeType: 'image/gif', byteLength: gifBytes.byteLength,
+      sha256: createHash('sha256').update(gifBytes).digest('hex'), source: 'imported', data: gifBytes.toString('base64'),
+    };
+    expect((await value.documents.apply({
+      id: createId('tx'), clientOperationId: 'install-comparison-gif', documentId: value.document.id, actor: HUMAN_ACTOR,
+      label: 'Install GIF comparison source', createdAt: nowIso(), operations: [{ kind: 'asset.add', asset: source }],
+    })).status).toBe('committed');
+
+    const started = await value.manager.startHuman({ ...value.request, mode: 'edit', sourceAssetIds: [source.id] });
+    const completed = await waitForStatus(value.documents, started.jobId, 'completed');
+    expect((completed.result as GenerationJobResult).comparisonSource).toMatchObject({
+      mimeType: 'image/gif', data: source.data, width: 1, height: 1,
+    });
+    expect(runner).toHaveBeenCalledOnce();
+  });
+
+  it('rejects malformed or contradictory rendered comparisons before dispatch and isolates a valid renderer snapshot', async () => {
+    let outputData = '';
+    const outputRunner = vi.fn<GenerationProviderRunner>(async () => [{ id: 'admitted-result', mimeType: 'image/png', data: outputData, width: 2, height: 2 }]);
+    const value = await fixture(outputRunner); outputData = value.data;
+    const wrongCanvas = createCanvas(1, 1);
+    const validCanvas = createCanvas(4, 4); validCanvas.getContext('2d').fillStyle = '#31a6a0'; validCanvas.getContext('2d').fillRect(0, 0, 4, 4);
+    const validPng = validCanvas.toBuffer('image/png');
+    const renderer = vi.fn<(document: AIDrawDocument) => Promise<Buffer>>()
+      .mockResolvedValueOnce(Buffer.from('not a PNG'))
+      .mockResolvedValueOnce(wrongCanvas.toBuffer('image/png'))
+      .mockImplementationOnce(async (snapshot) => { snapshot.name = 'Renderer mutation'; return validPng; });
+    const manager = new GenerationManager(
+      value.documents,
+      new ProviderCredentialStore(join(value.directory, 'comparison-admission-credentials.json')),
+      outputRunner,
+      renderer,
+    );
+    const before = value.documents.getDocument(value.document.id)!;
+
+    await expect(manager.startHuman(value.request)).rejects.toThrow('Generation comparison renderer returned an invalid PNG.');
+    await expect(manager.startHuman(value.request)).rejects.toThrow('Generation comparison renderer returned contradictory PNG dimensions.');
+    expect(outputRunner).not.toHaveBeenCalled();
+    expect(value.documents.snapshot().jobs).toEqual([]);
+
+    const started = await manager.startHuman(value.request);
+    const completed = await waitForStatus(value.documents, started.jobId, 'completed');
+    expect((completed.result as GenerationJobResult).comparisonSource).toMatchObject({
+      mimeType: 'image/png', data: validPng.toString('base64'), width: 4, height: 4,
+    });
+    expect(value.documents.getDocument(value.document.id)).toEqual(before);
+    expect(outputRunner).toHaveBeenCalledOnce();
+    expect(renderer).toHaveBeenCalledTimes(3);
+  });
+
+  it('wires production comparison rendering to supervised PNG bytes without Electron image decode', async () => {
+    const [managerSource, runtimeSource] = await Promise.all([
+      readFile(join(process.cwd(), 'src/main/generation-manager.ts'), 'utf8'),
+      readFile(join(process.cwd(), 'src/main/engine-runtime.ts'), 'utf8'),
+    ]);
+    expect(managerSource).not.toContain("import { nativeImage } from 'electron'");
+    expect(managerSource).not.toContain('nativeImage.createFromBuffer');
+    expect(runtimeSource).toContain("async (document) => (await this.rasterUtilities.exportDocument(document, 'png')).data");
+    expect(runtimeSource).not.toContain("from './render-document'");
   });
 
   it('accepts an oversized preview through an explicit normalized copy while retaining the exact provider result', async () => {
@@ -250,7 +318,7 @@ describe('generation manager orchestration', () => {
     const vector = Object.values(document.layers).find((layer) => layer.type === 'vector'); if (!vector || vector.type !== 'vector') throw new Error('Expected vector layer'); const timestamp = nowIso(); const shape: ShapeObject = { id: 'existing', revision: 0, name: 'Existing mark', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, layerId: vector.id, type: 'shape', shape: 'rectangle', width: 2, height: 2, transform: { ...IDENTITY_TRANSFORM, x: 1, y: 1 }, visible: true, locked: false, opacity: 1, blendMode: 'normal', fill: { kind: 'solid', color: '#ff0000' }, stroke: { paint: { kind: 'none' }, width: 0, opacity: 1, lineCap: 'round', lineJoin: 'round', dash: [] } };
     const setup: CanvasTransaction = { id: createId('tx'), clientOperationId: createId('op'), documentId: document.id, actor: HUMAN_ACTOR, label: 'Prepare outpaint', createdAt: timestamp, operations: [{ kind: 'asset.add', asset: source }, { kind: 'illustration.object.add', object: shape }] }; expect((await documents.apply(setup)).status).toBe('committed');
     const outputCanvas = createCanvas(15, 19); outputCanvas.getContext('2d').fillStyle = '#5aa9e6'; outputCanvas.getContext('2d').fillRect(0, 0, 15, 19); const outputData = outputCanvas.toBuffer('image/png').toString('base64'); const runner = vi.fn<GenerationProviderRunner>(async () => [{ id: 'expanded', mimeType: 'image/png', data: outputData, width: 15, height: 19 }]);
-    const manager = new GenerationManager(documents, new ProviderCredentialStore(join(directory, 'credentials.json')), runner, async () => ({ data: source.data!, width: 10, height: 10 })); const request: GenerationRequest = { documentId: document.id, provider: 'stability', mode: 'outpaint', prompt: 'Continue the sky', sourceAssetIds: [source.id], size: 'auto', resultCount: 1, providerOptions: { left: 2, right: 3, up: 4, down: 5, creativity: 0.5 } };
+    const manager = new GenerationManager(documents, new ProviderCredentialStore(join(directory, 'credentials.json')), runner, async () => Buffer.from(source.data!, 'base64')); const request: GenerationRequest = { documentId: document.id, provider: 'stability', mode: 'outpaint', prompt: 'Continue the sky', sourceAssetIds: [source.id], size: 'auto', resultCount: 1, providerOptions: { left: 2, right: 3, up: 4, down: 5, creativity: 0.5 } };
     const started = await manager.startHuman(request); await waitForStatus(documents, started.jobId, 'completed'); expect(await manager.accept(started.jobId, 'expanded')).toEqual({ accepted: true });
     const expanded = documents.getDocument(document.id); if (!expanded || expanded.kind !== 'illustration') throw new Error('Expected illustration'); expect(expanded.artboard).toMatchObject({ width: 15, height: 19 }); expect(expanded.objects[shape.id].transform).toMatchObject({ x: 3, y: 5 }); const generated = Object.values(expanded.objects).find((object) => object.type === 'image' && object.name === 'Generated image'); expect(generated?.transform).toMatchObject({ x: 0, y: 0, scaleX: 1, scaleY: 1 }); expect(expanded.provenance[0].conversion).toEqual({ outpaint: { previousWidth: 10, previousHeight: 10, width: 15, height: 19, offsetX: 2, offsetY: 4 } });
     const undone = await documents.undo(document.id); if (undone.status !== 'committed') throw new Error(JSON.stringify(undone)); const restored = documents.getDocument(document.id); if (!restored || restored.kind !== 'illustration') throw new Error('Expected illustration'); expect(restored.artboard).toMatchObject({ width: 10, height: 10 }); expect(restored.objects[shape.id].transform).toMatchObject({ x: 1, y: 1 }); expect(Object.values(restored.objects).some((object) => object.type === 'image' && object.name === 'Generated image')).toBe(false);
