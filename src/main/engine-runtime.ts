@@ -47,6 +47,7 @@ export class EngineRuntime {
       appVersion,
       new TransactionTraceStore(join(userDataPath, 'traces')),
       (bytes, expected) => this.rasterUtilities.validateImage(bytes, expected),
+      async (document) => (await this.rasterUtilities.exportDocument(document, 'png')).data,
     );
     this.providerCredentials = new ProviderCredentialStore(join(userDataPath, 'credentials', 'generation.json'));
     this.generationManager = new GenerationManager(

@@ -1,14 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createId, createIllustrationDocument, nowIso, type Actor, type CanvasTransaction, type ShapeObject } from '@aidraw/core';
-import { DocumentService } from '@main/document-service';
+import { DocumentService, type NativeDocumentPreviewRenderer } from '@main/document-service';
 import { RecoveryJournal } from '@main/journal';
 import { writeNativeDocument } from '@main/persistence';
 import { createCanvas } from '@napi-rs/canvas';
-import { unzipSync } from 'fflate';
+import { strFromU8, unzipSync } from 'fflate';
 
 const temporaryPaths: string[] = [];
 const services: DocumentService[] = [];
@@ -20,10 +20,68 @@ afterEach(async () => {
 });
 
 describe('document service collaboration semantics', () => {
+  it('archives the exact admitted preview while isolating renderer mutations from the saved document', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-service-supervised-preview-'));
+    temporaryPaths.push(root);
+    const canvas = createCanvas(3, 2);
+    const context = canvas.getContext('2d'); context.fillStyle = '#ff6b7a'; context.fillRect(0, 0, 3, 2);
+    const preview = canvas.toBuffer('image/png');
+    const previewRenderer = vi.fn<NativeDocumentPreviewRenderer>(async (snapshot) => {
+      snapshot.name = 'Renderer mutation must stay isolated';
+      return preview;
+    });
+    const service = new DocumentService(
+      new RecoveryJournal(join(root, 'recovery')),
+      '1.0.0',
+      undefined,
+      undefined,
+      previewRenderer,
+    );
+    services.push(service);
+    const document = service.create({ kind: 'illustration', name: 'Saved preview source', width: 3, height: 2 }).activeDocument!;
+
+    const destination = await service.save(document.id, join(root, 'supervised-preview.aidraw'));
+    const files = unzipSync(new Uint8Array(await readFile(destination)));
+    expect(Buffer.from(files['preview.png'])).toEqual(preview);
+    expect(JSON.parse(strFromU8(files['document.json']))).toMatchObject({ id: document.id, name: 'Saved preview source' });
+    expect(service.getDocument(document.id)).toMatchObject({ name: 'Saved preview source', filePath: destination, dirty: false });
+    expect(previewRenderer).toHaveBeenCalledOnce();
+  });
+
+  it('rejects invalid or contradictory preview output before replacing an existing destination', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-service-preview-admission-'));
+    temporaryPaths.push(root);
+    const wrongCanvas = createCanvas(1, 1);
+    const previewRenderer = vi.fn<NativeDocumentPreviewRenderer>()
+      .mockResolvedValueOnce(Buffer.from('not a PNG'))
+      .mockResolvedValueOnce(wrongCanvas.toBuffer('image/png'));
+    const service = new DocumentService(
+      new RecoveryJournal(join(root, 'recovery')),
+      '1.0.0',
+      undefined,
+      undefined,
+      previewRenderer,
+    );
+    services.push(service);
+    const document = service.create({ kind: 'illustration', name: 'Preview admission', width: 3, height: 2 }).activeDocument!;
+    const destination = join(root, 'existing.aidraw');
+    const original = Buffer.from('existing destination bytes');
+    await writeFile(destination, original);
+
+    await expect(service.save(document.id, destination)).rejects.toThrow('Native document preview renderer returned an invalid PNG.');
+    expect(await readFile(destination)).toEqual(original);
+    await expect(service.save(document.id, destination)).rejects.toThrow('Native document preview renderer returned contradictory PNG dimensions.');
+    expect(await readFile(destination)).toEqual(original);
+    expect(service.getDocument(document.id)?.filePath).toBeUndefined();
+    expect(service.getDocument(document.id)?.dirty).toBe(false);
+    expect(previewRenderer).toHaveBeenCalledTimes(2);
+  });
+
   it('saves an oversized nominal tilemap with the established transparent preview fallback', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aidraw-service-bounded-preview-'));
     temporaryPaths.push(root);
-    const service = new DocumentService(new RecoveryJournal(join(root, 'recovery')), '1.0.0');
+    const previewRenderer = vi.fn<NativeDocumentPreviewRenderer>(async () => { throw new Error('Oversized preview must be skipped.'); });
+    const service = new DocumentService(new RecoveryJournal(join(root, 'recovery')), '1.0.0', undefined, undefined, previewRenderer);
     services.push(service);
     service.initialize();
     const document = service.create({ kind: 'tilemap', name: 'Oversized saved map', width: 32, height: 1, tileWidth: 16, tileHeight: 16 }).activeDocument;
@@ -41,6 +99,13 @@ describe('document service collaboration semantics', () => {
     const files = unzipSync(new Uint8Array(await readFile(destination)));
     const preview = Buffer.from(files['preview.png']);
     expect({ width: preview.readUInt32BE(16), height: preview.readUInt32BE(20) }).toEqual({ width: 1, height: 1 });
+    expect(previewRenderer).not.toHaveBeenCalled();
+  });
+
+  it('wires production native previews to the supervised PNG export lane', async () => {
+    const source = await readFile(join(process.cwd(), 'src/main/engine-runtime.ts'), 'utf8');
+    expect(source).toContain("async (document) => (await this.rasterUtilities.exportDocument(document, 'png')).data");
+    expect(source.indexOf('this.rasterUtilities = new RasterUtilitySupervisor()')).toBeLessThan(source.indexOf('this.service = new DocumentService('));
   });
 
   it('creates documents with mode-specific dialog settings', async () => {

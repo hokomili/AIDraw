@@ -39,6 +39,7 @@ import { TransactionTraceStore } from './trace-store';
 import {
   assertDocumentImageAssetMetadata,
   inspectDocumentImageAsset,
+  inspectImageHeader,
   prepareTransactionForCommit,
   type ImageDecodeValidator,
 } from './transaction-policy';
@@ -79,6 +80,11 @@ function historyActionAvailable(entries: HistoryEntry[]): boolean {
   return Boolean(entry && !entry.invalidatedBy);
 }
 
+export type NativeDocumentPreviewRenderer = (document: AIDrawDocument) => Promise<Buffer>;
+
+const renderNativeDocumentPreviewDirect: NativeDocumentPreviewRenderer = async (document) =>
+  (await renderDocument(document)).toBuffer('image/png');
+
 export class DocumentService extends EventEmitter {
   private readonly documents = new Map<Id, AIDrawDocument>();
   private readonly histories = new Map<Id, Map<Id, HistoryState>>();
@@ -102,6 +108,7 @@ export class DocumentService extends EventEmitter {
     private readonly appVersion: string,
     private readonly traceStore?: TransactionTraceStore,
     private readonly imageDecoder?: ImageDecodeValidator,
+    private readonly nativePreviewRenderer: NativeDocumentPreviewRenderer = renderNativeDocumentPreviewDirect,
   ) {
     super();
   }
@@ -621,15 +628,26 @@ export class DocumentService extends EventEmitter {
   async save(documentId: Id, filePath: string): Promise<string> {
     const document = this.documents.get(documentId);
     if (!document) throw new Error('Document is not open.');
+    const previewDocument = structuredClone(document);
+    const previewDimensions = renderDocumentDimensions(previewDocument);
     const trace = await this.listTrace(documentId);
     const destination = await writeNativeDocument(
       filePath,
       document,
       this.appVersion,
       async () => {
-        const dimensions = renderDocumentDimensions(document);
-        if (!staticRasterDimensionsWithinLimits(dimensions.width, dimensions.height)) return undefined;
-        return (await renderDocument(document)).toBuffer('image/png');
+        if (!staticRasterDimensionsWithinLimits(previewDimensions.width, previewDimensions.height)) return undefined;
+        const rendered = await this.nativePreviewRenderer(previewDocument);
+        if (!Buffer.isBuffer(rendered)) throw new Error('Native document preview renderer returned an invalid PNG.');
+        const preview = Buffer.from(rendered);
+        let header: ReturnType<typeof inspectImageHeader>;
+        try { header = inspectImageHeader(preview); }
+        catch { throw new Error('Native document preview renderer returned an invalid PNG.'); }
+        if (header.mimeType !== 'image/png') throw new Error('Native document preview renderer returned an invalid PNG.');
+        if (header.width !== previewDimensions.width || header.height !== previewDimensions.height) {
+          throw new Error('Native document preview renderer returned contradictory PNG dimensions.');
+        }
+        return preview;
       },
       trace,
       this.listCheckpointRecords(documentId),
