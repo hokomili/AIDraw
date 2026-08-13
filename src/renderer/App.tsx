@@ -2369,7 +2369,7 @@ function TextInspector({ object, onReplace }: { object: TextObject; onReplace: (
         <label><span>Box height</span><input key={`${object.revision}:text-height`} type="number" min="1" max="8192" defaultValue={object.height} onBlur={(event) => onReplace({ ...object, height: Math.max(1, Number(event.target.value)) }, "Resize text box")} /></label>
         <label><span>Line height</span><input key={`${object.revision}:line-height`} type="number" min="0.5" max="5" step="0.05" defaultValue={object.lineHeight} onBlur={(event) => onReplace({ ...object, lineHeight: Math.max(0.5, Math.min(5, Number(event.target.value))) }, "Change line height")} /></label>
       </div>
-      <small>Text wraps to the box width; explicit line breaks, per-range style, alignment, tracking, and underline render identically in the editor and headless export.</small>
+      <small>Double-click visible unlocked text on the canvas, or select it and press Enter, to edit content in place. Range typography remains in this inspector. Text wraps to the box width; explicit line breaks, per-range style, alignment, tracking, and underline render identically in the editor and headless export.</small>
     </div>
   );
 }

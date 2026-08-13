@@ -1,12 +1,14 @@
-import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from 'react';
 import {
   HUMAN_ACTOR,
   IDENTITY_TRANSFORM,
   BUILT_IN_RASTER_BRUSH_PRESETS,
+  MAX_ILLUSTRATION_TEXT_LENGTH,
   createId,
   illustrationKeyframesForObject,
   nowIso,
   rasterBrushDynamics,
+  replaceStyledText,
   resolveRasterBrushPreset,
   type IllustrationDocument,
   type IllustrationObject,
@@ -45,6 +47,7 @@ import {
 import { convertPathNode, deletePathNode, inspectPathNodes, insertPathNode, movePathPoint, nearestPathLocation, type PathPointKind } from '../../common/path-nodes';
 import { outlinePath, pressureOutline } from './geometry';
 import { hitTestAll, localObjectPath, objectMatrix, worldToLocal } from './illustration-hit-test';
+import { illustrationTextEditorStyle, illustrationTextObjectIsEditable } from './illustration-text-editor';
 
 interface ViewTransform {
   scale: number;
@@ -72,6 +75,11 @@ interface Gesture {
   guideId?: string;
   selectionCombination?: SelectionCombination;
   containment?: boolean;
+}
+
+interface TextEditSession {
+  object: TextObject;
+  draft: string;
 }
 
 const noPaint: PaintStyle = { kind: 'none' };
@@ -292,6 +300,11 @@ export function IllustrationCanvas({ document }: { document: IllustrationDocumen
   const mountedRef = useRef(true);
   const [pathPoints, setPathPoints] = useState<PointSample[]>([]);
   const [textDialogPoint, setTextDialogPoint] = useState<PointSample>();
+  const [textEdit, setTextEdit] = useState<TextEditSession>();
+  const textEditObject = textEdit?.object;
+  const textEditObjectId = textEditObject?.id;
+  const textEditorRef = useRef<HTMLTextAreaElement>(null);
+  const textEditClosingRef = useRef(false);
   const tool = useEditorStore((state) => state.selectedTool);
   const color = useEditorStore((state) => state.primaryColor);
   const brushSize = useEditorStore((state) => state.brushSize);
@@ -324,7 +337,14 @@ export function IllustrationCanvas({ document }: { document: IllustrationDocumen
     };
   }, []);
 
-  const view: ViewTransform = (() => {
+  useEffect(() => {
+    if (!textEditObjectId) return;
+    const editor = textEditorRef.current;
+    editor?.focus();
+    editor?.setSelectionRange(0, editor.value.length);
+  }, [textEditObjectId]);
+
+  const view = useMemo<ViewTransform>(() => {
     const fit = Math.min((size.width - 128) / document.artboard.width, (size.height - 112) / document.artboard.height);
     const scale = Math.max(0.01, fit * zoom);
     return {
@@ -332,7 +352,11 @@ export function IllustrationCanvas({ document }: { document: IllustrationDocumen
       offsetX: (size.width - document.artboard.width * scale) / 2 + pan.x,
       offsetY: (size.height - document.artboard.height * scale) / 2 + pan.y,
     };
-  })();
+  }, [document.artboard.height, document.artboard.width, pan.x, pan.y, size.height, size.width, zoom]);
+  const textEditStyle = useMemo(
+    () => textEditObject ? illustrationTextEditorStyle(document, textEditObject, view) : undefined,
+    [document, textEditObject, view],
+  );
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -548,6 +572,55 @@ export function IllustrationCanvas({ document }: { document: IllustrationDocumen
     time: event.timeStamp,
   }), [view]);
 
+  const beginTextEdit = (object: TextObject) => {
+    textEditClosingRef.current = false;
+    setGesture(undefined);
+    setSelectedId(object.id);
+    setTextEdit({ object: structuredClone(object), draft: object.text });
+  };
+
+  const cancelTextEdit = () => {
+    textEditClosingRef.current = true;
+    setTextEdit(undefined);
+    canvasRef.current?.focus();
+  };
+
+  const commitTextEdit = async (restoreCanvasFocus = false) => {
+    const session = textEdit;
+    if (!session || textEditClosingRef.current) return;
+    textEditClosingRef.current = true;
+    if (restoreCanvasFocus) canvasRef.current?.focus();
+    const currentDocument = useEditorStore.getState().snapshot?.activeDocument;
+    const currentObject = currentDocument?.kind === 'illustration' ? currentDocument.objects[session.object.id] : undefined;
+    if (currentDocument?.kind !== 'illustration' || !illustrationTextObjectIsEditable(currentDocument, currentObject)) {
+      useEditorStore.getState().notify('The text is no longer visible and unlocked. Your draft is still open.', 'warning');
+      textEditClosingRef.current = false;
+      window.requestAnimationFrame(() => textEditorRef.current?.focus());
+      return;
+    }
+    const committed = session.draft === session.object.text || await apply('Edit text on canvas', [{
+      kind: 'illustration.object.replace',
+      object: replaceStyledText(session.object, session.draft),
+      expectedRevision: session.object.revision,
+    }]);
+    if (committed) {
+      setTextEdit(undefined);
+      return;
+    }
+    textEditClosingRef.current = false;
+    window.requestAnimationFrame(() => textEditorRef.current?.focus());
+  };
+
+  const onCanvasKeyDown = (event: ReactKeyboardEvent<HTMLCanvasElement>) => {
+    if (event.key === 'Enter' && tool === 'select' && selectedIds.length === 1) {
+      const object = document.objects[selectedIds[0]];
+      if (illustrationTextObjectIsEditable(document, object)) {
+        event.preventDefault();
+        beginTextEdit(object);
+      }
+    }
+  };
+
   const onPointerDown = (event: ReactPointerEvent<HTMLCanvasElement>) => {
     const animationPreview = useEditorStore.getState().canvasAnimation;
     if (animationPreview?.illustrationTimeMs !== undefined && animationPreview.playing) useEditorStore.getState().setCanvasAnimation({ ...animationPreview, playing: false });
@@ -598,6 +671,9 @@ export function IllustrationCanvas({ document }: { document: IllustrationDocumen
     if (tool === 'select') {
       const guide = (document.guides ?? []).find((entry) => !entry.locked && Math.abs((entry.orientation === 'vertical' ? point.x : point.y) - entry.position) <= 5 / view.scale);
       if (guide) { setGesture({ kind: 'guide', start: point, end: point, points: [point], guideId: guide.id }); return; }
+      const hits = hitTestAll(document, point, canvasRef.current?.getContext('2d') ?? undefined, view.scale);
+      const object = hits[0];
+      if (event.detail >= 2 && illustrationTextObjectIsEditable(document, object)) { beginTextEdit(object); return; }
       const selectedObjects = selectedIds
         .map((id) => document.objects[id])
         .filter((object): object is IllustrationObject => Boolean(object?.visible && !object.locked));
@@ -618,9 +694,7 @@ export function IllustrationCanvas({ document }: { document: IllustrationDocumen
         });
         return;
       }
-      const hits = hitTestAll(document, point, canvasRef.current?.getContext('2d') ?? undefined, view.scale);
       if (event.altKey && hits.length) { const selectedIndex = hits.findIndex((entry) => selectedIds.includes(entry.id)); const next = hits[(selectedIndex + 1) % hits.length]; setSelectedId(next.id); return; }
-      const object = hits[0];
       if (event.shiftKey && object) { toggleSelectedId(object.id); return; }
       setSelectedId(object?.id);
       if (object) {
@@ -667,6 +741,7 @@ export function IllustrationCanvas({ document }: { document: IllustrationDocumen
       const lock = await gesture.lockPromise;
       if (lock?.acquired) {
         try {
+          if (gesture.kind === 'move' && gesture.start.x === gesture.end.x && gesture.start.y === gesture.end.y) return;
           const objects = transformedGestureObjects(gesture, document);
           const label = gesture.kind === 'move' ? `Move ${objects.length === 1 ? 'object' : `${objects.length} objects`}` : gesture.kind === 'scale' ? `Scale ${objects.length === 1 ? 'object' : `${objects.length} objects`}` : `Rotate ${objects.length === 1 ? 'object' : `${objects.length} objects`}`;
           const animationTime = useEditorStore.getState().canvasAnimation?.illustrationTimeMs;
@@ -779,7 +854,25 @@ export function IllustrationCanvas({ document }: { document: IllustrationDocumen
         onPointerUp={() => void finishGesture()}
         onPointerCancel={() => void cancelGesture()}
         onWheel={onWheel}
+        onKeyDown={onCanvasKeyDown}
       />
+      {textEdit && <textarea
+        ref={textEditorRef}
+        className="illustration-text-editor"
+        aria-label={`Edit ${textEdit.object.name} text on canvas`}
+        aria-keyshortcuts="Control+Enter Meta+Enter Escape"
+        title="Edit content · Ctrl/Cmd+Enter commits · Escape cancels"
+        maxLength={MAX_ILLUSTRATION_TEXT_LENGTH}
+        spellCheck={false}
+        value={textEdit.draft}
+        style={textEditStyle}
+        onChange={(event) => setTextEdit((current) => current ? { ...current, draft: event.target.value } : current)}
+        onBlur={() => void commitTextEdit()}
+        onKeyDown={(event) => {
+          if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); cancelTextEdit(); }
+          else if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); event.stopPropagation(); void commitTextEdit(true); }
+        }}
+      />}
       <PlaybackLanes playbacks={playbacks} />
       <div className="canvas-ruler horizontal" /><div className="canvas-ruler vertical" />
       {useEditorStore.getState().snapshot?.mcp.sessions.filter((entry) => entry.documentId === document.id && entry.cursor).map((entry) => {

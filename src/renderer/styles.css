@@ -195,6 +195,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .canvas-workspace { grid-area: canvas; min-width: 0; min-height: 0; position: relative; overflow: hidden; }
 .canvas-container { width: 100%; height: 100%; position: relative; overflow: hidden; background-color: var(--workspace); background-image: radial-gradient(rgba(76, 64, 87, .09) .65px, transparent .65px); background-size: 14px 14px; }
 .drawing-canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+.illustration-text-editor { position: absolute; z-index: 24; box-sizing: border-box; min-width: 1px; min-height: 1px; margin: 0; padding: 0; overflow: auto; resize: none; border: 0; border-radius: 2px; outline: 2px solid rgba(116,84,216,.55); background: rgba(255,253,250,.94); box-shadow: 0 5px 18px rgba(45,35,55,.18); white-space: pre-wrap; overflow-wrap: break-word; tab-size: 4; }
+.illustration-text-editor:focus { outline-color: #684bc5; }
 .drawing-canvas.tool-hand { cursor: grab; }.drawing-canvas.tool-hand:active { cursor: grabbing; }
 .drawing-canvas.tool-zoom { cursor: zoom-in; }.drawing-canvas.tool-select { cursor: default; }
 .drawing-canvas.tool-pen, .drawing-canvas.tool-pencil, .drawing-canvas.tool-brush, .drawing-canvas.tool-eraser, .drawing-canvas.tool-fill, .drawing-canvas.tool-line, .drawing-canvas.tool-rectangle, .drawing-canvas.tool-ellipse, .drawing-canvas.tool-dither { cursor: crosshair; }
