@@ -2,6 +2,16 @@ import type { Transform } from '@aidraw/core';
 
 export const AIDRAW_PSD_EDITABLE_TEXT_SUFFIX = ' · editable text';
 
+export interface PsdLayerLockFields {
+  transparencyProtected?: boolean;
+  protected?: {
+    transparency?: boolean;
+    composite?: boolean;
+    position?: boolean;
+    artboards?: boolean;
+  };
+}
+
 export type AffineMatrix = readonly [number, number, number, number, number, number];
 
 const MAX_TEXT_DIMENSION = 1_000_000;
@@ -9,6 +19,35 @@ const MAX_TRANSLATION = 1_000_000;
 const MAX_SCALE = 10_000;
 const MAX_SKEW = 89.999;
 const MATRIX_EPSILON = 1e-12;
+
+/**
+ * Writes AIDraw's binary lock as Photoshop's documented lock-all state. A
+ * partial Photoshop lock is deliberately not collapsed into AIDraw's broader
+ * canonical lock.
+ */
+export function aidrawPsdLockFields(locked: boolean): PsdLayerLockFields {
+  return locked ? { transparencyProtected: true, protected: { transparency: false } } : {};
+}
+
+export function psdLayerIsLockedAll(layer: PsdLayerLockFields): boolean {
+  return layer.transparencyProtected === true && layer.protected?.transparency !== true;
+}
+
+export function psdLayerHasPartialLock(layer: PsdLayerLockFields): boolean {
+  if (psdLayerIsLockedAll(layer)) return false;
+  return layer.transparencyProtected === true || Boolean(
+    layer.protected?.transparency
+    || layer.protected?.composite
+    || layer.protected?.position
+    || layer.protected?.artboards,
+  );
+}
+
+export function aidrawPsdTextObjectName(layerName: unknown): string | undefined {
+  if (typeof layerName !== 'string' || !layerName.endsWith(AIDRAW_PSD_EDITABLE_TEXT_SUFFIX)) return undefined;
+  const name = layerName.slice(0, -AIDRAW_PSD_EDITABLE_TEXT_SUFFIX.length);
+  return name.length >= 1 && name.length <= 200 ? name : undefined;
+}
 
 function finiteNumbers(values: unknown[]): values is number[] {
   return values.every((value) => typeof value === 'number' && Number.isFinite(value));
@@ -84,7 +123,7 @@ export function aidrawPsdTextGeometry(
   boxBoundsValue: unknown,
   firstFontSize: number,
 ): AidrawPsdTextGeometry | undefined {
-  if (typeof layerName !== 'string' || !layerName.endsWith(AIDRAW_PSD_EDITABLE_TEXT_SUFFIX)
+  if (!aidrawPsdTextObjectName(layerName)
     || !Array.isArray(transformValue) || transformValue.length < 6
     || !Array.isArray(boxBoundsValue) || boxBoundsValue.length < 4
     || !Number.isFinite(firstFontSize) || firstFontSize < 1 || firstFontSize > 500) return undefined;

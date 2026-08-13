@@ -1,5 +1,5 @@
 import type { Transform } from '@aidraw/core';
-import { AIDRAW_PSD_EDITABLE_TEXT_SUFFIX, aidrawPsdTextGeometry, aidrawPsdTextMatrix, illustrationTransformMatrix } from '@common/psd-text';
+import { AIDRAW_PSD_EDITABLE_TEXT_SUFFIX, aidrawPsdLockFields, aidrawPsdTextGeometry, aidrawPsdTextMatrix, aidrawPsdTextObjectName, illustrationTransformMatrix, psdLayerHasPartialLock, psdLayerIsLockedAll } from '@common/psd-text';
 import { describe, expect, it } from 'vitest';
 
 function expectMatrixClose(actual: readonly number[], expected: readonly number[]): void {
@@ -27,5 +27,31 @@ describe('AIDraw PSD editable-text companion geometry', () => {
     expect(aidrawPsdTextGeometry(`String${AIDRAW_PSD_EDITABLE_TEXT_SUFFIX}`, ['1', 0, 0, 1, 0, 12], [0, 0, 40, 20], 12)).toBeUndefined();
     expect(aidrawPsdTextGeometry(`Bad${AIDRAW_PSD_EDITABLE_TEXT_SUFFIX}`, [1, 0, 0, 1, 0, 12], [1, 0, 40, 20], 12)).toBeUndefined();
     expect(aidrawPsdTextGeometry(`Huge${AIDRAW_PSD_EDITABLE_TEXT_SUFFIX}`, [1, 0, 0, 1, 0, 12], [0, 0, 1_000_001, 20], 12)).toBeUndefined();
+    expect(aidrawPsdTextGeometry(AIDRAW_PSD_EDITABLE_TEXT_SUFFIX, [1, 0, 0, 1, 0, 12], [0, 0, 40, 20], 12)).toBeUndefined();
+    expect(aidrawPsdTextGeometry(`${'x'.repeat(201)}${AIDRAW_PSD_EDITABLE_TEXT_SUFFIX}`, [1, 0, 0, 1, 0, 12], [0, 0, 40, 20], 12)).toBeUndefined();
+  });
+
+  it('recovers only a canonical object name from the private suffix', () => {
+    expect(aidrawPsdTextObjectName(`Golden title${AIDRAW_PSD_EDITABLE_TEXT_SUFFIX}`)).toBe('Golden title');
+    expect(aidrawPsdTextObjectName('Golden title')).toBeUndefined();
+    expect(aidrawPsdTextObjectName(AIDRAW_PSD_EDITABLE_TEXT_SUFFIX)).toBeUndefined();
+  });
+});
+
+describe('PSD full-lock mapping', () => {
+  it('writes and recognizes the pinned lock-all representation', () => {
+    expect(aidrawPsdLockFields(false)).toEqual({});
+    expect(aidrawPsdLockFields(true)).toEqual({ transparencyProtected: true, protected: { transparency: false } });
+    expect(psdLayerIsLockedAll(aidrawPsdLockFields(true))).toBe(true);
+  });
+
+  it('does not widen individual Photoshop locks into AIDraw lock-all', () => {
+    expect(psdLayerIsLockedAll({ transparencyProtected: true, protected: { transparency: true } })).toBe(false);
+    expect(psdLayerIsLockedAll({ protected: { composite: true, position: true } })).toBe(false);
+    expect(psdLayerIsLockedAll({})).toBe(false);
+    expect(psdLayerHasPartialLock({ transparencyProtected: true, protected: { transparency: true } })).toBe(true);
+    expect(psdLayerHasPartialLock({ protected: { composite: true, position: true } })).toBe(true);
+    expect(psdLayerHasPartialLock(aidrawPsdLockFields(true))).toBe(false);
+    expect(psdLayerHasPartialLock({})).toBe(false);
   });
 });

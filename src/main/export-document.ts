@@ -21,7 +21,7 @@ import {
 } from '@aidraw/core';
 import { exactSingleLayerAnimationFrame, exactSingleLayerGifFrame } from '../common/animation-palette';
 import { splitColorAlpha } from '../common/color';
-import { AIDRAW_PSD_EDITABLE_TEXT_SUFFIX, aidrawPsdTextMatrix } from '../common/psd-text';
+import { AIDRAW_PSD_EDITABLE_TEXT_SUFFIX, aidrawPsdLockFields, aidrawPsdTextMatrix } from '../common/psd-text';
 import { MAX_STATIC_RASTER_PIXELS } from '../common/static-raster';
 import { layoutStyledText } from '../common/text-layout';
 import type { ExportFormat, ExportOptions } from '../common/contracts';
@@ -496,7 +496,7 @@ function psdTextLayer(object: Extract<IllustrationObject, { type: 'text' }>): Ps
   const ranges = normalizeTextStyleRanges(object.text, object.ranges); const first = ranges[0];
   const style = (range: typeof first) => ({ font: { name: range.fontFamily || 'ArialMT' }, fontSize: range.fontSize, leading: object.lineHeight * range.fontSize, fauxBold: range.fontWeight >= 600, fauxItalic: range.fontStyle === 'italic', tracking: Math.round(range.letterSpacing / Math.max(1, range.fontSize) * 1_000), underline: Boolean(range.underline), fillColor: psdTextColor(range.color) });
   return {
-    name: `${object.name}${AIDRAW_PSD_EDITABLE_TEXT_SUFFIX}`, hidden: true, opacity: object.opacity, blendMode: psdBlendMode(object.blendMode),
+    name: `${object.name}${AIDRAW_PSD_EDITABLE_TEXT_SUFFIX}`, hidden: true, opacity: object.opacity, blendMode: psdBlendMode(object.blendMode), ...aidrawPsdLockFields(object.locked),
     left: object.transform.x, top: object.transform.y, right: object.transform.x + object.width, bottom: object.transform.y + object.height,
     text: {
       text: object.text, transform: [...aidrawPsdTextMatrix(object.transform, first.fontSize)], shapeType: 'box', boxBounds: [0, 0, object.width, object.height],
@@ -531,7 +531,7 @@ async function psd(document: AIDrawDocument): Promise<ExportArtifact> {
     let editableTextCount = 0;
     const exportLayer = async (layerId: string): Promise<PsdLayer | undefined> => {
       const layer = document.layers[layerId]; if (!layer) return undefined;
-      const common = { name: layer.name, opacity: layer.opacity, hidden: !layer.visible, blendMode: psdBlendMode(layer.blendMode) };
+      const common = { name: layer.name, opacity: layer.opacity, hidden: !layer.visible, blendMode: psdBlendMode(layer.blendMode), ...aidrawPsdLockFields(layer.locked) };
       if (layer.type === 'group' && !layer.filters?.length && !layer.maskLayerId) {
         const nested = (await Promise.all(layer.childIds.map(exportLayer))).filter((entry): entry is PsdLayer => Boolean(entry));
         return { ...common, children: nested, opened: true };
@@ -556,7 +556,7 @@ async function psd(document: AIDrawDocument): Promise<ExportArtifact> {
     for (const layerId of asset.layerIds) {
       const layer = asset.layers[layerId]; if (layer.type !== 'pixel') continue;
       const rendered = renderSprite(document, asset, asset.frameIds[0], layerId);
-      children.push({ name: layer.name, opacity: layer.opacity, hidden: !layer.visible, imageData: rendered.getContext('2d').getImageData(0, 0, width, height) });
+      children.push({ name: layer.name, opacity: layer.opacity, hidden: !layer.visible, imageData: rendered.getContext('2d').getImageData(0, 0, width, height), ...aidrawPsdLockFields(layer.locked) });
     }
     report.warnings.push('Pixel PSD export writes current-frame cels as raster layers.');
   }

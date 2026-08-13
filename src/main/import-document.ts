@@ -35,7 +35,7 @@ import { decodeApng } from './apng';
 import { inspectGif } from './gif';
 import { calculateSpriteSheetLayout, validateSpriteSheetSliceOptions, type SpriteSheetSliceOptions } from '../common/sprite-sheet';
 import { createExactAnimationPalettePlanner, exactAnimationFrameChanges, type ExactAnimationPalettePlan } from '../common/animation-palette';
-import { aidrawPsdTextGeometry } from '../common/psd-text';
+import { aidrawPsdTextGeometry, aidrawPsdTextObjectName, psdLayerHasPartialLock, psdLayerIsLockedAll } from '../common/psd-text';
 import { displayImageDimensions, inspectImageHeader, MAX_INLINE_IMAGE_DIMENSION, MAX_INLINE_IMAGE_PIXELS } from './transaction-policy';
 import { importEditableSvg } from './svg-import';
 import { MAX_IMPORT_UTILITY_DOCUMENTS } from './utility-contract';
@@ -374,7 +374,7 @@ function psdColorHex(value: unknown, fallback = '#000000'): string {
   return `#${channel(color.r)}${channel(color.g)}${channel(color.b)}${alpha}`;
 }
 
-function importedPsdText(layer: PsdLayer, layerId: string, visible: boolean): TextObject | undefined {
+function importedPsdText(layer: PsdLayer, layerId: string, visible: boolean): { object: TextObject; aidrawCompanion: boolean } | undefined {
   const source = layer.text; if (!source?.text) return undefined;
   const base = source.style ?? {}; const ranges: TextStyleRange[] = []; let offset = 0;
   const runs = source.styleRuns?.length ? source.styleRuns : [{ length: source.text.length, style: {} }];
@@ -393,9 +393,12 @@ function importedPsdText(layer: PsdLayer, layerId: string, visible: boolean): Te
   const width = Math.max(1, Number((layer.right ?? source.right ?? left + Math.max(first.fontSize, source.text.length * first.fontSize * 0.6)) - left));
   const height = Math.max(1, Number((layer.bottom ?? source.bottom ?? top + first.fontSize * 1.4) - top));
   const aidrawGeometry = aidrawPsdTextGeometry(layer.name, source.transform, source.boxBounds, first.fontSize);
+  const aidrawName = aidrawGeometry ? aidrawPsdTextObjectName(layer.name) : undefined;
   const justification = source.paragraphStyle?.justification;
-  const object: TextObject = { ...entityBase(source.text.slice(0, 32) || layer.name || 'PSD text', layerId), type: 'text', text: source.text, width: aidrawGeometry?.width ?? width, height: aidrawGeometry?.height ?? height, align: justification === 'center' || justification === 'justify-center' ? 'center' : justification === 'right' || justification === 'justify-right' ? 'right' : justification?.startsWith('justify') ? 'justify' : 'left', lineHeight: Math.max(0.5, Math.min(4, Number(base.leading ?? first.fontSize * 1.2) / first.fontSize)), ranges, visible: aidrawGeometry ? true : visible };
-  object.transform = aidrawGeometry?.transform ?? { ...object.transform, x: left, y: top }; return object;
+  const object: TextObject = { ...entityBase((aidrawName ?? source.text.slice(0, 32)) || layer.name || 'PSD text', layerId), type: 'text', text: source.text, width: aidrawGeometry?.width ?? width, height: aidrawGeometry?.height ?? height, align: justification === 'center' || justification === 'justify-center' ? 'center' : justification === 'right' || justification === 'justify-right' ? 'right' : justification?.startsWith('justify') ? 'justify' : 'left', lineHeight: Math.max(0.5, Math.min(4, Number(base.leading ?? first.fontSize * 1.2) / first.fontSize)), ranges, visible: aidrawGeometry ? true : visible };
+  object.transform = aidrawGeometry?.transform ?? { ...object.transform, x: left, y: top };
+  if (aidrawGeometry) { object.opacity = layer.opacity ?? 1; object.blendMode = aidrawPsdBlendMode(layer.blendMode); object.locked = psdLayerIsLockedAll(layer); }
+  return { object, aidrawCompanion: Boolean(aidrawGeometry) };
 }
 
 function addPsdRasterObject(document: Extract<AIDrawDocument, { kind: 'illustration' }>, layer: Extract<IllustrationLayer, { type: 'vector' }>, source: NonNullable<PsdLayer['imageData']>, name: string, visible: boolean, left = 0, top = 0): void {
@@ -427,22 +430,27 @@ function importPsd(bytes: Buffer, name: string, pixelMode: boolean): ImportResul
   }
   const document = createIllustrationDocument(name); document.artboard.width = psd.width; document.artboard.height = psd.height; document.artboard.background = null;
   const initialLayers = [...document.layerIds]; for (const id of initialLayers) delete document.layers[id]; document.layerIds = [];
-  const stats = { groups: 0, text: 0, effects: 0, vector: 0, adjustments: 0 };
+  const stats = { groups: 0, text: 0, effects: 0, vector: 0, adjustments: 0, partialLocks: 0 };
   const addLayers = (layers: PsdLayer[] | undefined, parentId?: string) => {
     for (const [index, source] of (layers ?? []).entries()) {
       const timestamp = nowIso(); const id = createId('layer'); const isGroup = psdLayerIsGroup(source); const layerName = source.name ?? `${isGroup ? 'Group' : 'Layer'} ${index + 1}`;
       if (source.effects) stats.effects += 1; if (source.vectorMask || source.vectorFill || source.vectorStroke) stats.vector += 1; if (source.adjustment) stats.adjustments += 1;
+      if (psdLayerHasPartialLock(source)) stats.partialLocks += 1;
       if (isGroup) {
-        const group: IllustrationLayer = { id, revision: 0, name: layerName, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, parentId, visible: !source.hidden, locked: false, opacity: source.opacity ?? 1, blendMode: aidrawPsdBlendMode(source.blendMode), type: 'group', childIds: [] };
+        const group: IllustrationLayer = { id, revision: 0, name: layerName, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, parentId, visible: !source.hidden, locked: psdLayerIsLockedAll(source), opacity: source.opacity ?? 1, blendMode: aidrawPsdBlendMode(source.blendMode), type: 'group', childIds: [] };
         document.layers[id] = group; stats.groups += 1;
         if (parentId) { const parent = document.layers[parentId]; if (parent?.type === 'group') parent.childIds.push(id); } else document.layerIds.push(id);
         addLayers(source.children, id); continue;
       }
-      const layer: IllustrationLayer = { id, revision: 0, name: layerName, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, parentId, visible: !source.hidden, locked: false, opacity: source.opacity ?? 1, blendMode: aidrawPsdBlendMode(source.blendMode), type: 'vector', objectIds: [] };
+      const layer: IllustrationLayer = { id, revision: 0, name: layerName, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, parentId, visible: !source.hidden, locked: psdLayerIsLockedAll(source), opacity: source.opacity ?? 1, blendMode: aidrawPsdBlendMode(source.blendMode), type: 'vector', objectIds: [] };
       document.layers[id] = layer;
       if (parentId) { const parent = document.layers[parentId]; if (parent?.type === 'group') parent.childIds.push(id); } else document.layerIds.push(id);
       if (source.imageData) addPsdRasterObject(document, layer, source.imageData, `${layerName} · raster fallback`, true, source.left ?? 0, source.top ?? 0);
-      const text = importedPsdText(source, id, !source.hidden && !source.imageData); if (text) { document.objects[text.id] = text; layer.objectIds.push(text.id); stats.text += 1; }
+      const importedText = importedPsdText(source, id, !source.hidden && !source.imageData); if (importedText) {
+        const { object, aidrawCompanion } = importedText;
+        if (aidrawCompanion) { layer.locked = false; layer.opacity = 1; layer.blendMode = 'normal'; }
+        document.objects[object.id] = object; layer.objectIds.push(object.id); stats.text += 1;
+      }
     }
   };
   addLayers(psd.children);
@@ -456,6 +464,7 @@ function importPsd(bytes: Buffer, name: string, pixelMode: boolean): ImportResul
   if (stats.effects) warnings.push(`${stats.effects} layer effect stack${stats.effects === 1 ? '' : 's'} remain rasterized.`);
   if (stats.vector) warnings.push(`${stats.vector} vector-mask/fill/stroke layer${stats.vector === 1 ? '' : 's'} retain raster fallbacks; editable Photoshop vector descriptors are not yet translated.`);
   if (stats.adjustments) warnings.push(`${stats.adjustments} adjustment layer${stats.adjustments === 1 ? '' : 's'} remain rasterized.`);
+  if (stats.partialLocks) warnings.push(`${stats.partialLocks} PSD layer${stats.partialLocks === 1 ? '' : 's'} used a partial transparency, position, composite, or artboard lock and imported unlocked; AIDraw maps only Photoshop lock-all to its binary layer lock.`);
   if (psd.bitsPerChannel !== undefined && psd.bitsPerChannel !== 8) warnings.push(`The ${psd.bitsPerChannel}-bit PSD was decoded into AIDraw's 8-bit sRGB workflow.`);
   return { documents: [document], warnings };
 }
