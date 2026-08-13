@@ -8,9 +8,12 @@ import {
   captureTileStamp,
   bitmapTextCells,
   measureBitmapText,
+  createPixelCelReader,
   cycledPaletteIndex,
   deletePixelAnimationTag,
   duplicatePixelFrame,
+  ellipsePixels,
+  floodPixelRegion,
   HUMAN_ACTOR,
   createId,
   nowIso,
@@ -18,10 +21,12 @@ import {
   paintWangTerrain,
   pixelAnimationFrames,
   pixelCelForFrame,
+  pixelPerfectStrokePoints,
   placePixelStamp,
   placeTileStamp,
   readPixel,
   readTileAt,
+  replacePixelRegion,
   reorderPixelFrame,
   resolveTilesetForGid,
   setPixelFrameCelsLinked,
@@ -35,6 +40,8 @@ import {
   type CanvasOperation,
   type CollisionShape,
   type BitmapFont,
+  type PixelIndexRun,
+  type PixelRegionResult,
   type PixelDocument,
   type PixelSprite,
   type PixelStamp,
@@ -47,13 +54,14 @@ import { useEditorStore } from '../store';
 import { PlaybackLanes } from '../components/PlaybackLanes';
 import { collectReplayMasks, replayPointKey, replayTileLayerKey } from '../replay';
 import { EditorDialog, EntryDialog } from '../components/EditorDialog';
-import { bresenham, ellipsePixels } from './geometry';
+import { bresenham } from './geometry';
 import { clientPointToIsometricCoordinate, clientPointToIsometricTile, clientPointToPixel } from './pixel-coordinates';
 import { pixelSelectionBounds, transformPixelSelection, type PixelSelectionTransform } from '../../common/pixel-selection';
 import { captureGridSelection, combineGridSelection, placeGridClipboard, rasterizeGridLasso, scaleGridSelection, transformGridSelection, type GridSelectionClipboard } from '../../common/grid-selection';
 import { deleteMapObjectPoint, insertMapObjectPoint, mapObjectAtPoint, mapObjectBounds, moveMapObjectPoint, nearestMapObjectSegment, transformMapObject } from '../../common/map-objects';
 import { TILE_VARIANT_SEED_PROPERTY, chooseTileVariant, tileVariantCandidates, tileVariantGroup } from '../../common/tile-variants';
 import { parseBitmapFontJson } from '../../common/bitmap-font-interchange';
+import { cancelPixelGesture, releasePendingPixelLocks } from '../../common/pixel-gesture';
 
 interface PixelPoint { x: number; y: number }
 interface PixelView { scale: number; offsetX: number; offsetY: number; logicalWidth: number; logicalHeight: number }
@@ -126,6 +134,30 @@ function pixelAt(sprite: PixelSprite, frameId: string, x: number, y: number): nu
   return 0;
 }
 
+function compositePixelReader(sprite: PixelSprite, frameId: string): (x: number, y: number) => number {
+  const readers = [...visibleSpriteLayers(sprite)].reverse().flatMap(({ layer }) => {
+    if (layer.type !== 'pixel') return [];
+    const cel = celFor(sprite, layer.id, frameId);
+    return cel ? [createPixelCelReader(cel)] : [];
+  });
+  return (x, y) => {
+    for (const read of readers) {
+      const value = read(x, y);
+      if (value !== 0) return value;
+    }
+    return 0;
+  };
+}
+
+function pixelRegionPoints(runs: Array<{ x: number; y: number; length: number }>): PixelPoint[] {
+  return runs.flatMap((run) => Array.from({ length: run.length }, (_, offset) => ({ x: run.x + offset, y: run.y })));
+}
+
+function pixelToolLimitMessage(action: string, result: Extract<PixelRegionResult, { ok: false }>): string {
+  const limit = result.limit === 1_000_000 ? 'one million' : result.limit.toLocaleString('en-US');
+  return `${action} is limited to ${limit} ${result.reason === 'cells' ? 'cells' : 'row runs'}; nothing was changed.`;
+}
+
 function drawChecker(context: CanvasRenderingContext2D, width: number, height: number, cell = 8): void {
   context.fillStyle = '#f5f1eb'; context.fillRect(0, 0, width, height);
   context.fillStyle = '#e5e0d9';
@@ -180,52 +212,10 @@ function frameChanges(tool: string, start: PixelPoint, end: PixelPoint): PixelPo
   return [];
 }
 
-function floodFill(sprite: PixelSprite, frameId: string, start: PixelPoint, replacement: number): PixelPoint[] {
-  const target = pixelAt(sprite, frameId, start.x, start.y);
-  if (target === replacement) return [];
-  const result: PixelPoint[] = [];
-  const queue = [start];
-  const visited = new Set<string>();
-  while (queue.length) {
-    const point = queue.pop()!;
-    const key = `${point.x},${point.y}`;
-    if (visited.has(key) || point.x < 0 || point.y < 0 || point.x >= sprite.width || point.y >= sprite.height) continue;
-    visited.add(key);
-    if (pixelAt(sprite, frameId, point.x, point.y) !== target) continue;
-    result.push(point);
-    queue.push({ x: point.x + 1, y: point.y }, { x: point.x - 1, y: point.y }, { x: point.x, y: point.y + 1 }, { x: point.x, y: point.y - 1 });
-  }
-  return result;
-}
-
-function floodSelect(sprite: PixelSprite, frameId: string, start: PixelPoint): PixelPoint[] {
-  const target = pixelAt(sprite, frameId, start.x, start.y);
-  const result: PixelPoint[] = []; const queue = [start]; const visited = new Set<string>();
-  while (queue.length) {
-    const point = queue.pop()!; const key = `${point.x},${point.y}`;
-    if (visited.has(key) || point.x < 0 || point.y < 0 || point.x >= sprite.width || point.y >= sprite.height) continue;
-    visited.add(key); if (pixelAt(sprite, frameId, point.x, point.y) !== target) continue; result.push(point);
-    queue.push({ x: point.x + 1, y: point.y }, { x: point.x - 1, y: point.y }, { x: point.x, y: point.y + 1 }, { x: point.x, y: point.y - 1 });
-  }
-  return result;
-}
-
 function rectangleFill(start: PixelPoint, end: PixelPoint): PixelPoint[] {
   const result: PixelPoint[] = [];
   for (let y = Math.min(start.y, end.y); y <= Math.max(start.y, end.y); y += 1) for (let x = Math.min(start.x, end.x); x <= Math.max(start.x, end.x); x += 1) result.push({ x, y });
   return result;
-}
-
-function pixelPerfect(points: PixelPoint[]): PixelPoint[] {
-  const deduped = [...new Map(points.map((point) => [`${point.x},${point.y}`, point])).values()];
-  if (deduped.length < 3) return deduped;
-  const result = [deduped[0]];
-  for (let index = 1; index < deduped.length - 1; index += 1) {
-    const before = result.at(-1)!; const point = deduped[index]; const after = deduped[index + 1];
-    const isCornerDouble = Math.abs(before.x - after.x) === 1 && Math.abs(before.y - after.y) === 1 && (point.x === before.x || point.y === before.y);
-    if (!isCornerDouble) result.push(point);
-  }
-  result.push(deduped.at(-1)!); return result;
 }
 
 interface BitmapTextRequest { text: string; fontId: string; letterSpacing: number; lineSpacing: number; scale: number; align: 'left' | 'center' | 'right' }
@@ -268,6 +258,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const [start, setStart] = useState<PixelPoint>();
   const [cursor, setCursor] = useState<PixelPoint>();
   const [preview, setPreview] = useState<PixelPoint[]>([]);
+  const [bulkPreview, setBulkPreview] = useState<PixelIndexRun[]>([]);
   const [selection, setSelection] = useState<PixelPoint[]>([]);
   const [selectionOffset, setSelectionOffset] = useState<PixelPoint>();
   const [lassoPath, setLassoPath] = useState<PixelPoint[]>([]);
@@ -283,6 +274,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const [activeTileStampId, setActiveTileStampId] = useState<string>();
   const [lockPromise, setLockPromise] = useState<Promise<{ acquired: boolean; lockId?: string }>>();
   const lockPromiseRef = useRef<Promise<{ acquired: boolean; lockId?: string }> | undefined>(undefined);
+  const gestureEpochRef = useRef(0);
   const mountedRef = useRef(true);
   const [frameId, setFrameId] = useState(sprite?.frameIds[0]);
   const [playing, setPlaying] = useState(false);
@@ -346,7 +338,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     return () => {
       mountedRef.current = false;
       const pendingLocks = [lockPromiseRef.current, mapObjectGestureRef.current?.lockPromise].filter((value): value is Promise<{ acquired: boolean; lockId?: string }> => Boolean(value));
-      for (const pendingLock of new Set(pendingLocks)) void pendingLock.then((lock) => lock.lockId ? window.aidraw.releaseHumanLock(lock.lockId) : undefined).catch(() => undefined);
+      void releasePendingPixelLocks(pendingLocks, (lockId) => window.aidraw.releaseHumanLock(lockId));
     };
   }, []);
 
@@ -538,9 +530,14 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       }
     }
 
-    if (preview.length) {
+    if (preview.length || bulkPreview.length) {
       context.globalAlpha = 0.78;
-      if (tool === 'stamp' && tileStampPreview.length) for (const point of tileStampPreview) {
+      if (bulkPreview.length) {
+        for (const run of bulkPreview) {
+          context.fillStyle = run.index === 0 ? '#ffffff80' : document.palette[run.index]?.color ?? '#ff00ff';
+          context.fillRect(run.x * view.scale, run.y * view.scale, run.length * view.scale, view.scale);
+        }
+      } else if (tool === 'stamp' && tileStampPreview.length) for (const point of tileStampPreview) {
         const gid = decodeTiledGid(point.gid).gid; context.fillStyle = gid === 0 ? '#ffffff80' : 'hsl(' + (gid * 47 % 360) + ' 52% 62%)';
         context.fillRect(point.x * view.scale, point.y * view.scale, view.scale, view.scale);
       } else if (tool === 'stamp' && stampPreview.length) for (const point of stampPreview) {
@@ -618,7 +615,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       context.stroke();
     }
     context.restore();
-  }, [activeFrameId, activePaletteCycle, activePaletteOverride, ditherCoverage, ditherMatrixSize, ditherMixIndex, document, lassoPath, logical, mapObjectGesture, onionSkin, paletteCycling, paletteOffset, pan.x, pan.y, pixelIndex, playbacks, preview, selectedEntityId, selection, selectionOffset, size, sprite, stampPreview, tilemap, tileStampPreview, tileset, tool, view, wrapPreview]);
+  }, [activeFrameId, activePaletteCycle, activePaletteOverride, bulkPreview, ditherCoverage, ditherMatrixSize, ditherMixIndex, document, lassoPath, logical, mapObjectGesture, onionSkin, paletteCycling, paletteOffset, pan.x, pan.y, pixelIndex, playbacks, preview, selectedEntityId, selection, selectionOffset, size, sprite, stampPreview, tilemap, tileStampPreview, tileset, tool, view, wrapPreview]);
 
   const toPixel = (event: ReactPointerEvent<HTMLCanvasElement>): PixelPoint => {
     const bounds = event.currentTarget.getBoundingClientRect();
@@ -812,6 +809,15 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     if (await apply('Delete reusable pixel stamp', [{ kind: 'pixel.stamps.replace', stamps }])) setActiveStampId(stamps[0]?.id);
   };
 
+  const cancelGesture = (): Promise<void> => {
+    const pendingLocks = [lockPromise, mapObjectGesture?.lockPromise].filter((value): value is Promise<{ acquired: boolean; lockId?: string }> => Boolean(value));
+    return cancelPixelGesture(() => {
+      gestureEpochRef.current += 1;
+      lockPromiseRef.current = undefined; mapObjectGestureRef.current = undefined;
+      setStart(undefined); setPreview([]); setBulkPreview([]); setLassoPath([]); setStampPreview([]); setTileStampPreview([]); setSelectionOffset(undefined); setLockPromise(undefined); setMapObjectGesture(undefined);
+    }, pendingLocks, (lockId) => window.aidraw.releaseHumanLock(lockId));
+  };
+
   const updatePreview = (from: PixelPoint, point: PixelPoint): void => {
     if (tool === 'select') setPreview(rectangleFill(from, point));
     else if (['line', 'rectangle', 'ellipse'].includes(tool)) setPreview(withSymmetry(frameChanges(tool, from, point)));
@@ -834,7 +840,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       setPreview((current) => {
         const symmetric = withSymmetry(points); const constrained = tool === 'dither' && selection.length ? symmetric.filter((point) => selection.some((selected) => selected.x === point.x && selected.y === point.y)) : symmetric;
         const combined = [...current, ...constrained];
-        return tool === 'pencil' && brushSize === 1 ? pixelPerfect(combined) : combined;
+        return tool === 'pencil' && brushSize === 1 ? pixelPerfectStrokePoints(combined) : combined;
       });
     }
   };
@@ -864,7 +870,13 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       return;
     }
     const combination: SelectionCombination = event.shiftKey && event.altKey ? 'intersect' : event.shiftKey ? 'add' : event.altKey ? 'subtract' : 'replace'; selectionCombination.current = combination;
-    if (tool === 'wand' && sprite && activeFrameId) { setSelection((current) => combineGridSelection(current, floodSelect(sprite, activeFrameId, point), combination)); setPreview([]); return; }
+    if (tool === 'wand' && sprite && activeFrameId) {
+      if (point.x < 0 || point.y < 0 || point.x >= sprite.width || point.y >= sprite.height) return;
+      const selected = floodPixelRegion({ width: sprite.width, height: sprite.height, start: point, read: compositePixelReader(sprite, activeFrameId) });
+      if (!selected.ok) notify(pixelToolLimitMessage('Magic-wand selection', selected), 'warning');
+      else setSelection((current) => combineGridSelection(current, pixelRegionPoints(selected.runs), combination));
+      setPreview([]); setBulkPreview([]); return;
+    }
     if (tool === 'select' && combination === 'replace' && selection.some((entry) => entry.x === point.x && entry.y === point.y)) { setStart(point); setCursor(point); setPreview([]); setSelectionOffset({ x: 0, y: 0 }); return; }
     if (tool === 'select' || tool === 'lasso') { setSelectionOffset(undefined); setStart(point); setCursor(point); setLassoPath(tool === 'lasso' ? [point] : []); setPreview([point]); return; }
     if (tool === 'text' && sprite && activeFrameId) {
@@ -872,15 +884,22 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       return;
     }
     const bounds = sprite ? { width: sprite.width, height: sprite.height, kind: 'pixel' as const } : { width: tilemap!.width, height: tilemap!.height, kind: 'tile' as const };
+    if ((tool === 'fill' || tool === 'replace') && sprite && activeFrameId) {
+      if (point.x < 0 || point.y < 0 || point.x >= sprite.width || point.y >= sprite.height) return;
+      const read = compositePixelReader(sprite, activeFrameId);
+      const source = read(point.x, point.y);
+      if (source === pixelIndex) { notify(tool === 'fill' ? 'This region already uses the selected palette index.' : 'The source and replacement palette indices are identical.', 'info'); return; }
+      const result = tool === 'fill'
+        ? floodPixelRegion({ width: sprite.width, height: sprite.height, start: point, read })
+        : replacePixelRegion({ width: sprite.width, height: sprite.height, matchIndex: source, read });
+      if (!result.ok) { notify(pixelToolLimitMessage(tool === 'fill' ? 'Pixel flood fill' : 'Pixel color replacement', result), 'warning'); return; }
+      if (!result.runs.length) { notify('The pixel operation would not change any cells.', 'info'); return; }
+      const pendingLock = window.aidraw.acquireHumanLock({ documentId: document.id, region: { kind: bounds.kind, assetId: sprite.id, x: 0, y: 0, width: bounds.width, height: bounds.height } });
+      setLockPromise(pendingLock); setStart(point); setCursor(point); setPreview([]); setBulkPreview(result.runs.map((run) => ({ ...run, index: pixelIndex }))); setStampPreview([]); setTileStampPreview([]);
+      return;
+    }
     setLockPromise(window.aidraw.acquireHumanLock({ documentId: document.id, region: { kind: bounds.kind, assetId: sprite?.id ?? asset!.id, x: 0, y: 0, width: bounds.width, height: bounds.height } }));
-    setStart(point); setCursor(point); setStampPreview([]); setTileStampPreview([]);
-    if (tool === 'fill' && sprite && activeFrameId) setPreview(floodFill(sprite, activeFrameId, point, pixelIndex));
-    else if (tool === 'replace' && sprite && activeFrameId) {
-      const source = pixelAt(sprite, activeFrameId, point.x, point.y);
-      const points: PixelPoint[] = [];
-      for (let y = 0; y < sprite.height; y += 1) for (let x = 0; x < sprite.width; x += 1) if (pixelAt(sprite, activeFrameId, x, y) === source) points.push({ x, y });
-      setPreview(points);
-    } else updatePreview(point, point);
+    setStart(point); setCursor(point); setBulkPreview([]); setStampPreview([]); setTileStampPreview([]); updatePreview(point, point);
   };
 
   const onPointerMove = (event: ReactPointerEvent<HTMLCanvasElement>) => {
@@ -891,38 +910,44 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       setPan((current) => ({ x: current.x + event.movementX, y: current.y + event.movementY }));
     } else if (selectionOffset && tool === 'select') setSelectionOffset({ x: point.x - start.x, y: point.y - start.y });
     else if (tool === 'lasso') setLassoPath((current) => { const last = current.at(-1); const next = last?.x === point.x && last.y === point.y ? current : [...current, point]; setPreview(rasterizeGridLasso(next)); return next; });
+    else if (tool === 'fill' || tool === 'replace') { setCursor(point); return; }
     else updatePreview(start, point);
     setCursor(point);
   };
 
   const finish = async () => {
+    const gestureEpoch = gestureEpochRef.current;
     if (mapObjectGesture && tilemap) {
-      const gesture = mapObjectGesture; setMapObjectGesture(undefined); const lock = await gesture.lockPromise; if (!lock?.acquired) return;
+      const gesture = mapObjectGesture; setMapObjectGesture(undefined); const lock = await gesture.lockPromise; if (gestureEpoch !== gestureEpochRef.current || !lock?.acquired) return;
       try { const next = structuredClone(tilemap); const layer = next.layers[gesture.layerId]; if (layer?.type !== 'object') return; const object = previewMapObject(gesture); layer.objects = (layer.objects ?? []).map((entry) => entry.id === object.id ? object : entry); await apply(gesture.mode === 'point' ? 'Move map object point' : gesture.mode === 'move' ? 'Move map object' : 'Resize map object', [{ kind: 'pixel.asset.replace', asset: next, expectedRevision: tilemap.revision }]); }
       finally { if (lock.lockId) await window.aidraw.releaseHumanLock(lock.lockId); }
       return;
     }
     const pendingLock = lockPromise;
+    const pendingRuns = bulkPreview;
     const points = preview.filter((point) => tilemap?.infinite || (point.x >= 0 && point.y >= 0 && point.x < logical.width && point.y < logical.height));
-    const placedStamp = stampPreview; const placedTiles = tileStampPreview; setStart(undefined); setPreview([]); setLassoPath([]); setStampPreview([]); setTileStampPreview([]);
+    const placedStamp = stampPreview; const placedTiles = tileStampPreview; setStart(undefined); setPreview([]); setBulkPreview([]); setLassoPath([]); setStampPreview([]); setTileStampPreview([]);
     if (selectionOffset && tool === 'select') { const offset = selectionOffset; setSelectionOffset(undefined); if (offset.x || offset.y) await transformSelection('move', offset); return; }
     if (tool === 'select' || tool === 'lasso') { setSelection((current) => combineGridSelection(current, points, selectionCombination.current)); return; }
-    if (points.length === 0) { const emptyLock = await pendingLock; setLockPromise(undefined); if (emptyLock?.lockId) await window.aidraw.releaseHumanLock(emptyLock.lockId); return; }
+    if (points.length === 0 && pendingRuns.length === 0) { const emptyLock = await pendingLock; setLockPromise(undefined); if (gestureEpoch !== gestureEpochRef.current) return; if (emptyLock?.lockId) await window.aidraw.releaseHumanLock(emptyLock.lockId); return; }
     const lock = await pendingLock;
     setLockPromise(undefined);
-    if (!lock?.acquired) return;
-    if (sprite && activeFrameId) {
+    if (gestureEpoch !== gestureEpochRef.current || !lock?.acquired) return;
+    try { if (sprite && activeFrameId) {
       const layerId = editableSpriteLayer(sprite)?.id;
       const cel = layerId ? celFor(sprite, layerId, activeFrameId) : undefined;
       if (cel) {
-        const changes = tool === 'stamp'
-          ? [...new Map(placedStamp.map((entry) => [`${entry.x},${entry.y}`, entry])).values()]
-          : tool === 'dither'
-          ? [...new Map(points.map((point) => [`${point.x},${point.y}`, { ...point, index: orderedDitherIndex(point.x, point.y, ditherMixIndex, pixelIndex, ditherCoverage, ditherMatrixSize) }])).values()]
-          : tool === 'lighten' || tool === 'darken'
-          ? [...new Map(points.map((point) => { const current = pixelAt(sprite, activeFrameId, point.x, point.y); return [`${point.x},${point.y}`, { ...point, index: stepPaletteByLuminance(activePaletteOverride ?? document.palette, current, tool === 'lighten' ? 'lighter' : 'darker') }] as const; })).values()]
-          : uniqueChanges(points, tool === 'eraser' ? 0 : pixelIndex);
-        await apply(`${tool === 'eraser' ? 'Erase' : 'Draw'} pixels`, [{ kind: 'pixel.cel.set', spriteId: sprite.id, celId: cel.id, changes, expectedRevision: cel.revision }]);
+        if (pendingRuns.length) await apply(tool === 'fill' ? 'Fill pixels' : 'Replace pixel color', [{ kind: 'pixel.cel.region', spriteId: sprite.id, celId: cel.id, runs: pendingRuns, expectedRevision: cel.revision }]);
+        else {
+          const changes = tool === 'stamp'
+            ? [...new Map(placedStamp.map((entry) => [`${entry.x},${entry.y}`, entry])).values()]
+            : tool === 'dither'
+            ? [...new Map(points.map((point) => [`${point.x},${point.y}`, { ...point, index: orderedDitherIndex(point.x, point.y, ditherMixIndex, pixelIndex, ditherCoverage, ditherMatrixSize) }])).values()]
+            : tool === 'lighten' || tool === 'darken'
+            ? [...new Map(points.map((point) => { const current = pixelAt(sprite, activeFrameId, point.x, point.y); return [`${point.x},${point.y}`, { ...point, index: stepPaletteByLuminance(activePaletteOverride ?? document.palette, current, tool === 'lighten' ? 'lighter' : 'darker') }] as const; })).values()]
+            : uniqueChanges(points, tool === 'eraser' ? 0 : pixelIndex);
+          await apply(`${tool === 'eraser' ? 'Erase' : 'Draw'} pixels`, [{ kind: 'pixel.cel.set', spriteId: sprite.id, celId: cel.id, changes, expectedRevision: cel.revision }]);
+        }
       }
     } else if (tilemap) {
       const layerId = Object.values(tilemap.layers).find((entry) => entry.type === 'tile' && entry.visible && !entry.locked)?.id;
@@ -950,8 +975,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
           await apply(selectedVariantGroup ? `Paint ${selectedVariantGroup} variants` : 'Paint tiles', [{ kind: 'pixel.tilemap.set', mapId: tilemap.id, layerId, changes, expectedRevision: layer.revision }]);
         }
       }
-    }
-    if (lock.lockId) await window.aidraw.releaseHumanLock(lock.lockId);
+    } } finally { if (lock.lockId) await window.aidraw.releaseHumanLock(lock.lockId); }
   };
 
   const onWheel = (event: ReactWheelEvent<HTMLCanvasElement>) => {
@@ -1103,8 +1127,9 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
         onPointerDown={(event) => void onPointerDown(event)}
         onPointerMove={onPointerMove}
         onPointerUp={() => void finish()}
-        onPointerCancel={() => void finish()}
+        onPointerCancel={() => void cancelGesture()}
         onPointerLeave={() => !start && setCursor(undefined)}
+        onKeyDown={(event) => { if (event.key === 'Escape' && (start || mapObjectGesture || lockPromise || selectionOffset)) { event.preventDefault(); event.stopPropagation(); void cancelGesture(); } }}
         onWheel={onWheel}
       />
       <PlaybackLanes playbacks={playbacks} />

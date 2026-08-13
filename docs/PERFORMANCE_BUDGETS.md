@@ -10,7 +10,10 @@
 | Atomically save and validate the 5,000-object native document | 5,000 ms |
 | Export that document to PNG | 5,000 ms |
 | Account for and slice one million compact playback samples | 500 ms |
+| Find and compact a one-million-cell flood-fill region | 2,000 ms |
 | Peak process RSS growth across the gate | 1,200 MiB |
+
+The flood scenario builds a real 1,000×1,000 indexed cel through canonical row-run storage, reads it through the cached production chunk reader, and requires exactly 1,000 output runs and 1,000,000 changed cells. Setup is outside the timing, but its memory remains inside the RSS gate.
 
 These thresholds are release tripwires, not product targets. The packaged Level 3 Computer Use pass separately measures pointer-to-preview latency, animation frame pacing, human input while four agent lanes are visible, 200% display scaling, and tablet latency; a headless Node test cannot honestly certify those interactions.
 

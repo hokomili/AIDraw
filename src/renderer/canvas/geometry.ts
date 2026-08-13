@@ -53,23 +53,3 @@ export function bresenham(x0: number, y0: number, x1: number, y1: number): Array
   }
   return points;
 }
-
-export function ellipsePixels(x0: number, y0: number, x1: number, y1: number): Array<{ x: number; y: number }> {
-  const left = Math.min(x0, x1);
-  const right = Math.max(x0, x1);
-  const top = Math.min(y0, y1);
-  const bottom = Math.max(y0, y1);
-  const cx = (left + right) / 2;
-  const cy = (top + bottom) / 2;
-  const rx = Math.max(0.5, (right - left) / 2);
-  const ry = Math.max(0.5, (bottom - top) / 2);
-  const steps = Math.max(12, Math.ceil(Math.PI * (rx + ry) * 1.5));
-  const unique = new Map<string, { x: number; y: number }>();
-  for (let index = 0; index < steps; index += 1) {
-    const angle = (index / steps) * Math.PI * 2;
-    const x = Math.round(cx + Math.cos(angle) * rx);
-    const y = Math.round(cy + Math.sin(angle) * ry);
-    unique.set(`${x},${y}`, { x, y });
-  }
-  return [...unique.values()];
-}

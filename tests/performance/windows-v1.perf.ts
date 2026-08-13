@@ -7,8 +7,11 @@ import {
   IDENTITY_TRANSFORM,
   createId,
   createIllustrationDocument,
+  createPixelCelReader,
   createPixelDocument,
+  floodPixelRegion,
   nowIso,
+  writePixelRuns,
   writeTileRuns,
   type CanvasOperation,
   type CanvasTransaction,
@@ -30,6 +33,7 @@ const budgets = {
   nativeSaveMs: 5_000,
   pngExportMs: 5_000,
   millionSampleAccountingMs: 500,
+  millionCellFloodFillMs: 2_000,
   rssGrowthMiB: 1_200,
 };
 
@@ -110,6 +114,16 @@ function mapFixture() {
   return { document, map };
 }
 
+function floodFillFixture() {
+  const document = createPixelDocument('sprite', 'One million cell flood-fill fixture');
+  const sprite = document.pixelAssets[document.activeAssetId];
+  if (sprite.type !== 'sprite') throw new Error('Sprite fixture is missing.');
+  sprite.width = 1_000; sprite.height = 1_000;
+  const cel = Object.values(sprite.cels)[0];
+  writePixelRuns(cel, Array.from({ length: 1_000 }, (_, y) => ({ x: 0, y, length: 1_000, index: 4 })));
+  return { sprite, read: createPixelCelReader(cel) };
+}
+
 describe('Windows v1 non-GUI performance gate', () => {
   it('meets the canonical render, persistence, and queue budgets', async () => {
     await renderIllustration(Object.assign(createIllustrationDocument('warmup'), { artboard: { ...createIllustrationDocument().artboard, width: 8, height: 8 } }));
@@ -147,6 +161,10 @@ describe('Windows v1 non-GUI performance gate', () => {
     const transaction: CanvasTransaction = { id: createId('tx'), clientOperationId: createId('op'), documentId: vector.id, actor: HUMAN_ACTOR, label: 'One million samples', createdAt: nowIso(), playback: { mode: 'animated', speed: 1 }, operations: [{ kind: 'pixel.cel.region', spriteId: 'sprite', celId: 'cel', runs } as CanvasOperation] };
     const queueAccounting = await measured(() => ({ samples: transactionSamples(transaction), midpoint: visibleOperations(transaction.operations, 0.5) }));
     memoryProfile.push(memorySnapshot('after-queue-accounting', startingRss));
+    const floodFixture = floodFillFixture();
+    memoryProfile.push(memorySnapshot('after-million-cell-flood-fixture', startingRss));
+    const floodFill = await measured(() => floodPixelRegion({ width: floodFixture.sprite.width, height: floodFixture.sprite.height, start: { x: 0, y: 0 }, read: floodFixture.read }));
+    memoryProfile.push(memorySnapshot('after-million-cell-flood-fill', startingRss));
     const peakRss = Math.max(afterVectorRss, afterPaintRss, afterMapRss, process.memoryUsage().rss);
     const metrics = {
       vector5000RenderMs: vectorRender.durationMs,
@@ -157,12 +175,16 @@ describe('Windows v1 non-GUI performance gate', () => {
       nativeSaveMs: nativeSave.durationMs,
       pngExportMs: pngExport.durationMs,
       millionSampleAccountingMs: queueAccounting.durationMs,
+      millionCellFloodFillMs: floodFill.durationMs,
       rssGrowthMiB: Number(((peakRss - startingRss) / 1024 / 1024).toFixed(2)),
     };
-    const report = { version: 1, createdAt: new Date().toISOString(), build: process.env.GITHUB_SHA ?? 'local', machine: { hostname: hostname(), platform: platform(), release: release(), arch: process.arch, cpu: cpus()[0]?.model, logicalCpus: cpus().length, totalMemoryMiB: Math.round(totalmem() / 1024 / 1024), freeMemoryMiB: Math.round(freemem() / 1024 / 1024), node: process.version }, coverage: { automated: ['5,000 vector render', 'four 4096×4096 editable paint layers', 'cold and warm four-layer 4096×4096 materialized sparse paint render', '65,536 visible tiles', 'native save', 'PNG export', 'one-million-sample compact accounting', 'RSS growth'], deferredToPackagedComputerUse: ['pointer-to-preview latency', 'requestAnimationFrame pacing', 'human input during four visible agent lanes', '200% display scaling and tablet latency'] }, budgets, metrics, diagnostics: { memoryProfile } };
+    const report = { version: 1, createdAt: new Date().toISOString(), build: process.env.GITHUB_SHA ?? 'local', machine: { hostname: hostname(), platform: platform(), release: release(), arch: process.arch, cpu: cpus()[0]?.model, logicalCpus: cpus().length, totalMemoryMiB: Math.round(totalmem() / 1024 / 1024), freeMemoryMiB: Math.round(freemem() / 1024 / 1024), node: process.version }, coverage: { automated: ['5,000 vector render', 'four 4096×4096 editable paint layers', 'cold and warm four-layer 4096×4096 materialized sparse paint render', '65,536 visible tiles', 'native save', 'PNG export', 'one-million-sample compact accounting', 'one-million-cell bounded flood fill', 'RSS growth'], deferredToPackagedComputerUse: ['pointer-to-preview latency', 'requestAnimationFrame pacing', 'human input during four visible agent lanes', '200% display scaling and tablet latency'] }, budgets, metrics, diagnostics: { memoryProfile } };
     const reportPath = process.env.AIDRAW_PERFORMANCE_REPORT ?? join(process.cwd(), 'test-results', 'performance-gate.json');
     await mkdir(dirname(reportPath), { recursive: true }); await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
     expect(queueAccounting.value.samples).toBe(1_000_000); expect((queueAccounting.value.midpoint[0] as Extract<CanvasOperation, { kind: 'pixel.cel.region' }>).runs.reduce((sum, run) => sum + run.length, 0)).toBe(500_000);
+    expect(floodFill.value).toMatchObject({ ok: true, cellCount: 1_000_000 });
+    if (!floodFill.value.ok) throw new Error('Expected bounded flood fill to succeed.');
+    expect(floodFill.value.runs).toHaveLength(1_000);
     for (const [name, budget] of Object.entries(budgets)) expect(metrics[name as keyof typeof metrics], `${name} exceeded its documented budget; inspect ${reportPath}`).toBeLessThanOrEqual(budget);
   }, 60_000);
 });

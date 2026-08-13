@@ -1,6 +1,7 @@
 export * from './model';
 export * from './ids';
 export * from './pixel';
+export * from './pixel-tools';
 export * from './defaults';
 export * from './operations';
 export * from './reducer';

@@ -16,14 +16,17 @@ import {
   applyTextStyleRange,
   bitmapTextCells,
   createId,
+  createPixelCelReader,
   deletePixelAnimationTag,
   duplicatePixelFrame,
   encodeTiledGid,
+  floodPixelRegion,
   nowIso,
   orderedDitherIndex,
   placePixelStamp,
   placeTileStamp,
   readPixel,
+  replacePixelRegion,
   replaceAndDeletePaletteIndexOperations,
   replaceStyledText,
   reorderPixelFrame,
@@ -42,6 +45,8 @@ import {
   type IllustrationDocument,
   type IllustrationObject,
   type PixelDocument,
+  type PixelCellRun,
+  type PixelRegionResult,
   type PixelSprite,
 } from '@aidraw/core';
 import { alignIllustrationObjects, distributeIllustrationObjects } from '../common/alignment';
@@ -457,6 +462,17 @@ function pixelRegionOperation(sprite: PixelSprite, celId: string, changes: Array
   return [{ kind: 'pixel.cel.region', spriteId: sprite.id, celId, runs: compactIndexedChanges(changes, 0, 0), expectedRevision }];
 }
 
+function pixelRunOperation(sprite: PixelSprite, celId: string, runs: PixelCellRun[], index: number, expectedRevision: number): CanvasOperation[] {
+  if (runs.length === 0) throw new Error('The semantic pixel operation would not change any cells.');
+  return [{ kind: 'pixel.cel.region', spriteId: sprite.id, celId, runs: runs.map((run) => ({ ...run, index })), expectedRevision }];
+}
+
+function requirePixelToolRegion(action: string, result: PixelRegionResult): Extract<PixelRegionResult, { ok: true }> {
+  if (result.ok) return result;
+  const unit = result.reason === 'cells' ? 'cells' : 'row runs';
+  throw new Error(`${action} is limited to ${result.limit.toLocaleString('en-US')} ${unit}; no pixels were changed.`);
+}
+
 function semanticObjects(document: AIDrawDocument, objectIds: string[], expectedRevisions: Record<string, number>): { document: IllustrationDocument; objects: IllustrationObject[] } {
   if (document.kind !== 'illustration') throw new Error('This semantic illustration operation requires an illustration document.');
   if (new Set(objectIds).size !== objectIds.length) throw new Error('Semantic object lists may not contain duplicates.');
@@ -500,21 +516,20 @@ async function expandAgentCanvasOperation(document: AIDrawDocument, value: Recor
     return replaceAndDeletePaletteIndexOperations(document, operation.sourceIndex, operation.replacementIndex);
   }
   if (value.kind === 'pixel.flood-fill') {
-    const operation = PixelFloodFillSchema.parse(value); const target = pixelSemanticTarget(document, operation.spriteId, operation.celId); boundedPixelRegion(target.sprite);
+    const operation = PixelFloodFillSchema.parse(value); const target = pixelSemanticTarget(document, operation.spriteId, operation.celId);
     if (operation.x >= target.sprite.width || operation.y >= target.sprite.height) throw new Error('Flood-fill seed is outside the sprite.');
     if (operation.index >= target.document.palette.length) throw new Error('Flood-fill palette index does not exist.');
-    const cel = target.sprite.cels[target.celId]; const sourceIndex = readPixel(cel, operation.x, operation.y); if (sourceIndex === operation.index) throw new Error('Flood fill already has the requested index.');
-    const visited = new Uint8Array(target.sprite.width * target.sprite.height); const queue = [operation.y * target.sprite.width + operation.x]; visited[queue[0]] = 1; const changes: Array<{ x: number; y: number; index: number }> = [];
-    for (let cursor = 0; cursor < queue.length; cursor += 1) { const cell = queue[cursor]; const x = cell % target.sprite.width; const y = Math.floor(cell / target.sprite.width); if (readPixel(cel, x, y) !== sourceIndex) continue; changes.push({ x, y, index: operation.index }); for (const [nextX, nextY] of [[x - 1, y], [x + 1, y], [x, y - 1], [x, y + 1]]) { if (nextX < 0 || nextY < 0 || nextX >= target.sprite.width || nextY >= target.sprite.height) continue; const next = nextY * target.sprite.width + nextX; if (!visited[next]) { visited[next] = 1; queue.push(next); } } }
-    return pixelRegionOperation(target.sprite, target.celId, changes, operation.expectedRevision);
+    const cel = target.sprite.cels[target.celId]; const read = createPixelCelReader(cel); const sourceIndex = read(operation.x, operation.y); if (sourceIndex === operation.index) throw new Error('Flood fill already has the requested index.');
+    const region = requirePixelToolRegion('Pixel flood fill', floodPixelRegion({ width: target.sprite.width, height: target.sprite.height, start: { x: operation.x, y: operation.y }, read }));
+    return pixelRunOperation(target.sprite, target.celId, region.runs, operation.index, operation.expectedRevision);
   }
   if (value.kind === 'pixel.replace-color') {
     const operation = PixelReplaceColorSchema.parse(value); const target = pixelSemanticTarget(document, operation.spriteId, operation.celId); const region = boundedPixelRegion(target.sprite, operation.region);
     if (operation.toIndex >= target.document.palette.length) throw new Error('Replacement palette index does not exist.');
     if (operation.fromIndex === operation.toIndex) throw new Error('Source and replacement palette indices are identical.');
-    const cel = target.sprite.cels[target.celId]; const changes: Array<{ x: number; y: number; index: number }> = [];
-    for (let y = region.y; y < region.y + region.height; y += 1) for (let x = region.x; x < region.x + region.width; x += 1) if (readPixel(cel, x, y) === operation.fromIndex) changes.push({ x, y, index: operation.toIndex });
-    return pixelRegionOperation(target.sprite, target.celId, changes, operation.expectedRevision);
+    const cel = target.sprite.cels[target.celId]; const read = createPixelCelReader(cel);
+    const replacement = requirePixelToolRegion('Pixel color replacement', replacePixelRegion({ width: target.sprite.width, height: target.sprite.height, region, matchIndex: operation.fromIndex, read }));
+    return pixelRunOperation(target.sprite, target.celId, replacement.runs, operation.toIndex, operation.expectedRevision);
   }
   if (value.kind === 'pixel.adjust-index') {
     const operation = PixelAdjustIndexSchema.parse(value); const target = pixelSemanticTarget(document, operation.spriteId, operation.celId); const region = boundedPixelRegion(target.sprite, operation.region); const cel = target.sprite.cels[target.celId]; const changes: Array<{ x: number; y: number; index: number }> = [];

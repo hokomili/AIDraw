@@ -623,6 +623,26 @@ describe('authenticated stateful MCP contract', () => {
     expect(readPixel(committedCel, 7, 7)).toBe(6);
   });
 
+  it('flood-fills a bounded connected island inside a sprite larger than one million cells', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-mcp-')); temporaryPaths.push(root);
+    const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0'); documents.initialize();
+    const host = new McpHost(documents, '1.0.0', join(root, 'port.json')); hosts.push(host); const started = await host.start('large-flood-token');
+    const client = await initializeClient(started.url, 'large-flood-token', 'large-flood-client');
+    const created = await callTool(started.url, client.headers, 2, 'document_manage', { action: 'new', kind: 'sprite', name: 'Large sparse sprite', width: 1_001, height: 1_000 });
+    const document = created.activeDocument as ReturnType<DocumentService['snapshot']>['activeDocument']; if (!document || document.kind !== 'pixel') throw new Error('Expected pixel document');
+    const sprite = document.pixelAssets[document.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('Expected sprite'); const cel = Object.values(sprite.cels)[0];
+    expect(await callTool(started.url, client.headers, 3, 'canvas_apply', { documentId: document.id, clientOperationId: 'large-flood-seed', label: 'Seed isolated pixel', playback: { mode: 'instant', speed: 1 }, operations: [{ kind: 'pixel.cel.set', spriteId: sprite.id, celId: cel.id, changes: [{ x: 500, y: 500, index: 4 }], expectedRevision: 0 }] })).toMatchObject({ status: 'committed' });
+    expect(await callTool(started.url, client.headers, 4, 'canvas_apply', { documentId: document.id, clientOperationId: 'large-flood-island', label: 'Fill isolated pixel', playback: { mode: 'instant', speed: 1 }, operations: [{ kind: 'pixel.flood-fill', spriteId: sprite.id, celId: cel.id, x: 500, y: 500, index: 5, expectedRevision: 1 }] })).toMatchObject({ status: 'committed' });
+    const committed = documents.getDocument(document.id); if (!committed || committed.kind !== 'pixel') throw new Error('Expected pixel document'); const committedSprite = committed.pixelAssets[sprite.id]; if (committedSprite.type !== 'sprite') throw new Error('Expected sprite');
+    expect(readPixel(committedSprite.cels[cel.id], 500, 500)).toBe(5);
+    expect(readPixel(committedSprite.cels[cel.id], 499, 500)).toBe(0);
+    const beforeOverflow = structuredClone(committed);
+    const overflow = await callToolMessage(started.url, client.headers, 5, 'canvas_apply', { documentId: document.id, clientOperationId: 'large-flood-overflow', label: 'Reject oversized blank region', playback: { mode: 'instant', speed: 1 }, operations: [{ kind: 'pixel.flood-fill', spriteId: sprite.id, celId: cel.id, x: 0, y: 0, index: 6, expectedRevision: 2 }] });
+    expect(overflow.result?.isError).toBe(true);
+    expect(JSON.stringify(overflow)).toContain('Pixel flood fill is limited to 1,000,000 cells; no pixels were changed.');
+    expect(documents.getDocument(document.id)).toEqual(beforeOverflow);
+  });
+
   it('expands semantic alignment, distribution, and editable material construction', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aidraw-mcp-')); temporaryPaths.push(root); const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0'); documents.initialize(); const host = new McpHost(documents, '1.0.0', join(root, 'port.json')); hosts.push(host); const started = await host.start('illustration-semantic-token'); const client = await initializeClient(started.url, 'illustration-semantic-token', 'illustration-semantic-client');
     const created = await callTool(started.url, client.headers, 2, 'document_manage', { action: 'new', kind: 'illustration', name: 'Semantic illustration', width: 400, height: 200, background: null }); const document = created.activeDocument as ReturnType<DocumentService['snapshot']>['activeDocument']; if (!document || document.kind !== 'illustration') throw new Error('Expected illustration'); const layer = Object.values(document.layers).find((entry) => entry.type === 'vector')!; const timestamp = nowIso();
