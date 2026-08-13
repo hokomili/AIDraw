@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createId, createIllustrationDocument, nowIso, type Actor, type CanvasTransaction, type ShapeObject } from '@aidraw/core';
@@ -8,6 +8,7 @@ import { DocumentService } from '@main/document-service';
 import { RecoveryJournal } from '@main/journal';
 import { writeNativeDocument } from '@main/persistence';
 import { createCanvas } from '@napi-rs/canvas';
+import { unzipSync } from 'fflate';
 
 const temporaryPaths: string[] = [];
 const services: DocumentService[] = [];
@@ -19,6 +20,29 @@ afterEach(async () => {
 });
 
 describe('document service collaboration semantics', () => {
+  it('saves an oversized nominal tilemap with the established transparent preview fallback', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-service-bounded-preview-'));
+    temporaryPaths.push(root);
+    const service = new DocumentService(new RecoveryJournal(join(root, 'recovery')), '1.0.0');
+    services.push(service);
+    service.initialize();
+    const document = service.create({ kind: 'tilemap', name: 'Oversized saved map', width: 32, height: 1, tileWidth: 16, tileHeight: 16 }).activeDocument;
+    if (!document || document.kind !== 'pixel') throw new Error('Expected pixel document');
+    const map = document.pixelAssets[document.activeAssetId];
+    if (map.type !== 'tilemap') throw new Error('Expected tilemap');
+    map.width = 1_000_000;
+    expect((await service.apply({
+      id: createId('tx'), clientOperationId: createId('op'), documentId: document.id, actor: HUMAN_ACTOR,
+      label: 'Expand nominal map bounds', createdAt: nowIso(),
+      operations: [{ kind: 'pixel.asset.replace', asset: map, expectedRevision: map.revision }],
+    })).status).toBe('committed');
+
+    const destination = await service.save(document.id, join(root, 'oversized-map.aidraw'));
+    const files = unzipSync(new Uint8Array(await readFile(destination)));
+    const preview = Buffer.from(files['preview.png']);
+    expect({ width: preview.readUInt32BE(16), height: preview.readUInt32BE(20) }).toEqual({ width: 1, height: 1 });
+  });
+
   it('creates documents with mode-specific dialog settings', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aidraw-service-'));
     temporaryPaths.push(root);

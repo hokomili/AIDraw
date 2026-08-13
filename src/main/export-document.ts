@@ -20,10 +20,11 @@ import {
   type PixelTileset,
 } from '@aidraw/core';
 import { splitColorAlpha } from '../common/color';
+import { MAX_STATIC_RASTER_PIXELS } from '../common/static-raster';
 import { layoutStyledText } from '../common/text-layout';
 import type { ExportFormat, ExportOptions } from '../common/contracts';
 import { safeTiledAssetName } from './export-artifact-policy';
-import { renderDocument, renderIllustration, renderSprite } from './render-document';
+import { renderDocument, renderDocumentDimensions, renderIllustration, renderSprite } from './render-document';
 
 initializePsdCanvas(createCanvas as unknown as (width: number, height: number) => HTMLCanvasElement);
 
@@ -33,7 +34,7 @@ export { plannedExportCompanionPaths } from './export-artifact-policy';
 export const MAX_EXPORT_SCALE = 64;
 
 const scalablePixelFormats = new Set<ExportFormat>(['png', 'jpeg', 'webp', 'svg', 'pdf', 'gif', 'apng', 'sprite-sheet']);
-const MAX_SCALED_PIXELS = 64 * 1024 * 1024;
+const MAX_SCALED_PIXELS = MAX_STATIC_RASTER_PIXELS;
 
 export function normalizeExportScale(value: unknown): number {
   const scale = value === undefined ? 1 : Number(value);
@@ -58,8 +59,8 @@ function assertScaledDimensions(width: number, height: number, scale: number): v
 }
 
 function nearestNeighborCanvas(source: Canvas, scale: number): Canvas {
-  if (scale === 1) return source;
   assertScaledDimensions(source.width, source.height, scale);
+  if (scale === 1) return source;
   const output = createCanvas(source.width * scale, source.height * scale);
   const context = output.getContext('2d');
   context.imageSmoothingEnabled = false;
@@ -231,6 +232,8 @@ async function illustrationSvg(document: IllustrationDocument): Promise<ExportAr
 }
 
 async function raster(document: AIDrawDocument, format: 'png' | 'jpeg' | 'webp', scale = 1): Promise<ExportArtifact> {
+  const dimensions = renderDocumentDimensions(document);
+  assertScaledDimensions(dimensions.width, dimensions.height, scale);
   const canvas = nearestNeighborCanvas(await renderDocument(document), scale);
   const mime = format === 'png' ? 'image/png' : format === 'jpeg' ? 'image/jpeg' : 'image/webp';
   const data = format === 'png'
@@ -442,6 +445,8 @@ async function illustrationPdf(document: IllustrationDocument): Promise<ExportAr
 
 async function pdf(document: AIDrawDocument, scale = 1): Promise<ExportArtifact> {
   if (document.kind === 'illustration') return illustrationPdf(document);
+  const dimensions = renderDocumentDimensions(document);
+  assertScaledDimensions(dimensions.width, dimensions.height, scale);
   const canvas = nearestNeighborCanvas(await renderDocument(document), scale); const png = canvas.toBuffer('image/png'); const output = await PDFDocument.create(); const page = output.addPage([canvas.width, canvas.height]);
   page.drawImage(await output.embedPng(png), { x: 0, y: 0, width: canvas.width, height: canvas.height });
   return { data: Buffer.from(await output.save()), mimeType: 'application/pdf', extension: 'pdf', report: { warnings: [...scaleWarnings(scale), 'Pixel PDF export embeds nearest-neighbor raster artwork.'], rasterized: ['composite'] } };
@@ -688,8 +693,8 @@ export async function exportDocument(document: AIDrawDocument, format: ExportFor
   if (format === 'svg') {
     if (document.kind === 'illustration') return illustrationSvg(document);
     const rasterized = await raster(document, 'png', scale);
-    const canvas = nearestNeighborCanvas(await renderDocument(document), scale);
-    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${canvas.width}" height="${canvas.height}" shape-rendering="crispEdges"><image width="100%" height="100%" image-rendering="pixelated" href="data:image/png;base64,${rasterized.data.toString('base64')}"/></svg>`;
+    const dimensions = renderDocumentDimensions(document); const width = dimensions.width * scale; const height = dimensions.height * scale;
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" shape-rendering="crispEdges"><image width="100%" height="100%" image-rendering="pixelated" href="data:image/png;base64,${rasterized.data.toString('base64')}"/></svg>`;
     return { data: Buffer.from(svg), mimeType: 'image/svg+xml', extension: 'svg', report: { warnings: [...scaleWarnings(scale), 'Pixel SVG export embeds nearest-neighbor raster artwork.'], rasterized: ['pixel artwork'] } };
   }
   if (format === 'pdf') return pdf(document, scale);

@@ -3,7 +3,7 @@ import { createCanvas, loadImage } from '@napi-rs/canvas';
 import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createIllustrationDocument, createPixelDocument, createPixelSprite, createPixelTilemap, createPixelTileset, encodeTiledGid, nowIso, writePixels, writeTiles, type GroupObject, type ShapeObject } from '@aidraw/core';
 import { exportDocument } from '@main/export-document';
 import { materializePaintTiles } from '@main/persistence';
-import { renderIllustration, renderSprite, renderSpriteRegion, renderTilemap } from '@main/render-document';
+import { renderIllustration, renderSprite, renderSpriteRegion, renderTilemap, renderTilemapRegion } from '@main/render-document';
 
 describe('native document rendering', () => {
   it('renders a rectangular orthogonal cell at its authored aspect without resampling drift', async () => {
@@ -22,6 +22,24 @@ describe('native document rendering', () => {
     expect(Buffer.from(rendered.getContext('2d').getImageData(0, 0, 3, 5).data)).toEqual(Buffer.from(source));
     const exported = await exportDocument(document, 'png'); const image = await loadImage(exported.data);
     expect({ width: image.width, height: image.height }).toEqual({ width: 3, height: 5 });
+  });
+
+  it('renders orthogonal and isometric nominal regions byte-exactly against full-raster crops', () => {
+    for (const orientation of ['orthogonal', 'isometric'] as const) {
+      const document = createPixelDocument('tilemap', `${orientation} region parity`); const map = document.pixelAssets[document.activeAssetId]; if (map.type !== 'tilemap') throw new Error('Expected tilemap');
+      map.orientation = orientation; map.width = 4; map.height = 3; map.tileWidth = 4; map.tileHeight = 2;
+      const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile' || !layer.chunks) throw new Error('Expected tile layer');
+      writeTiles(layer.chunks, [{ x: 0, y: 0, gid: 2 }, { x: 1, y: 1, gid: 4 }, { x: 3, y: 2, gid: 8 }]);
+      const timestamp = nowIso(); const objects: typeof map.layers[string] = {
+        id: `${orientation}-objects`, revision: 0, name: 'Region object', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
+        type: 'object', visible: true, locked: false, opacity: 0.6, parallaxX: 1, parallaxY: 1,
+        objects: [{ id: `${orientation}-rectangle`, type: 'rectangle', x: 2, y: 1, width: 4, height: 2, properties: {} }],
+      };
+      map.layers[objects.id] = objects; map.layerIds.push(objects.id);
+      const full = renderTilemap(document, map); const region = { x: 2, y: 1, width: 8, height: 5 };
+      const actual = renderTilemapRegion(document, map, region);
+      expect(Buffer.from(actual.getContext('2d').getImageData(0, 0, region.width, region.height).data), orientation).toEqual(Buffer.from(full.getContext('2d').getImageData(region.x, region.y, region.width, region.height).data));
+    }
   });
 
   it('renders a last-sheet tile from a maximum-size sparse sprite without materializing the full source', () => {

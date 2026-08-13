@@ -535,7 +535,7 @@ export interface NativeSaveFileSystem {
   remove(filePath: string): Promise<void>;
 }
 
-export type NativePreviewSource = Uint8Array | (() => Promise<Uint8Array>);
+export type NativePreviewSource = Uint8Array | (() => Promise<Uint8Array | undefined>);
 
 export const nativeSaveFileSystem: NativeSaveFileSystem = {
   openExclusive: async (filePath) => {

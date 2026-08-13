@@ -6,6 +6,7 @@ import type { ExportFormat, ExportOptions } from '../common/contracts';
 import type { QuantizeImageOptions } from './quantize-image';
 import type { SpriteSheetSliceOptions } from '../common/sprite-sheet';
 import type { ObservationRequest } from './capture-observation';
+import { MAX_STATIC_RASTER_SIDE } from '../common/static-raster';
 import {
   GENERATION_ACCEPTANCE_WEBP_QUALITIES,
   type GeneratedAcceptancePreparation,
@@ -513,6 +514,21 @@ function assertObservationError(request: ObservationUtilityRequest, result: Reco
         || !isNonEmptyString(result.guidance)) throw new Error('Raster utility returned a malformed observation result.');
       return;
     }
+    case 'observation_dimensions_too_large': {
+      const requested = result.requested;
+      const limit = result.limit;
+      const region = target && expectedObservationRegion(request, target);
+      const expectedWidth = region && region.width * request.request.scale;
+      const expectedHeight = region && region.height * request.request.scale;
+      if (!hasOnlyKeys(result, ['error', 'requested', 'limit', 'guidance']) || !hasKeys(result, ['error', 'requested', 'limit', 'guidance'])
+        || !isRecord(requested) || !hasOnlyKeys(requested, ['width', 'height']) || !hasKeys(requested, ['width', 'height'])
+        || !isPositiveInteger(requested.width) || !isPositiveInteger(requested.height)
+        || requested.width <= MAX_STATIC_RASTER_SIDE && requested.height <= MAX_STATIC_RASTER_SIDE
+        || expectedWidth !== undefined && requested.width !== expectedWidth || expectedHeight !== undefined && requested.height !== expectedHeight
+        || !isRecord(limit) || !hasOnlyKeys(limit, ['side']) || !hasKeys(limit, ['side']) || limit.side !== MAX_STATIC_RASTER_SIDE
+        || !isNonEmptyString(result.guidance)) throw new Error('Raster utility returned a malformed observation result.');
+      return;
+    }
     case 'observation_png_too_large': {
       const requested = result.requested;
       const limit = result.limit;
@@ -562,6 +578,7 @@ export function assertObservationUtilityResponse(
   const height = region.height * request.request.scale;
   const pixels = width * height;
   if (!regionsEqual(result.region, region) || !Number.isSafeInteger(width) || !Number.isSafeInteger(height)
+    || width > MAX_STATIC_RASTER_SIDE || height > MAX_STATIC_RASTER_SIDE
     || result.width !== width || result.height !== height || !Number.isSafeInteger(pixels) || pixels > request.maxPixels
     || result.assetId !== target.assetId || result.frameId !== target.frameId || result.layerId !== request.request.layerId
     || result.illustrationTimeMs !== request.request.illustrationTimeMs) {

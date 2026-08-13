@@ -22,6 +22,7 @@ import { orthogonalCellRect, orthogonalObjectMatrix, orthogonalProjectionExtent 
 import { paintTileCachePlan } from '../common/paint-tile-cache';
 import { renderRasterStroke } from '../common/raster-brush';
 import { drawPixelSpriteRegion, pixelSpriteRegionPlan, type PixelSpriteRegion } from '../common/pixel-sprite-render';
+import { MAX_STATIC_RASTER_PIXELS, MAX_STATIC_RASTER_SIDE, assertStaticRasterDimensions } from '../common/static-raster';
 import { renderStyledText } from '../common/text-layout';
 import { tileAnimationFrameAt, tilesetTileSourceRect } from '../common/tile-animation';
 import { isometricTileRenderCells } from '../common/tile-render-order';
@@ -35,6 +36,10 @@ let paintTileImageCacheBytes = 0;
 const MAX_RENDER_SCRATCH_CANVAS_CACHE_BYTES = 64 * 1024 * 1024;
 const MAX_MAP_TILE_SOURCE_CACHE_BYTES = 64 * 1024 * 1024;
 const MAX_MAP_TILE_SOURCE_CACHE_ENTRIES = 1_024;
+// Canvas2D can resolve coverage differently at a backing-surface edge even
+// when translated geometry is identical. Keep requested pixels away from that
+// edge before a raw crop; the margin contracts at static-raster limits.
+const TILEMAP_REGION_OVERSCAN_PIXELS = 4;
 const renderScratchCanvasCache: Canvas[] = [];
 let renderScratchCanvasCacheBytes = 0;
 
@@ -279,14 +284,21 @@ export function renderSpriteRegion(document: PixelDocument, sprite: PixelSprite,
   return { canvas, sample: plan.sample };
 }
 
-export function renderTilemap(document: PixelDocument, map: PixelTilemap, onlyLayerId?: string, tileAnimationTimeMs = 0): Canvas {
+export function renderTilemapDimensions(map: PixelTilemap): { width: number; height: number } {
   const isometric = map.orientation === 'isometric';
   const projected = isometric
     ? isometricProjectionExtent(map.width, map.height, map.tileWidth, map.tileHeight)
     : orthogonalProjectionExtent(map.width, map.height, map.tileWidth, map.tileHeight);
-  const width = Math.max(1, Math.ceil(projected.width));
-  const height = Math.max(1, Math.ceil(projected.height));
-  const canvas = createCanvas(width, height); const context = canvas.getContext('2d'); context.imageSmoothingEnabled = false;
+  return { width: Math.max(1, Math.ceil(projected.width)), height: Math.max(1, Math.ceil(projected.height)) };
+}
+
+function renderTilemapSurface(document: PixelDocument, map: PixelTilemap, region: PixelSpriteRegion, onlyLayerId?: string, tileAnimationTimeMs = 0): Canvas {
+  const isometric = map.orientation === 'isometric';
+  const dimensions = renderTilemapDimensions(map);
+  if (![region.x, region.y, region.width, region.height].every(Number.isSafeInteger) || region.x < 0 || region.y < 0 || region.width < 1 || region.height < 1) throw new RangeError('Tilemap raster regions must use nonnegative safe-integer coordinates and positive safe-integer dimensions.');
+  if (!Number.isSafeInteger(region.x + region.width) || !Number.isSafeInteger(region.y + region.height) || region.x + region.width > dimensions.width || region.y + region.height > dimensions.height) throw new RangeError('Tilemap raster region falls outside the nominal projected bounds.');
+  assertStaticRasterDimensions(region.width, region.height, 'Tilemap raster region');
+  const canvas = createCanvas(region.width, region.height); const context = canvas.getContext('2d'); context.imageSmoothingEnabled = false; context.translate(-region.x, -region.y);
   const sources = new BoundedResourceCache<RenderedSpriteRegion>(MAX_MAP_TILE_SOURCE_CACHE_ENTRIES, MAX_MAP_TILE_SOURCE_CACHE_BYTES, (source) => releaseCanvas(source.canvas));
   const animatedLocalIds = new Map<string, number>();
   const animatedLocalId = (tileset: Parameters<typeof tilesetTileSourceRect>[0], localId: number) => {
@@ -317,6 +329,8 @@ export function renderTilemap(document: PixelDocument, map: PixelTilemap, onlyLa
       const rect = isometric
         ? isometricCellRect(tileX, tileY, map.height, map.tileWidth, map.tileHeight)
         : orthogonalCellRect(tileX, tileY, map.tileWidth, map.tileHeight);
+      const transformedWidth = decoded.diagonal ? rect.height : rect.width; const transformedHeight = decoded.diagonal ? rect.width : rect.height; const centerX = rect.x + rect.width / 2; const centerY = rect.y + rect.height / 2;
+      if (centerX + transformedWidth / 2 <= region.x || centerY + transformedHeight / 2 <= region.y || centerX - transformedWidth / 2 >= region.x + region.width || centerY - transformedHeight / 2 >= region.y + region.height) return;
       const resolved = resolveTilesetForGid(document, map, decoded.gid); const sourceAsset = resolved ? document.pixelAssets[resolved.tileset.spriteAssetId] : undefined;
       if (resolved && sourceAsset?.type === 'sprite') {
         const sourceRect = tilesetTileSourceRect(resolved.tileset, animatedLocalId(resolved.tileset, resolved.localId));
@@ -335,6 +349,38 @@ export function renderTilemap(document: PixelDocument, map: PixelTilemap, onlyLa
     }
   } } finally { sources.clear(); }
   return canvas;
+}
+
+export function renderTilemapRegion(document: PixelDocument, map: PixelTilemap, region: PixelSpriteRegion, onlyLayerId?: string, tileAnimationTimeMs = 0): Canvas {
+  const dimensions = renderTilemapDimensions(map);
+  if (![region.x, region.y, region.width, region.height].every(Number.isSafeInteger) || region.x < 0 || region.y < 0 || region.width < 1 || region.height < 1) throw new RangeError('Tilemap raster regions must use nonnegative safe-integer coordinates and positive safe-integer dimensions.');
+  if (!Number.isSafeInteger(region.x + region.width) || !Number.isSafeInteger(region.y + region.height) || region.x + region.width > dimensions.width || region.y + region.height > dimensions.height) throw new RangeError('Tilemap raster region falls outside the nominal projected bounds.');
+  assertStaticRasterDimensions(region.width, region.height, 'Tilemap raster region');
+  let left = Math.min(TILEMAP_REGION_OVERSCAN_PIXELS, region.x);
+  let right = Math.min(TILEMAP_REGION_OVERSCAN_PIXELS, dimensions.width - region.x - region.width);
+  let top = Math.min(TILEMAP_REGION_OVERSCAN_PIXELS, region.y);
+  let bottom = Math.min(TILEMAP_REGION_OVERSCAN_PIXELS, dimensions.height - region.y - region.height);
+  while (region.width + left + right > MAX_STATIC_RASTER_SIDE) { if (right > left) right -= 1; else left -= 1; }
+  while (region.height + top + bottom > MAX_STATIC_RASTER_SIDE) { if (bottom > top) bottom -= 1; else top -= 1; }
+  while ((region.width + left + right) * (region.height + top + bottom) > MAX_STATIC_RASTER_PIXELS) {
+    if (bottom > 0) bottom -= 1;
+    else if (top > 0) top -= 1;
+    else if (right > 0) right -= 1;
+    else if (left > 0) left -= 1;
+  }
+  const expanded = { x: region.x - left, y: region.y - top, width: region.width + left + right, height: region.height + top + bottom };
+  const surface = renderTilemapSurface(document, map, expanded, onlyLayerId, tileAnimationTimeMs);
+  if (expanded.x === region.x && expanded.y === region.y && expanded.width === region.width && expanded.height === region.height) return surface;
+  try {
+    const pixels = surface.getContext('2d').getImageData(region.x - expanded.x, region.y - expanded.y, region.width, region.height);
+    const canvas = createCanvas(region.width, region.height); canvas.getContext('2d').putImageData(pixels, 0, 0); return canvas;
+  } finally { releaseCanvas(surface); }
+}
+
+export function renderTilemap(document: PixelDocument, map: PixelTilemap, onlyLayerId?: string, tileAnimationTimeMs = 0): Canvas {
+  const dimensions = renderTilemapDimensions(map);
+  assertStaticRasterDimensions(dimensions.width, dimensions.height, 'Tilemap raster');
+  return renderTilemapRegion(document, map, { x: 0, y: 0, ...dimensions }, onlyLayerId, tileAnimationTimeMs);
 }
 
 export function renderPixelAsset(document: PixelDocument, assetId = document.activeAssetId, frameId?: string, layerId?: string): Canvas {
@@ -358,12 +404,6 @@ export function renderDocumentDimensions(document: AIDrawDocument): { width: num
   const active = document.pixelAssets[document.activeAssetId];
   const asset = active?.type === 'tileset' ? document.pixelAssets[active.spriteAssetId] : active;
   if (asset?.type === 'sprite') return { width: asset.width, height: asset.height };
-  if (asset?.type === 'tilemap') {
-    if (asset.orientation === 'isometric') {
-      const extent = isometricProjectionExtent(asset.width, asset.height, asset.tileWidth, asset.tileHeight);
-      return { width: Math.max(1, Math.ceil(extent.width)), height: Math.max(1, Math.ceil(extent.height)) };
-    }
-    return { width: Math.max(1, asset.width * asset.tileWidth), height: Math.max(1, asset.height * asset.tileHeight) };
-  }
+  if (asset?.type === 'tilemap') return renderTilemapDimensions(asset);
   return { width: 1, height: 1 };
 }

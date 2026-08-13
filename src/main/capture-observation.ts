@@ -1,9 +1,11 @@
 import { createCanvas, type Canvas } from '@napi-rs/canvas';
 import { illustrationAtTime, type AIDrawDocument } from '@aidraw/core';
-import { renderIllustration, renderPixelAsset } from './render-document';
+import { MAX_STATIC_RASTER_SIDE } from '../common/static-raster';
+import { renderIllustration, renderPixelAsset, renderTilemapRegion } from './render-document';
 import { MAX_OBSERVATION_PNG_BYTES } from './utility-contract';
 
 export const MAX_OBSERVATION_PIXELS = 4_194_304;
+export const MAX_OBSERVATION_SIDE = MAX_STATIC_RASTER_SIDE;
 export { MAX_OBSERVATION_PNG_BYTES } from './utility-contract';
 
 export interface ObservationRequest {
@@ -29,6 +31,7 @@ export const captureObservation: CaptureObservation = async (
   maxPixels = MAX_OBSERVATION_PIXELS,
 ) => {
   let renderSource: () => Canvas | Promise<Canvas>;
+  let renderRegionSource: ((region: { x: number; y: number; width: number; height: number }) => Canvas | Promise<Canvas>) | undefined;
   let sourceWidth: number;
   let sourceHeight: number;
   let assetId: string | undefined;
@@ -63,6 +66,7 @@ export const captureObservation: CaptureObservation = async (
       sourceHeight = renderedAsset.orientation === 'isometric'
         ? Math.max(1, Math.ceil((renderedAsset.width + renderedAsset.height) * renderedAsset.tileHeight / 2))
         : renderedAsset.height * renderedAsset.tileHeight;
+      renderRegionSource = (region) => renderTilemapRegion(document, renderedAsset, region, layerId);
     }
     renderSource = () => renderPixelAsset(document, assetId, frameId, layerId);
   }
@@ -73,35 +77,43 @@ export const captureObservation: CaptureObservation = async (
   }
   const width = region.width * request.scale;
   const height = region.height * request.scale;
+  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width > MAX_OBSERVATION_SIDE || height > MAX_OBSERVATION_SIDE) {
+    return { error: 'observation_dimensions_too_large', requested: { width, height }, limit: { side: MAX_OBSERVATION_SIDE }, guidance: 'Request a region and scale no larger than the per-side limit.' };
+  }
   const outputPixels = width * height;
   if (!Number.isSafeInteger(outputPixels) || outputPixels > maxPixels) {
     return { error: 'observation_too_large', requested: { width, height, pixels: outputPixels }, limit: { pixels: maxPixels }, guidance: 'Request a smaller region or scale.' };
   }
-  const source = await renderSource();
+  const source = await (renderRegionSource ? renderRegionSource(region) : renderSource());
   const canvas = createCanvas(width, height);
-  const context = canvas.getContext('2d');
-  context.imageSmoothingEnabled = false;
-  if (request.background.startsWith('#')) {
-    context.fillStyle = request.background;
-    context.fillRect(0, 0, width, height);
+  try {
+    const context = canvas.getContext('2d');
+    context.imageSmoothingEnabled = false;
+    if (request.background.startsWith('#')) {
+      context.fillStyle = request.background;
+      context.fillRect(0, 0, width, height);
+    }
+    if (renderRegionSource) context.drawImage(source, 0, 0, region.width, region.height, 0, 0, width, height);
+    else context.drawImage(source, region.x, region.y, region.width, region.height, 0, 0, width, height);
+    const png = canvas.toBuffer('image/png');
+    if (png.byteLength > MAX_OBSERVATION_PNG_BYTES) {
+      return { error: 'observation_png_too_large', requested: { width, height, encodedBytes: png.byteLength }, limit: { encodedBytes: MAX_OBSERVATION_PNG_BYTES }, guidance: 'Request a smaller region or scale.' };
+    }
+    return {
+      available: true,
+      mimeType: 'image/png',
+      width,
+      height,
+      scale: request.scale,
+      region,
+      background: request.background,
+      assetId,
+      frameId,
+      layerId,
+      illustrationTimeMs: request.illustrationTimeMs,
+      data: png.toString('base64'),
+    };
+  } finally {
+    source.width = 1; source.height = 1; canvas.width = 1; canvas.height = 1;
   }
-  context.drawImage(source, region.x, region.y, region.width, region.height, 0, 0, width, height);
-  const png = canvas.toBuffer('image/png');
-  if (png.byteLength > MAX_OBSERVATION_PNG_BYTES) {
-    return { error: 'observation_png_too_large', requested: { width, height, encodedBytes: png.byteLength }, limit: { encodedBytes: MAX_OBSERVATION_PNG_BYTES }, guidance: 'Request a smaller region or scale.' };
-  }
-  return {
-    available: true,
-    mimeType: 'image/png',
-    width,
-    height,
-    scale: request.scale,
-    region,
-    background: request.background,
-    assetId,
-    frameId,
-    layerId,
-    illustrationTimeMs: request.illustrationTimeMs,
-    data: png.toString('base64'),
-  };
 };

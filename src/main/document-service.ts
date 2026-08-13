@@ -31,9 +31,10 @@ import type {
   WorkspaceSnapshot,
   TransactionTraceEntry,
 } from '../common/contracts';
+import { staticRasterDimensionsWithinLimits } from '../common/static-raster';
 import { RecoveryJournal } from './journal';
 import { readNativeDocument, writeNativeDocument } from './persistence';
-import { renderDocument } from './render-document';
+import { renderDocument, renderDocumentDimensions } from './render-document';
 import { TransactionTraceStore } from './trace-store';
 import {
   assertDocumentImageAssetMetadata,
@@ -625,7 +626,11 @@ export class DocumentService extends EventEmitter {
       filePath,
       document,
       this.appVersion,
-      async () => (await renderDocument(document)).toBuffer('image/png'),
+      async () => {
+        const dimensions = renderDocumentDimensions(document);
+        if (!staticRasterDimensionsWithinLimits(dimensions.width, dimensions.height)) return undefined;
+        return (await renderDocument(document)).toBuffer('image/png');
+      },
       trace,
       this.listCheckpointRecords(documentId),
       undefined,
