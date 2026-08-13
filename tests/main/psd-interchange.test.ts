@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { ImageData } from '@napi-rs/canvas';
 import { readPsd, writePsdBuffer, type Layer as PsdLayer } from 'ag-psd';
 import { describe, expect, it } from 'vitest';
-import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createId, createIllustrationDocument, createPixelDocument, nowIso, readPixel, writePixels, type IllustrationLayer, type PixelLayer, type ShapeObject, type TextObject } from '@aidraw/core';
+import { DEFAULT_PALETTE, HUMAN_ACTOR, IDENTITY_TRANSFORM, createId, createIllustrationDocument, createPixelDocument, nowIso, readPixel, writePixels, type IllustrationLayer, type PixelLayer, type ShapeObject, type TextObject } from '@aidraw/core';
 import { illustrationTransformMatrix } from '@common/psd-text';
 import { exportDocument } from '@main/export-document';
 import { importDocument } from '@main/import-document';
@@ -137,6 +137,38 @@ describe('PSD interchange', () => {
       const fallback = Object.values(sprite.layers).find((layer) => layer.name === 'Pixels'); expect(fallback).toMatchObject({ type: 'pixel', visible: true, opacity: 1, blendMode: 'normal' });
       expect(Object.values(sprite.cels)).toEqual([expect.objectContaining({ layerId: fallback?.id, chunks: {} })]);
       expect(imported.warnings).toContain('1 PSD layer without decoded raster pixels was omitted from the pixel sprite.');
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it('preserves representable custom colors through one shared pixel PSD palette', async () => {
+    const document = createPixelDocument('sprite', 'Custom PSD colors'); const sprite = document.pixelAssets[document.activeAssetId]; if (sprite?.type !== 'sprite') throw new Error('Expected sprite');
+    sprite.width = 2; sprite.height = 1; document.palette[2].color = '#123456'; document.palette[3].color = '#abcdef';
+    const bottomId = sprite.layerIds[0]; const bottom = sprite.layers[bottomId]; const bottomCel = Object.values(sprite.cels)[0]; bottom.name = 'Custom bottom'; writePixels(bottomCel, [{ x: 0, y: 0, index: 2 }]);
+    const topId = createId('layer'); const topCelId = createId('cel'); sprite.layers[topId] = { ...structuredClone(bottom), id: topId, name: 'Custom top' }; sprite.layerIds.push(topId);
+    sprite.cels[topCelId] = { ...structuredClone(bottomCel), id: topCelId, name: 'Custom top · Frame 1', layerId: topId, chunks: {} }; writePixels(sprite.cels[topCelId], [{ x: 1, y: 0, index: 3 }]);
+    const artifact = await exportDocument(document, 'psd'); const directory = await mkdtemp(join(tmpdir(), 'aidraw-pixel-psd-colors-'));
+    try {
+      const path = join(directory, 'custom-colors.psd'); await writeFile(path, artifact.data); const imported = await importDocument(path, true); const reopened = imported.documents[0];
+      if (reopened.kind !== 'pixel') throw new Error('Expected pixel document'); const importedSprite = reopened.pixelAssets[reopened.activeAssetId]; if (importedSprite?.type !== 'sprite') throw new Error('Expected imported sprite');
+      const colorAt = (layerName: string, x: number) => {
+        const importedLayer = Object.values(importedSprite.layers).find((layer) => layer.name === layerName); if (!importedLayer) throw new Error(`Expected ${layerName}`);
+        const cel = Object.values(importedSprite.cels).find((candidate) => candidate.layerId === importedLayer.id); if (!cel) throw new Error(`Expected ${layerName} cel`);
+        return reopened.palette[readPixel(cel, x, 0)]?.color;
+      };
+      expect(colorAt('Custom bottom', 0)).toBe('#123456'); expect(colorAt('Custom top', 1)).toBe('#abcdef'); expect(imported.warnings).not.toContainEqual(expect.stringMatching(/more than 255 visible RGBA colors/));
+      const reexported = await exportDocument(reopened, 'psd'); const decoded = readPsd(reexported.data, { useImageData: true, logMissingFeatures: false }); const decodedBottom = decoded.children?.find((layer) => layer.name === 'Custom bottom'); const decodedTop = decoded.children?.find((layer) => layer.name === 'Custom top');
+      expect(Array.from(decodedBottom?.imageData?.data.slice(0, 4) ?? [])).toEqual([18, 52, 86, 255]); expect(Array.from(decodedTop?.imageData?.data.slice(4, 8) ?? [])).toEqual([171, 205, 239, 255]);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it('warns and keeps the document-palette quantizer above 255 shared PSD colors', async () => {
+    const rgba = new Uint8ClampedArray(256 * 4); for (let index = 0; index < 256; index += 1) rgba.set([index, index ^ 0x55, index ^ 0xaa, 255], index * 4);
+    const image = new ImageData(rgba, 256, 1); const bytes = writePsdBuffer({ width: 256, height: 1, imageData: image, children: [{ name: '256 colors', imageData: image }] });
+    const directory = await mkdtemp(join(tmpdir(), 'aidraw-pixel-psd-palette-fallback-'));
+    try {
+      const path = join(directory, 'palette-overflow.psd'); await writeFile(path, bytes); const imported = await importDocument(path, true); const document = imported.documents[0];
+      if (document.kind !== 'pixel') throw new Error('Expected pixel document'); expect(document.palette).toEqual(DEFAULT_PALETTE);
+      expect(imported.warnings).toContain('PSD raster layers contain more than 255 visible RGBA colors after the alpha threshold; layers were quantized to the document palette.');
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 

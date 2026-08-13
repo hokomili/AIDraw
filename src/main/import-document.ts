@@ -37,7 +37,7 @@ import { quantizeImageToPalette, quantizeRgbaToPalette } from './quantize-image'
 import { decodeApng } from './apng';
 import { inspectGif, visitDecodedGifFrames, type DecodedGifFrame } from './gif';
 import { calculateSpriteSheetLayout, validateSpriteSheetSliceOptions, type SpriteSheetSliceOptions } from '../common/sprite-sheet';
-import { createExactAnimationPalettePlanner, exactAnimationFrameChanges, type ExactAnimationPalettePlan } from '../common/animation-palette';
+import { createExactAnimationPalettePlanner, exactAnimationFrameChanges, exactSharedIndexedPaletteChanges, planExactSharedIndexedPalette, type ExactAnimationPalettePlan } from '../common/animation-palette';
 import { aidrawPsdTextGeometry, aidrawPsdTextObjectName, psdLayerHasPartialLock, psdLayerIsLockedAll } from '../common/psd-text';
 import { MAX_PSD_EXPANDED_LAYER_PIXELS, MAX_PSD_LAYER_NESTING_DEPTH, MAX_PSD_LAYER_RECORDS } from '../common/psd-limits';
 import { displayImageDimensions, inspectImageHeader, MAX_INLINE_ASSET_BYTES, MAX_INLINE_IMAGE_DIMENSION, MAX_INLINE_IMAGE_PIXELS } from './transaction-policy';
@@ -62,6 +62,7 @@ const INVALID_CANONICAL_PDF_ERROR = "PDF extracted text exceeds AIDraw's canonic
 const PDF_TEXT_TRANSFER_LIMIT_ERROR = `PDF editable text exceeds the ${Math.floor(MAX_IMPORT_UTILITY_SERIALIZED_BYTES / 1024 / 1024)} MiB imported-document transfer limit.`;
 const INVALID_CANONICAL_PSD_ERROR = "PSD import produced content outside AIDraw's canonical document limits.";
 const PSD_TEXT_TRANSFER_LIMIT_ERROR = `PSD editable text exceeds the ${Math.floor(MAX_IMPORT_UTILITY_SERIALIZED_BYTES / 1024 / 1024)} MiB imported-document transfer limit.`;
+const PSD_PALETTE_FALLBACK_WARNING = 'PSD raster layers contain more than 255 visible RGBA colors after the alpha threshold; layers were quantized to the document palette.';
 const MAX_TILED_LAYERS = 4_096;
 const MAX_TILED_DEPTH = 64;
 const MAX_TILED_LAYER_CELLS = 4_194_304;
@@ -419,8 +420,20 @@ function inspectPsdLayers(layers: PsdLayer[] | undefined, depth = 0, budget = { 
   }
 }
 
+function psdRasterImages(layers: PsdLayer[] | undefined, result: Array<NonNullable<PsdLayer['imageData']>> = []): Array<NonNullable<PsdLayer['imageData']>> {
+  for (const layer of layers ?? []) {
+    if (psdLayerIsGroup(layer)) psdRasterImages(layer.children, result);
+    else if (layer.imageData) result.push(layer.imageData);
+  }
+  return result;
+}
+
 function canvasImageData(source: NonNullable<PsdLayer['imageData']>): ImageData {
   return new ImageData(new Uint8ClampedArray(source.data), source.width, source.height);
+}
+
+function* psdRasterRgba(images: Iterable<NonNullable<PsdLayer['imageData']>>): Generator<Uint8ClampedArray> {
+  for (const image of images) yield canvasImageData(image).data;
 }
 
 function aidrawPsdBlendMode(value: PsdLayer['blendMode']): BlendMode {
@@ -482,6 +495,9 @@ function importPsd(bytes: Buffer, name: string, pixelMode: boolean): ImportResul
   inspectPsdLayers(psd.children);
   if (pixelMode) {
     const document = createPixelDocument('project', name);
+    const rasterImages = psdRasterImages(psd.children);
+    const exactPalettePlan = planExactSharedIndexedPalette(psdRasterRgba(rasterImages), document.palette, document.conversionDefaults.alphaThreshold);
+    if (exactPalettePlan) document.palette = structuredClone(exactPalettePlan.palette);
     const sprite = createPixelSprite(name, psd.width, psd.height); const frameId = sprite.frameIds[0];
     const fallbackLayerId = sprite.layerIds[0]; const fallbackLayer = sprite.layers[fallbackLayerId]; const fallbackCel = Object.values(sprite.cels)[0];
     sprite.layerIds = []; sprite.layers = {}; sprite.cels = {};
@@ -505,7 +521,10 @@ function importPsd(bytes: Buffer, name: string, pixelMode: boolean): ImportResul
         sprite.cels[celId] = cel; stats.rasterLayers += 1;
         const left = source.left ?? 0; const top = source.top ?? 0;
         if (!Number.isSafeInteger(left) || !Number.isSafeInteger(top)) throw new Error(INVALID_CANONICAL_PSD_ERROR);
-        const changes = quantizeRgbaToPalette(canvasImageData(imageData).data, imageData.width, imageData.height, document.palette, { alphaThreshold: document.conversionDefaults.alphaThreshold, dithering: document.conversionDefaults.dithering });
+        const rgba = canvasImageData(imageData).data;
+        const changes = exactPalettePlan
+          ? exactSharedIndexedPaletteChanges(rgba, imageData.width, imageData.height, exactPalettePlan)
+          : quantizeRgbaToPalette(rgba, imageData.width, imageData.height, document.palette, { alphaThreshold: document.conversionDefaults.alphaThreshold, dithering: document.conversionDefaults.dithering });
         for (const change of changes) { change.x += left; change.y += top; }
         writePixels(cel, changes);
       }
@@ -516,7 +535,8 @@ function importPsd(bytes: Buffer, name: string, pixelMode: boolean): ImportResul
     }
     document.pixelAssets = { [sprite.id]: sprite }; document.assetIds = [sprite.id]; document.activeAssetId = sprite.id;
     document.dirty = true;
-    const warnings = ['PSD pixel import restored available folders and raster layers as one current-frame sprite hierarchy; raster pixels were independently quantized to the document palette. Unsupported effects use decoded raster fallbacks.'];
+    const warnings = ['PSD pixel import restored available folders and raster layers as one current-frame sprite hierarchy; raster pixels were indexed independently against one shared document palette. Unsupported effects use decoded raster fallbacks.'];
+    if (rasterImages.length && !exactPalettePlan) warnings.push(PSD_PALETTE_FALLBACK_WARNING);
     if (stats.omittedLayers) warnings.push(`${stats.omittedLayers} PSD layer${stats.omittedLayers === 1 ? '' : 's'} without decoded raster pixels ${stats.omittedLayers === 1 ? 'was' : 'were'} omitted from the pixel sprite.`);
     if (stats.partialLocks) warnings.push(`${stats.partialLocks} PSD layer${stats.partialLocks === 1 ? '' : 's'} used a partial transparency, position, composite, or artboard lock and imported unlocked; AIDraw maps only Photoshop lock-all to its binary layer lock.`);
     if (psd.bitsPerChannel !== undefined && psd.bitsPerChannel !== 8) warnings.push(`The ${psd.bitsPerChannel}-bit PSD was decoded into AIDraw's 8-bit indexed workflow.`);

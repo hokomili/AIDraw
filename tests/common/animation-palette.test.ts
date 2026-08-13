@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_PALETTE, createPixelDocument, writePixels } from '@aidraw/core';
-import { createExactAnimationPalettePlanner, exactAnimationFrameChanges, exactNormalCompositeAnimationFrame, exactNormalCompositeGifFrame, exactSingleLayerGifFrame } from '../../src/common/animation-palette';
+import { createExactAnimationPalettePlanner, exactAnimationFrameChanges, exactNormalCompositeAnimationFrame, exactNormalCompositeGifFrame, exactSharedIndexedPaletteChanges, exactSingleLayerGifFrame, planExactSharedIndexedPalette } from '../../src/common/animation-palette';
 
 describe('exact animation frame palettes', () => {
   it('keeps reference indexes and assigns frame-local RGBA colors deterministically', () => {
@@ -38,6 +38,23 @@ describe('exact animation frame palettes', () => {
     const planner = createExactAnimationPalettePlanner(DEFAULT_PALETTE, 0.5);
     expect(planner.addFrame(rgba)).toBe(false);
     expect(planner.finish()).toBeUndefined();
+  });
+
+  it('plans one deterministic exact palette across several structural RGBA sources', () => {
+    const first = Uint8ClampedArray.from([255, 107, 122, 255, 18, 52, 86, 128]);
+    const second = Uint8ClampedArray.from([171, 205, 239, 255, 18, 52, 86, 128]);
+    const plan = planExactSharedIndexedPalette([first, second], DEFAULT_PALETTE, 0.5)!;
+    expect(plan.palette[4].color).toBe('#ff6b7a'); expect(plan.palette[1].color).toBe('#12345680'); expect(plan.palette[2].color).toBe('#abcdef');
+    expect(exactSharedIndexedPaletteChanges(first, 2, 1, plan)).toEqual([{ x: 0, y: 0, index: 4 }, { x: 1, y: 0, index: 1 }]);
+    expect(exactSharedIndexedPaletteChanges(second, 2, 1, plan)).toEqual([{ x: 0, y: 0, index: 2 }, { x: 1, y: 0, index: 1 }]);
+  });
+
+  it('declines a shared union above 255 visible colors without returning a partial plan', () => {
+    const rgba = new Uint8ClampedArray(256 * 4);
+    for (let index = 0; index < 256; index += 1) rgba.set([index, index ^ 0x55, index ^ 0xaa, 255], index * 4);
+    expect(planExactSharedIndexedPalette([rgba.subarray(0, 128 * 4), rgba.subarray(128 * 4)], DEFAULT_PALETTE, 0.5)).toBeUndefined();
+    const exact = planExactSharedIndexedPalette([rgba.subarray(0, 127 * 4), rgba.subarray(128 * 4)], DEFAULT_PALETTE, 0.5);
+    expect(exact).toBeDefined(); expect(exact?.assignments).toHaveLength(255);
   });
 
   it('offers exact GIF indexes only for opaque ordinary single-layer frames', () => {

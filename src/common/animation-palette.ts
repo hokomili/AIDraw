@@ -7,18 +7,24 @@ import {
 } from '@aidraw/core';
 import { pixelSpriteVisibleLayers } from './pixel-sprite-render';
 
-interface ColorAssignment {
+export interface ExactPaletteColorAssignment {
   color: number;
   index: number;
 }
 
 interface PlannedFrame {
-  assignments: ColorAssignment[];
+  assignments: ExactPaletteColorAssignment[];
 }
 
 export interface ExactAnimationFramePalette {
-  assignments: ColorAssignment[];
+  assignments: ExactPaletteColorAssignment[];
   paletteOverride?: PaletteEntry[];
+}
+
+export interface ExactSharedIndexedPalettePlan {
+  alphaThreshold: number;
+  palette: PaletteEntry[];
+  assignments: ExactPaletteColorAssignment[];
 }
 
 export interface ExactAnimationPalettePlan {
@@ -75,7 +81,7 @@ function framePlan(
     colors.set(color, undefined);
     if (colors.size > 255) return undefined;
   }
-  const assignments: ColorAssignment[] = [];
+  const assignments: ExactPaletteColorAssignment[] = [];
   const used = new Uint8Array(256); used[0] = 1;
   for (const color of colors.keys()) {
     const index = referenceIndexes.get(color);
@@ -90,6 +96,82 @@ function framePlan(
     assignments.push({ color, index: available }); used[available] = 1;
   }
   return { assignments };
+}
+
+/**
+ * Plans one exact indexed palette shared by several RGBA sources. Unlike
+ * animation frames, structural layers cannot own palette overrides, so the
+ * complete visible-color union must fit the 255 nontransparent slots.
+ */
+export function planExactSharedIndexedPalette(
+  sources: Iterable<Uint8ClampedArray>,
+  referencePalette: PaletteEntry[],
+  alphaThreshold: number,
+): ExactSharedIndexedPalettePlan | undefined {
+  if (referencePalette.length < 1 || referencePalette.length > 256) throw new Error('Shared palette planning requires 1–256 reference colors.');
+  if (!Number.isFinite(alphaThreshold) || alphaThreshold < 0 || alphaThreshold > 1) throw new Error('Shared palette planning requires an alpha threshold from zero through one.');
+  const colors = new Map<number, undefined>(); let sourceCount = 0;
+  for (const rgba of sources) {
+    sourceCount += 1;
+    if (rgba.byteLength % 4 !== 0) throw new Error('Shared-palette RGBA data is incomplete.');
+    for (let offset = 0; offset < rgba.byteLength; offset += 4) {
+      const color = visibleColor(rgba, offset, alphaThreshold);
+      if (color === undefined || colors.has(color)) continue;
+      colors.set(color, undefined);
+      if (colors.size > 255) return undefined;
+    }
+  }
+  if (!sourceCount) return undefined;
+  const referenceColors = referencePalette.map((entry) => paletteColor(entry.color));
+  const referenceIndexes = new Map<number, number>();
+  referenceColors.forEach((color, index) => { if (index > 0 && !referenceIndexes.has(color)) referenceIndexes.set(color, index); });
+  const assignments: ExactPaletteColorAssignment[] = []; const used = new Uint8Array(256); used[0] = 1;
+  for (const color of colors.keys()) {
+    const index = referenceIndexes.get(color);
+    if (index === undefined || index === 0) continue;
+    assignments.push({ color, index }); used[index] = 1;
+  }
+  let available = 1;
+  for (const color of colors.keys()) {
+    if (referenceIndexes.has(color)) continue;
+    while (available < used.length && used[available]) available += 1;
+    if (available >= used.length) return undefined;
+    assignments.push({ color, index: available }); used[available] = 1;
+  }
+  const highestIndex = assignments.reduce((highest, assignment) => Math.max(highest, assignment.index), 0);
+  const length = Math.max(2, referencePalette.length, highestIndex + 1);
+  const plannedColors = Array.from({ length }, (_, index) => referenceColors[index] ?? packedColor(0, 0, 0, 255));
+  assignments.forEach(({ color, index }) => { plannedColors[index] = color; });
+  const palette = plannedColors.map((color, index) => {
+    const unchanged = referencePalette[index] !== undefined && color === referenceColors[index];
+    return {
+      id: referencePalette[index]?.id ?? `imported-color-${index}`,
+      name: unchanged ? referencePalette[index].name : index === 0 ? 'Transparent' : `Imported color ${index}`,
+      color: colorHex(color),
+    };
+  });
+  return { alphaThreshold, palette, assignments };
+}
+
+export function exactSharedIndexedPaletteChanges(
+  rgba: Uint8ClampedArray,
+  width: number,
+  height: number,
+  plan: ExactSharedIndexedPalettePlan,
+): Array<{ x: number; y: number; index: number }> {
+  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width < 1 || height < 1 || rgba.byteLength !== width * height * 4) {
+    throw new Error('Shared-palette RGBA data does not match its dimensions.');
+  }
+  const indexes = new Map(plan.assignments.map(({ color, index }) => [color, index]));
+  const changes: Array<{ x: number; y: number; index: number }> = [];
+  for (let pixel = 0; pixel < width * height; pixel += 1) {
+    const color = visibleColor(rgba, pixel * 4, plan.alphaThreshold);
+    if (color === undefined) continue;
+    const index = indexes.get(color);
+    if (index === undefined) throw new Error('RGBA colors disagree with the exact shared-palette plan.');
+    changes.push({ x: pixel % width, y: Math.floor(pixel / width), index });
+  }
+  return changes;
 }
 
 export function createExactAnimationPalettePlanner(
