@@ -116,6 +116,7 @@ import { alignIllustrationObjects, distributeIllustrationObjects, type Alignment
 import { actorClientLabel, actorIdentityLabel } from "../common/actor-identity";
 import { AGENT_CLIENTS, type AgentClientId, type AgentClientSetupResult } from "../common/agent-clients";
 import { cropImageToAspect, resetImageCrop } from "../common/image-crop";
+import { ImageCropFields } from "./components/ImageCropFields";
 import { flattenLayerTree, layerTreeDescendants, moveLayerTreeEntry } from "../common/layer-tree";
 import { assignWangTile, deleteWangColor, deleteWangSet, upsertWangColor, upsertWangSet } from "../common/wang-authoring";
 import { TILE_VARIANT_GROUP_PROPERTY, tileVariantCandidates, tileVariantGroup } from "../common/tile-variants";
@@ -3110,6 +3111,11 @@ function ObjectInspector({ document }: { document: IllustrationDocument }) {
       )}
       {object.type === "image" && (
         <>
+          <ImageCropFields
+            key={`${object.id}:${object.revision}:crop-fields`}
+            object={object}
+            onApply={(next) => replace(next, "Set numeric image crop")}
+          />
           <button
             className="crop-button"
             onClick={() =>

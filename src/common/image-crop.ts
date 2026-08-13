@@ -40,6 +40,31 @@ export function cropImageToAspect(source: ImageObject, aspect: number): ImageObj
   return cropImageObject(source, { x: (source.width - width) / 2, y: (source.height - height) / 2, width, height });
 }
 
+export function setImageSourceCrop(source: ImageObject, crop: CropRectangle): ImageObject {
+  const bounds = imageSourceBounds(source);
+  const values = [crop.x, crop.y, crop.width, crop.height];
+  if (!values.every(Number.isFinite) || crop.x < 0 || crop.y < 0 || crop.width <= 0 || crop.height <= 0) {
+    throw new Error('Source crop coordinates must be finite, nonnegative, and have positive size.');
+  }
+  if (crop.x + crop.width > bounds.width || crop.y + crop.height > bounds.height) {
+    throw new Error(`Source crop must fit inside ${bounds.width} × ${bounds.height} pixels.`);
+  }
+  if (crop.x === 0 && crop.y === 0 && crop.width === bounds.width && crop.height === bounds.height) {
+    return resetImageCrop(source);
+  }
+  const base = source.crop ?? bounds;
+  const scaleX = source.width / base.width;
+  const scaleY = source.height / base.height;
+  const object = structuredClone(source);
+  object.transform = shiftLocalOrigin(source, (crop.x - base.x) * scaleX, (crop.y - base.y) * scaleY);
+  object.width = crop.width * scaleX;
+  object.height = crop.height * scaleY;
+  object.sourceWidth = bounds.width;
+  object.sourceHeight = bounds.height;
+  object.crop = structuredClone(crop);
+  return object;
+}
+
 export function resetImageCrop(source: ImageObject): ImageObject {
   if (!source.crop) return structuredClone(source);
   const bounds = imageSourceBounds(source); const scaleX = source.width / source.crop.width; const scaleY = source.height / source.crop.height; const object = structuredClone(source);

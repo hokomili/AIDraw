@@ -702,6 +702,18 @@ Focused pinned-Node-24 typecheck/targeted ESLint and **3 files / 59 tests** pass
 
 This checkpoint changes no known-chunk semantics, CRC/order/default-image/color/frame validation, resource ceiling, canonical state, transaction, export encoder/layout, MIME/source-retention contract, or static-PNG behavior. It proves only one private ancillary type and three malformed/critical mutations, not every ancillary extension, external producers, color management, packaged import presentation, broad APNG/PNG compatibility, Level 3, RC, or stable-v1 readiness. PIX-14, IO-07, QA-03, and QA-08 remain Working.
 
+## Latest source/headless numeric image-crop checkpoint
+
+Source/headless ILL-12 evidence (2026-08-12): canvas drag and aspect presets already produced exact non-stretching source crops, but the inspector exposed only a rounded summary and reset button. Users could not enter a precise fractional source rectangle, and commit-on-blur would make a four-field edit partially transactional. Source coordinates were selected instead of display coordinates because the stored crop and foreign-image geometry are source-relative while the canvas already owns display-space direct manipulation.
+
+The image inspector now holds X, Y, width, and height as one draft and submits only through **Apply source crop**. A pure helper requires finite nonnegative origins, positive size, and complete containment in the original source bounds. It derives display units per source pixel from the current crop, preserves fractional input, shifts the local origin through the same scale/skew/rotation matrix used for rendering, then replaces transform, displayed dimensions, source bounds, and crop together. Applying the exact full-source rectangle uses the established reset path. The form is keyed by object ID/revision, and Apply uses the existing lock-safe revision-checked object replacement; invalid input reports locally without submitting a partial edit.
+
+Exact tests cover a fractional recrop with unequal display scale, object scale, 45-degree skew, and 90-degree rotation; full-source reset; out-of-bounds and non-finite rejection; rendered field values/source-size guidance; and revision-keyed wiring to the existing replacement path. Focused pinned-Node-24 typecheck/targeted ESLint and **3 files / 23 tests** pass. The complete safe gate passes portability for **369 tracked + 78 prospective** paths, TypeScript, full ESLint, and **152 files / 887 tests**.
+
+The formal performance gate passes **1/1** at **918.19 MiB** RSS; 5,000 vectors take **23.66 ms**, editable 4K paint **70.67 ms**, cold/warm materialized paint **186.63 / 155.93 ms**, 65,536 addressed tiles **161.69 ms**, map/sprite sparse regions **1.42 / 0.54 ms**, 100,000-object filtering **31.43 ms**, native save **124.01 ms**, PNG export **43.67 ms**, one-million-sample accounting **1.38 ms**, and flood **172.91 ms**. `/private/tmp/aidraw-numeric-image-crop-performance-gate.json` is temporary self-authored diagnostics, not retained release evidence.
+
+This checkpoint changes no image asset bytes/identity, object schema, source-coordinate storage, canvas drag/aspect crop, transform representation, save/export/interchange contract, or MCP operation surface. Replace/relink and missing-asset UX remain open. Exact packaged layout, focus order, keyboard/number-input behavior, pointer interaction, native visual acceptance, Level 3, RC, and stable-v1 readiness remain unclaimed; ILL-12 stays Working. The adjacent ILL-03 reset-transform audit remains decision-ready: identity-at-origin, position-preserving reset, and geometry baking have different user-visible results, so no reset action was invented.
+
 ## Failure severity and reruns
 
 | Severity | Meaning | Gate effect |
