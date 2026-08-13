@@ -16,6 +16,7 @@ import {
   type PixelTilemap,
 } from '@aidraw/core';
 import { colorWithOpacity } from '../common/color';
+import { isometricCellRect, isometricProjectionExtent } from '../common/isometric-projection';
 import { paintTileCachePlan } from '../common/paint-tile-cache';
 import { renderRasterStroke } from '../common/raster-brush';
 import { renderStyledText } from '../common/text-layout';
@@ -275,8 +276,9 @@ export function renderSprite(document: PixelDocument, sprite: PixelSprite, frame
 
 export function renderTilemap(document: PixelDocument, map: PixelTilemap, onlyLayerId?: string): Canvas {
   const isometric = map.orientation === 'isometric';
-  const width = isometric ? Math.max(1, Math.ceil((map.width + map.height) * map.tileWidth / 2)) : map.width * map.tileWidth;
-  const height = isometric ? Math.max(1, Math.ceil((map.width + map.height) * map.tileHeight / 2)) : map.height * map.tileHeight;
+  const projected = isometric ? isometricProjectionExtent(map.width, map.height, map.tileWidth, map.tileHeight) : undefined;
+  const width = projected ? Math.max(1, Math.ceil(projected.width)) : map.width * map.tileWidth;
+  const height = projected ? Math.max(1, Math.ceil(projected.height)) : map.height * map.tileHeight;
   const canvas = createCanvas(width, height); const context = canvas.getContext('2d'); context.imageSmoothingEnabled = false;
   const sources = new Map<string, Canvas>();
   const visibleLayers: Array<{ layer: PixelTilemap['layers'][string]; opacity: number }> = []; const visit = (id: string, opacity = 1) => { const layer = map.layers[id]; if (!layer?.visible) return; const combined = opacity * layer.opacity; if (layer.type === 'group') for (const childId of layer.childIds ?? []) visit(childId, combined); else visibleLayers.push({ layer, opacity: combined }); }; if (onlyLayerId) visit(onlyLayerId); else for (const id of map.layerIds) visit(id);
@@ -285,15 +287,16 @@ export function renderTilemap(document: PixelDocument, map: PixelTilemap, onlyLa
     context.globalAlpha = entry.opacity;
     const drawCell = (tileX: number, tileY: number, raw: number) => {
       const decoded = decodeTiledGid(raw); if (!decoded.gid) return;
-      const dx = isometric ? (tileX - tileY) * map.tileWidth / 2 + map.height * map.tileWidth / 2 : tileX * map.tileWidth;
-      const dy = isometric ? (tileX + tileY) * map.tileHeight / 2 : tileY * map.tileHeight;
+      const rect = isometric
+        ? isometricCellRect(tileX, tileY, map.height, map.tileWidth, map.tileHeight)
+        : { x: tileX * map.tileWidth, y: tileY * map.tileHeight, width: map.tileWidth, height: map.tileHeight };
       const resolved = resolveTilesetForGid(document, map, decoded.gid); const sourceAsset = resolved ? document.pixelAssets[resolved.tileset.spriteAssetId] : undefined;
       if (resolved && sourceAsset?.type === 'sprite') {
         let source = sources.get(sourceAsset.id); if (!source) { source = renderSprite(document, sourceAsset); sources.set(sourceAsset.id, source); }
         const definition = resolved.tileset.tiles[resolved.localId]; const sx = definition?.sourceX ?? resolved.localId % resolved.tileset.columns * resolved.tileset.tileWidth; const sy = definition?.sourceY ?? Math.floor(resolved.localId / resolved.tileset.columns) * resolved.tileset.tileHeight;
         const transform = tiledTileTransformMatrix(decoded);
-        context.save(); context.translate(dx + map.tileWidth / 2, dy + map.tileHeight / 2); context.transform(transform.a, transform.b, transform.c, transform.d, 0, 0); context.drawImage(source, sx, sy, resolved.tileset.tileWidth, resolved.tileset.tileHeight, -map.tileWidth / 2, -map.tileHeight / 2, map.tileWidth, map.tileHeight); context.restore();
-      } else { context.fillStyle = `hsl(${decoded.gid * 47 % 360} 55% 60%)`; context.fillRect(dx, dy, map.tileWidth, map.tileHeight); }
+        context.save(); context.translate(rect.x + rect.width / 2, rect.y + rect.height / 2); context.transform(transform.a, transform.b, transform.c, transform.d, 0, 0); context.drawImage(source, sx, sy, resolved.tileset.tileWidth, resolved.tileset.tileHeight, -rect.width / 2, -rect.height / 2, rect.width, rect.height); context.restore();
+      } else { context.fillStyle = `hsl(${decoded.gid * 47 % 360} 55% 60%)`; context.fillRect(rect.x, rect.y, rect.width, rect.height); }
     };
     if (isometric) for (const cell of isometricTileRenderCells(Object.values(layer.chunks), (chunk) => decodeTilemapChunk(chunk))) drawCell(cell.x, cell.y, cell.raw);
     else for (const chunk of Object.values(layer.chunks)) {
@@ -325,8 +328,12 @@ export function renderDocumentDimensions(document: AIDrawDocument): { width: num
   const active = document.pixelAssets[document.activeAssetId];
   const asset = active?.type === 'tileset' ? document.pixelAssets[active.spriteAssetId] : active;
   if (asset?.type === 'sprite') return { width: asset.width, height: asset.height };
-  if (asset?.type === 'tilemap') return asset.orientation === 'isometric'
-    ? { width: Math.max(1, Math.ceil((asset.width + asset.height) * asset.tileWidth / 2)), height: Math.max(1, Math.ceil((asset.width + asset.height) * asset.tileHeight / 2)) }
-    : { width: Math.max(1, asset.width * asset.tileWidth), height: Math.max(1, asset.height * asset.tileHeight) };
+  if (asset?.type === 'tilemap') {
+    if (asset.orientation === 'isometric') {
+      const extent = isometricProjectionExtent(asset.width, asset.height, asset.tileWidth, asset.tileHeight);
+      return { width: Math.max(1, Math.ceil(extent.width)), height: Math.max(1, Math.ceil(extent.height)) };
+    }
+    return { width: Math.max(1, asset.width * asset.tileWidth), height: Math.max(1, asset.height * asset.tileHeight) };
+  }
   return { width: 1, height: 1 };
 }

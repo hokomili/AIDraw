@@ -1,3 +1,5 @@
+import { isometricCoordinateFromScreen } from '../../common/isometric-projection';
+
 export interface CanvasBounds {
   left: number;
   top: number;
@@ -54,9 +56,10 @@ export function clientPointToIsometricTile(
   bounds: CanvasBounds,
   logicalSize: CanvasLogicalSize,
   view: PixelViewport,
-  mapWidth: number,
+  mapHeight: number,
+  cellHeight: number,
 ): PixelCoordinate {
-  const point = clientPointToIsometricCoordinate(clientX, clientY, bounds, logicalSize, view, mapWidth);
+  const point = clientPointToIsometricCoordinate(clientX, clientY, bounds, logicalSize, view, mapHeight, cellHeight);
   return { x: Math.floor(point.x), y: Math.floor(point.y) };
 }
 
@@ -66,12 +69,11 @@ export function clientPointToIsometricCoordinate(
   bounds: CanvasBounds,
   logicalSize: CanvasLogicalSize,
   view: PixelViewport,
-  mapWidth: number,
+  mapHeight: number,
+  cellHeight: number,
 ): PixelCoordinate {
   const canvas = clientPointToCanvas(clientX, clientY, bounds, logicalSize);
   const screenX = canvas.x - view.offsetX;
   const screenY = canvas.y - view.offsetY;
-  const difference = 2 * (screenX - mapWidth * view.scale / 2) / view.scale;
-  const sum = 4 * screenY / view.scale;
-  return { x: (difference + sum) / 2, y: (sum - difference) / 2 };
+  return isometricCoordinateFromScreen(screenX, screenY, mapHeight, view.scale, cellHeight);
 }

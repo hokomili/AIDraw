@@ -93,7 +93,7 @@ const GOLDEN_HASHES = {
     : '1ec4a2d01fa69b61bc9f6706abee685b6e207cfa2a9bcffd33a1eea9569bae00',
   indexedSprite: '794c89da39db802f2586364a02711207ee3b3ac0463b9b1e03aa10b389711dc0',
   orthogonalMap: '37aa4899a52c08f383ddd8fbbc7bfc33823180aa8714e5c7d44047bf77b64879',
-  isometricMap: '22a795ad9d9dde42295e7fe66d147f7c2a40c119a3624540ada3f6928d999de1',
+  isometricMap: 'fb2f38d000733aaf520658d38ec7df376e1df128178e6fe20f5316baf5b8d268',
   tileTransforms: '6bc27075a13934fa4d9a8cb4be584a77cfa9b3f696b71933bd143b838244934d',
   illustrationAnimation: 'c43ed7db842896effb9597fd9ed05e4fc77feda49e1be599b29e7104da71cee1',
 };

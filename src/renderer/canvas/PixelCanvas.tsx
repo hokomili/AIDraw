@@ -63,6 +63,7 @@ import { clientPointToIsometricCoordinate, clientPointToIsometricTile, clientPoi
 import { pixelSelectionBounds, transformPixelSelection, type PixelSelectionTransform } from '../../common/pixel-selection';
 import { captureGridSelection, combineGridSelection, placeGridClipboard, rasterizeGridLasso, scaleGridSelection, transformGridSelection, type GridSelectionClipboard } from '../../common/grid-selection';
 import { deleteMapObjectPoint, insertMapObjectPoint, mapObjectAtPoint, mapObjectBounds, moveMapObjectPoint, nearestMapObjectSegment, transformMapObject } from '../../common/map-objects';
+import { isometricCellRect, isometricCoordinateDeltaFromScreen, isometricObjectMatrix, isometricProjectionExtent, type IsometricCellRect } from '../../common/isometric-projection';
 import { TILE_VARIANT_SEED_PROPERTY, chooseTileVariant, nextTileVariantSeed, tileVariantCandidates, tileVariantGroup } from '../../common/tile-variants';
 import { isometricTileRenderCells } from '../../common/tile-render-order';
 import { DEFAULT_ONION_SKIN_SETTINGS, onionSkinLayers, type OnionSkinSettings } from '../../common/onion-skin';
@@ -146,6 +147,15 @@ function drawChecker(context: CanvasRenderingContext2D, width: number, height: n
   context.fillStyle = '#f5f1eb'; context.fillRect(0, 0, width, height);
   context.fillStyle = '#e5e0d9';
   for (let y = 0; y < height; y += cell) for (let x = 0; x < width; x += cell) if ((x / cell + y / cell) % 2 === 0) context.fillRect(x, y, cell, cell);
+}
+
+function traceIsometricCell(context: CanvasRenderingContext2D, rect: IsometricCellRect): void {
+  context.beginPath();
+  context.moveTo(rect.x + rect.width / 2, rect.y);
+  context.lineTo(rect.x + rect.width, rect.y + rect.height / 2);
+  context.lineTo(rect.x + rect.width / 2, rect.y + rect.height);
+  context.lineTo(rect.x, rect.y + rect.height / 2);
+  context.closePath();
 }
 
 function uniqueChanges(points: PixelPoint[], index: number): Array<{ x: number; y: number; index: number }> {
@@ -345,9 +355,15 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   }, [hasTimeline]);
 
   const logical = useMemo(() => {
-    if (sprite) return { width: sprite.width, height: sprite.height, unitX: 1, unitY: 1 };
-    if (tilemap) return { width: tilemap.width, height: tilemap.height, unitX: tilemap.tileWidth, unitY: tilemap.tileHeight };
-    return { width: 1, height: 1, unitX: 1, unitY: 1 };
+    if (sprite) return { width: sprite.width, height: sprite.height, gridWidth: sprite.width, gridHeight: sprite.height, unitX: 1, unitY: 1 };
+    if (tilemap) {
+      if (tilemap.orientation === 'isometric') {
+        const extent = isometricProjectionExtent(tilemap.width, tilemap.height, 1, tilemap.tileHeight / tilemap.tileWidth);
+        return { width: extent.width, height: extent.height, gridWidth: tilemap.width, gridHeight: tilemap.height, unitX: tilemap.tileWidth, unitY: tilemap.tileHeight };
+      }
+      return { width: tilemap.width, height: tilemap.height, gridWidth: tilemap.width, gridHeight: tilemap.height, unitX: tilemap.tileWidth, unitY: tilemap.tileHeight };
+    }
+    return { width: 1, height: 1, gridWidth: 1, gridHeight: 1, unitX: 1, unitY: 1 };
   }, [sprite, tilemap]);
 
   const view: PixelView = useMemo(() => {
@@ -400,6 +416,24 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     context.shadowColor = 'rgba(47, 39, 63, .2)'; context.shadowBlur = 24; context.shadowOffsetY = 8;
     drawChecker(context, logical.width * view.scale, logical.height * view.scale, Math.max(4, view.scale));
     context.shadowColor = 'transparent';
+    const isometricCellHeight = tilemap?.orientation === 'isometric' ? view.scale * tilemap.tileHeight / tilemap.tileWidth : view.scale;
+    const gridCellRect = (point: PixelPoint): IsometricCellRect => tilemap?.orientation === 'isometric'
+      ? isometricCellRect(point.x, point.y, tilemap.height, view.scale, isometricCellHeight)
+      : { x: point.x * view.scale, y: point.y * view.scale, width: view.scale, height: view.scale };
+    const fillGridCell = (point: PixelPoint): void => {
+      const rect = gridCellRect(point);
+      if (tilemap?.orientation === 'isometric') { traceIsometricCell(context, rect); context.fill(); }
+      else context.fillRect(rect.x, rect.y, rect.width, rect.height);
+    };
+    const strokeGridCell = (point: PixelPoint): void => {
+      const rect = gridCellRect(point);
+      if (tilemap?.orientation === 'isometric') { traceIsometricCell(context, rect); context.stroke(); }
+      else context.strokeRect(rect.x + 0.5, rect.y + 0.5, rect.width - 1, rect.height - 1);
+    };
+    const gridCellCenter = (point: PixelPoint): PixelPoint => {
+      const rect = gridCellRect(point);
+      return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+    };
 
     if (sprite && activeFrameId) {
       const paletteColor = (index: number) => {
@@ -461,7 +495,11 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
           context.globalAlpha = entry.opacity;
           for (const source of layer.objects ?? []) {
             const object = mapObjectGesture?.layerId === layer.id && mapObjectGesture.objectId === source.id ? previewMapObject(mapObjectGesture) : source; const selected = selectedEntityId === object.id; const width = object.width ?? 1; const height = object.height ?? 1; const unitScale = view.scale / Math.max(tilemap.tileWidth, tilemap.tileHeight);
-            context.save(); if (tilemap.orientation === 'isometric') context.transform(view.scale / (2 * tilemap.tileWidth), view.scale / (4 * tilemap.tileWidth), -view.scale / (2 * tilemap.tileHeight), view.scale / (4 * tilemap.tileHeight), logical.width * view.scale / 2, 0); else context.scale(view.scale / tilemap.tileWidth, view.scale / tilemap.tileHeight);
+            context.save();
+            if (tilemap.orientation === 'isometric') {
+              const matrix = isometricObjectMatrix(tilemap.height, tilemap.tileWidth, tilemap.tileHeight, view.scale, isometricCellHeight);
+              context.transform(matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f);
+            } else context.scale(view.scale / tilemap.tileWidth, view.scale / tilemap.tileHeight);
             context.fillStyle = selected ? 'rgba(130,104,221,.22)' : 'rgba(49,166,160,.15)'; context.strokeStyle = selected ? '#7454d8' : '#2b958e'; context.lineWidth = (selected ? 2 : 1.25) / Math.max(.001, unitScale); context.setLineDash(object.type === 'polyline' ? [5 / Math.max(.001, unitScale), 3 / Math.max(.001, unitScale)] : []); context.beginPath();
             if (object.type === 'rectangle') context.rect(object.x, object.y, width, height); else if (object.type === 'ellipse') context.ellipse(object.x + width / 2, object.y + height / 2, Math.abs(width / 2), Math.abs(height / 2), 0, 0, Math.PI * 2); else if (object.points?.length) { object.points.forEach((point, index) => { if (index) context.lineTo(object.x + point.x, object.y + point.y); else context.moveTo(object.x + point.x, object.y + point.y); }); if (object.type === 'polygon') context.closePath(); }
             if (object.type !== 'polyline') context.fill(); context.stroke(); context.setLineDash([]);
@@ -480,13 +518,13 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
           let mapSource = mapSourceAsset?.type === 'sprite' ? mapSources.get(mapSourceAsset.id) : undefined; if (!mapSource && mapSourceAsset?.type === 'sprite') { mapSource = spriteBitmap(mapSourceAsset, mapSourceAsset.frameIds[0], document.palette); mapSources.set(mapSourceAsset.id, mapSource); }
           const definition = resolved?.tileset.tiles[resolved.localId]; const sourceX = resolved ? definition?.sourceX ?? resolved.localId % resolved.tileset.columns * resolved.tileset.tileWidth : 0;
           const sourceY = resolved ? definition?.sourceY ?? Math.floor(resolved.localId / resolved.tileset.columns) * resolved.tileset.tileHeight : 0;
-          const drawTile = (screenX: number, screenY: number) => { if (!mapSource || !resolved) return false; const transform = tiledTileTransformMatrix(decoded); context.save(); context.translate(screenX + view.scale / 2, screenY + view.scale / 2); context.transform(transform.a, transform.b, transform.c, transform.d, 0, 0); context.drawImage(mapSource, sourceX, sourceY, resolved.tileset.tileWidth, resolved.tileset.tileHeight, -view.scale / 2, -view.scale / 2, view.scale, view.scale); context.restore(); return true; };
+          const drawTile = (rect: IsometricCellRect) => { if (!mapSource || !resolved) return false; const transform = tiledTileTransformMatrix(decoded); context.save(); context.translate(rect.x + rect.width / 2, rect.y + rect.height / 2); context.transform(transform.a, transform.b, transform.c, transform.d, 0, 0); context.drawImage(mapSource, sourceX, sourceY, resolved.tileset.tileWidth, resolved.tileset.tileHeight, -rect.width / 2, -rect.height / 2, rect.width, rect.height); context.restore(); return true; };
           if (tilemap.orientation === 'orthogonal') {
-            if (!drawTile(x * view.scale, y * view.scale)) { context.fillStyle = `hsl(${decoded.gid * 47 % 360} 52% 62%)`; context.fillRect(x * view.scale, y * view.scale, view.scale, view.scale); }
+            const rect = gridCellRect({ x, y });
+            if (!drawTile(rect)) { context.fillStyle = `hsl(${decoded.gid * 47 % 360} 52% 62%)`; context.fillRect(rect.x, rect.y, rect.width, rect.height); }
           } else {
-            const screenX = (x - y) * view.scale / 2 + logical.width * view.scale / 2;
-            const screenY = (x + y) * view.scale / 4;
-            if (!drawTile(screenX - view.scale / 2, screenY - view.scale / 2)) { context.fillStyle = `hsl(${decoded.gid * 47 % 360} 52% 62%)`; context.beginPath(); context.moveTo(screenX, screenY); context.lineTo(screenX + view.scale / 2, screenY + view.scale / 4); context.lineTo(screenX, screenY + view.scale / 2); context.lineTo(screenX - view.scale / 2, screenY + view.scale / 4); context.closePath(); context.fill(); }
+            const rect = gridCellRect({ x, y });
+            if (!drawTile(rect)) { context.fillStyle = `hsl(${decoded.gid * 47 % 360} 52% 62%)`; traceIsometricCell(context, rect); context.fill(); }
           }
         };
         if (tilemap.orientation === 'isometric') for (const cell of isometricTileRenderCells(Object.values(layer.chunks), safeDecodeTilemapChunk)) drawCell(cell.x, cell.y, cell.raw);
@@ -507,13 +545,13 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
         }
       } else if (tool === 'stamp' && tileStampPreview.length) for (const point of tileStampPreview) {
         const gid = decodeTiledGid(point.gid).gid; context.fillStyle = gid === 0 ? '#ffffff80' : 'hsl(' + (gid * 47 % 360) + ' 52% 62%)';
-        context.fillRect(point.x * view.scale, point.y * view.scale, view.scale, view.scale);
+        fillGridCell(point);
       } else if (tool === 'stamp' && stampPreview.length) for (const point of stampPreview) {
         context.fillStyle = point.index === 0 ? '#ffffff80' : document.palette[point.index]?.color ?? '#ff00ff';
         context.fillRect(point.x * view.scale, point.y * view.scale, view.scale, view.scale);
       } else if (tool === 'dither') {
         for (const point of preview) {
-          if (point.x < 0 || point.y < 0 || point.x >= logical.width || point.y >= logical.height) continue;
+          if (point.x < 0 || point.y < 0 || point.x >= logical.gridWidth || point.y >= logical.gridHeight) continue;
           const index = orderedDitherIndex(point.x, point.y, ditherMixIndex, pixelIndex, ditherCoverage, ditherMatrixSize);
           context.fillStyle = index === 0 ? '#ffffff80' : (activePaletteOverride ?? document.palette)[index]?.color ?? '#ff00ff';
           context.fillRect(point.x * view.scale, point.y * view.scale, view.scale, view.scale);
@@ -521,21 +559,22 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       } else {
         const drawIndex = tool === 'eraser' ? 0 : pixelIndex;
         context.fillStyle = drawIndex === 0 ? '#ffffff80' : document.palette[drawIndex]?.color ?? '#ff00ff';
-        for (const point of preview) if (point.x >= 0 && point.y >= 0 && point.x < logical.width && point.y < logical.height) context.fillRect(point.x * view.scale, point.y * view.scale, view.scale, view.scale);
+        for (const point of preview) if (point.x >= 0 && point.y >= 0 && point.x < logical.gridWidth && point.y < logical.gridHeight) fillGridCell(point);
       }
     }
 
     if (tool === 'lasso' && lassoPath.length > 1) {
       context.globalAlpha = 1; context.strokeStyle = '#6e58c7'; context.lineWidth = Math.max(1, view.scale / 7); context.setLineDash([Math.max(2, view.scale / 2), Math.max(2, view.scale / 3)]); context.beginPath();
-      context.moveTo((lassoPath[0].x + 0.5) * view.scale, (lassoPath[0].y + 0.5) * view.scale); for (const point of lassoPath.slice(1)) context.lineTo((point.x + 0.5) * view.scale, (point.y + 0.5) * view.scale); context.closePath(); context.stroke(); context.setLineDash([]);
+      const first = gridCellCenter(lassoPath[0]); context.moveTo(first.x, first.y); for (const point of lassoPath.slice(1)) { const center = gridCellCenter(point); context.lineTo(center.x, center.y); } context.closePath(); context.stroke(); context.setLineDash([]);
     }
 
     if (selection.length) {
       context.globalAlpha = 1; context.strokeStyle = '#ffffff'; context.lineWidth = Math.max(1, view.scale / 8); context.setLineDash([Math.max(2, view.scale / 3), Math.max(2, view.scale / 3)]);
       context.lineDashOffset = -(Date.now() / 120) % 8;
       const offset = selectionOffset ?? { x: 0, y: 0 };
-      for (const point of selection) context.strokeRect((point.x + offset.x) * view.scale + 0.5, (point.y + offset.y) * view.scale + 0.5, view.scale - 1, view.scale - 1);
-      context.strokeStyle = '#4f3f68'; context.lineDashOffset += Math.max(2, view.scale / 3); for (const point of selection) context.strokeRect((point.x + offset.x) * view.scale + 0.5, (point.y + offset.y) * view.scale + 0.5, view.scale - 1, view.scale - 1); context.setLineDash([]);
+      const selectedPoints = selection.map((point) => ({ x: point.x + offset.x, y: point.y + offset.y }));
+      for (const point of selectedPoints) strokeGridCell(point);
+      context.strokeStyle = '#4f3f68'; context.lineDashOffset += Math.max(2, view.scale / 3); for (const point of selectedPoints) strokeGridCell(point); context.setLineDash([]);
     }
 
     for (const playback of playbacks) {
@@ -563,13 +602,13 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
           for (const change of changes) {
             if (![change.x, change.y, change.gid].every(Number.isFinite)) continue;
             context.fillStyle = change.gid === 0 ? '#ffffff80' : `hsl(${(change.gid * 47) % 360} 52% 62%)`;
-            context.fillRect(change.x * view.scale, change.y * view.scale, view.scale, view.scale);
+            fillGridCell(change);
           }
         } else if (operation.kind === 'pixel.tilemap.region' && tilemap && operation.mapId === tilemap.id) {
           for (const run of operation.runs) {
             if (![run.x, run.y, run.length, run.gid].every(Number.isFinite)) continue;
             context.fillStyle = run.gid === 0 ? '#ffffff80' : `hsl(${(run.gid * 47) % 360} 52% 62%)`;
-            context.fillRect(run.x * view.scale, run.y * view.scale, run.length * view.scale, view.scale);
+            for (let offset = 0; offset < run.length; offset += 1) fillGridCell({ x: run.x + offset, y: run.y });
           }
         }
       }
@@ -588,20 +627,20 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const toPixel = (event: ReactPointerEvent<HTMLCanvasElement>): PixelPoint => {
     const bounds = event.currentTarget.getBoundingClientRect();
     return tilemap?.orientation === 'isometric'
-      ? clientPointToIsometricTile(event.clientX, event.clientY, bounds, size, view, tilemap.width)
+      ? clientPointToIsometricTile(event.clientX, event.clientY, bounds, size, view, tilemap.height, view.scale * tilemap.tileHeight / tilemap.tileWidth)
       : clientPointToPixel(event.clientX, event.clientY, bounds, size, view);
   };
 
   const toMapObjectPoint = (event: ReactPointerEvent<HTMLCanvasElement>): PixelPoint => {
     const bounds = event.currentTarget.getBoundingClientRect(); if (!tilemap) return { x: 0, y: 0 };
-    if (tilemap.orientation === 'isometric') { const point = clientPointToIsometricCoordinate(event.clientX, event.clientY, bounds, size, view, tilemap.width); return { x: point.x * tilemap.tileWidth, y: point.y * tilemap.tileHeight }; }
+    if (tilemap.orientation === 'isometric') { const point = clientPointToIsometricCoordinate(event.clientX, event.clientY, bounds, size, view, tilemap.height, view.scale * tilemap.tileHeight / tilemap.tileWidth); return { x: point.x * tilemap.tileWidth, y: point.y * tilemap.tileHeight }; }
     const gridX = (event.clientX - bounds.left - view.offsetX) / view.scale; const gridY = (event.clientY - bounds.top - view.offsetY) / view.scale;
     return { x: gridX * tilemap.tileWidth, y: gridY * tilemap.tileHeight };
   };
 
   const toLayerMapObjectPoint = (event: ReactPointerEvent<HTMLCanvasElement>, layer: NonNullable<typeof tilemap>['layers'][string]): PixelPoint => {
     const point = toMapObjectPoint(event); if (!tilemap) return point;
-    if (tilemap.orientation === 'isometric') { const screenX = pan.x * (layer.parallaxX - 1); const screenY = pan.y * (layer.parallaxY - 1); return { x: point.x - (screenX / view.scale + 2 * screenY / view.scale) * tilemap.tileWidth, y: point.y - (2 * screenY / view.scale - screenX / view.scale) * tilemap.tileHeight }; }
+    if (tilemap.orientation === 'isometric') { const delta = isometricCoordinateDeltaFromScreen(pan.x * (layer.parallaxX - 1), pan.y * (layer.parallaxY - 1), view.scale, view.scale * tilemap.tileHeight / tilemap.tileWidth); return { x: point.x - delta.x * tilemap.tileWidth, y: point.y - delta.y * tilemap.tileHeight }; }
     return { x: point.x - pan.x * (layer.parallaxX - 1) / view.scale * tilemap.tileWidth, y: point.y - pan.y * (layer.parallaxY - 1) / view.scale * tilemap.tileHeight };
   };
 
@@ -900,7 +939,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     }
     const pendingLock = lockPromise;
     const pendingRuns = bulkPreview;
-    const points = preview.filter((point) => tilemap?.infinite || (point.x >= 0 && point.y >= 0 && point.x < logical.width && point.y < logical.height));
+    const points = preview.filter((point) => tilemap?.infinite || (point.x >= 0 && point.y >= 0 && point.x < logical.gridWidth && point.y < logical.gridHeight));
     const placedStamp = stampPreview; const placedTiles = tileStampPreview; setStart(undefined); setPreview([]); setBulkPreview([]); setLassoPath([]); setStampPreview([]); setTileStampPreview([]);
     if (selectionOffset && tool === 'select') { const offset = selectionOffset; setSelectionOffset(undefined); if (offset.x || offset.y) await transformSelection('move', offset); return; }
     if (tool === 'select' || tool === 'lasso') { setSelection((current) => combineGridSelection(current, points, selectionCombination.current)); return; }

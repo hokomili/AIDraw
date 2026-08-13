@@ -36,16 +36,16 @@ describe('pixel canvas pointer coordinates', () => {
     )).toEqual(target);
   });
 
-  it('inverts the rendered isometric diamond projection after CSS scaling', () => {
-    const logicalSize = { width: 900, height: 640 }; const bounds = { left: 31, top: 19, width: 1200, height: 800 }; const view = { scale: 32, offsetX: 70, offsetY: 45 }; const mapWidth = 20; const target = { x: 7, y: 11 };
-    const canvasX = view.offsetX + (target.x - target.y) * view.scale / 2 + mapWidth * view.scale / 2;
-    const canvasY = view.offsetY + (target.x + target.y) * view.scale / 4 + view.scale / 4;
-    expect(clientPointToIsometricTile(bounds.left + canvasX * bounds.width / logicalSize.width, bounds.top + canvasY * bounds.height / logicalSize.height, bounds, logicalSize, view, mapWidth)).toEqual(target);
+  it('inverts an asymmetric isometric diamond projection after CSS scaling', () => {
+    const logicalSize = { width: 900, height: 640 }; const bounds = { left: 31, top: 19, width: 1200, height: 800 }; const view = { scale: 32, offsetX: 70, offsetY: 45 }; const mapHeight = 13; const cellHeight = 12; const target = { x: 7, y: 11 };
+    const canvasX = view.offsetX + (target.x - target.y + mapHeight) * view.scale / 2;
+    const canvasY = view.offsetY + (target.x + target.y + 1) * cellHeight / 2;
+    expect(clientPointToIsometricTile(bounds.left + canvasX * bounds.width / logicalSize.width, bounds.top + canvasY * bounds.height / logicalSize.height, bounds, logicalSize, view, mapHeight, cellHeight)).toEqual(target);
   });
 
-  it('preserves fractional isometric coordinates for object-layer gestures', () => {
-    const logicalSize = { width: 900, height: 640 }; const bounds = { left: 31, top: 19, width: 1200, height: 800 }; const view = { scale: 32, offsetX: 70, offsetY: 45 }; const mapWidth = 20; const target = { x: 7.25, y: 11.75 };
-    const canvasX = view.offsetX + (target.x - target.y) * view.scale / 2 + mapWidth * view.scale / 2; const canvasY = view.offsetY + (target.x + target.y) * view.scale / 4;
-    expect(clientPointToIsometricCoordinate(bounds.left + canvasX * bounds.width / logicalSize.width, bounds.top + canvasY * bounds.height / logicalSize.height, bounds, logicalSize, view, mapWidth)).toEqual(target);
+  it('preserves fractional isometric coordinates and a non-2:1 cell ratio for object gestures', () => {
+    const logicalSize = { width: 900, height: 640 }; const bounds = { left: 31, top: 19, width: 1200, height: 800 }; const view = { scale: 32, offsetX: 70, offsetY: 45 }; const mapHeight = 13; const cellHeight = 12; const target = { x: 7.25, y: 11.75 };
+    const canvasX = view.offsetX + (target.x - target.y + mapHeight) * view.scale / 2; const canvasY = view.offsetY + (target.x + target.y) * cellHeight / 2;
+    expect(clientPointToIsometricCoordinate(bounds.left + canvasX * bounds.width / logicalSize.width, bounds.top + canvasY * bounds.height / logicalSize.height, bounds, logicalSize, view, mapHeight, cellHeight)).toEqual(target);
   });
 });

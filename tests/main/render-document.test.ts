@@ -4,6 +4,22 @@ import { materializePaintTiles } from '@main/persistence';
 import { renderIllustration, renderSprite, renderTilemap } from '@main/render-document';
 
 describe('native document rendering', () => {
+  it('renders a one-cell non-square isometric map without clipping either tile edge', () => {
+    const document = createPixelDocument('project', 'Isometric edge bounds'); document.assetIds = []; document.pixelAssets = {};
+    const sprite = createPixelSprite('Non-square tile', 4, 2); const cel = Object.values(sprite.cels)[0];
+    writePixels(cel, [2, 4, 8, 11, 12, 9, 6, 3].map((index, offset) => ({ x: offset % 4, y: Math.floor(offset / 4), index })));
+    const tileset = createPixelTileset('Non-square tile', sprite.id, 4, 2, 1, 1); tileset.firstGid = 1;
+    const map = createPixelTilemap('One diamond'); map.orientation = 'isometric'; map.width = 1; map.height = 1; map.tileWidth = 4; map.tileHeight = 2; map.tilesetIds = [tileset.id];
+    const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile' || !layer.chunks) throw new Error('Expected tile layer');
+    writeTiles(layer.chunks, [{ x: 0, y: 0, gid: 1 }]);
+    document.pixelAssets = { [sprite.id]: sprite, [tileset.id]: tileset, [map.id]: map }; document.assetIds = [sprite.id, tileset.id, map.id]; document.activeAssetId = map.id;
+
+    const source = renderSprite(document, sprite).getContext('2d').getImageData(0, 0, 4, 2).data;
+    const rendered = renderTilemap(document, map);
+    expect({ width: rendered.width, height: rendered.height }).toEqual({ width: 4, height: 2 });
+    expect(Buffer.from(rendered.getContext('2d').getImageData(0, 0, 4, 2).data)).toEqual(Buffer.from(source));
+  });
+
   it('renders overlapping isometric cells right-down across reverse-inserted sparse chunks', () => {
     const document = createPixelDocument('project', 'Isometric sparse depth order'); document.assetIds = []; document.pixelAssets = {};
     const sprite = createPixelSprite('Depth tiles', 8, 4); const cel = Object.values(sprite.cels)[0];
@@ -19,9 +35,9 @@ describe('native document rendering', () => {
     const backColor = [...source.getImageData(0, 0, 1, 1).data];
     const frontColor = [...source.getImageData(4, 0, 1, 1).data];
     const rendered = renderTilemap(document, map).getContext('2d');
-    expect([...rendered.getImageData(69, 62, 1, 1).data]).toEqual(backColor);
-    expect([...rendered.getImageData(64, 67, 1, 1).data]).toEqual(frontColor);
-    expect([...rendered.getImageData(66, 64, 1, 1).data]).toEqual(frontColor);
+    expect([...rendered.getImageData(67, 62, 1, 1).data]).toEqual(backColor);
+    expect([...rendered.getImageData(62, 67, 1, 1).data]).toEqual(frontColor);
+    expect([...rendered.getImageData(64, 64, 1, 1).data]).toEqual(frontColor);
   });
 
   it('renders all eight Tiled tile transforms in diagonal-first order', () => {
