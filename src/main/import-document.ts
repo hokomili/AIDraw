@@ -4,7 +4,6 @@ import { gunzipSync, inflateSync } from 'node:zlib';
 import { basename, dirname, extname, isAbsolute, relative, resolve } from 'node:path';
 import { createCanvas, DOMMatrix, ImageData, Path2D, loadImage, type Canvas } from '@napi-rs/canvas';
 import { initializeCanvas as initializePsdCanvas, readPsd, type Layer as PsdLayer } from 'ag-psd';
-import { decompressFrames, parseGIF, type ParsedFrame } from 'gifuct-js';
 import { XMLParser } from 'fast-xml-parser';
 import {
   HUMAN_ACTOR,
@@ -34,7 +33,7 @@ import {
 } from '@aidraw/core';
 import { quantizeImageToPalette, quantizeRgbaToPalette } from './quantize-image';
 import { decodeApng } from './apng';
-import { inspectGif } from './gif';
+import { decodeGifFrames, inspectGif, type DecodedGifFrame } from './gif';
 import { calculateSpriteSheetLayout, validateSpriteSheetSliceOptions, type SpriteSheetSliceOptions } from '../common/sprite-sheet';
 import { createExactAnimationPalettePlanner, exactAnimationFrameChanges, type ExactAnimationPalettePlan } from '../common/animation-palette';
 import { aidrawPsdTextGeometry, aidrawPsdTextObjectName, psdLayerHasPartialLock, psdLayerIsLockedAll } from '../common/psd-text';
@@ -224,7 +223,7 @@ function setImportedFramePalette(sprite: PixelSprite, frameId: string, plan: Exa
 }
 
 function visitCompositedGifFrames(
-  frames: ParsedFrame[],
+  frames: DecodedGifFrame[],
   width: number,
   height: number,
   visit: (rgba: Uint8ClampedArray, index: number) => boolean | void,
@@ -276,7 +275,7 @@ export function importApngBytes(bytes: Buffer, name: string): ImportResult | und
 
 export function importGifBytes(bytes: Buffer, name: string): ImportResult {
   assertImportedInlineAssetBytes(bytes, 'GIF source');
-  const inspected = inspectGif(bytes); const parsed = parseGIF(Uint8Array.from(bytes).buffer); const frames = decompressFrames(parsed, true);
+  const inspected = inspectGif(bytes); const frames = decodeGifFrames(bytes, inspected);
   if (!frames.length) throw new Error('GIF contains no decodable frames.');
   if (frames.length !== inspected.frameCount) throw new Error('GIF decoder frame count disagrees with the validated container.');
   const width = inspected.width; const height = inspected.height; const document = createPixelDocument('sprite', name); const sprite = createPixelSprite(name, width, height);
@@ -775,7 +774,7 @@ export async function importDocument(filePath: string, pixelMode = false): Promi
   const structured = ['.svg', '.json', '.tmj', '.tmx', '.tsj', '.tsx'].includes(extension); const bytes = await readBoundedImportFile(filePath, structured ? MAX_STRUCTURED_IMPORT_BYTES : MAX_BINARY_IMPORT_BYTES);
   if (['.png', '.apng', '.jpg', '.jpeg', '.webp', '.gif'].includes(extension)) assertImportedInlineAssetBytes(bytes, 'Image source');
   if ((extension === '.png' || extension === '.apng') && pixelMode) { const animated = importApngBytes(bytes, name); if (animated) return animated; }
-  if (extension === '.gif') { inspectGif(bytes); if (pixelMode) return importGifBytes(bytes, name); }
+  if (extension === '.gif') { if (pixelMode) return importGifBytes(bytes, name); inspectGif(bytes); }
   if (['.png', '.apng', '.jpg', '.jpeg', '.webp', '.gif'].includes(extension)) return importRaster(bytes, name, extension === '.png' || extension === '.apng' ? 'image/png' : extension === '.webp' ? 'image/webp' : extension === '.gif' ? 'image/gif' : 'image/jpeg', pixelMode);
   if (extension === '.svg') { if (!pixelMode) return importSvg(bytes, name); importSvg(bytes, name); const rendered = await loadImage(bytes); assertImageDimensions(rendered.width, rendered.height, 'SVG'); const canvas = createCanvas(rendered.width, rendered.height); canvas.getContext('2d').drawImage(rendered, 0, 0); return importRaster(canvas.toBuffer('image/png'), name, 'image/png', true); }
   if (extension === '.psd') return importPsd(bytes, name, pixelMode);
