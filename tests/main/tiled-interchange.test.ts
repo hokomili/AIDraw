@@ -2,7 +2,7 @@ import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { createPixelDocument, createPixelSprite, createPixelTilemap, createPixelTileset, encodeTiledGid, readPixel, readTileAt, writePixels, writeTiles, type PixelSprite } from '@aidraw/core';
+import { createPixelDocument, createPixelSprite, createPixelTilemap, createPixelTileset, encodeTiledGid, readPixel, readTileAt, writePixels, writeTiles, type CollisionShape, type PixelSprite } from '@aidraw/core';
 import UPNG from 'upng-js';
 
 import { importDocument } from '../../src/main/import-document';
@@ -81,6 +81,30 @@ describe('representative Tiled JSON interchange', () => {
     const reopenedMap = reopened.pixelAssets[reopened.activeAssetId]; if (reopenedMap.type !== 'tilemap') throw new Error('Expected tilemap');
     expect(reopenedMap.tilesetIds.map((id) => reopened.pixelAssets[id].name)).toEqual(['Terrain/Day', 'terrain:day']);
     expect(Buffer.from(renderTilemap(reopened, reopenedMap).getContext('2d').getImageData(0, 0, 2, 1).data)).toEqual(sourcePixels);
+  });
+
+  it('emits one stable numeric object namespace across inline tileset and map object groups', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'aidraw-tiled-object-ids-')); temporaryDirectories.push(directory);
+    const shape = (id: string, name: string, x: number): CollisionShape => ({ id, type: 'rectangle', x, y: 0, width: 1, height: 1, properties: { name } });
+    const document = createPixelDocument('project', 'Tiled object IDs'); document.assetIds = []; document.pixelAssets = {};
+    const sprite = createPixelSprite('Object pixels', 1, 1);
+    const tileset = createPixelTileset('Object tileset', sprite.id, 1, 1, 1, 1); tileset.firstGid = 1;
+    tileset.tiles[0] = { id: 0, sourceX: 0, sourceY: 0, probability: 1, animation: [], properties: {}, collisions: [shape('uuid-12-34', 'Opaque collision', 0), shape('7', 'Exact collision', 1)] };
+    const map = createPixelTilemap('Object map'); map.tilesetIds = [tileset.id];
+    const objectLayer = map.layers[map.layerIds[0]]; objectLayer.type = 'object'; delete objectLayer.chunks; objectLayer.objects = [shape('1234', 'Exact map object', 2), shape('also-12-34', 'Second opaque object', 3)];
+    document.pixelAssets = { [sprite.id]: sprite, [tileset.id]: tileset, [map.id]: map }; document.assetIds = [sprite.id, tileset.id, map.id]; document.activeAssetId = map.id;
+
+    const objectIds = (bytes: Buffer) => {
+      const output = JSON.parse(bytes.toString()) as { tilesets: Array<{ tiles: Array<{ objectgroup?: { objects: Array<{ id: number }> } }> }>; layers: Array<{ objects?: Array<{ id: number }> }> };
+      return [...(output.tilesets[0].tiles[0].objectgroup?.objects ?? []), ...(output.layers[0].objects ?? [])].map((object) => object.id);
+    };
+    const first = await exportDocument(document, 'tiled-json'); expect(objectIds(first.data)).toEqual([1, 7, 1234, 2]);
+    const xml = await exportDocument(document, 'tiled-xml'); expect([...xml.data.toString().matchAll(/<object id="(\d+)"/g)].map((match) => Number(match[1]))).toEqual([1, 7, 1234, 2]);
+    const mapPath = join(directory, 'object-ids.tmj');
+    await Promise.all([writeFile(mapPath, first.data, { flag: 'wx' }), ...first.companions!.map((companion) => writeFile(join(directory, companion.name), companion.data, { flag: 'wx' }))]);
+    const imported = await runImportUtilityRequest({ id: 'object-id-roundtrip', kind: 'import-document', filePath: mapPath, pixelMode: true }); expect(imported.warnings).toEqual([]);
+    const second = await exportDocument(imported.documents[0], 'tiled-json'); expect(objectIds(second.data)).toEqual([1, 7, 1234, 2]);
+    expect(new Set(objectIds(second.data)).size).toBe(4);
   });
 
   it('imports an external TSX through TMX with typed properties and geometry', async () => {
