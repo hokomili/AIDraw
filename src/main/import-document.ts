@@ -428,12 +428,12 @@ function importPsd(bytes: Buffer, name: string, pixelMode: boolean): ImportResul
       const timestamp = nowIso(); const id = createId('layer'); const layerName = source.name ?? `${source.children?.length ? 'Group' : 'Layer'} ${index + 1}`;
       if (source.effects) stats.effects += 1; if (source.vectorMask || source.vectorFill || source.vectorStroke) stats.vector += 1; if (source.adjustment) stats.adjustments += 1;
       if (source.children?.length) {
-        const group: IllustrationLayer = { id, revision: 0, name: layerName, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, parentId, visible: !source.hidden, locked: false, opacity: (source.opacity ?? 255) / 255, blendMode: aidrawPsdBlendMode(source.blendMode), type: 'group', childIds: [] };
+        const group: IllustrationLayer = { id, revision: 0, name: layerName, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, parentId, visible: !source.hidden, locked: false, opacity: source.opacity ?? 1, blendMode: aidrawPsdBlendMode(source.blendMode), type: 'group', childIds: [] };
         document.layers[id] = group; stats.groups += 1;
         if (parentId) { const parent = document.layers[parentId]; if (parent?.type === 'group') parent.childIds.push(id); } else document.layerIds.push(id);
         addLayers(source.children, id); continue;
       }
-      const layer: IllustrationLayer = { id, revision: 0, name: layerName, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, parentId, visible: !source.hidden, locked: false, opacity: (source.opacity ?? 255) / 255, blendMode: aidrawPsdBlendMode(source.blendMode), type: 'vector', objectIds: [] };
+      const layer: IllustrationLayer = { id, revision: 0, name: layerName, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, parentId, visible: !source.hidden, locked: false, opacity: source.opacity ?? 1, blendMode: aidrawPsdBlendMode(source.blendMode), type: 'vector', objectIds: [] };
       document.layers[id] = layer;
       if (parentId) { const parent = document.layers[parentId]; if (parent?.type === 'group') parent.childIds.push(id); } else document.layerIds.push(id);
       if (source.imageData) addPsdRasterObject(document, layer, source.imageData, `${layerName} · raster fallback`, true, source.left ?? 0, source.top ?? 0);

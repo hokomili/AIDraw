@@ -856,6 +856,20 @@ The complete formal **1/1 PASS** report records **878.36 MiB** RSS; 5,000-vector
 
 This checkpoint changes no canonical schema, PSD raster/composite fallback, unmarked/external text interpretation, import budget, general layer hierarchy, or PDF/SVG/Tiled contract. It does not prove Photoshop redraw/font availability/shaping, arbitrary external text boxes/transforms/styles, exact canonical transform fields, non-integer tracking, effect/vector/adjustment fidelity, byte/container identity, packaged file-dialog/report presentation, broad PSD compatibility, Level 3, RC, or stable-v1 readiness. IO-04 remains Partial and QA-03 remains Working.
 
+## Latest source/headless PSD opacity-contract checkpoint
+
+Source/headless IO-04/QA-03 evidence (2026-08-12): the pinned `ag-psd` contract reads a PSD layer's byte opacity as a normalized `0…1` value and writes by clamping that normalized value before multiplying by 255. AIDraw instead multiplied every export value by 255 before calling the writer and divided every decoded illustration value by 255 again. Every nonzero fractional export therefore became fully opaque, while a decoded 50% layer became about 0.2% in canonical state.
+
+All three PSD writer sites now pass canonical normalized opacity directly: illustration group/vector layers, their AIDraw hidden text companions, and pixel-sprite layers. Illustration PSD import likewise accepts the decoder's normalized value directly, retaining the existing default of one only when opacity is absent. The format byte remains the precision boundary; blend-mode mapping, layer hierarchy, visibility, and raster/composite fallbacks are unchanged.
+
+**Material user-facing decision:** one normalized boundary replaces the broken arithmetic; no value-dependent 0–1/0–255 heuristic is accepted. The pinned decoder cannot produce ambiguous units, and guessing would turn malformed or future values into silent visual changes. Older AIDraw PSD files whose former export already clamped any nonzero fraction to one contain no recoverable intended value, so they import at the full opacity actually stored. Pixel-mode PSD import still creates independently quantized sprites and does not gain layer-opacity hierarchy from this export/import correction.
+
+The production AIDraw export→`ag-psd` decode→file import regression proves nested illustration group/vector/hidden-companion opacity **0.8 / 0.6 / 0.4** plus the existing multiply/screen/overlay mappings, text geometry/styles, visibility, and fallback hierarchy. A second production pixel export proves canonical **0.25** decodes at the exact PSD byte value **64/255**. Focused pinned-Node-24 typecheck/targeted ESLint and **4 files / 74 tests** pass. The complete safe gate passes portability for **369 tracked + 101 prospective** paths, TypeScript, full ESLint, and **165 files / 939 tests**.
+
+The complete formal **1/1 PASS** report records **874.39 MiB** RSS; 5,000-vector render **21.76 ms**; maximum-artboard illustration region **0.29 ms**; exact lasso **189.49 ms**; path-authoritative click **19.42 ms**; editable 4K paint **58.03 ms**; cold/warm materialized paint **181.05 / 150.47 ms**; 65,536 addressed maximum-sheet tiles **144.17 ms**; map/sprite sparse regions **1.31 / 0.33 ms**; 100,000-object filtering **32.04 ms**; overlay filtering **2.09 ms**; native save **120.25 ms**; PNG export **40.75 ms**; one-million-sample accounting **1.32 ms**; and flood **170.5 ms**. `/private/tmp/aidraw-psd-opacity-performance-gate.json` is temporary self-authored diagnostics, not retained Photoshop/package evidence.
+
+This checkpoint changes no canonical schema or opacity range, PDF/SVG/Tiled behavior, PSD blend mapping, external field support, pixel-mode import structure, or raster fallback. It does not prove external-producer appearance, Photoshop rendering, effects/adjustments/vector descriptors, uncommon color modes, packaged import/export/report presentation, byte identity, broad/lossless PSD compatibility, Level 3, RC, or stable-v1 readiness. IO-04 remains Partial and QA-03 remains Working.
+
 ## Failure severity and reruns
 
 | Severity | Meaning | Gate effect |
