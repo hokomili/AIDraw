@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { access, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { DocumentService } from '@main/document-service';
 import { RecoveryJournal } from '@main/journal';
-import { McpHost, type GenerationApprovalPreviewRenderer } from '@main/mcp-host';
+import { McpHost, parseFolderTrustSettings, parsePreferredPortSettings, type GenerationApprovalPreviewRenderer } from '@main/mcp-host';
 import { TransactionTraceStore } from '@main/trace-store';
 import { createCanvas, loadImage } from '@napi-rs/canvas';
 import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createId, createPixelTileset, decodeTiledGid, encodeTiledGid, nowIso, readPixel, readTileAt } from '@aidraw/core';
@@ -1177,6 +1177,54 @@ describe('authenticated stateful MCP contract', () => {
     expect(await access(join(root, 'trusted-folders.json')).then(() => true, () => false)).toBe(false);
   });
 
+  it('accepts only exact writer-shaped MCP control settings', () => {
+    const absoluteFolder = join(tmpdir(), 'aidraw-writer-shaped-trust');
+    expect(parsePreferredPortSettings({ version: 1, preferredPort: 48_200 })).toBe(48_200);
+    expect(parsePreferredPortSettings({ version: 1, preferredPort: '48200' })).toBeUndefined();
+    expect(parsePreferredPortSettings({ version: 1, preferredPort: 48_199 })).toBeUndefined();
+    expect(parsePreferredPortSettings({ version: 2, preferredPort: 48_200 })).toBeUndefined();
+    expect(parsePreferredPortSettings({ version: 1, preferredPort: 48_200, fallback: 48_201 })).toBeUndefined();
+
+    expect(parseFolderTrustSettings({ version: 1, folders: [absoluteFolder] })).toEqual([absoluteFolder]);
+    expect(parseFolderTrustSettings({ version: 1, folders: absoluteFolder })).toBeUndefined();
+    expect(parseFolderTrustSettings({ version: 1, folders: ['relative-folder'] })).toBeUndefined();
+    expect(parseFolderTrustSettings({ version: 1, folders: [absoluteFolder, 'relative-folder'] })).toBeUndefined();
+    expect(parseFolderTrustSettings({ version: 1, folders: [absoluteFolder, absoluteFolder] })).toBeUndefined();
+    expect(parseFolderTrustSettings({ version: 1, folders: [absoluteFolder], inherited: true })).toBeUndefined();
+  });
+
+  it('admits persistent folder trust atomically and clears stale authority on restart', async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'aidraw-mcp-trust-admission-')));
+    temporaryPaths.push(root);
+    const folder = join(root, 'trusted-output');
+    await mkdir(folder, { recursive: true });
+    const trustPath = join(root, 'trusted-folders.json');
+    const portPath = join(root, 'mcp-port.json');
+    const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0');
+    documents.initialize();
+    const documentId = documents.snapshot().activeDocument!.id;
+    const request = async (host: McpHost, token: string, clientName: string, id: number, fileName: string) => {
+      const started = await host.start(token);
+      const client = await initializeClient(started.url, token, clientName);
+      return callTool(started.url, client.headers, id, 'document_export', { documentId, path: join(folder, fileName), format: 'png', scale: 1 });
+    };
+
+    await writeFile(trustPath, JSON.stringify({ version: 1, folders: folder }));
+    const corruptHost = new McpHost(documents, '1.0.0', portPath);
+    hosts.push(corruptHost);
+    await expect(request(corruptHost, 'partial-trust-token', 'partial-trust-client', 2, 'partial.png')).resolves.toMatchObject({ status: 'waiting-for-user' });
+    await corruptHost.stop();
+
+    await writeFile(trustPath, JSON.stringify({ version: 1, folders: [folder] }));
+    const restartableHost = new McpHost(documents, '1.0.0', portPath);
+    hosts.push(restartableHost);
+    await expect(request(restartableHost, 'valid-trust-token', 'valid-trust-client', 3, 'valid.png')).resolves.toMatchObject({ status: 'queued', trust: 'folder' });
+    await restartableHost.stop();
+
+    await writeFile(trustPath, JSON.stringify({ version: 1, folders: folder }));
+    await expect(request(restartableHost, 'stale-trust-token', 'stale-trust-client', 4, 'stale.png')).resolves.toMatchObject({ status: 'waiting-for-user' });
+  });
+
   it('persists explicitly granted folder trust across MCP host restarts', async () => {
     const root = await realpath(await mkdtemp(join(tmpdir(), 'aidraw-mcp-')));
     temporaryPaths.push(root);
@@ -1198,6 +1246,13 @@ describe('authenticated stateful MCP contract', () => {
     expect(documents.resolveJob(job.id, 'allow-always')?.status).toBe('queued');
     const persistedFolder = process.platform === 'win32' ? folder.toLowerCase() : folder;
     await expect.poll(async () => await readFile(join(root, 'trusted-folders.json'), 'utf8').then((text) => (JSON.parse(text) as { folders?: string[] }).folders ?? [], () => [])).toContain(persistedFolder);
+    expect(JSON.parse(await readFile(join(root, 'trusted-folders.json'), 'utf8'))).toEqual({ version: 1, folders: [persistedFolder] });
+    expect(parsePreferredPortSettings(JSON.parse(await readFile(portPath, 'utf8')))).toBe(started.port);
+    expect((await readdir(root)).filter((entry) => entry.endsWith('.tmp'))).toEqual([]);
+    if (process.platform !== 'win32') {
+      expect((await stat(join(root, 'trusted-folders.json'))).mode & 0o777).toBe(0o600);
+      expect((await stat(portPath)).mode & 0o777).toBe(0o600);
+    }
 
     await firstHost.stop();
     hosts.splice(hosts.indexOf(firstHost), 1);

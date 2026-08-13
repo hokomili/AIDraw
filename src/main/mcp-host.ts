@@ -1,6 +1,6 @@
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from 'node:http';
-import { mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, realpath, rename, stat, unlink } from 'node:fs/promises';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { McpServer, ResourceTemplate } from '@modelcontextprotocol/server';
 import {
@@ -91,6 +91,52 @@ interface McpSession {
 interface PortSettings { version: 1; preferredPort: number }
 interface FolderTrustSettings { version: 1; folders: string[] }
 type ApprovalDecision = 'allow-once' | 'allow-session' | 'allow-always' | 'deny';
+
+function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  const actual = Object.keys(value);
+  return actual.length === keys.length && keys.every((key) => Object.prototype.hasOwnProperty.call(value, key));
+}
+
+function plainRecord(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+export function parsePreferredPortSettings(value: unknown): number | undefined {
+  if (!plainRecord(value) || !hasExactKeys(value, ['version', 'preferredPort']) || value.version !== 1
+    || !Number.isInteger(value.preferredPort) || Number(value.preferredPort) < PORT_START || Number(value.preferredPort) > PORT_END) return undefined;
+  return Number(value.preferredPort);
+}
+
+export function parseFolderTrustSettings(value: unknown): string[] | undefined {
+  if (!plainRecord(value) || !hasExactKeys(value, ['version', 'folders']) || value.version !== 1 || !Array.isArray(value.folders)) return undefined;
+  const folders: string[] = [];
+  const seen = new Set<string>();
+  for (const folder of value.folders) {
+    if (typeof folder !== 'string' || !isAbsolute(folder) || folder.includes('\0') || seen.has(folder)) return undefined;
+    seen.add(folder); folders.push(folder);
+  }
+  return folders;
+}
+
+async function writePrivateMcpSettings(filePath: string, value: PortSettings | FolderTrustSettings): Promise<void> {
+  await mkdir(dirname(filePath), { recursive: true, mode: 0o700 });
+  const temporary = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+  const handle = await open(temporary, 'wx', 0o600);
+  let openHandle = true;
+  try {
+    await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, 'utf8');
+    await handle.sync();
+    await handle.close();
+    openHandle = false;
+    await rename(temporary, filePath);
+  } catch (error) {
+    if (openHandle) await handle.close().catch(() => undefined);
+    await unlink(temporary).catch(() => undefined);
+    throw error;
+  }
+}
 
 export type GenerationApprovalPreviewRenderer = (
   asset: DocumentAsset,
@@ -890,6 +936,7 @@ export class McpHost {
   private readonly sessionTrustedFolders = new Map<string, Set<string>>();
   private readonly persistentTrustedFolders = new Set<string>();
   private readonly launchTrustedFolders = new Set<string>();
+  private persistentTrustWrite: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly documents: DocumentService,
@@ -961,6 +1008,7 @@ export class McpHost {
     if (this.httpServer) await new Promise<void>((resolve) => this.httpServer!.close(() => resolve()));
     this.httpServer = undefined;
     await this.batches.flush();
+    await this.persistentTrustWrite;
     await this.documents.flushRecovery();
   }
 
@@ -1530,24 +1578,41 @@ export class McpHost {
       if (!this.hasActiveSession(job.actor.id)) return;
       const folders = this.sessionTrustedFolders.get(job.actor.id) ?? new Set<string>(); folders.add(folder); this.sessionTrustedFolders.set(job.actor.id, folders); return;
     }
-    this.persistentTrustedFolders.add(folder); await mkdir(dirname(this.trustSettingsPath()), { recursive: true }); await writeFile(this.trustSettingsPath(), JSON.stringify({ version: 1, folders: [...this.persistentTrustedFolders] } satisfies FolderTrustSettings, null, 2), 'utf8');
+    const persist = async () => {
+      const folders = new Set(this.persistentTrustedFolders); folders.add(folder);
+      await writePrivateMcpSettings(this.trustSettingsPath(), { version: 1, folders: [...folders] } satisfies FolderTrustSettings);
+      this.persistentTrustedFolders.clear();
+      for (const trustedFolder of folders) this.persistentTrustedFolders.add(trustedFolder);
+    };
+    const writeResult = this.persistentTrustWrite.then(persist, persist);
+    this.persistentTrustWrite = writeResult.then(() => undefined, () => undefined);
+    await writeResult;
   }
 
   private async readFolderTrust(): Promise<void> {
-    try { const settings = JSON.parse(await readFile(this.trustSettingsPath(), 'utf8')) as FolderTrustSettings; if (settings.version === 1) for (const folder of settings.folders) this.persistentTrustedFolders.add(await this.canonicalizeFolder(folder)); } catch { /* No persistent trust has been granted yet. */ }
+    this.persistentTrustedFolders.clear();
+    try {
+      const folders = parseFolderTrustSettings(JSON.parse(await readFile(this.trustSettingsPath(), 'utf8')) as unknown);
+      if (!folders) return;
+      const canonicalFolders = new Set<string>();
+      for (const folder of folders) {
+        const canonical = await this.canonicalizeFolder(folder);
+        if (canonicalFolders.has(canonical)) return;
+        canonicalFolders.add(canonical);
+      }
+      for (const folder of canonicalFolders) this.persistentTrustedFolders.add(folder);
+    } catch { /* Missing, stale, or corrupt trust state grants no persistent authority. */ }
   }
 
   private async readPreferredPort(): Promise<number> {
     try {
-      const settings = JSON.parse(await readFile(this.preferredPortPath, 'utf8')) as PortSettings;
-      return settings.preferredPort;
+      return parsePreferredPortSettings(JSON.parse(await readFile(this.preferredPortPath, 'utf8')) as unknown) ?? PORT_START;
     } catch {
       return PORT_START;
     }
   }
 
   private async writePreferredPort(port: number): Promise<void> {
-    await mkdir(dirname(this.preferredPortPath), { recursive: true });
-    await writeFile(this.preferredPortPath, JSON.stringify({ version: 1, preferredPort: port } satisfies PortSettings, null, 2), 'utf8');
+    await writePrivateMcpSettings(this.preferredPortPath, { version: 1, preferredPort: port } satisfies PortSettings);
   }
 }
