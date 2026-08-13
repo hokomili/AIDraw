@@ -367,6 +367,77 @@ describe('document service collaboration semantics', () => {
     expect(restarted.snapshot()).toMatchObject({ activeDocumentId: source.id, activeDocument: { id: source.id, name: 'Recovered immediate edit', revision: 1, dirty: true, filePath: sourcePath } });
   });
 
+  it('refuses a different native file with an open document ID without replacing dirty work', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-service-open-identity-'));
+    temporaryPaths.push(root);
+    const source = createIllustrationDocument('Canonical source');
+    const sourcePath = await writeNativeDocument(join(root, 'source'), source, '1.0.0');
+    const copied = structuredClone(source);
+    copied.name = 'Different copied file';
+    const copiedPath = await writeNativeDocument(join(root, 'copy'), copied, '1.0.0');
+    const sibling = createIllustrationDocument('Independent sibling');
+    const siblingPath = await writeNativeDocument(join(root, 'sibling'), sibling, '1.0.0');
+    const recoveryRoot = join(root, 'recovery');
+    const service = new DocumentService(new RecoveryJournal(recoveryRoot), '1.0.0');
+    services.push(service);
+
+    await expect(service.open([sourcePath])).resolves.toEqual({ opened: [sourcePath], warnings: [] });
+    await expect(service.apply({
+      id: createId('tx'), clientOperationId: createId('op'), documentId: source.id, actor: HUMAN_ACTOR,
+      label: 'Unsaved canonical edit', createdAt: nowIso(), operations: [{ kind: 'document.rename', name: 'Dirty canonical work' }],
+    })).resolves.toMatchObject({ status: 'committed', revision: 1 });
+    await expect(service.open([sourcePath])).resolves.toEqual({ opened: [], warnings: [] });
+    expect(service.getDocument(source.id)).toMatchObject({ name: 'Dirty canonical work', revision: 1, dirty: true, filePath: sourcePath });
+
+    await expect(service.open([copiedPath, siblingPath])).resolves.toEqual({
+      opened: [siblingPath],
+      warnings: [`${copiedPath}: Document ID “${source.id}” is already in use by an open document; refusing to replace existing work.`],
+    });
+    expect(service.snapshot()).toMatchObject({
+      activeDocumentId: sibling.id,
+      documents: [
+        { id: source.id, name: 'Dirty canonical work', revision: 1, dirty: true, filePath: sourcePath },
+        { id: sibling.id, name: 'Independent sibling', revision: 0, dirty: false, filePath: siblingPath },
+      ],
+    });
+    expect(service.getDocument(source.id)).toMatchObject({ name: 'Dirty canonical work', revision: 1, dirty: true, filePath: sourcePath });
+    await service.flushRecovery();
+    expect((await new RecoveryJournal(recoveryRoot).recover()).find(({ id }) => id === source.id)).toMatchObject({
+      name: 'Dirty canonical work', revision: 1, dirty: true, filePath: sourcePath,
+    });
+  });
+
+  it('rejects an imported document set atomically before cloning, publishing, or recovery replacement', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-service-add-identity-'));
+    temporaryPaths.push(root);
+    const service = new DocumentService(new RecoveryJournal(root), '1.0.0');
+    services.push(service);
+    const existing = service.create({ kind: 'illustration', name: 'Existing imported work' }).activeDocument!;
+    const incoming = structuredClone(existing);
+    incoming.name = 'Colliding import';
+    incoming.revision = 12;
+    incoming.dirty = true;
+    const independent = createIllustrationDocument('Would otherwise be imported first');
+    const workspaceRevision = service.snapshot().workspaceRevision;
+
+    expect(() => service.addDocuments([independent, structuredClone(independent)])).toThrow(
+      `Document ID “${independent.id}” appears more than once in the incoming document set; no documents were added.`,
+    );
+    expect(() => service.addDocuments([independent, incoming])).toThrow(
+      `Document ID “${existing.id}” is already in use by an open document; refusing to replace existing work.`,
+    );
+    expect(service.snapshot()).toMatchObject({
+      workspaceRevision,
+      activeDocumentId: existing.id,
+      documents: [{ id: existing.id, name: 'Existing imported work', revision: 0 }],
+      activeDocument: { id: existing.id, name: 'Existing imported work', revision: 0 },
+    });
+    await service.flushRecovery();
+    const recovered = await new RecoveryJournal(root).recover();
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0]).toMatchObject({ id: existing.id, name: 'Existing imported work', revision: 0 });
+  });
+
   it('keeps the attached editor advisory on the canonical active document and rejects stale tab updates', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aidraw-service-advisory-'));
     temporaryPaths.push(root);

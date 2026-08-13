@@ -388,7 +388,7 @@ async function runApprovedFileJob(job: AsyncJob): Promise<void> {
         let imported;
         if (spriteSheet) { const extension = extname(requestedPath).toLowerCase(); imported = await engineRuntime.rasterUtilities.importSpriteSheet(requestedPath, { options: spriteSheet, name: basename(requestedPath, extension) }); }
         else imported = await engineRuntime.rasterUtilities.importDocument(requestedPath, request.pixelMode === true);
-        for (const document of imported.documents) service.addDocument(document);
+        service.addDocuments(imported.documents);
         const report = await recordInterchangeReport({ kind: 'import', status: 'completed', actor: job.actor, documentIds: imported.documents.map((document) => document.id), documentNames: imported.documents.map((document) => document.name), format: spriteSheet ? 'sprite-sheet-image' : extname(requestedPath).slice(1).toLowerCase() || 'unknown', sourcePaths: [requestedPath], destinationPaths: [], warnings: imported.warnings, rasterized: imported.warnings.filter((warning) => /raster|flatten|fallback/i.test(warning)), ...(imported.fidelity?.length ? { fidelity: imported.fidelity } : {}) });
         output = { imported: imported.documents.map((document) => document.id), warnings: imported.warnings, reportId: report.id };
       }
@@ -592,7 +592,7 @@ function registerIpc(): void {
     for (const filePath of result.filePaths) {
       try {
         const value = await engineRuntime.rasterUtilities.importDocument(filePath, pixelMode === true);
-        for (const document of value.documents) { service.addDocument(document); imported += 1; }
+        service.addDocuments(value.documents); imported += value.documents.length;
         warnings.push(...value.warnings);
         const report = await recordInterchangeReport({ kind: 'import', status: 'completed', actor: HUMAN_ACTOR, documentIds: value.documents.map((document) => document.id), documentNames: value.documents.map((document) => document.name), format: extname(filePath).slice(1).toLowerCase() || 'unknown', sourcePaths: [filePath], destinationPaths: [], warnings: value.warnings, rasterized: value.warnings.filter((warning) => /raster|flatten|fallback/i.test(warning)), ...(value.fidelity?.length ? { fidelity: value.fidelity } : {}) });
         reportIds.push(report.id);

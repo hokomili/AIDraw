@@ -319,17 +319,23 @@ export class DocumentService extends EventEmitter {
   }
 
   addDocument(document: AIDrawDocument): WorkspaceSnapshot {
-    const cloned = structuredClone(document);
-    this.documents.set(document.id, cloned);
-    this.documentIncarnations.set(document.id, Symbol(document.id));
-    this.histories.set(document.id, new Map());
-    this.operationIds.set(document.id, new Map());
-    this.changes.set(document.id, []);
-    this.checkpoints.set(document.id, new Map());
-    this.comparisons.delete(document.id);
-    this.acknowledgedAgentActivityCounts.set(document.id, agentActivityEntries(cloned).length);
-    void this.journal.compact(document).catch((error) => this.emit('recovery-error', error));
-    this.setActiveDocument(document.id);
+    return this.addDocuments([document]);
+  }
+
+  addDocuments(documents: readonly AIDrawDocument[]): WorkspaceSnapshot {
+    const incomingIds = new Set<Id>();
+    for (const document of documents) {
+      this.assertDocumentIdentityAvailable(document.id);
+      if (incomingIds.has(document.id)) {
+        throw new Error(`Document ID “${document.id}” appears more than once in the incoming document set; no documents were added.`);
+      }
+      incomingIds.add(document.id);
+    }
+    const clonedDocuments = documents.map((document) => structuredClone(document));
+    for (const cloned of clonedDocuments) this.installAddedDocument(cloned);
+    const active = clonedDocuments.at(-1);
+    if (!active) return this.snapshot();
+    this.setActiveDocument(active.id);
     this.publish();
     return this.snapshot();
   }
@@ -607,6 +613,7 @@ export class DocumentService extends EventEmitter {
           this.activeDocumentId = existing.id;
           continue;
         }
+        this.assertDocumentIdentityAvailable(loaded.document.id);
         this.documents.set(loaded.document.id, loaded.document);
         this.documentIncarnations.set(loaded.document.id, Symbol(loaded.document.id));
         this.histories.set(loaded.document.id, new Map());
@@ -854,6 +861,24 @@ export class DocumentService extends EventEmitter {
 
   private listCheckpointRecords(documentId: Id): DocumentCheckpointRecord[] {
     return [...(this.checkpoints.get(documentId)?.values() ?? [])].map((checkpoint) => structuredClone(checkpoint));
+  }
+
+  private assertDocumentIdentityAvailable(documentId: Id): void {
+    if (this.documents.has(documentId)) {
+      throw new Error(`Document ID “${documentId}” is already in use by an open document; refusing to replace existing work.`);
+    }
+  }
+
+  private installAddedDocument(document: AIDrawDocument): void {
+    this.documents.set(document.id, document);
+    this.documentIncarnations.set(document.id, Symbol(document.id));
+    this.histories.set(document.id, new Map());
+    this.operationIds.set(document.id, new Map());
+    this.changes.set(document.id, []);
+    this.checkpoints.set(document.id, new Map());
+    this.comparisons.delete(document.id);
+    this.acknowledgedAgentActivityCounts.set(document.id, agentActivityEntries(document).length);
+    void this.journal.compact(document).catch((error) => this.emit('recovery-error', error));
   }
 
   private enqueueSave<T>(documentId: Id, operation: () => Promise<T>): Promise<T> {
