@@ -68,7 +68,7 @@ import { drawMapObjectOverlay, mapObjectIntersectsRasterRegion } from '../../com
 import { orthogonalCellRect, orthogonalCoordinateDeltaFromScreen, orthogonalObjectMatrix, orthogonalProjectionExtent } from '../../common/orthogonal-projection';
 import { TILE_VARIANT_SEED_PROPERTY, chooseTileVariant, nextTileVariantSeed, tileVariantCandidates, tileVariantGroup } from '../../common/tile-variants';
 import { isometricTileRenderCells } from '../../common/tile-render-order';
-import { coveringRasterViewportRegion, tilemapChunksIntersectingRegion, tilemapGridLineRange } from '../../common/tilemap-region';
+import { coveringRasterViewportRegion, createGridRasterRegionFilter, tilemapChunksIntersectingRegion, tilemapGridLineRange } from '../../common/tilemap-region';
 import { DEFAULT_ONION_SKIN_SETTINGS, onionSkinLayers, type OnionSkinSettings } from '../../common/onion-skin';
 import { tileAnimationFrameAt, tilesetTileSourceRect } from '../../common/tile-animation';
 import { parseBitmapFontJson } from '../../common/bitmap-font-interchange';
@@ -474,6 +474,19 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       layerOffsetY: 0,
       projectionScale: sprite ? view.scale : view.scale / tilemap!.tileWidth,
     }) : undefined;
+    const overlayGeometry = sprite
+      ? { orientation: 'orthogonal' as const, rows: sprite.height, tileWidth: 1, tileHeight: 1 }
+      : tilemap
+        ? { orientation: tilemap.orientation, rows: tilemap.height, tileWidth: tilemap.tileWidth, tileHeight: tilemap.tileHeight }
+        : undefined;
+    const overlayRegionFilter = overlayGeometry && baseRasterViewportRegion
+      ? createGridRasterRegionFilter(overlayGeometry, baseRasterViewportRegion)
+      : undefined;
+    const selectionStrokeWidth = Math.max(1, view.scale / 8);
+    const overlayProjectionScale = sprite ? view.scale : tilemap ? view.scale / tilemap.tileWidth : 1;
+    const selectionRegionFilter = overlayGeometry && baseRasterViewportRegion
+      ? createGridRasterRegionFilter(overlayGeometry, baseRasterViewportRegion, Math.ceil((selectionStrokeWidth / 2 + 1) / overlayProjectionScale))
+      : undefined;
     const gridCellRect = (point: PixelPoint): IsometricCellRect => tilemap?.orientation === 'isometric'
       ? isometricCellRect(point.x, point.y, tilemap.height, view.scale, isometricCellHeight)
       : tilemap?.orientation === 'orthogonal'
@@ -618,18 +631,23 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       context.globalAlpha = 0.78;
       if (bulkPreview.length) {
         for (const run of bulkPreview) {
+          const range = overlayRegionFilter?.runOffsets(run.x, run.y, run.length) ?? { start: 0, end: run.length };
+          if (range.end <= range.start) continue;
           context.fillStyle = run.index === 0 ? '#ffffff80' : document.palette[run.index]?.color ?? '#ff00ff';
-          context.fillRect(run.x * view.scale, run.y * view.scale, run.length * view.scale, view.scale);
+          context.fillRect((run.x + range.start) * view.scale, run.y * view.scale, (range.end - range.start) * view.scale, view.scale);
         }
       } else if (tool === 'stamp' && tileStampPreview.length) for (const point of tileStampPreview) {
+        if (overlayRegionFilter && !overlayRegionFilter.cellIntersects(point.x, point.y)) continue;
         const gid = decodeTiledGid(point.gid).gid; context.fillStyle = gid === 0 ? '#ffffff80' : 'hsl(' + (gid * 47 % 360) + ' 52% 62%)';
         fillGridCell(point);
       } else if (tool === 'stamp' && stampPreview.length) for (const point of stampPreview) {
+        if (overlayRegionFilter && !overlayRegionFilter.cellIntersects(point.x, point.y)) continue;
         context.fillStyle = point.index === 0 ? '#ffffff80' : document.palette[point.index]?.color ?? '#ff00ff';
         context.fillRect(point.x * view.scale, point.y * view.scale, view.scale, view.scale);
       } else if (tool === 'dither') {
         for (const point of preview) {
           if (point.x < 0 || point.y < 0 || point.x >= logical.gridWidth || point.y >= logical.gridHeight) continue;
+          if (overlayRegionFilter && !overlayRegionFilter.cellIntersects(point.x, point.y)) continue;
           const index = orderedDitherIndex(point.x, point.y, ditherMixIndex, pixelIndex, ditherCoverage, ditherMatrixSize);
           context.fillStyle = index === 0 ? '#ffffff80' : (activePaletteOverride ?? document.palette)[index]?.color ?? '#ff00ff';
           context.fillRect(point.x * view.scale, point.y * view.scale, view.scale, view.scale);
@@ -637,7 +655,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       } else {
         const drawIndex = tool === 'eraser' ? 0 : pixelIndex;
         context.fillStyle = drawIndex === 0 ? '#ffffff80' : document.palette[drawIndex]?.color ?? '#ff00ff';
-        for (const point of preview) if (point.x >= 0 && point.y >= 0 && point.x < logical.gridWidth && point.y < logical.gridHeight) fillGridCell(point);
+        for (const point of preview) if (point.x >= 0 && point.y >= 0 && point.x < logical.gridWidth && point.y < logical.gridHeight && (!overlayRegionFilter || overlayRegionFilter.cellIntersects(point.x, point.y))) fillGridCell(point);
       }
     }
 
@@ -647,10 +665,14 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     }
 
     if (selection.length) {
-      context.globalAlpha = 1; context.strokeStyle = '#ffffff'; context.lineWidth = Math.max(1, view.scale / 8); context.setLineDash([Math.max(2, view.scale / 3), Math.max(2, view.scale / 3)]);
+      context.globalAlpha = 1; context.strokeStyle = '#ffffff'; context.lineWidth = selectionStrokeWidth; context.setLineDash([Math.max(2, view.scale / 3), Math.max(2, view.scale / 3)]);
       context.lineDashOffset = -(Date.now() / 120) % 8;
       const offset = selectionOffset ?? { x: 0, y: 0 };
-      const selectedPoints = selection.map((point) => ({ x: point.x + offset.x, y: point.y + offset.y }));
+      const selectedPoints: PixelPoint[] = [];
+      for (const point of selection) {
+        const selected = { x: point.x + offset.x, y: point.y + offset.y };
+        if (!selectionRegionFilter || selectionRegionFilter.cellIntersects(selected.x, selected.y)) selectedPoints.push(selected);
+      }
       for (const point of selectedPoints) strokeGridCell(point);
       context.strokeStyle = '#4f3f68'; context.lineDashOffset += Math.max(2, view.scale / 3); for (const point of selectedPoints) strokeGridCell(point); context.setLineDash([]);
     }
@@ -664,6 +686,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
           const changes = Array.isArray(operation.changes) ? operation.changes : [];
           for (const change of changes) {
             if (![change.x, change.y, change.index].every(Number.isFinite)) continue;
+            if (overlayRegionFilter && !overlayRegionFilter.cellIntersects(change.x, change.y)) continue;
             context.fillStyle = change.index === 0 ? '#ffffff80' : document.palette[change.index]?.color ?? playback.actor.color;
             context.fillRect(change.x * view.scale, change.y * view.scale, view.scale, view.scale);
           }
@@ -672,21 +695,26 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
           if (!targetCel || targetCel.frameId !== activeFrameId) continue;
           for (const run of operation.runs) {
             if (![run.x, run.y, run.length, run.index].every(Number.isFinite)) continue;
+            const range = overlayRegionFilter?.runOffsets(run.x, run.y, run.length) ?? { start: 0, end: run.length };
+            if (range.end <= range.start) continue;
             context.fillStyle = run.index === 0 ? '#ffffff80' : document.palette[run.index]?.color ?? playback.actor.color;
-            context.fillRect(run.x * view.scale, run.y * view.scale, run.length * view.scale, view.scale);
+            context.fillRect((run.x + range.start) * view.scale, run.y * view.scale, (range.end - range.start) * view.scale, view.scale);
           }
         } else if (operation.kind === 'pixel.tilemap.set' && tilemap && operation.mapId === tilemap.id) {
           const changes = Array.isArray(operation.changes) ? operation.changes : [];
           for (const change of changes) {
             if (![change.x, change.y, change.gid].every(Number.isFinite)) continue;
+            if (overlayRegionFilter && !overlayRegionFilter.cellIntersects(change.x, change.y)) continue;
             context.fillStyle = change.gid === 0 ? '#ffffff80' : `hsl(${(change.gid * 47) % 360} 52% 62%)`;
             fillGridCell(change);
           }
         } else if (operation.kind === 'pixel.tilemap.region' && tilemap && operation.mapId === tilemap.id) {
           for (const run of operation.runs) {
             if (![run.x, run.y, run.length, run.gid].every(Number.isFinite)) continue;
+            const range = overlayRegionFilter?.runOffsets(run.x, run.y, run.length) ?? { start: 0, end: run.length };
+            if (range.end <= range.start) continue;
             context.fillStyle = run.gid === 0 ? '#ffffff80' : `hsl(${(run.gid * 47) % 360} 52% 62%)`;
-            for (let offset = 0; offset < run.length; offset += 1) fillGridCell({ x: run.x + offset, y: run.y });
+            for (let offset = range.start; offset < range.end; offset += 1) fillGridCell({ x: run.x + offset, y: run.y });
           }
         }
       }

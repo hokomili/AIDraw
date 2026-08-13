@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { coveringRasterViewportRegion, tilemapChunksIntersectingRegion, tilemapGridLineRange } from '../../src/common/tilemap-region';
+import { coveringRasterViewportRegion, createGridRasterRegionFilter, tilemapChunksIntersectingRegion, tilemapGridLineRange } from '../../src/common/tilemap-region';
 
 function chunk(id: string, x: number, y: number, width = 32, height = 32) {
   return { id, x, y, width, height };
@@ -55,5 +55,68 @@ describe('tilemap region chunk filtering', () => {
       .toEqual({ columnStart: 0, columnEnd: 6, rowStart: 0, rowEnd: 4 });
     expect(tilemapGridLineRange({ x: 2_000, y: 2_000, width: 1, height: 1 }, { columns: 10, rows: 10, tileWidth: 16, tileHeight: 16 }))
       .toEqual({ columnStart: 124, columnEnd: 10, rowStart: 124, rowEnd: 10 });
+  });
+
+  it('clips orthogonal overlay cells and compact runs without expanding their payload', () => {
+    const filter = createGridRasterRegionFilter(
+      { orientation: 'orthogonal', rows: 100, tileWidth: 16, tileHeight: 8 },
+      { x: 0, y: 0, width: 16, height: 8 },
+    );
+    expect(filter.cellIntersects(0, 0)).toBe(true);
+    expect(filter.cellIntersects(-1, 0)).toBe(false);
+    expect(filter.cellIntersects(0, 1)).toBe(false);
+    expect(filter.runOffsets(-10, 0, 30)).toEqual({ start: 9, end: 12 });
+    expect(filter.runOffsets(-10, 20, 30)).toEqual({ start: 0, end: 0 });
+
+    const padded = createGridRasterRegionFilter(
+      { orientation: 'orthogonal', rows: 1, tileWidth: 16, tileHeight: 16 },
+      { x: 16, y: 0, width: 1, height: 1 },
+      1,
+    );
+    expect(padded.cellIntersects(0, 0)).toBe(true);
+  });
+
+  it('conservatively bounds isometric horizontal runs to projected candidates', () => {
+    const filter = createGridRasterRegionFilter(
+      { orientation: 'isometric', rows: 64, tileWidth: 16, tileHeight: 8 },
+      { x: 496, y: -4, width: 24, height: 16 },
+    );
+    const run = { x: -100, y: 0, length: 200 };
+    const range = filter.runOffsets(run.x, run.y, run.length);
+    const intersecting = Array.from({ length: run.length }, (_, offset) => offset)
+      .filter((offset) => filter.cellIntersects(run.x + offset, run.y));
+    expect(intersecting.length).toBeGreaterThan(0);
+    expect(range.end - range.start).toBeLessThan(run.length / 4);
+    expect(intersecting.every((offset) => offset >= range.start && offset < range.end)).toBe(true);
+
+    for (const geometry of [
+      { orientation: 'isometric' as const, rows: 1, tileWidth: 4, tileHeight: 2 },
+      { orientation: 'isometric' as const, rows: 3, tileWidth: 7, tileHeight: 5 },
+      { orientation: 'isometric' as const, rows: 64, tileWidth: 16, tileHeight: 8 },
+    ]) for (const region of [
+      { x: -9, y: -7, width: 3, height: 5 },
+      { x: 0, y: 0, width: 1, height: 1 },
+      { x: 31, y: 17, width: 19, height: 11 },
+    ]) for (let y = -8; y <= 8; y += 1) {
+      const candidateFilter = createGridRasterRegionFilter(geometry, region);
+      const candidateRun = { x: -20, y, length: 40 };
+      const candidateRange = candidateFilter.runOffsets(candidateRun.x, candidateRun.y, candidateRun.length);
+      for (let offset = 0; offset < candidateRun.length; offset += 1) {
+        if (candidateFilter.cellIntersects(candidateRun.x + offset, y)) {
+          expect(offset).toBeGreaterThanOrEqual(candidateRange.start);
+          expect(offset).toBeLessThan(candidateRange.end);
+        }
+      }
+    }
+  });
+
+  it('fails closed for invalid overlay filters or records', () => {
+    const geometry = { orientation: 'orthogonal' as const, rows: 1, tileWidth: 1, tileHeight: 1 };
+    expect(() => createGridRasterRegionFilter(geometry, { x: 0.5, y: 0, width: 1, height: 1 })).toThrow(/safe-integer/);
+    expect(() => createGridRasterRegionFilter(geometry, { x: Number.MIN_SAFE_INTEGER, y: 0, width: 1, height: 1 }, 1)).toThrow(/safe coordinates/);
+    const filter = createGridRasterRegionFilter(geometry, { x: 0, y: 0, width: 1, height: 1 });
+    expect(filter.cellIntersects(Number.NaN, 0)).toBe(false);
+    expect(filter.runOffsets(0, 0, 0)).toEqual({ start: 0, end: 0 });
+    expect(filter.runOffsets(Number.MAX_SAFE_INTEGER, 0, 2)).toEqual({ start: 0, end: 0 });
   });
 });

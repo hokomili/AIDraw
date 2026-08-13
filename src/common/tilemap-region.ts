@@ -43,6 +43,16 @@ export interface TilemapGridLineRange {
   rowEnd: number;
 }
 
+export interface GridRunOffsetRange {
+  start: number;
+  end: number;
+}
+
+export interface GridRasterRegionFilter {
+  cellIntersects(x: number, y: number): boolean;
+  runOffsets(x: number, y: number, length: number): GridRunOffsetRange;
+}
+
 function positiveSafeInteger(value: number, label: string): void {
   if (!Number.isSafeInteger(value) || value < 1) throw new RangeError(`${label} must be a positive safe integer.`);
 }
@@ -55,6 +65,79 @@ function intersects(
   region: TilemapRasterRegion,
 ): boolean {
   return right > region.x && bottom > region.y && left < region.x + region.width && top < region.y + region.height;
+}
+
+/**
+ * Builds one validated, allocation-free filter for transient grid overlays.
+ * Cell bounds are conservative for the isometric diamond. Horizontal runs are
+ * clipped algebraically, avoiding expansion of compact million-cell replay or
+ * fill records merely to discover that their pixels are outside the viewport.
+ */
+export function createGridRasterRegionFilter(
+  geometry: TilemapProjectionGeometry,
+  region: TilemapRasterRegion,
+  paddingPixels = 0,
+): GridRasterRegionFilter {
+  positiveSafeInteger(geometry.rows, 'Grid row count');
+  positiveSafeInteger(geometry.tileWidth, 'Grid cell width');
+  positiveSafeInteger(geometry.tileHeight, 'Grid cell height');
+  if (![region.x, region.y, region.width, region.height].every(Number.isSafeInteger)
+    || region.width < 1 || region.height < 1) throw new RangeError('Grid raster region must use safe-integer coordinates and positive dimensions.');
+  if (!Number.isSafeInteger(paddingPixels) || paddingPixels < 0) throw new RangeError('Grid raster padding must be a nonnegative safe integer.');
+  const right = region.x + region.width;
+  const bottom = region.y + region.height;
+  const left = region.x - paddingPixels;
+  const top = region.y - paddingPixels;
+  const expandedRight = right + paddingPixels;
+  const expandedBottom = bottom + paddingPixels;
+  if (![left, top, expandedRight, expandedBottom].every(Number.isSafeInteger)) throw new RangeError('Grid raster region exceeds safe coordinates after padding.');
+  const expanded = { x: left, y: top, width: expandedRight - left, height: expandedBottom - top };
+  const empty = (): GridRunOffsetRange => ({ start: 0, end: 0 });
+
+  const cellIntersects = (x: number, y: number): boolean => {
+    if (!Number.isSafeInteger(x) || !Number.isSafeInteger(y)) return false;
+    if (geometry.orientation === 'orthogonal') {
+      const cellLeft = x * geometry.tileWidth;
+      const cellTop = y * geometry.tileHeight;
+      return [cellLeft, cellTop].every(Number.isFinite)
+        && intersects(cellLeft, cellTop, cellLeft + geometry.tileWidth, cellTop + geometry.tileHeight, expanded);
+    }
+    const cellLeft = (x - y + geometry.rows - 1) * geometry.tileWidth / 2;
+    const cellTop = (x + y) * geometry.tileHeight / 2;
+    return [cellLeft, cellTop].every(Number.isFinite)
+      && intersects(cellLeft, cellTop, cellLeft + geometry.tileWidth, cellTop + geometry.tileHeight, expanded);
+  };
+
+  const runOffsets = (x: number, y: number, length: number): GridRunOffsetRange => {
+    if (![x, y, length].every(Number.isSafeInteger) || length < 1 || !Number.isSafeInteger(x + length)) return empty();
+    let candidateStart: number;
+    let candidateEnd: number;
+    if (geometry.orientation === 'orthogonal') {
+      const cellTop = y * geometry.tileHeight;
+      if (!Number.isFinite(cellTop) || !intersects(expanded.x, cellTop, expanded.x + expanded.width, cellTop + geometry.tileHeight, expanded)) return empty();
+      candidateStart = Math.floor(expanded.x / geometry.tileWidth) - 1;
+      candidateEnd = Math.ceil((expanded.x + expanded.width) / geometry.tileWidth) + 1;
+    } else {
+      const lower = Math.max(
+        2 * expanded.x / geometry.tileWidth + y - geometry.rows - 1,
+        2 * expanded.y / geometry.tileHeight - y - 2,
+      );
+      const upper = Math.min(
+        2 * (expanded.x + expanded.width) / geometry.tileWidth + y - geometry.rows + 1,
+        2 * (expanded.y + expanded.height) / geometry.tileHeight - y,
+      );
+      if (!Number.isFinite(lower) || !Number.isFinite(upper) || lower >= upper) return empty();
+      // One candidate of numerical slack on either side prevents floating-
+      // point division at an exact projected edge from dropping a real cell.
+      candidateStart = Math.floor(lower) - 1;
+      candidateEnd = Math.ceil(upper) + 1;
+    }
+    const first = Math.max(x, candidateStart);
+    const end = Math.min(x + length, candidateEnd);
+    return end > first ? { start: first - x, end: end - x } : empty();
+  };
+
+  return { cellIntersects, runOffsets };
 }
 
 /**
