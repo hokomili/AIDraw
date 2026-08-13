@@ -1,8 +1,8 @@
 import { randomBytes } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { safeStorage } from 'electron';
-import { requireSecureStorage } from './secure-storage';
+import { readEncryptedCredentialFile, requireSecureStorage } from './secure-storage';
 
 interface EncryptedSecretFile {
   version: 1;
@@ -15,7 +15,7 @@ export class LocalCredentialStore {
   async loadOrCreateToken(): Promise<string> {
     requireSecureStorage(safeStorage);
     try {
-      const file = JSON.parse(await readFile(this.tokenPath, 'utf8')) as EncryptedSecretFile;
+      const file = JSON.parse(await readEncryptedCredentialFile(this.tokenPath, 'MCP credential file')) as EncryptedSecretFile;
       if (file.version !== 1 || !['windows-dpapi', 'electron-safe-storage'].includes(file.encryption)) throw new Error('Unsupported credential file.');
       return safeStorage.decryptString(Buffer.from(file.value, 'base64'));
     } catch (error) {

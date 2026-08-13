@@ -1,4 +1,4 @@
-import { open, mkdir, readFile, rename, unlink } from 'node:fs/promises';
+import { open, mkdir, rename, unlink } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { dirname } from 'node:path';
 import { safeStorage } from 'electron';
@@ -7,7 +7,7 @@ import {
   type GenerationProvider,
   type GenerationProviderStatus,
 } from '../common/generation';
-import { requireSecureStorage, secureStorageStatus, type SafeStorageStatusSource } from './secure-storage';
+import { MAX_ENCRYPTED_CREDENTIAL_FILE_BYTES, readEncryptedCredentialFile, requireSecureStorage, secureStorageStatus, type SafeStorageStatusSource } from './secure-storage';
 
 type HostedProvider = Exclude<GenerationProvider, 'comfyui'>;
 
@@ -29,7 +29,6 @@ export interface ProviderCredentialStoreOptions {
   replaceFile?: (source: string, destination: string) => Promise<void>;
 }
 
-const MAX_CREDENTIAL_FILE_BYTES = 256 * 1024;
 const HOSTED_PROVIDERS = ['openai', 'stability'] as const satisfies readonly HostedProvider[];
 
 function emptyCredentialFile(platform: NodeJS.Platform): CredentialFile {
@@ -42,7 +41,7 @@ function canonicalBase64(value: unknown): value is string {
 }
 
 function parseCredentialFile(source: string): CredentialFile | undefined {
-  if (Buffer.byteLength(source, 'utf8') > MAX_CREDENTIAL_FILE_BYTES) return undefined;
+  if (Buffer.byteLength(source, 'utf8') > MAX_ENCRYPTED_CREDENTIAL_FILE_BYTES) return undefined;
   const parsed = JSON.parse(source) as Partial<CredentialFile>;
   if (parsed.version !== 1 || !['windows-dpapi', 'electron-safe-storage'].includes(String(parsed.encryption))
     || !parsed.values || typeof parsed.values !== 'object' || Array.isArray(parsed.values)) return undefined;
@@ -128,7 +127,7 @@ export class ProviderCredentialStore {
 
   private async read(): Promise<CredentialFile> {
     try {
-      return parseCredentialFile(await readFile(this.filePath, 'utf8')) ?? emptyCredentialFile(this.platform);
+      return parseCredentialFile(await readEncryptedCredentialFile(this.filePath, 'Provider credential file')) ?? emptyCredentialFile(this.platform);
     } catch {
       // Missing or corrupt files begin empty; secrets are never downgraded to plaintext.
       return emptyCredentialFile(this.platform);

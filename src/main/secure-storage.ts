@@ -1,4 +1,19 @@
 import { desktopPlatformInfo, type DesktopPlatformInfo } from '../common/platform';
+import { readBoundedRegularFile } from './bounded-file-read';
+
+export const MAX_ENCRYPTED_CREDENTIAL_FILE_BYTES = 256 * 1024;
+
+export async function readEncryptedCredentialFile(filePath: string, label: string): Promise<string> {
+  const bytes = await readBoundedRegularFile(filePath, {
+    maxBytes: MAX_ENCRYPTED_CREDENTIAL_FILE_BYTES,
+    minBytes: 1,
+    notFileMessage: `${label} is not a regular file.`,
+    tooLargeMessage: `${label} exceeds the 256 KiB encrypted-file limit.`,
+    tooSmallMessage: `${label} is empty.`,
+    changedMessage: `${label} changed while it was being read.`,
+  });
+  return bytes.toString('utf8');
+}
 
 export interface SafeStorageStatusSource {
   isEncryptionAvailable(): boolean;

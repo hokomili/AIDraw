@@ -1,4 +1,4 @@
-import { access, mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { access, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -13,6 +13,7 @@ vi.mock('electron', () => ({
 }));
 
 import { ProviderCredentialStore, type ProviderCredentialStoreOptions } from '../../src/main/provider-credentials';
+import { MAX_ENCRYPTED_CREDENTIAL_FILE_BYTES } from '../../src/main/secure-storage';
 
 const temporaryDirectories: string[] = [];
 
@@ -126,5 +127,20 @@ describe('provider credential lifecycle', () => {
     await unavailable.set('openai', '');
     await expect(access(value.path)).rejects.toMatchObject({ code: 'ENOENT' });
     expect(unavailableStorage.decryptString).not.toHaveBeenCalled();
+  });
+
+  it('treats an over-ceiling encrypted file as corrupt before decryption and replaces it through normal rotation', async () => {
+    const value = await fixture();
+    await writeFile(value.path, Buffer.alloc(MAX_ENCRYPTED_CREDENTIAL_FILE_BYTES + 1, 0x78));
+
+    await expect(value.store.status()).resolves.toMatchObject({
+      openai: { configured: false, stored: false },
+      stability: { configured: false, stored: false },
+    });
+    expect(value.decryptString).not.toHaveBeenCalled();
+
+    await value.store.set('openai', 'replacement-secret');
+    expect((await readFile(value.path)).byteLength).toBeLessThan(MAX_ENCRYPTED_CREDENTIAL_FILE_BYTES);
+    await expect(value.store.get('openai')).resolves.toBe('replacement-secret');
   });
 });
