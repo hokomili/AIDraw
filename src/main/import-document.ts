@@ -32,7 +32,7 @@ import { quantizeImageToPalette, quantizeRgbaToPalette } from './quantize-image'
 import { decodeApng } from './apng';
 import { inspectGif } from './gif';
 import { calculateSpriteSheetLayout, validateSpriteSheetSliceOptions, type SpriteSheetSliceOptions } from '../common/sprite-sheet';
-import { inspectImageHeader, MAX_INLINE_IMAGE_DIMENSION, MAX_INLINE_IMAGE_PIXELS } from './transaction-policy';
+import { displayImageDimensions, inspectImageHeader, MAX_INLINE_IMAGE_DIMENSION, MAX_INLINE_IMAGE_PIXELS } from './transaction-policy';
 import { importEditableSvg } from './svg-import';
 import { MAX_IMPORT_UTILITY_DOCUMENTS } from './utility-contract';
 
@@ -108,12 +108,20 @@ function imageAsset(name: string, mimeType: string, bytes: Buffer, source: Docum
 
 async function importRaster(bytes: Buffer, name: string, mimeType: string, pixelMode: boolean): Promise<ImportResult> {
   const header = inspectImageHeader(bytes);
-  assertImageDimensions(header.width, header.height, 'Image');
+  const display = displayImageDimensions(header);
+  assertImageDimensions(display.width, display.height, 'Image');
   let decoded;
   try { decoded = await loadImage(bytes); }
   catch { throw new Error('Image is corrupt or uses an unsupported codec.'); }
   const size = { width: decoded.width, height: decoded.height };
-  if (size.width !== header.width || size.height !== header.height) throw new Error('Decoded image dimensions disagree with its file header.');
+  if (size.width !== display.width || size.height !== display.height) {
+    throw new Error(header.mimeType === 'image/jpeg' && header.orientation !== undefined
+      ? 'Decoded image dimensions disagree with its file header and EXIF orientation.'
+      : 'Decoded image dimensions disagree with its file header.');
+  }
+  const warnings = header.mimeType === 'image/jpeg' && header.orientation !== undefined && header.orientation !== 1
+    ? [`JPEG EXIF orientation ${header.orientation} was applied; display geometry is ${display.width}×${display.height} from ${header.width}×${header.height} encoded pixels.`]
+    : [];
   if (pixelMode) {
     const document = createPixelDocument('sprite', name);
     const sprite = document.pixelAssets[document.activeAssetId];
@@ -124,7 +132,7 @@ async function importRaster(bytes: Buffer, name: string, mimeType: string, pixel
     document.assets[asset.id] = asset;
     writePixels(cel, await quantizeImageToPalette(bytes, size.width, size.height, document.palette, { alphaThreshold: document.conversionDefaults.alphaThreshold, dithering: document.conversionDefaults.dithering }));
     document.dirty = true;
-    return { documents: [document], warnings: ['Full-color image quantized to the active indexed palette; the source image is embedded for reproducibility.'] };
+    return { documents: [document], warnings: [...warnings, 'Full-color image quantized to the active indexed palette; the source image is embedded for reproducibility.'] };
   }
   const document = createIllustrationDocument(name);
   document.artboard.width = size.width; document.artboard.height = size.height; document.artboard.background = null;
@@ -133,7 +141,7 @@ async function importRaster(bytes: Buffer, name: string, mimeType: string, pixel
   const object: ImageObject = { ...entityBase(name, layer.id), type: 'image', assetId: asset.id, width: size.width, height: size.height, sourceWidth: size.width, sourceHeight: size.height, filters: [] };
   document.objects[object.id] = object; if (layer.type === 'vector') layer.objectIds.push(object.id);
   document.dirty = true;
-  return { documents: [document], warnings: [] };
+  return { documents: [document], warnings };
 }
 
 export function importApngBytes(bytes: Buffer, name: string): ImportResult | undefined {

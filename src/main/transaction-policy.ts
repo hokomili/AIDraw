@@ -15,10 +15,14 @@ export const MAX_INLINE_ASSET_BYTES = 1_500_000;
 export const MAX_INLINE_IMAGE_DIMENSION = 8_192;
 export const MAX_INLINE_IMAGE_PIXELS = 16_777_216;
 
-interface ImageHeader {
+export type JpegExifOrientation = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
+
+export interface ImageHeader {
   mimeType: DocumentAsset['mimeType'];
   width: number;
   height: number;
+  /** JPEG display transform. Omitted when no valid EXIF orientation exists. */
+  orientation?: JpegExifOrientation;
 }
 
 export interface TransactionPolicyOptions {
@@ -44,10 +48,38 @@ function gifHeader(bytes: Buffer): ImageHeader | undefined {
   return { mimeType: 'image/gif', width: bytes.readUInt16LE(6), height: bytes.readUInt16LE(8) };
 }
 
+function jpegExifOrientation(bytes: Buffer): JpegExifOrientation | undefined {
+  if (bytes.byteLength < 14 || !bytes.subarray(0, 6).equals(Buffer.from('Exif\0\0', 'binary'))) return undefined;
+  const tiff = 6;
+  const byteOrder = bytes.toString('ascii', tiff, tiff + 2);
+  const littleEndian = byteOrder === 'II';
+  if (!littleEndian && byteOrder !== 'MM') return undefined;
+  const uint16 = (offset: number): number | undefined => offset >= 0 && offset <= bytes.byteLength - 2
+    ? littleEndian ? bytes.readUInt16LE(offset) : bytes.readUInt16BE(offset)
+    : undefined;
+  const uint32 = (offset: number): number | undefined => offset >= 0 && offset <= bytes.byteLength - 4
+    ? littleEndian ? bytes.readUInt32LE(offset) : bytes.readUInt32BE(offset)
+    : undefined;
+  if (uint16(tiff + 2) !== 42) return undefined;
+  const firstIfdOffset = uint32(tiff + 4);
+  if (firstIfdOffset === undefined || firstIfdOffset > bytes.byteLength - tiff - 2) return undefined;
+  const firstIfd = tiff + firstIfdOffset;
+  const declaredEntries = uint16(firstIfd);
+  if (declaredEntries === undefined) return undefined;
+  const boundedEntries = Math.min(declaredEntries, Math.floor((bytes.byteLength - firstIfd - 2) / 12));
+  for (let index = 0; index < boundedEntries; index += 1) {
+    const entry = firstIfd + 2 + index * 12;
+    if (uint16(entry) !== 0x0112 || uint16(entry + 2) !== 3 || uint32(entry + 4) !== 1) continue;
+    const value = uint16(entry + 8);
+    if (value !== undefined && value >= 1 && value <= 8) return value as JpegExifOrientation;
+  }
+  return undefined;
+}
+
 function jpegHeader(bytes: Buffer): ImageHeader | undefined {
   if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) return undefined;
   const startOfFrame = new Set([0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf]);
-  let offset = 2;
+  let offset = 2; let width: number | undefined; let height: number | undefined; let orientation: JpegExifOrientation | undefined;
   while (offset + 3 < bytes.length) {
     while (offset < bytes.length && bytes[offset] === 0xff) offset += 1;
     const marker = bytes[offset];
@@ -57,12 +89,13 @@ function jpegHeader(bytes: Buffer): ImageHeader | undefined {
     if (offset + 2 > bytes.length) break;
     const length = bytes.readUInt16BE(offset);
     if (length < 2 || offset + length > bytes.length) break;
-    if (startOfFrame.has(marker) && length >= 7) {
-      return { mimeType: 'image/jpeg', width: bytes.readUInt16BE(offset + 5), height: bytes.readUInt16BE(offset + 3) };
+    if (marker === 0xe1 && orientation === undefined) orientation = jpegExifOrientation(bytes.subarray(offset + 2, offset + length));
+    if (startOfFrame.has(marker) && length >= 7 && width === undefined) {
+      width = bytes.readUInt16BE(offset + 5); height = bytes.readUInt16BE(offset + 3);
     }
     offset += length;
   }
-  return undefined;
+  return width !== undefined && height !== undefined ? { mimeType: 'image/jpeg', width, height, ...(orientation === undefined ? {} : { orientation }) } : undefined;
 }
 
 function webpHeader(bytes: Buffer): ImageHeader | undefined {
@@ -89,6 +122,12 @@ export function inspectImageHeader(bytes: Buffer): ImageHeader {
   return header;
 }
 
+export function displayImageDimensions(header: ImageHeader): { width: number; height: number } {
+  return header.mimeType === 'image/jpeg' && header.orientation !== undefined && header.orientation >= 5
+    ? { width: header.height, height: header.width }
+    : { width: header.width, height: header.height };
+}
+
 export async function validateInlineDocumentAsset(asset: DocumentAsset): Promise<void> {
   if (!asset.data) throw new Error(`Inline asset ${asset.id} is missing base64 data.`);
   if (asset.data.length % 4 !== 0 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(asset.data)) {
@@ -102,12 +141,17 @@ export async function validateInlineDocumentAsset(asset: DocumentAsset): Promise
 
   const header = inspectImageHeader(bytes);
   if (asset.mimeType !== header.mimeType) throw new Error(`Inline asset ${asset.id} declares ${asset.mimeType} but its bytes are ${header.mimeType}.`);
-  if (header.width < 1 || header.height < 1 || header.width > MAX_INLINE_IMAGE_DIMENSION || header.height > MAX_INLINE_IMAGE_DIMENSION || header.width * header.height > MAX_INLINE_IMAGE_PIXELS) {
-    throw new Error(`Inline asset ${asset.id} dimensions ${header.width}×${header.height} exceed the 8192 px / 16 MP safety limit.`);
+  const display = displayImageDimensions(header);
+  if (display.width < 1 || display.height < 1 || display.width > MAX_INLINE_IMAGE_DIMENSION || display.height > MAX_INLINE_IMAGE_DIMENSION || display.width * display.height > MAX_INLINE_IMAGE_PIXELS) {
+    throw new Error(`Inline asset ${asset.id} dimensions ${display.width}×${display.height} exceed the 8192 px / 16 MP safety limit.`);
   }
   try {
     const decoded = await loadImage(bytes);
-    if (decoded.width !== header.width || decoded.height !== header.height) throw new Error('decoded dimensions differ from the file header');
+    if (decoded.width !== display.width || decoded.height !== display.height) {
+      throw new Error(header.mimeType === 'image/jpeg' && header.orientation !== undefined
+        ? 'decoded dimensions differ from the file header and EXIF orientation'
+        : 'decoded dimensions differ from the file header');
+    }
   } catch (error) {
     throw new Error(`Inline asset ${asset.id} could not be decoded safely: ${error instanceof Error ? error.message : 'unsupported image'}.`);
   }
