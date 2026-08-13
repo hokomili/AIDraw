@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import type { CollisionShape } from '@aidraw/core';
-import { drawMapObjectOverlay } from '../../src/common/map-object-render';
+import { drawMapObjectOverlay, mapObjectIntersectsRasterRegion, mapObjectProjectedRenderBounds, mapObjectsIntersectingRasterRegion } from '../../src/common/map-object-render';
 
 class RecordingContext {
   fillStyle: unknown;
   strokeStyle: unknown;
   lineWidth = 0;
+  miterLimit = 10;
   readonly calls: Array<[string, ...unknown[]]> = [];
   beginPath() { this.calls.push(['beginPath']); }
   closePath() { this.calls.push(['closePath']); }
@@ -66,5 +67,30 @@ describe('shared map-object overlay rendering', () => {
     expect(context.calls.slice(-4)).toEqual([
       ['beginPath'], ['arc', 12, 23, 2, 0, Math.PI * 2], ['fill'], ['stroke'],
     ]);
+  });
+
+  it('projects conservative stroke and handle bounds through an affine map matrix', () => {
+    expect(mapObjectProjectedRenderBounds(shape('rectangle'), { a: 2, b: 1, c: -1, d: 0.5, e: 100, f: 50 }))
+      .toEqual({ x: 41.25, y: 60.625, width: 137.5, height: 68.75 });
+    expect(mapObjectProjectedRenderBounds(shape('rectangle'), { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 }, { selected: true, unitScale: 2 }))
+      .toEqual({ x: 5, y: 15, width: 40, height: 50 });
+  });
+
+  it('filters projected objects conservatively without changing retained order', () => {
+    const edge = shape('rectangle', { id: 'edge', x: 10.7, y: 1, width: 1, height: 1 });
+    const target = shape('ellipse', { id: 'target', x: 2, y: 2, width: 1, height: 1 });
+    const far = shape('rectangle', { id: 'far', x: 100, y: 100, width: 1, height: 1 });
+    const matrix = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
+    const region = { x: 0, y: 0, width: 10, height: 10 };
+    expect(mapObjectIntersectsRasterRegion(edge, matrix, region, { unitScale: 10 })).toBe(false);
+    expect(mapObjectsIntersectingRasterRegion([edge, far, target], matrix, region, { unitScale: 10, selectedId: edge.id }).map(({ id }) => id))
+      .toEqual(['edge', 'target']);
+  });
+
+  it('fails closed on invalid projection or raster geometry', () => {
+    const object = shape('rectangle'); const matrix = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
+    expect(() => mapObjectProjectedRenderBounds(object, { ...matrix, a: Number.NaN })).toThrow(/matrix must be finite/);
+    expect(() => mapObjectProjectedRenderBounds(object, matrix, { unitScale: 0 })).toThrow(/positive and finite/);
+    expect(() => mapObjectIntersectsRasterRegion(object, matrix, { x: 0, y: 0, width: 0, height: 10 })).toThrow(/dimensions must be positive/);
   });
 });

@@ -642,6 +642,18 @@ The compositor still performs an O(total stored chunks) key-count comparison bef
 
 The adjacent checker-pattern loop was not changed. Its background and each dark cell currently draw while the map shadow is active, and Canvas shadow blur has no portable finite cutoff that would justify omitting offscreen cells as exact. A future review must choose between retaining that appearance with native visual evidence and moving shadow ownership to one whole-canvas rectangle as an explicit visual correction. This checkpoint does not silently make that choice or claim Level 3, RC, or stable-v1 readiness.
 
+## Latest source/headless map-object viewport checkpoint
+
+Source/headless MAP-09/FND-10/FND-12 evidence (2026-08-12): a small regional observation and a panned editor viewport previously invoked the full path/fill/stroke/handle renderer for every visible-layer map object, up to the canonical 100,000-object array ceiling, and relied on Canvas clipping afterward. Unlike the checker shadow, object geometry has an established affine projection and bounded style contract, so exact conservative culling is possible without a visual-policy change.
+
+One pure bounds helper starts with the existing canonical rectangle/ellipse/polygon/polyline AABB, expands it by half the explicitly set Canvas miter limit times the renderer's scale-stable line width, and includes the selected eight-pixel resize or four-pixel point handles within that larger pad. Transforming all four expanded corners through the exact orthogonal or isometric object matrix yields a conservative raster AABB. Editor projection adds the layer's fractional parallax translation and uses live gesture-preview geometry plus selected styling; headless rendering uses canonical pan zero. Filtering retains source order before the unchanged overlay renderer.
+
+Pure tests prove an exact skewed affine AABB, selected-handle expansion, edge intersection, retained order, and invalid geometry. Source wiring requires both renderers to filter, and a production regional test gives a distant rectangle a width getter that throws on a second access: the filter reads it once, the visible neighbor renders, and the distant draw path is never reached. Focused pinned-Node-24 typecheck/targeted ESLint and **4 files / 33 tests** pass. The complete safe gate passes portability for **369 tracked + 76 prospective** paths, TypeScript, full ESLint, and **151 files / 873 tests**.
+
+The formal gate constructs the canonical **100,000-object** ceiling as spaced rectangles, filters against the final object's region, requires that one exact retained ID, and trips at **500 ms**. The local Apple Silicon run passes at **35.98 ms** and **868.39 MiB** total RSS; 4,096-chunk map/sprite regions take **1.36 / 0.33 ms**, 65,536 addressed maximum-sheet tiles **145.91 ms**, native save **126.86 ms**, PNG export **41.97 ms**, one-million-sample accounting **1.36 ms**, and flood **179.24 ms**. `/private/tmp/aidraw-map-object-viewport-performance-gate-final.json` is temporary self-authored diagnostics, not browser/package evidence.
+
+The filter remains O(total objects) and adds no mutable spatial index, schema field, or invalidation path. Canonical object arrays/properties/points, flattened z-order, opacity, styles, selection/gesture semantics, hit testing, headless pan-zero behavior, raster pixels, Tiled bytes, map bounds/origin, and infinite-view policy remain unchanged. Packaged drag/visual/frame-pacing acceptance, Tiled-native styling equivalence, broad compatibility, Level 3, RC, and stable-v1 readiness remain unclaimed.
+
 ## Failure severity and reruns
 
 | Severity | Meaning | Gate effect |

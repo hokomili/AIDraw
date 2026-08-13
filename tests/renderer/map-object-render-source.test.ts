@@ -5,8 +5,10 @@ describe('map-object render source parity', () => {
   it('uses the same overlay renderer in interactive and headless map surfaces', async () => {
     const interactive = await readFile(new URL('../../src/renderer/canvas/PixelCanvas.tsx', import.meta.url), 'utf8');
     const headless = await readFile(new URL('../../src/main/render-document.ts', import.meta.url), 'utf8');
-    expect(interactive).toContain("import { drawMapObjectOverlay } from '../../common/map-object-render'");
-    expect(headless).toContain("import { drawMapObjectOverlay } from '../common/map-object-render'");
+    expect(interactive).toContain("import { drawMapObjectOverlay, mapObjectIntersectsRasterRegion } from '../../common/map-object-render'");
+    expect(headless).toContain("import { drawMapObjectOverlay, mapObjectsIntersectingRasterRegion } from '../common/map-object-render'");
+    expect(interactive).toContain('if (!mapObjectIntersectsRasterRegion(object, projectedMatrix, viewport, { selected, unitScale })) continue');
+    expect(headless).toContain('const objects = mapObjectsIntersectingRasterRegion(layer.objects ?? [], matrix, region, { unitScale })');
     expect(interactive).toContain('drawMapObjectOverlay(context, object, { selected, unitScale })');
     expect(headless).toContain('drawMapObjectOverlay(context, object, { unitScale })');
   });

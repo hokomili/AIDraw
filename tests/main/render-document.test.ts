@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createCanvas, loadImage } from '@napi-rs/canvas';
-import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createIllustrationDocument, createPixelDocument, createPixelSprite, createPixelTilemap, createPixelTileset, encodeTiledGid, nowIso, writePixels, writeTiles, type GroupObject, type ShapeObject } from '@aidraw/core';
+import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createIllustrationDocument, createPixelDocument, createPixelSprite, createPixelTilemap, createPixelTileset, encodeTiledGid, nowIso, writePixels, writeTiles, type CollisionShape, type GroupObject, type ShapeObject } from '@aidraw/core';
 import { exportDocument } from '@main/export-document';
 import { materializePaintTiles } from '@main/persistence';
 import { renderIllustration, renderSprite, renderSpriteRegion, renderTilemap, renderTilemapRegion } from '@main/render-document';
@@ -173,6 +173,24 @@ describe('native document rendering', () => {
     expect(context.getImageData(4, 2, 1, 1).data[3]).toBeLessThanOrEqual(20);
     objectLayer.visible = false;
     expect([...renderTilemap(document, map).getContext('2d').getImageData(0, 0, 8, 4).data].every((channel) => channel === 0)).toBe(true);
+  });
+
+  it('does not path-render a nonintersecting map object during regional rendering', () => {
+    const document = createPixelDocument('tilemap', 'Object-region pruning'); const map = document.pixelAssets[document.activeAssetId]; if (map.type !== 'tilemap') throw new Error('Expected tilemap');
+    map.width = 100; map.height = 1; map.tileWidth = 16; map.tileHeight = 16;
+    const timestamp = nowIso(); let farWidthReads = 0;
+    const farObject = {
+      id: 'far-object', type: 'rectangle', x: 1_000, y: 0, get width() { farWidthReads += 1; if (farWidthReads > 1) throw new Error('A nonintersecting map object was rendered.'); return 16; }, height: 16, properties: {},
+    } as CollisionShape;
+    const objectLayer: typeof map.layers[string] = {
+      id: 'regional-objects', revision: 0, name: 'Regional objects', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
+      type: 'object', visible: true, locked: false, opacity: 1, parallaxX: 1, parallaxY: 1,
+      objects: [farObject, { id: 'near-object', type: 'rectangle', x: 2, y: 2, width: 8, height: 8, properties: {} }],
+    };
+    map.layers = { [objectLayer.id]: objectLayer }; map.layerIds = [objectLayer.id];
+    const rendered = renderTilemapRegion(document, map, { x: 0, y: 0, width: 16, height: 16 });
+    expect(farWidthReads).toBe(1);
+    expect(rendered.getContext('2d').getImageData(6, 6, 1, 1).data[3]).toBeGreaterThan(0);
   });
 
   it('renders overlapping isometric cells right-down across reverse-inserted sparse chunks', () => {

@@ -17,7 +17,7 @@ import {
 import { BoundedResourceCache } from '../common/bounded-resource-cache';
 import { colorWithOpacity } from '../common/color';
 import { isometricCellRect, isometricObjectMatrix, isometricProjectionExtent } from '../common/isometric-projection';
-import { drawMapObjectOverlay } from '../common/map-object-render';
+import { drawMapObjectOverlay, mapObjectsIntersectingRasterRegion } from '../common/map-object-render';
 import { orthogonalCellRect, orthogonalObjectMatrix, orthogonalProjectionExtent } from '../common/orthogonal-projection';
 import { paintTileCachePlan } from '../common/paint-tile-cache';
 import { renderRasterStroke } from '../common/raster-brush';
@@ -312,15 +312,13 @@ function renderTilemapSurface(document: PixelDocument, map: PixelTilemap, region
     context.globalAlpha = entry.opacity;
     if (layer.type === 'object') {
       context.save();
-      if (isometric) {
-        const matrix = isometricObjectMatrix(map.height, map.tileWidth, map.tileHeight, map.tileWidth, map.tileHeight);
-        context.transform(matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f);
-      } else {
-        const matrix = orthogonalObjectMatrix(map.tileWidth, map.tileHeight, map.tileWidth, map.tileHeight);
-        context.transform(matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f);
-      }
+      const matrix = isometric
+        ? isometricObjectMatrix(map.height, map.tileWidth, map.tileHeight, map.tileWidth, map.tileHeight)
+        : orthogonalObjectMatrix(map.tileWidth, map.tileHeight, map.tileWidth, map.tileHeight);
       const unitScale = isometric ? map.tileWidth / Math.max(map.tileWidth, map.tileHeight) : 1;
-      for (const object of layer.objects ?? []) drawMapObjectOverlay(context, object, { unitScale });
+      const objects = mapObjectsIntersectingRasterRegion(layer.objects ?? [], matrix, region, { unitScale });
+      context.transform(matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f);
+      for (const object of objects) drawMapObjectOverlay(context, object, { unitScale });
       context.restore();
       continue;
     }

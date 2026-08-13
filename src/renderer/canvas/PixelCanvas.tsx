@@ -63,7 +63,7 @@ import { pixelSelectionBounds, transformPixelSelection, type PixelSelectionTrans
 import { captureGridSelection, combineGridSelection, placeGridClipboard, rasterizeGridLasso, scaleGridSelection, transformGridSelection, type GridSelectionClipboard } from '../../common/grid-selection';
 import { deleteMapObjectPoint, insertMapObjectPoint, mapObjectAtPoint, mapObjectBounds, moveMapObjectPoint, nearestMapObjectSegment, transformMapObject } from '../../common/map-objects';
 import { isometricCellRect, isometricCoordinateDeltaFromScreen, isometricObjectMatrix, isometricProjectionExtent, type IsometricCellRect } from '../../common/isometric-projection';
-import { drawMapObjectOverlay } from '../../common/map-object-render';
+import { drawMapObjectOverlay, mapObjectIntersectsRasterRegion } from '../../common/map-object-render';
 import { orthogonalCellRect, orthogonalCoordinateDeltaFromScreen, orthogonalObjectMatrix, orthogonalProjectionExtent } from '../../common/orthogonal-projection';
 import { TILE_VARIANT_SEED_PROPERTY, chooseTileVariant, nextTileVariantSeed, tileVariantCandidates, tileVariantGroup } from '../../common/tile-variants';
 import { isometricTileRenderCells } from '../../common/tile-render-order';
@@ -539,16 +539,17 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
         context.save(); context.translate(layerOffsetX, layerOffsetY);
         if (layer.type === 'object') {
           context.globalAlpha = entry.opacity;
+          const matrix = tilemap.orientation === 'isometric'
+            ? isometricObjectMatrix(tilemap.height, tilemap.tileWidth, tilemap.tileHeight, view.scale, isometricCellHeight)
+            : orthogonalObjectMatrix(tilemap.tileWidth, tilemap.tileHeight, view.scale, orthogonalCellHeight);
+          const projectedMatrix = { ...matrix, e: matrix.e + layerOffsetX, f: matrix.f + layerOffsetY };
+          const viewport = { x: -view.offsetX, y: -view.offsetY, width: size.width, height: size.height };
+          const unitScale = tilemap.orientation === 'orthogonal' ? view.scale / tilemap.tileWidth : view.scale / Math.max(tilemap.tileWidth, tilemap.tileHeight);
           for (const source of layer.objects ?? []) {
-            const object = mapObjectGesture?.layerId === layer.id && mapObjectGesture.objectId === source.id ? previewMapObject(mapObjectGesture) : source; const selected = selectedEntityId === object.id; const unitScale = tilemap.orientation === 'orthogonal' ? view.scale / tilemap.tileWidth : view.scale / Math.max(tilemap.tileWidth, tilemap.tileHeight);
+            const object = mapObjectGesture?.layerId === layer.id && mapObjectGesture.objectId === source.id ? previewMapObject(mapObjectGesture) : source; const selected = selectedEntityId === object.id;
+            if (!mapObjectIntersectsRasterRegion(object, projectedMatrix, viewport, { selected, unitScale })) continue;
             context.save();
-            if (tilemap.orientation === 'isometric') {
-              const matrix = isometricObjectMatrix(tilemap.height, tilemap.tileWidth, tilemap.tileHeight, view.scale, isometricCellHeight);
-              context.transform(matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f);
-            } else {
-              const matrix = orthogonalObjectMatrix(tilemap.tileWidth, tilemap.tileHeight, view.scale, orthogonalCellHeight);
-              context.transform(matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f);
-            }
+            context.transform(matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f);
             drawMapObjectOverlay(context, object, { selected, unitScale });
             context.restore();
           }
