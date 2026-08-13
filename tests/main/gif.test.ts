@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { GIFEncoder } from 'gifenc';
-import { decodeGifFrames, inspectGif } from '../../src/main/gif';
+import { inspectGif, visitDecodedGifFrames, type DecodedGifFrame } from '../../src/main/gif';
 
 function minimalGif(width = 1, height = 1): Buffer {
   return Buffer.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, width & 255, width >> 8, height & 255, height >> 8, 0x80, 0, 0, 0, 0, 0, 255, 255, 255, 0x2c, 0, 0, 0, 0, width & 255, width >> 8, height & 255, height >> 8, 0, 2, 2, 0x44, 0x01, 0, 0x3b]);
@@ -16,6 +16,12 @@ function withoutGlobalColorTable(bytes: Buffer): Buffer {
 
 function withTransparencyIndex(bytes: Buffer, index: number): Buffer {
   return Buffer.concat([bytes.subarray(0, 19), Buffer.from([0x21, 0xf9, 4, 1, 0, 0, index, 0]), bytes.subarray(19)]);
+}
+
+function decodeGifFrames(bytes: Buffer): DecodedGifFrame[] {
+  const frames: DecodedGifFrame[] = [];
+  visitDecodedGifFrames(bytes, (frame) => frames.push(frame));
+  return frames;
 }
 
 describe('bounded GIF inspection', () => {
@@ -47,6 +53,21 @@ describe('bounded GIF inspection', () => {
     }
     const encoder = GIFEncoder(); encoder.writeFrame(indexes, width, height, { palette }); encoder.finish();
     expect(decodeGifFrames(Buffer.from(encoder.bytes()))[0].patch).toEqual(expected);
+  });
+
+  it('replays decoded patches in frame order as fresh visitor values', () => {
+    const encoder = GIFEncoder(); const palette = [[0, 0, 0], [255, 255, 255]];
+    encoder.writeFrame(Uint8Array.from([0]), 1, 1, { palette, delay: 40 });
+    encoder.writeFrame(Uint8Array.from([1]), 1, 1, { palette, delay: 70 });
+    encoder.finish();
+    const bytes = Buffer.from(encoder.bytes()); const passes: DecodedGifFrame[][] = [[], []];
+    visitDecodedGifFrames(bytes, (frame) => passes[0].push(frame));
+    visitDecodedGifFrames(bytes, (frame) => passes[1].push(frame));
+    expect(passes.map((frames) => frames.map((frame) => [frame.delay, ...frame.patch]))).toEqual([
+      [[40, 0, 0, 0, 255], [70, 255, 255, 255, 255]],
+      [[40, 0, 0, 0, 255], [70, 255, 255, 255, 255]],
+    ]);
+    expect(passes[0][0].patch).not.toBe(passes[1][0].patch);
   });
 
   it('rejects LZW streams without exact pixels and an end-of-information code', () => {

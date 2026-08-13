@@ -197,17 +197,21 @@ function deinterlaceGifPixels(pixels: Uint8Array, width: number, height: number)
   return output;
 }
 
-export function decodeGifFrames(bytes: Uint8Array, inspected = inspectGif(bytes)): DecodedGifFrame[] {
+export function visitDecodedGifFrames(
+  bytes: Uint8Array,
+  visit: (frame: DecodedGifFrame, index: number) => void,
+  inspected = inspectGif(bytes),
+): void {
   // gifuct-js remains the container parser, but its pixel helper pads short LZW
   // output with index zero and substitutes black for missing palette entries.
   // Editable import must reject those cases rather than inventing artwork.
   const parsed = parseGIF(Uint8Array.from(bytes).buffer) as unknown as ParsedGifSource;
-  const frames: DecodedGifFrame[] = [];
+  let frameCount = 0;
   let patchPixels = 0;
   for (const candidate of parsed.frames) {
     if (!isParsedGifImageFrame(candidate)) continue;
     const { descriptor, data } = candidate.image;
-    const frameNumber = frames.length + 1;
+    const frameNumber = frameCount + 1;
     const pixelCount = descriptor.width * descriptor.height;
     const table = descriptor.lct.exists ? candidate.image.lct : parsed.gct;
     if (!Array.isArray(table) || !table.length) throw new Error(`GIF frame ${frameNumber} has no active color table.`);
@@ -235,8 +239,8 @@ export function decodeGifFrames(bytes: Uint8Array, inspected = inspectGif(bytes)
       frame.disposalType = candidate.gce.extras.disposal;
     }
     patchPixels += pixelCount;
-    frames.push(frame);
+    frameCount += 1;
+    visit(frame, frameNumber - 1);
   }
-  if (frames.length !== inspected.frameCount || patchPixels !== inspected.patchPixels) throw new Error('GIF decoder output disagrees with the validated container.');
-  return frames;
+  if (frameCount !== inspected.frameCount || patchPixels !== inspected.patchPixels) throw new Error('GIF decoder output disagrees with the validated container.');
 }

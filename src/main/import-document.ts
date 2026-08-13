@@ -33,7 +33,7 @@ import {
 } from '@aidraw/core';
 import { quantizeImageToPalette, quantizeRgbaToPalette } from './quantize-image';
 import { decodeApng } from './apng';
-import { decodeGifFrames, inspectGif, type DecodedGifFrame } from './gif';
+import { inspectGif, visitDecodedGifFrames, type DecodedGifFrame } from './gif';
 import { calculateSpriteSheetLayout, validateSpriteSheetSliceOptions, type SpriteSheetSliceOptions } from '../common/sprite-sheet';
 import { createExactAnimationPalettePlanner, exactAnimationFrameChanges, type ExactAnimationPalettePlan } from '../common/animation-palette';
 import { aidrawPsdTextGeometry, aidrawPsdTextObjectName, psdLayerHasPartialLock, psdLayerIsLockedAll } from '../common/psd-text';
@@ -223,15 +223,16 @@ function setImportedFramePalette(sprite: PixelSprite, frameId: string, plan: Exa
 }
 
 function visitCompositedGifFrames(
-  frames: DecodedGifFrame[],
+  decodeFrames: (visit: (frame: DecodedGifFrame, index: number) => void) => void,
   width: number,
   height: number,
-  visit: (rgba: Uint8ClampedArray, index: number) => boolean | void,
+  visit: (rgba: Uint8ClampedArray, index: number, frame: DecodedGifFrame) => boolean | void,
 ): void {
   const canvas = createCanvas(width, height); const context = canvas.getContext('2d'); context.imageSmoothingEnabled = false;
+  let active = true;
   try {
-    for (let index = 0; index < frames.length; index += 1) {
-      const frame = frames[index];
+    decodeFrames((frame, index) => {
+      if (!active) return;
       const restore = frame.disposalType === 3 ? context.getImageData(0, 0, width, height) : undefined;
       const patchCanvas = createCanvas(frame.dims.width, frame.dims.height);
       try {
@@ -240,10 +241,10 @@ function visitCompositedGifFrames(
       } finally {
         patchCanvas.width = 1; patchCanvas.height = 1;
       }
-      if (visit(context.getImageData(0, 0, width, height).data, index) === false) return;
+      if (visit(context.getImageData(0, 0, width, height).data, index, frame) === false) { active = false; return; }
       if (frame.disposalType === 2) context.clearRect(frame.dims.left, frame.dims.top, frame.dims.width, frame.dims.height);
       else if (frame.disposalType === 3 && restore) context.putImageData(restore, 0, 0);
-    }
+    });
   } finally {
     canvas.width = 1; canvas.height = 1;
   }
@@ -275,17 +276,18 @@ export function importApngBytes(bytes: Buffer, name: string): ImportResult | und
 
 export function importGifBytes(bytes: Buffer, name: string): ImportResult {
   assertImportedInlineAssetBytes(bytes, 'GIF source');
-  const inspected = inspectGif(bytes); const frames = decodeGifFrames(bytes, inspected);
-  if (!frames.length) throw new Error('GIF contains no decodable frames.');
-  if (frames.length !== inspected.frameCount) throw new Error('GIF decoder frame count disagrees with the validated container.');
+  const inspected = inspectGif(bytes);
+  // Palette planning and cel writing replay the bounded source rather than
+  // retaining every decoded RGBA patch across both compositing passes.
+  const decodeFrames = (visit: (frame: DecodedGifFrame, index: number) => void) => visitDecodedGifFrames(bytes, visit, inspected);
   const width = inspected.width; const height = inspected.height; const document = createPixelDocument('sprite', name); const sprite = createPixelSprite(name, width, height);
   document.pixelAssets = { [sprite.id]: sprite }; document.assetIds = [sprite.id]; document.activeAssetId = sprite.id;
   const planner = createExactAnimationPalettePlanner(document.palette, document.conversionDefaults.alphaThreshold);
-  visitCompositedGifFrames(frames, width, height, (rgba) => planner.addFrame(rgba));
+  visitCompositedGifFrames(decodeFrames, width, height, (rgba) => planner.addFrame(rgba));
   const exactPlan = planner.finish(); if (exactPlan) document.palette = structuredClone(exactPlan.palette);
   const layerId = sprite.layerIds[0]; const firstFrameId = sprite.frameIds[0]; const firstCel = Object.values(sprite.cels)[0];
-  visitCompositedGifFrames(frames, width, height, (rgba, index) => {
-    const frame = frames[index]; const changes = exactPlan
+  visitCompositedGifFrames(decodeFrames, width, height, (rgba, index, frame) => {
+    const changes = exactPlan
       ? exactAnimationFrameChanges(rgba, width, height, exactPlan.frames[index], exactPlan.alphaThreshold)
       : quantizeRgbaToPalette(rgba, width, height, document.palette, { alphaThreshold: document.conversionDefaults.alphaThreshold, dithering: document.conversionDefaults.dithering, includeTransparent: true });
     if (index === 0) {
