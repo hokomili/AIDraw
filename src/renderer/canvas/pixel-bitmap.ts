@@ -78,7 +78,20 @@ export function drawSpriteThumbnail(
   outputWidth: number,
   outputHeight: number,
 ): void {
+  drawSpriteRegionThumbnail(context, sprite, frameId, palette, { x: 0, y: 0, width: sprite.width, height: sprite.height }, outputWidth, outputHeight);
+}
+
+export function drawSpriteRegionThumbnail(
+  context: CanvasRenderingContext2D,
+  sprite: PixelSprite,
+  frameId: string,
+  palette: PixelDocument['palette'],
+  source: { x: number; y: number; width: number; height: number },
+  outputWidth: number,
+  outputHeight: number,
+): void {
   if (!Number.isInteger(outputWidth) || outputWidth < 1 || !Number.isInteger(outputHeight) || outputHeight < 1) throw new Error('Sprite thumbnail dimensions must be positive integers.');
+  if (![source.x, source.y, source.width, source.height].every(Number.isInteger) || source.width < 1 || source.height < 1) throw new Error('Sprite thumbnail source rectangles must use positive integer geometry.');
   context.save();
   context.clearRect(0, 0, outputWidth, outputHeight);
   context.imageSmoothingEnabled = false;
@@ -91,9 +104,9 @@ export function drawSpriteThumbnail(
     context.globalAlpha = opacity;
     context.globalCompositeOperation = layer.blendMode === 'normal' ? 'source-over' : layer.blendMode;
     for (let y = 0; y < outputHeight; y += 1) {
-      const sourceY = Math.min(sprite.height - 1, Math.floor(y * sprite.height / outputHeight));
+      const sourceY = source.y + Math.min(source.height - 1, Math.floor(y * source.height / outputHeight));
       for (let x = 0; x < outputWidth; x += 1) {
-        const sourceX = Math.min(sprite.width - 1, Math.floor(x * sprite.width / outputWidth));
+        const sourceX = source.x + Math.min(source.width - 1, Math.floor(x * source.width / outputWidth));
         const index = read(sourceX, sourceY);
         if (!index) continue;
         context.fillStyle = colors[index]?.color ?? '#ff00ff';

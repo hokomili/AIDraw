@@ -48,7 +48,7 @@ import {
   type TileStamp,
   type TilemapChunk,
 } from '@aidraw/core';
-import { ArrowLeft, ArrowRight, ChevronLeft, ChevronRight, ClipboardPaste, Copy, Eraser, Eye, FlipHorizontal2, FlipVertical2, Grid3X3, Link2, Move, Palette, Pause, Play, Repeat2, RotateCcw, RotateCw, Scaling, Scissors, Trash2, Unlink2 } from 'lucide-react';
+import { ArrowLeft, ArrowRight, ChevronLeft, ChevronRight, ClipboardPaste, Copy, Dices, Eraser, Eye, FlipHorizontal2, FlipVertical2, Grid3X3, Link2, Move, Palette, Pause, Play, Repeat2, RotateCcw, RotateCw, Scaling, Scissors, Trash2, Unlink2 } from 'lucide-react';
 import { useEditorStore } from '../store';
 import { PlaybackLanes } from '../components/PlaybackLanes';
 import { collectReplayMasks, replayPointKey, replayTileLayerKey } from '../replay';
@@ -58,7 +58,7 @@ import { clientPointToIsometricCoordinate, clientPointToIsometricTile, clientPoi
 import { pixelSelectionBounds, transformPixelSelection, type PixelSelectionTransform } from '../../common/pixel-selection';
 import { captureGridSelection, combineGridSelection, placeGridClipboard, rasterizeGridLasso, scaleGridSelection, transformGridSelection, type GridSelectionClipboard } from '../../common/grid-selection';
 import { deleteMapObjectPoint, insertMapObjectPoint, mapObjectAtPoint, mapObjectBounds, moveMapObjectPoint, nearestMapObjectSegment, transformMapObject } from '../../common/map-objects';
-import { TILE_VARIANT_SEED_PROPERTY, chooseTileVariant, tileVariantCandidates, tileVariantGroup } from '../../common/tile-variants';
+import { TILE_VARIANT_SEED_PROPERTY, chooseTileVariant, nextTileVariantSeed, tileVariantCandidates, tileVariantGroup } from '../../common/tile-variants';
 import { parseBitmapFontJson } from '../../common/bitmap-font-interchange';
 import { cancelPixelGesture, releasePendingPixelLocks } from '../../common/pixel-gesture';
 import { recordValues, safeDecodePixelChunk, spriteBitmap, visibleSpriteLayers } from './pixel-bitmap';
@@ -286,7 +286,8 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const placementTileStamp: TileStamp = activeTileStamp ?? { id: 'builtin-tile', name: 'Current tile', width: 1, height: 1, anchorX: 0, anchorY: 0, cells: [{ x: 0, y: 0, gid: encodeTiledGid((terrainTileset?.type === 'tileset' ? terrainTileset.firstGid : 1) + Math.max(1, pixelIndex) - 1, tileTransforms) }] };
   const selectedTileId = Math.max(1, pixelIndex) - 1;
   const selectedVariantGroup = terrainTileset?.type === 'tileset' ? tileVariantGroup(terrainTileset.tiles[selectedTileId]) : undefined;
-  const selectedVariantCount = terrainTileset?.type === 'tileset' ? tileVariantCandidates(terrainTileset, selectedTileId).length : 0;
+  const selectedVariantCandidates = terrainTileset?.type === 'tileset' ? tileVariantCandidates(terrainTileset, selectedTileId) : [];
+  const selectedVariantCount = selectedVariantCandidates.length;
   const variantSeed = tilemap ? Math.trunc(Number(tilemap.properties[TILE_VARIANT_SEED_PROPERTY]) || 0) : 0;
   const hasTimeline = Boolean(sprite && !tileset);
 
@@ -639,6 +640,13 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
         if (result.dropped) notify(`${result.dropped} selected pixel${result.dropped === 1 ? '' : 's'} fell outside the sprite and were clipped.`, 'warning');
       }
     } finally { if (lock.lockId) await window.aidraw.releaseHumanLock(lock.lockId); }
+  };
+
+  const changeVariantSeed = (seed: number, label: string) => {
+    if (!tilemap || seed === variantSeed) return;
+    const map = structuredClone(tilemap);
+    map.properties[TILE_VARIANT_SEED_PROPERTY] = seed;
+    void apply(label, [{ kind: 'pixel.asset.replace', asset: map, expectedRevision: tilemap.revision }]);
   };
 
   const deleteSelection = async () => {
@@ -1104,7 +1112,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
         {paletteCycling && document.paletteCycles.length > 0 && <select aria-label="Active palette cycle" value={activePaletteCycle?.id} onChange={(event) => { setActivePaletteCycleId(event.target.value); setPaletteOffset(0); }} title="Named palette cycle">{document.paletteCycles.map((cycle) => <option key={cycle.id} value={cycle.id}>{cycle.name}</option>)}</select>}
         {tool === 'terrain' && terrainTileset?.type === 'tileset' && <><select aria-label="Active Wang set" value={terrainSet?.id ?? ''} onChange={(event) => { setTerrainSetId(event.target.value); setTerrainColorId(undefined); }}><option value="" disabled>Wang set</option>{terrainTileset.wangSets.map((set) => <option key={set.id} value={set.id}>{set.name}</option>)}</select><select aria-label="Active Wang color" value={terrainColor?.id ?? ''} onChange={(event) => setTerrainColorId(Number(event.target.value))}><option value="" disabled>Terrain color</option>{terrainSet?.colors.map((color) => <option key={color.id} value={color.id}>{color.name}</option>)}</select><button className={terrainErase ? 'is-active' : ''} onClick={() => setTerrainErase((value) => !value)} title="Toggle terrain erase and neighbor repair"><Eraser size={13} /> {terrainErase ? 'Erase' : 'Paint'}</button></>}
         {tilemap && tool !== 'terrain' && terrainTileset?.type === 'tileset' && <><button className={tileTransforms.hFlip ? 'is-active' : ''} disabled={!terrainTileset.transformations.hFlip} onClick={() => setTileTransforms((value) => ({ ...value, hFlip: !value.hFlip }))} title="Paint horizontally flipped tiles"><FlipHorizontal2 size={13} /> Tile H</button><button className={tileTransforms.vFlip ? 'is-active' : ''} disabled={!terrainTileset.transformations.vFlip} onClick={() => setTileTransforms((value) => ({ ...value, vFlip: !value.vFlip }))} title="Paint vertically flipped tiles"><FlipVertical2 size={13} /> Tile V</button><button className={tileTransforms.diagonal ? 'is-active' : ''} disabled={!terrainTileset.transformations.rotate} onClick={() => setTileTransforms((value) => ({ ...value, diagonal: !value.diagonal }))} title="Paint diagonally transformed tiles"><RotateCw size={13} /> Tile 90°</button></>}
-        {tilemap && tool !== 'terrain' && selectedVariantGroup && <label className="variant-seed-control" title={`${selectedVariantCount} weighted tiles in “${selectedVariantGroup}”`}><span>{selectedVariantGroup} · {selectedVariantCount}</span><input aria-label="Random tile variant seed" type="number" defaultValue={variantSeed} key={`${tilemap.id}:${variantSeed}`} onBlur={(event) => { const seed = Math.max(-2_147_483_648, Math.min(2_147_483_647, Math.trunc(Number(event.target.value) || 0))); if (seed === variantSeed) return; const map = structuredClone(tilemap); map.properties[TILE_VARIANT_SEED_PROPERTY] = seed; void apply('Change tile variant seed', [{ kind: 'pixel.asset.replace', asset: map, expectedRevision: tilemap.revision }]); }} /></label>}
+        {tilemap && tool !== 'terrain' && selectedVariantGroup && <div className="variant-seed-control" title={`${selectedVariantCount} weighted tiles in “${selectedVariantGroup}”`}><span>{selectedVariantGroup} · {selectedVariantCount}</span><label><span>Seed</span><input aria-label="Random tile variant seed" type="number" defaultValue={variantSeed} key={`${tilemap.id}:${variantSeed}`} onBlur={(event) => changeVariantSeed(Math.max(-2_147_483_648, Math.min(2_147_483_647, Math.trunc(Number(event.target.value) || 0))), 'Change tile variant seed')} /></label><button type="button" onClick={() => changeVariantSeed(nextTileVariantSeed(variantSeed), 'Start new tile-variant stroke seed')} title="Persist a new deterministic seed for subsequent variant strokes; existing painted tiles do not change"><Dices size={11} /> New stroke</button></div>}
         {tool === 'stamp' && (sprite || tilemap) && <>
           {sprite ? <select aria-label="Active reusable stamp" value={activeStamp?.id ?? 'builtin-plus'} onChange={(event) => setActiveStampId(event.target.value === 'builtin-plus' ? undefined : event.target.value)} title="Reusable stamp library"><option value="builtin-plus">Built-in plus</option>{document.stamps.map((stamp) => <option key={stamp.id} value={stamp.id}>{stamp.name}</option>)}</select> : <select aria-label="Active reusable tile stamp" value={activeTileStamp?.id ?? 'builtin-tile'} onChange={(event) => setActiveTileStampId(event.target.value === 'builtin-tile' ? undefined : event.target.value)} title="Reusable tile stamp library"><option value="builtin-tile">Current tile</option>{document.tileStamps.map((stamp) => <option key={stamp.id} value={stamp.id}>{stamp.name}</option>)}</select>}
           <button disabled={!selection.length} onClick={() => setStampCaptureOpen(true)} title="Capture the current selection as a reusable stamp"><Copy size={13} /> Capture</button>

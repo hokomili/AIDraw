@@ -3,7 +3,7 @@ import { ArrowDown, ArrowUp, GripVertical, Pause, Play, Trash2 } from 'lucide-re
 import type { PixelDocument, PixelSprite, PixelTileset, TileDefinition } from '@aidraw/core';
 
 import { moveTileAnimationFrame, tilesetTileSourceRect, type TileAnimationFrame } from '../../common/tile-animation';
-import { drawSpriteRegion } from '../canvas/pixel-bitmap';
+import { drawSpriteRegionThumbnail } from '../canvas/pixel-bitmap';
 
 interface TileAnimationEditorProps {
   document: PixelDocument;
@@ -30,14 +30,15 @@ function TileAnimationPreview({ document, tileset, sourceSprite, tile }: Pick<Ti
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    canvas.width = tileset.tileWidth;
-    canvas.height = tileset.tileHeight;
+    const scale = Math.min(1, 40 / tileset.tileWidth, 40 / tileset.tileHeight);
+    canvas.width = Math.max(1, Math.round(tileset.tileWidth * scale));
+    canvas.height = Math.max(1, Math.round(tileset.tileHeight * scale));
     const context = canvas.getContext('2d');
     if (!context) return;
     context.clearRect(0, 0, canvas.width, canvas.height);
     if (!sourceSprite) return;
     const source = tilesetTileSourceRect(tileset, frame.tileId);
-    drawSpriteRegion(context, sourceSprite, sourceSprite.frameIds[0], document.palette, source);
+    drawSpriteRegionThumbnail(context, sourceSprite, sourceSprite.frameIds[0], document.palette, source, canvas.width, canvas.height);
   }, [document.palette, frame.tileId, sourceSprite, tileset]);
 
   useEffect(() => {
@@ -49,7 +50,7 @@ function TileAnimationPreview({ document, tileset, sourceSprite, tile }: Pick<Ti
   return (
     <div className="tile-animation-preview">
       <div className="tile-animation-preview-stage">
-        <canvas ref={canvasRef} role="img" aria-label={`Tile animation preview, frame ${activeIndex + 1}, tile ${frame.tileId}`} style={{ width: tileset.tileWidth >= tileset.tileHeight ? 40 : 40 * tileset.tileWidth / tileset.tileHeight, height: tileset.tileHeight >= tileset.tileWidth ? 40 : 40 * tileset.tileHeight / tileset.tileWidth }} />
+        <canvas ref={canvasRef} role="img" aria-label={`Tile animation preview, frame ${activeIndex + 1}, tile ${frame.tileId}`} />
       </div>
       <div className="tile-animation-preview-copy">
         <strong>{tile.animation.length ? `Frame ${activeIndex + 1} of ${tile.animation.length}` : 'Static tile'}</strong>

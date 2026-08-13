@@ -118,7 +118,7 @@ import { AGENT_CLIENTS, type AgentClientId, type AgentClientSetupResult } from "
 import { cropImageToAspect, resetImageCrop } from "../common/image-crop";
 import { flattenLayerTree, layerTreeDescendants, moveLayerTreeEntry } from "../common/layer-tree";
 import { assignWangTile, deleteWangColor, deleteWangSet, upsertWangColor, upsertWangSet } from "../common/wang-authoring";
-import { TILE_VARIANT_GROUP_PROPERTY, tileVariantCandidates } from "../common/tile-variants";
+import { TILE_VARIANT_GROUP_PROPERTY, tileVariantCandidates, tileVariantGroup } from "../common/tile-variants";
 import type {
   BatchDocumentResult,
   CheckpointComparisonResult,
@@ -140,6 +140,7 @@ import { CollisionShapeEditor } from "./components/CollisionShapeEditor";
 import { IllustrationAnimationPanel } from "./components/IllustrationAnimationPanel";
 import { TileAnimationEditor } from "./components/TileAnimationEditor";
 import { TilesetSliceEditor } from "./components/TilesetSliceEditor";
+import { TileVariantPreview } from "./components/TileVariantPreview";
 
 type Icon = ComponentType<{ size?: number; strokeWidth?: number }>;
 
@@ -3519,6 +3520,8 @@ function TilesetPanel({
     collisions: [],
     properties: {},
   };
+  const selectedVariantGroup = tileVariantGroup(selectedTile);
+  const selectedVariantCandidates = tileVariantCandidates(tileset, selectedTileId);
   const selectedCollision = selectedTile.collisions.find((shape) => shape.id === selectedCollisionId);
   const updateTile = (patch: Partial<typeof selectedTile>, label: string) => {
     const next = structuredClone(tileset);
@@ -3617,7 +3620,8 @@ function TilesetPanel({
       <div className="tile-definition-editor">
         <div className="section-heading"><span>Tile {selectedTileId}</span><small>{selectedTile.sourceX}, {selectedTile.sourceY}</small></div>
         <label className="field"><span>Painting probability</span><input key={"probability-" + selectedTileId + "-" + selectedTile.probability} type="number" min="0" step="0.05" defaultValue={selectedTile.probability} onBlur={(event) => updateTile({ probability: Math.max(0, Number(event.target.value) || 0) }, "Change tile probability")} /></label>
-        <label className="field"><span>Random variant group</span><input key={"variant-" + selectedTileId + "-" + String(selectedTile.properties[TILE_VARIANT_GROUP_PROPERTY] ?? "")} maxLength={100} defaultValue={String(selectedTile.properties[TILE_VARIANT_GROUP_PROPERTY] ?? "")} placeholder="e.g. grass" onBlur={(event) => { const properties = { ...selectedTile.properties }; const group = event.target.value.trim(); if (group) properties[TILE_VARIANT_GROUP_PROPERTY] = group; else delete properties[TILE_VARIANT_GROUP_PROPERTY]; updateTile({ properties }, "Change random variant group"); }} /><small>{tileVariantCandidates(tileset, selectedTileId).length || 1} weighted tile variant{(tileVariantCandidates(tileset, selectedTileId).length || 1) === 1 ? "" : "s"} share this group.</small></label>
+        <label className="field"><span>Random variant group</span><input key={"variant-" + selectedTileId + "-" + String(selectedTile.properties[TILE_VARIANT_GROUP_PROPERTY] ?? "")} maxLength={100} defaultValue={String(selectedTile.properties[TILE_VARIANT_GROUP_PROPERTY] ?? "")} placeholder="e.g. grass" onBlur={(event) => { const properties = { ...selectedTile.properties }; const group = event.target.value.trim(); if (group) properties[TILE_VARIANT_GROUP_PROPERTY] = group; else delete properties[TILE_VARIANT_GROUP_PROPERTY]; updateTile({ properties }, "Change random variant group"); }} /><small>{selectedVariantCandidates.length || 1} weighted tile variant{(selectedVariantCandidates.length || 1) === 1 ? "" : "s"} share this group.</small></label>
+        <TileVariantPreview palette={document.palette} sprite={sourceSprite?.type === "sprite" ? sourceSprite : undefined} tileset={tileset} selectedTileId={selectedTileId} group={selectedVariantGroup} candidates={selectedVariantCandidates} onSelect={(tileId) => { setSelectedTileId(tileId); setSelectedCollisionId(undefined); }} />
         <TileAnimationEditor document={document} tileset={tileset} sourceSprite={sourceSprite?.type === "sprite" ? sourceSprite : undefined} tile={selectedTile} tileCount={tileCount} onChange={(animation, label) => updateTile({ animation }, label)} />
         <div className="section-heading"><span>Custom properties</span></div>
         <div className="tile-property-add"><input aria-label="Property name" placeholder="name" value={propertyName} onChange={(event) => setPropertyName(event.target.value)} /><input aria-label="Property value" placeholder="value" value={propertyValue} onChange={(event) => setPropertyValue(event.target.value)} /><button disabled={!propertyName.trim()} onClick={() => { const parsed = propertyValue === "true" ? true : propertyValue === "false" ? false : propertyValue.trim() !== "" && Number.isFinite(Number(propertyValue)) ? Number(propertyValue) : propertyValue; updateTile({ properties: { ...selectedTile.properties, [propertyName.trim()]: parsed } }, "Set tile property"); setPropertyName(""); setPropertyValue(""); }}>Add</button></div>

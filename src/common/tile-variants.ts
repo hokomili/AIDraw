@@ -3,6 +3,11 @@ import type { PixelTileset, TileDefinition } from '@aidraw/core';
 export const TILE_VARIANT_GROUP_PROPERTY = 'aidraw:variantGroup';
 export const TILE_VARIANT_SEED_PROPERTY = 'aidraw:variantSeed';
 
+/** Advances the persisted signed 32-bit seed without relying on ambient randomness. */
+export function nextTileVariantSeed(seed: number): number {
+  return (Math.imul(Math.trunc(seed) | 0, 1_664_525) + 1_013_904_223) | 0;
+}
+
 function hash32(seed: number, x: number, y: number, tileId: number): number {
   let value = (seed | 0) ^ Math.imul(x | 0, 0x45d9f3b) ^ Math.imul(y | 0, 0x119de1f3) ^ Math.imul(tileId | 0, 0x27d4eb2d);
   value ^= value >>> 16; value = Math.imul(value, 0x7feb352d); value ^= value >>> 15; value = Math.imul(value, 0x846ca68b); value ^= value >>> 16;

@@ -33,4 +33,12 @@ describe('pixel tool renderer wiring', () => {
     expect(source).toContain("transformActiveStamp('rotate-counterclockwise')");
     expect(source).toContain('RotateCcw');
   });
+
+  it('persists a deterministic new seed between weighted-variant strokes without rewriting painted cells', async () => {
+    const source = await readFile(new URL('../../src/renderer/canvas/PixelCanvas.tsx', import.meta.url), 'utf8');
+    expect(source).toContain('nextTileVariantSeed(variantSeed)');
+    expect(source).toContain('Start new tile-variant stroke seed');
+    expect(source).toContain('existing painted tiles do not change');
+    expect(source).toContain("kind: 'pixel.asset.replace', asset: map, expectedRevision: tilemap.revision");
+  });
 });

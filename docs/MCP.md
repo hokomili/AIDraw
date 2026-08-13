@@ -94,3 +94,5 @@ In addition to the canonical reducer kinds, MCP accepts these validated semantic
 - `document.fragment.import` for a fragment returned by `canvas_observe.fragment`, with optional illustration target layer and x/y offset.
 
 Path booleans use the same exact shared Paper.js kernel in renderer and headless execution. Large multi-stage work should remain semantically partitioned so progress, cancellation, undo, and attribution are understandable.
+
+`aidraw:variantGroup` (tile property) and `aidraw:variantSeed` (map property) are AIDraw-namespaced custom properties, not standard Tiled random-brush behavior. Tiled JSON/XML export retains them as ordinary typed properties, but no external editor interpretation is promised. UI and `pixel.tile-variants.paint` use the same coordinate-stable weighted choice; advancing the persisted seed changes subsequent choices only, while already painted GIDs remain exact.
