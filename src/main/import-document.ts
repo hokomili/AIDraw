@@ -35,6 +35,7 @@ import { decodeApng } from './apng';
 import { inspectGif } from './gif';
 import { calculateSpriteSheetLayout, validateSpriteSheetSliceOptions, type SpriteSheetSliceOptions } from '../common/sprite-sheet';
 import { createExactAnimationPalettePlanner, exactAnimationFrameChanges, type ExactAnimationPalettePlan } from '../common/animation-palette';
+import { aidrawPsdTextGeometry } from '../common/psd-text';
 import { displayImageDimensions, inspectImageHeader, MAX_INLINE_IMAGE_DIMENSION, MAX_INLINE_IMAGE_PIXELS } from './transaction-policy';
 import { importEditableSvg } from './svg-import';
 import { MAX_IMPORT_UTILITY_DOCUMENTS } from './utility-contract';
@@ -386,9 +387,10 @@ function importedPsdText(layer: PsdLayer, layerId: string, visible: boolean): Te
   const first = ranges[0]; const transform = source.transform ?? []; const left = Number(layer.left ?? source.left ?? transform[4] ?? 0); const top = Number(layer.top ?? source.top ?? (Number(transform[5] ?? 0) - first.fontSize));
   const width = Math.max(1, Number((layer.right ?? source.right ?? left + Math.max(first.fontSize, source.text.length * first.fontSize * 0.6)) - left));
   const height = Math.max(1, Number((layer.bottom ?? source.bottom ?? top + first.fontSize * 1.4) - top));
+  const aidrawGeometry = aidrawPsdTextGeometry(layer.name, source.transform, source.boxBounds, first.fontSize);
   const justification = source.paragraphStyle?.justification;
-  const object: TextObject = { ...entityBase(source.text.slice(0, 32) || layer.name || 'PSD text', layerId), type: 'text', text: source.text, width, height, align: justification === 'center' || justification === 'justify-center' ? 'center' : justification === 'right' || justification === 'justify-right' ? 'right' : justification?.startsWith('justify') ? 'justify' : 'left', lineHeight: Math.max(0.5, Math.min(4, Number(base.leading ?? first.fontSize * 1.2) / first.fontSize)), ranges, visible };
-  object.transform.x = left; object.transform.y = top; return object;
+  const object: TextObject = { ...entityBase(source.text.slice(0, 32) || layer.name || 'PSD text', layerId), type: 'text', text: source.text, width: aidrawGeometry?.width ?? width, height: aidrawGeometry?.height ?? height, align: justification === 'center' || justification === 'justify-center' ? 'center' : justification === 'right' || justification === 'justify-right' ? 'right' : justification?.startsWith('justify') ? 'justify' : 'left', lineHeight: Math.max(0.5, Math.min(4, Number(base.leading ?? first.fontSize * 1.2) / first.fontSize)), ranges, visible: aidrawGeometry ? true : visible };
+  object.transform = aidrawGeometry?.transform ?? { ...object.transform, x: left, y: top }; return object;
 }
 
 function addPsdRasterObject(document: Extract<AIDrawDocument, { kind: 'illustration' }>, layer: Extract<IllustrationLayer, { type: 'vector' }>, source: NonNullable<PsdLayer['imageData']>, name: string, visible: boolean, left = 0, top = 0): void {

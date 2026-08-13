@@ -21,6 +21,7 @@ import {
 } from '@aidraw/core';
 import { exactSingleLayerAnimationFrame, exactSingleLayerGifFrame } from '../common/animation-palette';
 import { splitColorAlpha } from '../common/color';
+import { AIDRAW_PSD_EDITABLE_TEXT_SUFFIX, aidrawPsdTextMatrix } from '../common/psd-text';
 import { MAX_STATIC_RASTER_PIXELS } from '../common/static-raster';
 import { layoutStyledText } from '../common/text-layout';
 import type { ExportFormat, ExportOptions } from '../common/contracts';
@@ -493,12 +494,12 @@ function psdTextColor(value: string): { r: number; g: number; b: number; a?: num
 
 function psdTextLayer(object: Extract<IllustrationObject, { type: 'text' }>): PsdLayer {
   const ranges = normalizeTextStyleRanges(object.text, object.ranges); const first = ranges[0];
-  const style = (range: typeof first) => ({ font: { name: range.fontFamily || 'ArialMT' }, fontSize: range.fontSize, fauxBold: range.fontWeight >= 600, fauxItalic: range.fontStyle === 'italic', tracking: Math.round(range.letterSpacing / Math.max(1, range.fontSize) * 1_000), underline: Boolean(range.underline), fillColor: psdTextColor(range.color) });
+  const style = (range: typeof first) => ({ font: { name: range.fontFamily || 'ArialMT' }, fontSize: range.fontSize, leading: object.lineHeight * range.fontSize, fauxBold: range.fontWeight >= 600, fauxItalic: range.fontStyle === 'italic', tracking: Math.round(range.letterSpacing / Math.max(1, range.fontSize) * 1_000), underline: Boolean(range.underline), fillColor: psdTextColor(range.color) });
   return {
-    name: `${object.name} · editable text`, hidden: true, opacity: Math.round(object.opacity * 255), blendMode: psdBlendMode(object.blendMode),
+    name: `${object.name}${AIDRAW_PSD_EDITABLE_TEXT_SUFFIX}`, hidden: true, opacity: Math.round(object.opacity * 255), blendMode: psdBlendMode(object.blendMode),
     left: object.transform.x, top: object.transform.y, right: object.transform.x + object.width, bottom: object.transform.y + object.height,
     text: {
-      text: object.text, transform: [1, 0, 0, 1, object.transform.x, object.transform.y + first.fontSize], shapeType: 'box', boxBounds: [0, 0, object.width, object.height],
+      text: object.text, transform: [...aidrawPsdTextMatrix(object.transform, first.fontSize)], shapeType: 'box', boxBounds: [0, 0, object.width, object.height],
       style: style(first), styleRuns: ranges.map((range) => ({ length: range.end - range.start, style: style(range) })),
       paragraphStyle: { justification: object.align === 'justify' ? 'justify-left' : object.align },
     },
@@ -540,7 +541,7 @@ async function psd(document: AIDrawDocument): Promise<ExportArtifact> {
         if (layer.type === 'group') report.warnings.push(`Layer group “${layer.name}” was flattened because its filter or mask cannot be represented safely in PSD.`);
         return { ...common, imageData };
       }
-      const texts = textObjectsInLayer(document, layerId).filter((object) => object.visible);
+      const texts = textObjectsInLayer(document, layerId).filter((object) => object.visible && object.text.length > 0);
       if (!texts.length) return { ...common, imageData };
       editableTextCount += texts.length;
       return { ...common, children: [{ name: `${layer.name} · visual fallback`, imageData }, ...texts.map(psdTextLayer)], opened: true };
