@@ -2,19 +2,7 @@ import { createHash } from 'node:crypto';
 import { appendFile, mkdir, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { TransactionTraceEntry } from '../common/contracts';
-
-const TRACE_VERSION = 1 as const;
-
-function isTraceEntry(value: unknown): value is TransactionTraceEntry {
-  if (!value || typeof value !== 'object') return false;
-  const entry = value as Partial<TransactionTraceEntry>;
-  return entry.version === TRACE_VERSION
-    && typeof entry.documentId === 'string'
-    && typeof entry.revision === 'number'
-    && typeof entry.recordedAt === 'string'
-    && typeof entry.outcome === 'string'
-    && Boolean(entry.transaction && typeof entry.transaction === 'object');
-}
+import { parseTransactionTraceEntry, parseTransactionTraceJsonl } from './trace-policy';
 
 /**
  * Append-only transaction history kept separately from the compacting recovery
@@ -27,26 +15,20 @@ export class TransactionTraceStore {
   async append(entry: Omit<TransactionTraceEntry, 'version' | 'recordedAt'> & { recordedAt?: string }): Promise<void> {
     const record: TransactionTraceEntry = {
       ...structuredClone(entry),
-      version: TRACE_VERSION,
+      version: 1,
       recordedAt: entry.recordedAt ?? new Date().toISOString(),
     };
+    const parsed = parseTransactionTraceEntry(record);
+    if (!parsed) throw new Error('AIDraw transaction trace contains an invalid entry.');
     const path = this.tracePath(record.documentId);
     await mkdir(dirname(path), { recursive: true });
-    await appendFile(path, `${JSON.stringify(record)}\n`, { encoding: 'utf8', mode: 0o600 });
+    await appendFile(path, `${JSON.stringify(parsed)}\n`, { encoding: 'utf8', mode: 0o600 });
   }
 
   async list(documentId: string, limit = Number.POSITIVE_INFINITY): Promise<TransactionTraceEntry[]> {
     let source: string;
     try { source = await readFile(this.tracePath(documentId), 'utf8'); } catch { return []; }
-    const entries: TransactionTraceEntry[] = [];
-    for (const line of source.split(/\r?\n/).filter(Boolean)) {
-      try {
-        const value = JSON.parse(line) as unknown;
-        if (isTraceEntry(value) && value.documentId === documentId) entries.push(value);
-      } catch {
-        // A partial final write must not hide earlier valid trace records.
-      }
-    }
+    const entries = parseTransactionTraceJsonl(source, documentId).entries;
     const selected = Number.isFinite(limit) ? entries.slice(-Math.max(0, limit)) : entries;
     return selected.map((entry) => structuredClone(entry));
   }
@@ -57,14 +39,21 @@ export class TransactionTraceStore {
 
   async import(documentId: string, entries: TransactionTraceEntry[]): Promise<number> {
     const existing = new Set((await this.list(documentId)).map((entry) => `${entry.transaction.id}:${entry.revision}:${entry.outcome}`));
+    const accepted: TransactionTraceEntry[] = [];
     let imported = 0;
     for (const entry of entries) {
-      if (!isTraceEntry(entry) || entry.documentId !== documentId) continue;
-      const key = `${entry.transaction.id}:${entry.revision}:${entry.outcome}`;
+      const parsed = parseTransactionTraceEntry(entry, documentId);
+      if (!parsed) continue;
+      const key = `${parsed.transaction.id}:${parsed.revision}:${parsed.outcome}`;
       if (existing.has(key)) continue;
-      await this.append(entry);
+      accepted.push(parsed);
       existing.add(key);
       imported += 1;
+    }
+    if (accepted.length) {
+      const path = this.tracePath(documentId);
+      await mkdir(dirname(path), { recursive: true });
+      await appendFile(path, `${accepted.map((entry) => JSON.stringify(entry)).join('\n')}\n`, { encoding: 'utf8', mode: 0o600 });
     }
     return imported;
   }

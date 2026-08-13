@@ -120,6 +120,20 @@ describe('document service collaboration semantics', () => {
     await service.compactRecovery();
   });
 
+  it('rejects a schema-shaped but non-JSON transaction without changing canonical state', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-service-serialization-')); temporaryPaths.push(root);
+    const service = new DocumentService(new RecoveryJournal(root), '1.0.0'); services.push(service); service.initialize();
+    const document = service.snapshot().activeDocument!;
+    const transaction = {
+      id: createId('tx'), clientOperationId: 'non-json-operation', documentId: document.id, actor: HUMAN_ACTOR,
+      label: 'Reject non-JSON transaction', createdAt: nowIso(),
+      operations: [{ kind: 'document.rename', name: 'Must not commit', nonJson: 1n }],
+    } as unknown as CanvasTransaction;
+    await expect(service.apply(transaction)).resolves.toEqual({ status: 'conflict', message: 'Transaction must be JSON-serializable.' });
+    expect(service.getDocument(document.id)).toMatchObject({ name: document.name, revision: document.revision, dirty: document.dirty });
+    await service.compactRecovery();
+  });
+
   it('publishes live and unread background-agent tab activity until the document is viewed', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aidraw-service-'));
     temporaryPaths.push(root);

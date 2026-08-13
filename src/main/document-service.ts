@@ -38,6 +38,7 @@ import { TransactionTraceStore } from './trace-store';
 import { prepareTransactionForCommit } from './transaction-policy';
 import { rebaseRestoredEntityRevisions } from '../common/document-branch';
 import { checkpointMergeCandidates, checkpointMergeOperations } from '../common/checkpoint-merge';
+import { MAX_TRANSACTION_SERIALIZED_BYTES } from '../common/transaction-limits';
 import { committedHistoryTargets, historyTargetsIntersect, mutationHistoryTargets } from './history-policy';
 
 interface HistoryInvalidation {
@@ -61,8 +62,6 @@ interface HumanLock extends HumanLockRequest {
   id: Id;
   acquiredAt: number;
 }
-
-const MAX_REQUEST_BYTES = 2 * 1024 * 1024;
 
 function agentActivityEntries(document: AIDrawDocument) {
   return document.activity.filter((entry) => entry.actor.kind === 'agent');
@@ -300,8 +299,11 @@ export class DocumentService extends EventEmitter {
       return { status: 'conflict', message: error instanceof Error ? error.message : 'Invalid transaction' };
     }
 
-    const size = Buffer.byteLength(JSON.stringify(transaction));
-    if (size > MAX_REQUEST_BYTES) {
+    let size: number;
+    try { size = Buffer.byteLength(JSON.stringify(transaction)); } catch {
+      return { status: 'conflict', message: 'Transaction must be JSON-serializable.' };
+    }
+    if (size > MAX_TRANSACTION_SERIALIZED_BYTES) {
       return { status: 'busy', message: 'Transaction exceeds the 2 MiB request limit.' };
     }
     const current = this.documents.get(transaction.documentId);

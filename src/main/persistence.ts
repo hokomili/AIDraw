@@ -18,6 +18,7 @@ import type { DocumentCheckpointRecord, TransactionTraceEntry } from '../common/
 import { paintTileCachePlan, parsePaintTileKey } from '../common/paint-tile-cache';
 import { renderRasterStroke } from '../common/raster-brush';
 import { inspectImageHeader } from './transaction-policy';
+import { parseTransactionTraceEntry, parseTransactionTraceJsonl } from './trace-policy';
 
 const TRANSPARENT_PREVIEW = Uint8Array.from(
   Buffer.from(
@@ -415,7 +416,12 @@ function buildArchive(document: AIDrawDocument, appVersion: string, preview?: Ui
   files['manifest.json'] = strToU8(JSON.stringify(manifest, null, 2));
   files['document.json'] = strToU8(JSON.stringify(persisted));
   files['activity.json'] = strToU8(JSON.stringify(persisted.activity));
-  files['trace/transactions.jsonl'] = strToU8(trace.map((entry) => JSON.stringify(entry)).join('\n') + (trace.length ? '\n' : ''));
+  const persistedTrace = trace.map((entry) => {
+    const parsed = parseTransactionTraceEntry(entry, persisted.id);
+    if (!parsed) throw new Error('AIDraw transaction trace contains an invalid entry.');
+    return parsed;
+  });
+  files['trace/transactions.jsonl'] = strToU8(persistedTrace.map((entry) => JSON.stringify(entry)).join('\n') + (persistedTrace.length ? '\n' : ''));
   files['checkpoints/index.json'] = strToU8(JSON.stringify(persistedCheckpoints.map((checkpoint) => ({
     id: checkpoint.id, documentId: checkpoint.documentId, name: checkpoint.name, createdAt: checkpoint.createdAt,
     createdBy: checkpoint.createdBy, sourceRevision: checkpoint.sourceRevision, kind: checkpoint.kind,
@@ -440,13 +446,10 @@ export async function readNativeDocument(filePath: string): Promise<LoadedNative
   const trace: TransactionTraceEntry[] = [];
   const checkpoints: DocumentCheckpointRecord[] = [];
   if (archive['trace/transactions.jsonl']) {
-    for (const line of strFromU8(archive['trace/transactions.jsonl']).split(/\r?\n/).filter(Boolean)) {
-      try {
-        const entry = JSON.parse(line) as TransactionTraceEntry;
-        if (entry.version === 1 && entry.documentId === document.id && entry.transaction) trace.push(entry);
-        else warnings.push('An invalid transaction trace entry was ignored.');
-      } catch { warnings.push('A corrupt transaction trace entry was ignored.'); }
-    }
+    const parsed = parseTransactionTraceJsonl(strFromU8(archive['trace/transactions.jsonl']), document.id);
+    trace.push(...parsed.entries);
+    if (parsed.ignored === 1) warnings.push('A malformed transaction trace entry was ignored.');
+    else if (parsed.ignored > 1) warnings.push(`${parsed.ignored.toLocaleString('en-US')} malformed transaction trace entries were ignored.`);
   }
   hydrateNativeAssets(document, archive, warnings);
   validateLoadedPaintTileCaches(document, warnings);

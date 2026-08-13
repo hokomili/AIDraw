@@ -5,6 +5,8 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate';
 import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createId, createIllustrationDocument, createPixelDocument, duplicatePixelFrame, nowIso, readPixel, readTileAt, resolvePixelCel, writePixels, writeTiles, type CanvasTransaction, type GroupObject, type IllustrationLayer, type PixelLayer, type TilemapLayer } from '@aidraw/core';
+import type { TransactionTraceEntry } from '@common/contracts';
+import { MAX_TRANSACTION_SERIALIZED_BYTES } from '@common/transaction-limits';
 import { nativeSaveFileSystem, readNativeDocument, writeNativeDocument, type NativeSaveFileSystem } from '@main/persistence';
 
 const temporaryPaths: string[] = [];
@@ -395,6 +397,55 @@ describe('.aidraw persistence', () => {
     const invalidMetadataPath = join(root, 'invalid-asset-metadata.aidraw');
     await writeFile(invalidMetadataPath, zipSync(invalidMetadataFiles));
     await expect(readNativeDocument(invalidMetadataPath)).rejects.toThrow('AIDraw document contains invalid asset metadata.');
+  });
+
+  it('isolates malformed native trace records and rejects an invalid trace before save replacement', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-persistence-trace-')); temporaryPaths.push(root);
+    const document = createIllustrationDocument('Trace integrity fixture');
+    const transaction: CanvasTransaction = {
+      id: 'trace-valid', clientOperationId: 'trace-valid-operation', documentId: document.id, actor: HUMAN_ACTOR,
+      label: 'Valid durable trace', createdAt: nowIso(), operations: [{ kind: 'document.rename', name: document.name }],
+    };
+    const validTrace: TransactionTraceEntry = {
+      version: 1, documentId: document.id, revision: 1, recordedAt: nowIso(), outcome: 'committed', transaction,
+    };
+    const sourcePath = await writeNativeDocument(join(root, 'source.aidraw'), document, '1.0.0', undefined, [validTrace]);
+    const sourceBytes = await readFile(sourcePath);
+    const files = unzipSync(new Uint8Array(sourceBytes));
+    const exactTransaction = {
+      ...transaction, id: 'trace-exact-limit', clientOperationId: 'trace-exact-limit-operation',
+      operations: [{ kind: 'document.rename', name: document.name, padding: '' }],
+    } as unknown as CanvasTransaction;
+    const paddingLength = MAX_TRANSACTION_SERIALIZED_BYTES - Buffer.byteLength(JSON.stringify(exactTransaction), 'utf8');
+    (exactTransaction.operations[0] as unknown as { padding: string }).padding = 'x'.repeat(paddingLength);
+    expect(Buffer.byteLength(JSON.stringify(exactTransaction), 'utf8')).toBe(MAX_TRANSACTION_SERIALIZED_BYTES);
+    const exactTrace: TransactionTraceEntry = { ...validTrace, revision: 2, transaction: exactTransaction };
+    const oversizedTrace = structuredClone(exactTrace) as TransactionTraceEntry;
+    (oversizedTrace.transaction.operations[0] as unknown as { padding: string }).padding += 'x';
+    const malformed = [
+      { ...validTrace, extra: 'not-writer-authored' },
+      { ...validTrace, transaction: { ...transaction, documentId: 'another-document' } },
+      { ...validTrace, transaction: { ...transaction, operations: [{ kind: 'document.rename', name: '' }] } },
+      oversizedTrace,
+    ];
+    files['trace/transactions.jsonl'] = strToU8([
+      JSON.stringify(validTrace),
+      JSON.stringify(exactTrace),
+      ...Array.from({ length: 10_000 }, () => '{}'),
+      ...malformed.map((entry) => JSON.stringify(entry)),
+      '',
+    ].join('\n'));
+    const hostilePath = join(root, 'hostile-trace.aidraw');
+    await writeFile(hostilePath, zipSync(files));
+
+    const loaded = await readNativeDocument(hostilePath);
+    expect(loaded.trace).toEqual([validTrace, exactTrace]);
+    expect(loaded.warnings).toEqual(['10,004 malformed transaction trace entries were ignored.']);
+    expect(loaded.document.id).toBe(document.id);
+
+    const invalidSaveTrace = malformed[2] as unknown as TransactionTraceEntry;
+    await expect(writeNativeDocument(sourcePath, document, '1.0.1', undefined, [invalidSaveTrace])).rejects.toThrow('AIDraw transaction trace contains an invalid entry.');
+    expect(await readFile(sourcePath)).toEqual(sourceBytes);
   });
 
   it('rejects unsafe ZIP paths and oversized metadata before native extraction', async () => {
