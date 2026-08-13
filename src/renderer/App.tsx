@@ -146,6 +146,7 @@ import { TileAnimationEditor } from "./components/TileAnimationEditor";
 import { TilesetSliceEditor } from "./components/TilesetSliceEditor";
 import { TileVariantPreview } from "./components/TileVariantPreview";
 import { ShortcutReferenceDialog } from "./components/ShortcutReferenceDialog";
+import { documentTabFocusIndex } from "./document-tabs";
 import { shortcutHelpRequested, toolRailFocusIndex } from "./shortcuts";
 
 type Icon = ComponentType<{ size?: number; strokeWidth?: number }>;
@@ -821,6 +822,7 @@ function DocumentTabs() {
   const [scrollState, setScrollState] = useState({ left: false, right: false });
   const viewportRef = useRef<HTMLDivElement>(null);
   const allTabsRef = useRef<HTMLDivElement>(null);
+  const focusAfterCloseRef = useRef(false);
   const documents = snapshot?.documents ?? [];
 
   useEffect(
@@ -901,6 +903,17 @@ function DocumentTabs() {
   }, [documents.length, snapshot?.activeDocumentId]);
 
   useEffect(() => {
+    if (!focusAfterCloseRef.current) return;
+    focusAfterCloseRef.current = false;
+    const frame = window.requestAnimationFrame(() => {
+      viewportRef.current
+        ?.querySelector<HTMLButtonElement>('.document-tab[tabindex="0"]')
+        ?.focus();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [documents.length, snapshot?.activeDocumentId]);
+
+  useEffect(() => {
     if (!showAll) return;
     const onPointerDown = (event: PointerEvent) => {
       if (!allTabsRef.current?.contains(event.target as Node))
@@ -926,6 +939,12 @@ function DocumentTabs() {
     });
   };
 
+  const closeDocumentTab = async (documentId: string, restoreFocus: boolean) => {
+    if (restoreFocus) focusAfterCloseRef.current = true;
+    const result = await window.aidraw.closeDocument(documentId);
+    if (!result.closed && restoreFocus) focusAfterCloseRef.current = false;
+  };
+
   return (
     <div className="document-tabs">
       <button
@@ -943,39 +962,63 @@ function DocumentTabs() {
         role="tablist"
         aria-label="Open documents"
       >
-        {documents.map((document) => (
-          <button
-            key={document.id}
-            className={`document-tab ${document.id === snapshot?.activeDocumentId ? "is-active" : ""}`}
-            onClick={() => void activate(document.id)}
-            role="tab"
-            title={document.name}
-            aria-selected={document.id === snapshot?.activeDocumentId}
-          >
-            <span className={`mode-dot ${document.kind}`} />
-            <span className="document-tab-name">{document.name}</span>
-            {document.dirty && (
-              <span className="dirty-dot" aria-label="Unsaved changes" />
-            )}
-            <DocumentActivityBadge document={document} />
-            <span
-              role="button"
-              tabIndex={0}
-              className="tab-close"
-              aria-label={`Close ${document.name}`}
-              onClick={(event) => {
-                event.stopPropagation();
-                void window.aidraw.closeDocument(document.id);
-              }}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" || event.key === " ")
-                  void window.aidraw.closeDocument(document.id);
-              }}
+        {documents.map((document, index) => {
+          const active = document.id === snapshot?.activeDocumentId;
+          return (
+            <div
+              key={document.id}
+              className={`document-tab-shell ${active ? "is-active" : ""}`}
+              role="presentation"
             >
-              <X size={12} />
-            </span>
-          </button>
-        ))}
+              <button
+                type="button"
+                className={`document-tab ${active ? "is-active" : ""}`}
+                onClick={() => void activate(document.id)}
+                onKeyDown={(event) => {
+                  if (
+                    event.altKey ||
+                    event.ctrlKey ||
+                    event.metaKey ||
+                    event.shiftKey
+                  )
+                    return;
+                  const nextIndex = documentTabFocusIndex(
+                    event.key,
+                    index,
+                    documents.length,
+                  );
+                  if (nextIndex === undefined) return;
+                  event.preventDefault();
+                  const nextTab = viewportRef.current?.querySelectorAll<HTMLButtonElement>(
+                    ".document-tab",
+                  )[nextIndex];
+                  nextTab?.focus();
+                  void activate(documents[nextIndex].id);
+                }}
+                role="tab"
+                title={document.name}
+                aria-selected={active}
+                tabIndex={active ? 0 : -1}
+              >
+                <span className={`mode-dot ${document.kind}`} />
+                <span className="document-tab-name">{document.name}</span>
+                {document.dirty && (
+                  <span className="dirty-dot" aria-label="Unsaved changes" />
+                )}
+                <DocumentActivityBadge document={document} />
+              </button>
+              <button
+                type="button"
+                tabIndex={active ? 0 : -1}
+                className="tab-close"
+                aria-label={`Close ${document.name}`}
+                onClick={() => void closeDocumentTab(document.id, active)}
+              >
+                <X size={12} />
+              </button>
+            </div>
+          );
+        })}
       </div>
       <button
         className="tab-scroll-control"

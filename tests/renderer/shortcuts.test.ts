@@ -35,6 +35,7 @@ describe('keyboard shortcut reference', () => {
     expect(pixelEntries.map((entry) => entry.label)).not.toContain('Edit selected illustration text');
     expect(illustration.at(-1)).toMatchObject({ title: 'Illustration tools' });
     expect(illustration.at(-1)?.entries.map((entry) => entry.keys[0])).toEqual(['V', 'B']);
+    expect(illustrationEntries.map((entry) => entry.label)).toContain('Move through focused document tabs');
   });
 
   it('filters by every command, category, and key term without mutating the catalog', () => {

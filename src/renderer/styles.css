@@ -98,9 +98,11 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .document-tabs { min-width: 0; flex: 1; height: 100%; display: flex; align-items: end; padding: 0 5px; gap: 2px; overflow: visible; }
 .document-tab-viewport { min-width: 0; flex: 1; height: 100%; display: flex; align-items: end; gap: 3px; overflow-x: auto; overflow-y: hidden; scroll-behavior: smooth; scrollbar-width: none; overscroll-behavior-x: contain; }
 .document-tab-viewport::-webkit-scrollbar { display: none; }
-.document-tab { position: relative; width: clamp(118px, 15vw, 210px); min-width: 118px; max-width: 210px; flex: 0 0 auto; height: 39px; margin-top: 10px; padding: 0 10px; border-radius: 10px 10px 0 0; background: transparent; display: flex; align-items: center; gap: 7px; color: #6f6877; cursor: pointer; border: 1px solid transparent; border-bottom: 0; }
+.document-tab-shell { position: relative; width: clamp(118px, 15vw, 210px); min-width: 118px; max-width: 210px; flex: 0 0 auto; height: 39px; margin-top: 10px; color: #6f6877; }
+.document-tab { width: 100%; min-width: 0; height: 100%; padding: 0 32px 0 10px; border-radius: 10px 10px 0 0; background: transparent; display: flex; align-items: center; gap: 7px; color: inherit; cursor: pointer; border: 1px solid transparent; border-bottom: 0; }
 .document-tab:hover { background: #f4f0f1; }
 .document-tab.is-active { background: var(--workspace); border-color: var(--border); color: var(--ink); }
+.document-tab-shell.is-active { color: var(--ink); }
 .document-tab-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12.5px; font-weight: 620; flex: 1; }
 .mode-dot { display: inline-block; width: 8px; height: 8px; flex: 0 0 auto; border-radius: 3px; background: var(--lavender); }
 .mode-dot.pixel { background: var(--teal); border-radius: 2px; }
@@ -110,8 +112,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .tab-activity-badge.is-complete { background: color-mix(in srgb, var(--actor) 9%, white); opacity: .82; }
 .tab-activity-badge.is-conflict, .tab-activity-badge.is-approval { border-color: #d65a73; background: #fff0f3; color: #ba405d; }
 @keyframes tab-activity-pulse { 0%, 100% { opacity: .3; transform: scale(.9); } 50% { opacity: .9; transform: scale(1.08); } }
-.tab-close { width: 18px; height: 18px; border-radius: 5px; display: inline-flex; align-items: center; justify-content: center; opacity: .2; }
-.document-tab:hover .tab-close, .document-tab.is-active .tab-close { opacity: .6; }
+.tab-close { position: absolute; top: 50%; right: 7px; width: 18px; height: 18px; padding: 0; border-radius: 5px; background: transparent; display: inline-flex; align-items: center; justify-content: center; color: inherit; cursor: pointer; opacity: .2; transform: translateY(-50%); }
+.document-tab-shell:hover .tab-close, .document-tab-shell.is-active .tab-close, .tab-close:focus-visible { opacity: .6; }
 .tab-close:hover { background: rgba(77, 62, 90, .12); opacity: 1 !important; }
 .tab-scroll-control { width: 23px; height: 30px; margin-bottom: 5px; flex: 0 0 auto; display: flex; align-items: center; justify-content: center; border-radius: 7px; color: #655d6e; cursor: pointer; }
 .tab-scroll-control:hover:not(:disabled) { background: #f0ebf2; color: var(--lavender); }
