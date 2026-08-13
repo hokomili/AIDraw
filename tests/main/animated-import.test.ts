@@ -315,6 +315,28 @@ describe('animated pixel import', () => {
     expect(Buffer.from(UPNG.toRGBA8(decodedSheet)[0])).toEqual(Buffer.concat([expected, expected]));
   });
 
+  it('exports exact fractional-opacity normal composites to PNG, APNG, and sprite sheets', async () => {
+    const document = createPixelDocument('sprite', 'Fractional normal composite output'); const sprite = document.pixelAssets[document.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('Expected sprite');
+    sprite.width = 2; sprite.height = 1; document.palette[1].color = '#4080c080'; document.palette[2].color = '#0000ff80';
+    const bottomLayer = sprite.layers[sprite.layerIds[0]]; const bottomCel = Object.values(sprite.cels)[0]; bottomLayer.opacity = 0.5;
+    const topLayerId = 'fractional-composite-top'; const topCelId = 'fractional-composite-top-cel';
+    sprite.layers[topLayerId] = { ...structuredClone(bottomLayer), id: topLayerId, name: 'Top' }; sprite.layerIds.push(topLayerId);
+    sprite.cels[topCelId] = { ...structuredClone(bottomCel), id: topCelId, name: 'Top cel', layerId: topLayerId, chunks: {} };
+    writePixels(bottomCel, [{ x: 0, y: 0, index: 1 }, { x: 1, y: 0, index: 1 }]); writePixels(sprite.cels[topCelId], [{ x: 0, y: 0, index: 2 }]);
+    const expected = Buffer.from([27, 55, 228, 112, 64, 128, 192, 64]);
+    const secondFrameId = 'fractional-composite-second-frame'; sprite.frameIds.push(secondFrameId);
+    sprite.frames[secondFrameId] = { ...structuredClone(sprite.frames[sprite.frameIds[0]]), id: secondFrameId, name: 'Frame 2' };
+    sprite.cels['fractional-composite-second-bottom-cel'] = { ...structuredClone(bottomCel), id: 'fractional-composite-second-bottom-cel', name: 'Second bottom cel', frameId: secondFrameId };
+    sprite.cels['fractional-composite-second-top-cel'] = { ...structuredClone(sprite.cels[topCelId]), id: 'fractional-composite-second-top-cel', name: 'Second top cel', frameId: secondFrameId };
+
+    const png = await exportDocument(document, 'png'); const decodedPng = UPNG.decode(Uint8Array.from(png.data).buffer);
+    expect(Buffer.from(UPNG.toRGBA8(decodedPng)[0])).toEqual(expected);
+    const apng = decodeApng((await exportDocument(document, 'apng')).data)!;
+    expect(apng.frames.map(({ rgba }) => Buffer.from(rgba))).toEqual([expected, expected]);
+    const sheet = await exportDocument(document, 'sprite-sheet'); const decodedSheet = UPNG.decode(Uint8Array.from(sheet.data).buffer);
+    expect(Buffer.from(UPNG.toRGBA8(decodedSheet)[0])).toEqual(Buffer.concat([expected, expected]));
+  });
+
   it('re-exports binary-alpha normal-layer composites through exact GIF local palettes', async () => {
     const document = createPixelDocument('sprite', 'Normal composite GIF'); const sprite = document.pixelAssets[document.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('Expected sprite');
     sprite.width = 3; sprite.height = 1; document.palette[1].color = '#ff0000'; document.palette[2].color = '#0000ff80';

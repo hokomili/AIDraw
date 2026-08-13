@@ -331,15 +331,21 @@ function roundedRatio(numerator: number, denominator: number): number {
   return Math.floor((numerator + denominator / 2) / denominator);
 }
 
+function canvasOpacityAlpha(sourceAlpha: number, opacity: number): number {
+  const opacityByte = Math.floor(opacity * 255);
+  return roundedRatio(sourceAlpha * opacityByte, 255);
+}
+
 function sourceOverPixel(
   output: Uint8ClampedArray,
   offset: number,
   source: readonly [number, number, number, number],
+  opacity: number,
 ): void {
-  const sourceAlpha = source[3];
+  const sourceAlpha = canvasOpacityAlpha(source[3], opacity);
   if (sourceAlpha === 0) return;
   if (sourceAlpha === 255 || output[offset + 3] === 0) {
-    output.set(source, offset);
+    output[offset] = source[0]; output[offset + 1] = source[1]; output[offset + 2] = source[2]; output[offset + 3] = sourceAlpha;
     return;
   }
   const destinationAlpha = output[offset + 3];
@@ -355,8 +361,9 @@ function sourceOverPixel(
 
 /**
  * Returns deterministic unpremultiplied RGBA for the ordinary normal-composite
- * pixel subset. Visible nested leaves must retain full opacity and normal blend;
- * richer composites deliberately keep using the established Canvas renderer.
+ * pixel subset. Visible nested leaves may use the renderer's established
+ * path-multiplied opacity but every blend must remain normal; richer composites
+ * deliberately keep using the established Canvas renderer.
  */
 export function exactNormalCompositeAnimationFrame(
   palette: PaletteEntry[],
@@ -364,22 +371,22 @@ export function exactNormalCompositeAnimationFrame(
   frameId: string,
 ): Uint8ClampedArray | undefined {
   const visible = pixelSpriteVisibleLayers(sprite);
-  if (visible.some(({ layer, opacity, normalBlend }) => layer.type !== 'pixel' || opacity !== 1 || !normalBlend)) return undefined;
+  if (visible.some(({ layer, opacity, normalBlend }) => layer.type !== 'pixel' || !Number.isFinite(opacity) || opacity < 0 || opacity > 1 || !normalBlend)) return undefined;
   const colors = animationFrameColors(palette, sprite, frameId);
   if (!colors) return undefined;
   const output = new Uint8ClampedArray(sprite.width * sprite.height * 4);
   if (visible.length === 1) {
     if (!visitPixelLayerIndexes(sprite, visible[0].layer.id, frameId, (index, pixel) => {
       if (!colors[index]) return false;
-      output.set(colors[index], pixel * 4); return true;
+      const offset = pixel * 4; output.set(colors[index], offset); output[offset + 3] = canvasOpacityAlpha(colors[index][3], visible[0].opacity); return true;
     })) return undefined;
     return output;
   }
-  for (const { layer } of visible) {
+  for (const { layer, opacity } of visible) {
     if (!visitPixelLayerIndexes(sprite, layer.id, frameId, (index, pixel) => {
       const color = colors[index];
       if (!color || color[3] === 0) return false;
-      sourceOverPixel(output, pixel * 4, color);
+      sourceOverPixel(output, pixel * 4, color, opacity);
       return true;
     })) return undefined;
   }
@@ -411,6 +418,7 @@ export function exactNormalCompositeGifFrame(
 ): { indexes: Uint8Array; palette: number[][] } | undefined {
   const direct = exactSingleLayerGifFrame(palette, sprite, frameId);
   if (direct) return direct;
+  if (pixelSpriteVisibleLayers(sprite).some(({ opacity }) => opacity !== 1)) return undefined;
   const rgba = exactNormalCompositeAnimationFrame(palette, sprite, frameId);
   if (!rgba) return undefined;
   const indexes = new Uint8Array(sprite.width * sprite.height);

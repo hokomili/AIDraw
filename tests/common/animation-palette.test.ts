@@ -82,15 +82,29 @@ describe('exact animation frame palettes', () => {
       255, 0, 0, 128,
     ]);
     sprite.layers[topId].opacity = 0.5;
-    expect(exactNormalCompositeAnimationFrame(document.palette, sprite, sprite.frameIds[0])).toBeUndefined();
+    expect(Array.from(exactNormalCompositeAnimationFrame(document.palette, sprite, sprite.frameIds[0])!)).toEqual([
+      153, 0, 102, 160,
+      255, 0, 0, 128,
+    ]);
     sprite.layers[topId].opacity = 1; sprite.layers[topId].blendMode = 'multiply';
     expect(exactNormalCompositeAnimationFrame(document.palette, sprite, sprite.frameIds[0])).toBeUndefined();
     sprite.layers[topId].blendMode = 'normal'; sprite.layers[groupId].blendMode = 'multiply';
     expect(exactNormalCompositeAnimationFrame(document.palette, sprite, sprite.frameIds[0])).toBeUndefined();
     sprite.layers[groupId].blendMode = 'normal'; sprite.layers[groupId].opacity = 0.5;
-    expect(exactNormalCompositeAnimationFrame(document.palette, sprite, sprite.frameIds[0])).toBeUndefined();
+    expect(Array.from(exactNormalCompositeAnimationFrame(document.palette, sprite, sprite.frameIds[0])!)).toEqual([
+      109, 0, 146, 112,
+      255, 0, 0, 64,
+    ]);
     sprite.layers[groupId].opacity = 1; document.palette[2].color = '#0000ff00';
     expect(exactNormalCompositeAnimationFrame(document.palette, sprite, sprite.frameIds[0])).toBeUndefined();
+  });
+
+  it('retains exact source RGB while applying the renderer opacity byte contract', () => {
+    const document = createPixelDocument('sprite', 'Fractional normal opacity'); const sprite = document.pixelAssets[document.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('Expected sprite');
+    sprite.width = 1; sprite.height = 1; document.palette[1].color = '#4080c080'; sprite.layers[sprite.layerIds[0]].opacity = 0.5;
+    writePixels(Object.values(sprite.cels)[0], [{ x: 0, y: 0, index: 1 }]);
+    expect(Array.from(exactNormalCompositeAnimationFrame(document.palette, sprite, sprite.frameIds[0])!)).toEqual([64, 128, 192, 64]);
+    expect(exactNormalCompositeGifFrame(document.palette, sprite, sprite.frameIds[0])).toBeUndefined();
   });
 
   it('retains the established stored transparent RGB for an ordinary single layer', () => {
@@ -110,6 +124,7 @@ describe('exact animation frame palettes', () => {
     const exact = exactNormalCompositeGifFrame(document.palette, sprite, sprite.frameIds[0])!;
     expect(Array.from(exact.indexes)).toEqual([1, 2, 0]);
     expect(exact.palette).toEqual([[0, 0, 0], [127, 0, 128], [255, 0, 0]]);
+    sprite.layers[topId].opacity = 0.5; expect(exactNormalCompositeGifFrame(document.palette, sprite, sprite.frameIds[0])).toBeUndefined(); sprite.layers[topId].opacity = 1;
     writePixels(sprite.cels[topCelId], [{ x: 2, y: 0, index: 2 }]);
     expect(exactNormalCompositeGifFrame(document.palette, sprite, sprite.frameIds[0])).toBeUndefined();
   });
