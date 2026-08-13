@@ -5,10 +5,10 @@ import { createCanvas } from '@napi-rs/canvas';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createIllustrationDocument, createPixelDocument, type PaletteEntry } from '@aidraw/core';
 import { MAX_QUEUED_UTILITY_TASKS, RasterUtilitySupervisor, type UtilityProcessLike } from '@main/utility-supervisor';
-import { MAX_EXPORT_UTILITY_MEMBERS, MAX_GENERATED_OUTPUT_BYTES, MAX_GENERATION_PROGRESS_MESSAGE_BYTES, MAX_GENERATION_PROVIDER_METADATA_BYTES, MAX_IMPORT_UTILITY_DOCUMENTS, MAX_OBSERVATION_PNG_BYTES, MAX_OBSERVATION_UTILITY_RESULT_SERIALIZED_BYTES, MAX_QUANTIZE_UTILITY_BASE64_CHARACTERS, MAX_QUANTIZE_UTILITY_SOURCE_BYTES, MAX_UTILITY_ERROR_MESSAGE_BYTES, MAX_UTILITY_REPORT_SERIALIZED_BYTES, MAX_UTILITY_TEXT_BYTES, assertExportUtilityResponse, type UtilityResponse } from '@main/utility-contract';
+import { MAX_EXPORT_UTILITY_MEMBERS, MAX_GENERATED_OUTPUT_BYTES, MAX_GENERATION_PROGRESS_MESSAGE_BYTES, MAX_GENERATION_PROVIDER_METADATA_BYTES, MAX_IMPORT_UTILITY_DOCUMENTS, MAX_OBSERVATION_PNG_BYTES, MAX_OBSERVATION_UTILITY_RESULT_SERIALIZED_BYTES, MAX_QUANTIZE_UTILITY_BASE64_CHARACTERS, MAX_QUANTIZE_UTILITY_SOURCE_BYTES, MAX_UTILITY_ERROR_MESSAGE_BYTES, MAX_UTILITY_REPORT_SERIALIZED_BYTES, MAX_UTILITY_TEXT_BYTES, assertExportUtilityResponse, generationApprovalPreviewDimensions, type UtilityResponse } from '@main/utility-contract';
 import type { GeneratedOutput, GenerationRequest } from '../../src/common/generation';
 import { normalizeGeneratedOutputForAcceptance } from '../../src/main/normalize-generation-output';
-import { validateUtilityImage } from '../../src/main/utility-image-validation';
+import { renderUtilityImagePreview, validateUtilityImage } from '../../src/main/utility-image-validation';
 
 class FakeUtility extends EventEmitter implements UtilityProcessLike {
   readonly messages: unknown[] = [];
@@ -113,6 +113,8 @@ describe('RasterUtilitySupervisor', () => {
     const bytes = createCanvas(2, 3).toBuffer('image/png');
     await expect(validateUtilityImage(bytes, { mimeType: 'image/png', width: 2, height: 3 })).resolves.toEqual({ width: 2, height: 3 });
     await expect(validateUtilityImage(bytes, { mimeType: 'image/png', width: 2, height: 3 }, async () => ({ width: 3, height: 2 }))).rejects.toThrow('disagree');
+    const renderedPreview = await renderUtilityImagePreview(bytes, { mimeType: 'image/png', width: 2, height: 3 }, { width: 1, height: 2 });
+    expect([renderedPreview.readUInt32BE(16), renderedPreview.readUInt32BE(20)]).toEqual([1, 2]);
 
     const workers = [new FakeUtility(), new FakeUtility()];
     const fork = vi.fn(() => workers[fork.mock.calls.length - 1]);
@@ -131,6 +133,40 @@ describe('RasterUtilitySupervisor', () => {
     await expect(recovered).resolves.toBeUndefined();
     expect(fork).toHaveBeenCalledTimes(2);
     supervisor.stop();
+  });
+
+  it('admits generation approval thumbnails only after exact static-PNG validation and fresh-worker recovery', async () => {
+    expect(generationApprovalPreviewDimensions(360, 120)).toEqual({ width: 180, height: 60 });
+    expect(generationApprovalPreviewDimensions(90, 240)).toEqual({ width: 45, height: 120 });
+    expect(generationApprovalPreviewDimensions(2, 3)).toEqual({ width: 2, height: 3 });
+    const { document } = importedDocumentWithPng('Approval preview source');
+    const asset = document.assets['imported-image'];
+    const workers = [new FakeUtility(), new FakeUtility()];
+    const fork = vi.fn(() => workers[fork.mock.calls.length - 1]);
+    const supervisor = new RasterUtilitySupervisor(fork);
+    const malformed = supervisor.renderGenerationApprovalPreview(asset);
+    const recovered = supervisor.renderGenerationApprovalPreview(asset);
+    await nextTurn();
+    const firstRequest = workers[0].messages[0] as Record<string, any>;
+    expect(firstRequest).toMatchObject({
+      kind: 'render-generation-approval-preview', mimeType: 'image/png', width: 2, height: 3,
+      previewWidth: 2, previewHeight: 3,
+    });
+    workers[0].respond({
+      id: firstRequest.id, ok: true, kind: 'render-generation-approval-preview',
+      previewDataBase64: observationPng(3, 3),
+    });
+    await expect(malformed).rejects.toThrow('malformed generation approval preview PNG');
+    expect(workers[0].killed).toBe(true);
+    await nextTurn();
+    const secondRequest = workers[1].messages[0] as Record<string, any>;
+    const previewDataBase64 = observationPng(2, 3);
+    workers[1].respond({
+      id: secondRequest.id, ok: true, kind: 'render-generation-approval-preview', previewDataBase64,
+    });
+    await expect(recovered).resolves.toEqual({
+      width: 2, height: 3, previewPng: Buffer.from(previewDataBase64, 'base64'),
+    });
   });
 
   it('rejects a contradictory image-validation result and retires that worker', async () => {

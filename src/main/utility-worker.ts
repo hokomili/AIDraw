@@ -4,6 +4,7 @@ import {
   assertNormalizeGenerationAcceptanceInput,
   assertImportUtilityResponseEnvelope,
   assertQuantizeUtilityParameters,
+  assertRenderGenerationApprovalPreviewUtilityRequest,
   assertValidateImageUtilityRequest,
   isGenerationProgressUtilityResponse,
   MAX_QUANTIZE_UTILITY_BASE64_CHARACTERS,
@@ -11,7 +12,7 @@ import {
   type UtilityRequest,
   type UtilityResponse,
 } from './utility-contract';
-import { validateUtilityImage } from './utility-image-validation';
+import { renderUtilityImagePreview, validateUtilityImage } from './utility-image-validation';
 import { boundedUtilityErrorMessage } from './utility-resource-policy';
 import { isAbsolute } from 'node:path';
 import { validateSpriteSheetSliceOptions } from '../common/sprite-sheet';
@@ -56,9 +57,13 @@ const generationControllers = new Map<string, AbortController>();
 function validateRequest(value: unknown): UtilityRequest {
   if (!value || typeof value !== 'object') throw new Error('Utility request must be an object.');
   const base = value as { id?: unknown; kind?: unknown };
-  if (typeof base.id !== 'string' || !base.id || !['validate-image', 'quantize-image', 'export-document', 'import-document', 'inspect-sprite-sheet', 'capture-observation', 'generation-run', 'normalize-generation-acceptance', 'containment-probe'].includes(String(base.kind))) throw new Error('Unknown utility request.');
+  if (typeof base.id !== 'string' || !base.id || !['validate-image', 'render-generation-approval-preview', 'quantize-image', 'export-document', 'import-document', 'inspect-sprite-sheet', 'capture-observation', 'generation-run', 'normalize-generation-acceptance', 'containment-probe'].includes(String(base.kind))) throw new Error('Unknown utility request.');
   if (base.kind === 'validate-image') {
     assertValidateImageUtilityRequest(value);
+    return value;
+  }
+  if (base.kind === 'render-generation-approval-preview') {
+    assertRenderGenerationApprovalPreviewUtilityRequest(value);
     return value;
   }
   if (base.kind === 'containment-probe') {
@@ -182,6 +187,18 @@ process.parentPort.on('message', (event) => {
           { mimeType: request.mimeType, width: request.width, height: request.height },
         );
         process.parentPort!.postMessage({ id, ok: true, kind: request.kind, ...decoded } satisfies UtilityResponse);
+      } else if (request.kind === 'render-generation-approval-preview') {
+        const preview = await renderUtilityImagePreview(
+          Buffer.from(request.encodedBase64, 'base64'),
+          { mimeType: request.mimeType, width: request.width, height: request.height },
+          { width: request.previewWidth, height: request.previewHeight },
+        );
+        process.parentPort!.postMessage({
+          id,
+          ok: true,
+          kind: request.kind,
+          previewDataBase64: preview.toString('base64'),
+        } satisfies UtilityResponse);
       } else if (request.kind === 'containment-probe') {
         if (request.mode === 'crash') setTimeout(() => process.crash(), 100);
         if (request.mode === 'crash' || request.mode === 'hang') await new Promise<never>(() => undefined);

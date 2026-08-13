@@ -69,6 +69,7 @@ export class EngineRuntime {
       (encoded, width, height, palette, settings) => this.rasterUtilities.quantizeImage(encoded, width, height, palette, settings),
       (document, request, maxPixels) => this.rasterUtilities.captureObservation(document, request, maxPixels ?? 4_194_304),
       options.approvalTimeoutMs,
+      (asset) => this.rasterUtilities.renderGenerationApprovalPreview(asset),
     );
   }
 

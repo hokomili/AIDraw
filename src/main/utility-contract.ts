@@ -62,6 +62,11 @@ export const MAX_QUANTIZE_UTILITY_SOURCE_BYTES = MAX_INLINE_ASSET_BYTES;
 export const MAX_QUANTIZE_UTILITY_BASE64_CHARACTERS = 2_000_000;
 export const MAX_IMAGE_VALIDATION_UTILITY_SOURCE_BYTES = MAX_NATIVE_BINARY_ENTRY_BYTES;
 export const MAX_IMAGE_VALIDATION_UTILITY_BASE64_CHARACTERS = Math.ceil(MAX_IMAGE_VALIDATION_UTILITY_SOURCE_BYTES / 3) * 4;
+/** Approval cards show only a small, static rendering of an already-canonical source asset. */
+export const MAX_GENERATION_APPROVAL_PREVIEW_WIDTH = 180;
+export const MAX_GENERATION_APPROVAL_PREVIEW_HEIGHT = 120;
+export const MAX_GENERATION_APPROVAL_PREVIEW_BYTES = 256 * 1024;
+export const MAX_GENERATION_APPROVAL_PREVIEW_BASE64_CHARACTERS = Math.ceil(MAX_INLINE_ASSET_BYTES / 3) * 4;
 const MAX_EXPORT_UTILITY_BASE64_CHARACTERS = Math.ceil(MAX_EXPORT_UTILITY_TOTAL_DECODED_BYTES / 3) * 4;
 /** PDF is the only multi-document importer and already caps its page/result count here. */
 export const MAX_IMPORT_UTILITY_DOCUMENTS = 256;
@@ -90,6 +95,17 @@ export interface ValidateImageUtilityRequest {
   mimeType: string;
   width: number;
   height: number;
+}
+
+export interface RenderGenerationApprovalPreviewUtilityRequest {
+  id: string;
+  kind: 'render-generation-approval-preview';
+  encodedBase64: string;
+  mimeType: string;
+  width: number;
+  height: number;
+  previewWidth: number;
+  previewHeight: number;
 }
 
 /** Keep supervisor admission and worker validation on the same quantization limits. */
@@ -190,10 +206,11 @@ export interface SerializedExportArtifact {
   companions?: Array<{ dataBase64: string; extension: string; mimeType: string; name: string }>;
 }
 
-export type UtilityRequest = ValidateImageUtilityRequest | QuantizeUtilityRequest | ExportUtilityRequest | ImportUtilityRequest | InspectSpriteSheetUtilityRequest | ObservationUtilityRequest | GenerationUtilityRequest | NormalizeGenerationAcceptanceUtilityRequest | UtilityContainmentProbeRequest;
+export type UtilityRequest = ValidateImageUtilityRequest | RenderGenerationApprovalPreviewUtilityRequest | QuantizeUtilityRequest | ExportUtilityRequest | ImportUtilityRequest | InspectSpriteSheetUtilityRequest | ObservationUtilityRequest | GenerationUtilityRequest | NormalizeGenerationAcceptanceUtilityRequest | UtilityContainmentProbeRequest;
 
 export type UtilityResponse =
   | { id: string; ok: true; kind: 'validate-image'; width: number; height: number }
+  | { id: string; ok: true; kind: 'render-generation-approval-preview'; previewDataBase64: string }
   | { id: string; ok: true; kind: 'quantize-image'; changes: Array<{ x: number; y: number; index: number }> }
   | { id: string; ok: true; kind: 'export-document'; artifact: SerializedExportArtifact }
   | { id: string; ok: true; kind: 'import-document'; documents: AIDrawDocument[]; warnings: string[]; fidelity?: InterchangeFidelityEntry[] }
@@ -281,6 +298,16 @@ function isNonEmptyString(value: unknown): value is string {
   return isBoundedUtilityString(value, MAX_UTILITY_TEXT_BYTES, false);
 }
 
+export function generationApprovalPreviewDimensions(width: number, height: number): { width: number; height: number } {
+  if (!isPositiveInteger(width) || !isPositiveInteger(height)
+    || width > MAX_INLINE_IMAGE_DIMENSION || height > MAX_INLINE_IMAGE_DIMENSION
+    || width * height > MAX_INLINE_IMAGE_PIXELS) {
+    throw new Error('Generation approval preview source exceeds the image safety limit.');
+  }
+  const scale = Math.min(1, MAX_GENERATION_APPROVAL_PREVIEW_WIDTH / width, MAX_GENERATION_APPROVAL_PREVIEW_HEIGHT / height);
+  return { width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)) };
+}
+
 export function assertValidateImageUtilityRequest(value: unknown): asserts value is ValidateImageUtilityRequest {
   if (!isRecord(value)
     || !hasOnlyKeys(value, ['id', 'kind', 'encodedBase64', 'mimeType', 'width', 'height'])
@@ -311,6 +338,37 @@ export function assertValidateImageUtilityRequest(value: unknown): asserts value
   }
 }
 
+export function assertRenderGenerationApprovalPreviewUtilityRequest(
+  value: unknown,
+): asserts value is RenderGenerationApprovalPreviewUtilityRequest {
+  if (!isRecord(value)
+    || !hasOnlyKeys(value, ['id', 'kind', 'encodedBase64', 'mimeType', 'width', 'height', 'previewWidth', 'previewHeight'])
+    || !hasKeys(value, ['id', 'kind', 'encodedBase64', 'mimeType', 'width', 'height', 'previewWidth', 'previewHeight'])
+    || typeof value.id !== 'string' || !value.id
+    || value.kind !== 'render-generation-approval-preview'
+    || typeof value.encodedBase64 !== 'string'
+    || value.encodedBase64.length > MAX_GENERATION_APPROVAL_PREVIEW_BASE64_CHARACTERS
+    || !isCanonicalBase64(value.encodedBase64)
+    || typeof value.mimeType !== 'string'
+    || !isPositiveInteger(value.width) || !isPositiveInteger(value.height)
+    || !isPositiveInteger(value.previewWidth) || !isPositiveInteger(value.previewHeight)) {
+    throw new Error('Generation approval preview utility request is malformed.');
+  }
+  if (base64DecodedByteLength(value.encodedBase64) > MAX_INLINE_ASSET_BYTES) {
+    throw new Error("Generation approval preview source exceeds AIDraw's 1,500,000-byte editable-asset limit.");
+  }
+  const expectedPreview = generationApprovalPreviewDimensions(value.width, value.height);
+  if (value.previewWidth !== expectedPreview.width || value.previewHeight !== expectedPreview.height) {
+    throw new Error('Generation approval preview utility request has contradictory preview dimensions.');
+  }
+  const bytes = Buffer.from(value.encodedBase64, 'base64');
+  const header = inspectImageHeader(bytes);
+  const display = displayImageDimensions(header);
+  if (value.mimeType !== header.mimeType || value.width !== display.width || value.height !== display.height) {
+    throw new Error('Generation approval preview utility request disagrees with its source header.');
+  }
+}
+
 export function assertValidateImageUtilityResponse(
   request: ValidateImageUtilityRequest,
   value: unknown,
@@ -324,6 +382,25 @@ export function assertValidateImageUtilityResponse(
     || value.height !== request.height) {
     throw new Error('Raster utility returned a malformed image-validation result.');
   }
+}
+
+export function assertRenderGenerationApprovalPreviewUtilityResponse(
+  request: RenderGenerationApprovalPreviewUtilityRequest,
+  value: unknown,
+): asserts value is Extract<UtilityResponse, { ok: true; kind: 'render-generation-approval-preview' }> {
+  if (!isRecord(value)
+    || !hasOnlyKeys(value, ['id', 'ok', 'kind', 'previewDataBase64'])
+    || !hasKeys(value, ['id', 'ok', 'kind', 'previewDataBase64'])
+    || value.id !== request.id
+    || value.ok !== true
+    || value.kind !== request.kind) {
+    throw new Error('Raster utility returned a malformed generation approval preview.');
+  }
+  assertStaticPng(value.previewDataBase64, request.previewWidth, request.previewHeight, MAX_GENERATION_APPROVAL_PREVIEW_BYTES, {
+    malformed: 'Raster utility returned a malformed generation approval preview PNG.',
+    limit: `Raster utility generation approval preview exceeds its ${MAX_GENERATION_APPROVAL_PREVIEW_BYTES}-byte PNG limit.`,
+    undecodable: 'Raster utility returned an undecodable generation approval preview PNG.',
+  });
 }
 
 /**

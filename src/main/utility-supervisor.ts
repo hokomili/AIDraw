@@ -1,5 +1,5 @@
 import { isAbsolute, join } from 'node:path';
-import { createId, type AIDrawDocument, type PaletteEntry } from '@aidraw/core';
+import { createId, type AIDrawDocument, type DocumentAsset, type PaletteEntry } from '@aidraw/core';
 import type { ExportFormat, ExportOptions } from '../common/contracts';
 import type { ExportArtifact } from './export-document';
 import type { QuantizeImageOptions } from './quantize-image';
@@ -14,13 +14,16 @@ import {
   assertObservationUtilityResponse,
   assertQuantizeUtilityResponse,
   assertQuantizeUtilityParameters,
+  assertRenderGenerationApprovalPreviewUtilityResponse,
   assertValidateImageUtilityResponse,
+  generationApprovalPreviewDimensions,
   MAX_IMAGE_VALIDATION_UTILITY_SOURCE_BYTES,
   validateImportUtilityResponse,
   MAX_QUANTIZE_UTILITY_SOURCE_BYTES,
   type ExportUtilityRequest,
   type InspectSpriteSheetUtilityRequest,
   type QuantizeUtilityRequest,
+  type RenderGenerationApprovalPreviewUtilityRequest,
   type UtilityCancelRequest,
   type UtilityContainmentProbeRequest,
   type UtilityRequest,
@@ -29,8 +32,10 @@ import {
 } from './utility-contract';
 import {
   displayImageDimensions,
+  inspectDocumentImageAsset,
   inspectEmbeddedDocumentImageAssets,
   inspectImageHeader,
+  MAX_INLINE_ASSET_BYTES,
   MAX_INLINE_IMAGE_DIMENSION,
   MAX_INLINE_IMAGE_PIXELS,
   type ExpectedDecodedImage,
@@ -159,6 +164,37 @@ export class RasterUtilitySupervisor {
     };
     return this.enqueue(request, control).then((response) => {
       if (response.kind !== 'validate-image') throw new Error('Raster utility returned the wrong image-validation result kind.');
+    });
+  }
+
+  renderGenerationApprovalPreview(
+    asset: DocumentAsset,
+    control: { signal?: AbortSignal; timeoutMs?: number } = {},
+  ): Promise<{ width: number; height: number; previewPng: Buffer }> {
+    let inspected: ReturnType<typeof inspectDocumentImageAsset>;
+    try {
+      inspected = inspectDocumentImageAsset(asset, {
+        maxBytes: MAX_INLINE_ASSET_BYTES,
+        limitLabel: '1.5 MB',
+        label: `Generation approval source ${asset.id}`,
+      });
+    } catch (error) {
+      return Promise.reject(error instanceof Error ? error : new Error(String(error)));
+    }
+    const preview = generationApprovalPreviewDimensions(inspected.expected.width, inspected.expected.height);
+    const request: RenderGenerationApprovalPreviewUtilityRequest = {
+      id: createId('utility'),
+      kind: 'render-generation-approval-preview',
+      encodedBase64: inspected.bytes.toString('base64'),
+      mimeType: inspected.expected.mimeType,
+      width: inspected.expected.width,
+      height: inspected.expected.height,
+      previewWidth: preview.width,
+      previewHeight: preview.height,
+    };
+    return this.enqueue(request, { ...control, timeoutMs: control.timeoutMs ?? 15_000 }).then((response) => {
+      if (response.kind !== request.kind) throw new Error('Raster utility returned the wrong generation approval preview result kind.');
+      return { width: request.width, height: request.height, previewPng: Buffer.from(response.previewDataBase64, 'base64') };
     });
   }
 
@@ -628,6 +664,7 @@ export class RasterUtilitySupervisor {
       try {
         if (response.kind !== task.request.kind) throw new Error('Raster utility returned the wrong result kind.');
         if (task.request.kind === 'validate-image') assertValidateImageUtilityResponse(task.request, response);
+        if (task.request.kind === 'render-generation-approval-preview') assertRenderGenerationApprovalPreviewUtilityResponse(task.request, response);
         if (task.request.kind === 'quantize-image') assertQuantizeUtilityResponse(task.request, response);
         if (task.request.kind === 'export-document') assertExportUtilityResponse(task.request, response);
         if (task.request.kind === 'capture-observation') assertObservationUtilityResponse(task.request, response);

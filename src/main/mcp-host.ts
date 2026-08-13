@@ -3,7 +3,6 @@ import { createServer, type IncomingMessage, type Server as HttpServer, type Ser
 import { mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { McpServer, ResourceTemplate } from '@modelcontextprotocol/server';
-import { createCanvas, loadImage } from '@napi-rs/canvas';
 import {
   NodeStreamableHTTPServerTransport,
   localhostHostValidation,
@@ -42,6 +41,7 @@ import {
   type AsyncJob,
   type CanvasOperation,
   type CanvasTransaction,
+  type DocumentAsset,
   type IllustrationDocument,
   type IllustrationObject,
   type PixelDocument,
@@ -91,6 +91,10 @@ interface McpSession {
 interface PortSettings { version: 1; preferredPort: number }
 interface FolderTrustSettings { version: 1; folders: string[] }
 type ApprovalDecision = 'allow-once' | 'allow-session' | 'allow-always' | 'deny';
+
+export type GenerationApprovalPreviewRenderer = (
+  asset: DocumentAsset,
+) => Promise<{ width: number; height: number; previewPng: Buffer }>;
 
 const ObservationRegionSchema = z.object({
   x: z.number().int().nonnegative(),
@@ -852,17 +856,21 @@ function approvalReview(
   };
 }
 
-async function generationApprovalPreviews(document: AIDrawDocument | undefined, request: Record<string, unknown>): Promise<NonNullable<NonNullable<NonNullable<AsyncJob['approval']>['review']>['previews']>> {
-  if (!document) return [];
+async function generationApprovalPreviews(
+  document: AIDrawDocument | undefined,
+  request: Record<string, unknown>,
+  renderPreview: GenerationApprovalPreviewRenderer | undefined,
+): Promise<NonNullable<NonNullable<NonNullable<AsyncJob['approval']>['review']>['previews']>> {
+  if (!document || !renderPreview) return [];
   const sources = Array.isArray(request.sourceAssetIds) ? request.sourceAssetIds.filter((value): value is string => typeof value === 'string').slice(0, 4).map((assetId) => ({ role: 'source' as const, assetId })) : [];
   const targets = [...sources, ...(typeof request.maskAssetId === 'string' ? [{ role: 'mask' as const, assetId: request.maskAssetId }] : [])];
   const previews: NonNullable<NonNullable<NonNullable<AsyncJob['approval']>['review']>['previews']> = [];
   for (const target of targets) {
     const asset = document.assets[target.assetId]; if (!asset?.data || !asset.mimeType.startsWith('image/')) continue;
     try {
-      const image = await loadImage(Buffer.from(asset.data, 'base64')); const scale = Math.min(1, 180 / image.width, 120 / image.height); const width = Math.max(1, Math.round(image.width * scale)); const height = Math.max(1, Math.round(image.height * scale)); const canvas = createCanvas(width, height); const context = canvas.getContext('2d'); context.imageSmoothingEnabled = true; context.drawImage(image, 0, 0, width, height); const data = canvas.toBuffer('image/png'); if (data.byteLength > 256 * 1024) continue;
-      previews.push({ role: target.role, assetId: asset.id, name: asset.name, mimeType: asset.mimeType, width: image.width, height: image.height, dataUrl: `data:image/png;base64,${data.toString('base64')}` });
-    } catch { /* The validator still reports the asset ID; an undecodable preview never grants or blocks approval. */ }
+      const preview = await renderPreview(asset);
+      previews.push({ role: target.role, assetId: asset.id, name: asset.name, mimeType: asset.mimeType, width: preview.width, height: preview.height, dataUrl: `data:image/png;base64,${preview.previewPng.toString('base64')}` });
+    } catch { /* The approval fields still report the asset ID; an unavailable advisory preview never grants or blocks approval. */ }
   }
   return previews;
 }
@@ -892,6 +900,7 @@ export class McpHost {
     private readonly quantizeImage: QuantizeImage = quantizeImageToPalette,
     private readonly captureCanvasObservation: CaptureObservation = captureObservation,
     private readonly approvalTimeoutMs = 120_000,
+    private readonly renderGenerationApprovalPreview?: GenerationApprovalPreviewRenderer,
   ) {
     this.scheduler = new PlaybackScheduler(documents);
     this.batches = new BatchManager(documents, join(dirname(preferredPortPath), 'batches.json'));
@@ -1102,7 +1111,7 @@ export class McpHost {
       const overwritePaths = (await Promise.all(targetPaths.map(async (target) => await stat(target).then(() => target, () => undefined)))).filter((target): target is string => Boolean(target));
       const request = requestedPath ? { ...rawRequest, path: requestedPath, overwritePaths } : rawRequest;
       const timestamp = nowIso(); const review = approvalReview(kind, title, request, requestedPath, overwritePaths, trustable);
-      if (kind === 'generation') review.previews = await generationApprovalPreviews(document, request);
+      if (kind === 'generation') review.previews = await generationApprovalPreviews(document, request, this.renderGenerationApprovalPreview);
       const job: AsyncJob = {
         id: createId('job'), kind, status: 'waiting-for-user', actor: structuredClone(session.actor), createdAt: timestamp, updatedAt: timestamp,
         progress: 0, message: `${title} is waiting for in-app approval.`, result: { documentId, request },

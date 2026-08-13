@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { DocumentService } from '@main/document-service';
 import { RecoveryJournal } from '@main/journal';
-import { McpHost } from '@main/mcp-host';
+import { McpHost, type GenerationApprovalPreviewRenderer } from '@main/mcp-host';
 import { TransactionTraceStore } from '@main/trace-store';
 import { createCanvas, loadImage } from '@napi-rs/canvas';
 import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createId, createPixelTileset, decodeTiledGid, encodeTiledGid, nowIso, readPixel, readTileAt } from '@aidraw/core';
@@ -978,7 +978,24 @@ describe('authenticated stateful MCP contract', () => {
     const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0');
     documents.initialize();
     let generationCancellationJobId: string | undefined;
-    const host = new McpHost(documents, '1.0.0', join(root, 'port.json'), (jobId) => { generationCancellationJobId = jobId; });
+    const previewedAssetIds: string[] = [];
+    let rejectApprovalPreview = false;
+    const renderApprovalPreview: GenerationApprovalPreviewRenderer = async (asset) => {
+      previewedAssetIds.push(asset.id);
+      if (rejectApprovalPreview) throw new Error('Simulated advisory preview failure.');
+      return { width: 2, height: 1, previewPng: Buffer.from(asset.data!, 'base64') };
+    };
+    const host = new McpHost(
+      documents,
+      '1.0.0',
+      join(root, 'port.json'),
+      (jobId) => { generationCancellationJobId = jobId; },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      renderApprovalPreview,
+    );
     hosts.push(host);
     const started = await host.start('approval-token');
     const client = await initializeClient(started.url, 'approval-token', 'approval-client');
@@ -1078,6 +1095,14 @@ describe('authenticated stateful MCP contract', () => {
       expect.objectContaining({ label: 'Provider options', value: '{"quality":"high"}' }),
     ]));
     expect(generationJob.approval?.review?.previews).toEqual([expect.objectContaining({ role: 'source', assetId: sourceAssetId, name: 'Coral source', width: 2, height: 1, dataUrl: expect.stringMatching(/^data:image\/png;base64,/) })]);
+    expect(previewedAssetIds).toEqual([sourceAssetId]);
+    const [mcpHostSource, runtimeSource] = await Promise.all([
+      readFile(join(process.cwd(), 'src/main/mcp-host.ts'), 'utf8'),
+      readFile(join(process.cwd(), 'src/main/engine-runtime.ts'), 'utf8'),
+    ]);
+    expect(mcpHostSource).not.toContain("from '@napi-rs/canvas'");
+    expect(mcpHostSource).toContain('await renderPreview(asset)');
+    expect(runtimeSource).toContain('(asset) => this.rasterUtilities.renderGenerationApprovalPreview(asset)');
     const defaultExpiryMs = new Date(generationJob.approval!.expiresAt).getTime() - new Date(generationJob.createdAt).getTime();
     expect(defaultExpiryMs).toBeGreaterThanOrEqual(119_900); expect(defaultExpiryMs).toBeLessThanOrEqual(120_100);
     const revisionBeforeTimeout = documents.getDocument(documentId)!.revision;
@@ -1085,6 +1110,15 @@ describe('authenticated stateful MCP contract', () => {
     for (let attempt = 0; attempt < 20 && documents.getJob(generationJob.id)?.status === 'waiting-for-user'; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 5));
     expect(documents.getJob(generationJob.id)).toMatchObject({ status: 'cancelled', approval: undefined, error: { code: 'approval_timeout', retryable: true } });
     expect(documents.getDocument(documentId)!.revision).toBe(revisionBeforeTimeout);
+    rejectApprovalPreview = true;
+    const previewFailure = await call(61, 'generation_start', {
+      documentId, provider: 'openai', mode: 'edit', prompt: 'Approval remains available', sourceAssetIds: [sourceAssetId],
+      size: { width: 1024, height: 1024 }, resultCount: 1,
+    });
+    const previewFailureJob = documents.getJob(String(previewFailure.jobId))!;
+    expect(previewFailureJob).toMatchObject({ status: 'waiting-for-user', approval: { review: { previews: [] } } });
+    expect(previewedAssetIds).toEqual([sourceAssetId, sourceAssetId]);
+    expect(documents.resolveJob(previewFailureJob.id, 'deny')?.status).toBe('cancelled');
     const unsupported = await call(7, 'generation_start', { documentId, provider: 'stability', mode: 'variation', prompt: 'Do not approximate this', sourceAssetIds: [], resultCount: 1 });
     expect(unsupported).toMatchObject({ error: 'unsupported_generation_request', message: expect.stringContaining('does not support variation') });
   });
