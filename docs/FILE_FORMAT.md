@@ -47,6 +47,14 @@ Custom brush-library transfer is separate from the native container and grants n
 
 The bundle does not include built-in presets, strokes, bitmap tip images, folders/tags, or application-global settings, and it is not a third-party brush format. Copy and one user-selected JSON file are the only source UI paths established here; no background directory access or native-container schema change is implied.
 
+## Clipboard HTML envelope
+
+Clipboard transfer is separate from the native container and grants no filesystem authority. A current editable copy writes one HTML element with `data-aidraw-version="1"`, `data-aidraw-sha256="<lowercase SHA-256>"`, and `data-aidraw="<canonical base64>"`. The decoded bytes are UTF-8 JSON for the existing version-1 `AIDrawFragment` contract; the SHA-256 covers those exact bytes. Fragment JSON is capped at 2 MiB before encoding, and the complete HTML payload is capped at 16 MiB. If visual SVG markup would exceed the latter bound, the private fragment stays intact and the HTML body becomes a small text label.
+
+The exact legacy form containing `data-aidraw` without version or checksum remains readable. A current envelope must supply both current version and checksum, attributes must not be duplicated, base64 must be canonical, UTF-8/JSON/fragment content must validate, and all limits apply before canonical use. Once HTML contains an exact AIDraw marker, any failure is reported as invalid AIDraw clipboard data; paste does not silently reinterpret the same clipboard as a bitmap. HTML without that marker may use the ordinary PNG fallback after native and decoded geometry agree and the image fits the canonical 8,192-side/16MP and 1,500,000-byte editable-asset limits.
+
+Copy also writes SVG text for illustration selections or fragment JSON text for pixel content, plus a standard PNG. These are fallbacks for ordinary clipboard consumers; the HTML attributes are an application-private convention, not a registered MIME type or third-party interchange standard. This contract does not change `.aidraw`, promise cross-application preservation of custom HTML, or establish packaged OS clipboard acceptance.
+
 ## Profile recovery state
 
 Crash recovery is profile-local and separate from the portable `.aidraw` container. New document journals are named `document-<sha256(documentId)>.jsonl`, so an imported opaque ID never becomes a path component and case-distinct IDs remain distinct on case-insensitive filesystems. A safe direct-child legacy `<documentId>.jsonl` remains readable and appendable until the next successful compaction writes the hashed form; only then is that legacy file removed. Compaction and the fixed `workspace.json` index use exclusive unique temporary siblings followed by atomic replacement.

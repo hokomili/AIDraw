@@ -4,9 +4,8 @@ import { join } from 'node:path';
 import { link, mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, isAbsolute, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { CanvasTransactionSchema, HUMAN_ACTOR, IDENTITY_TRANSFORM, createId, nowIso, type AIDrawDocument, type AsyncJob, type CanvasOperation, type CanvasTransaction, type DocumentAsset, type ImageObject } from '@aidraw/core';
+import { CanvasTransactionSchema, HUMAN_ACTOR, createId, nowIso, type AsyncJob, type CanvasOperation } from '@aidraw/core';
 import { IPC, type BatchDocumentResult, type DocumentPresetInput, type EngineStatus, type ExportOptions, type HumanLockRequest, type InterchangeReportInput, type NewDocumentOptions, type PixelLinkAction, type PixelLinkActionResult } from '../common/contracts';
-import { exportIllustrationFragment, exportPixelFragment, importDocumentFragmentOperations, parseDocumentFragment, type AIDrawFragment } from '../common/document-fragment';
 import { applyPortablePalette, parsePaletteFile, serializePaletteFile, type PaletteFileFormat, type PaletteImportMode } from '../common/palette-interchange';
 import type { DocumentService } from './document-service';
 import type { McpHost } from './mcp-host';
@@ -14,9 +13,8 @@ import type { ProviderCredentialStore } from './provider-credentials';
 import type { GenerationManager } from './generation-manager';
 import { EngineRuntime } from './engine-runtime';
 import type { GenerationRequest } from '../common/generation';
-import { illustrationToSvg, type ExportFormat } from './export-document';
+import type { ExportFormat } from './export-document';
 import { renderDocument } from './render-document';
-import { quantizeToPalette } from './quantize';
 import { cliHelp, executeBatchExport, parseCliArguments, type CliCommand } from './cli';
 import { validateSpriteSheetSliceOptions, type SpriteSheetSliceOptions } from '../common/sprite-sheet';
 import { buildRendererDiagnostics, type RendererFailureDetail } from './renderer-diagnostics';
@@ -44,6 +42,12 @@ import {
   installFnd09GenerationNormalizationE2eNetworkBoundary,
   resolveFnd09GenerationNormalizationE2eConfiguration,
 } from './generation-normalization-e2e';
+import {
+  assertClipboardImageGeometry,
+  copySelectionToClipboard,
+  pasteFromClipboard,
+  type ClipboardWorkflowDependencies,
+} from './clipboard-workflows';
 
 declare const MAIN_WINDOW_VITE_DEV_SERVER_URL: string | undefined;
 declare const MAIN_WINDOW_VITE_NAME: string;
@@ -403,37 +407,37 @@ function companionBytes(data: Buffer, format: string, target: string): Buffer {
   try { const metadata = JSON.parse(data.toString('utf8')) as { meta?: Record<string, unknown> }; metadata.meta = { ...(metadata.meta ?? {}), image: basename(target) }; return Buffer.from(JSON.stringify(metadata, null, 2)); } catch { return data; }
 }
 
-async function copySelection(objectIds: string[]): Promise<{ copied: boolean; kind?: string }> {
-  const id = service.getActiveDocumentId(); const document = id ? service.getDocument(id) : undefined; if (!document) return { copied: false };
-  let fragment: AIDrawFragment; let standardDocument: AIDrawDocument; let svg = '';
-  if (document.kind === 'illustration') {
-    standardDocument = structuredClone(document);
-    fragment = exportIllustrationFragment(document, objectIds);
-    if (fragment.kind !== 'illustration-objects') throw new Error('Illustration copy produced an incompatible fragment.');
-    const ids = new Set(fragment.objects.map((object) => object.id));
-    standardDocument.objects = Object.fromEntries(fragment.objects.map((object) => [object.id, object])); for (const layer of Object.values(standardDocument.layers)) if (layer.type === 'vector') layer.objectIds = layer.objectIds.filter((objectId) => ids.has(objectId)); svg = illustrationToSvg(standardDocument);
-  } else {
-    standardDocument = structuredClone(document);
-    fragment = exportPixelFragment(document);
-  }
-  const png = (await renderDocument(standardDocument)).toBuffer('image/png'); const encoded = Buffer.from(JSON.stringify(fragment)).toString('base64'); const html = `<div data-aidraw="${encoded}">${svg || '<span>AIDraw pixel artwork</span>'}</div>`;
-  clipboard.write({ text: svg || JSON.stringify(fragment), html, image: nativeImage.createFromBuffer(png) }); return { copied: true, kind: fragment.kind };
+function clipboardDependencies(): ClipboardWorkflowDependencies {
+  return {
+    getActiveDocument: () => {
+      const id = service.getActiveDocumentId();
+      return id ? service.getDocument(id) : undefined;
+    },
+    apply: (transaction) => service.apply(transaction),
+    raster: {
+      renderPng: async (document) => (await engineRuntime.rasterUtilities.exportDocument(document, 'png')).data,
+      quantizePng: (bytes, width, height, palette, settings) => engineRuntime.rasterUtilities.quantizeImage(bytes, width, height, palette, settings),
+    },
+    clipboard: {
+      write: (data) => {
+        const image = nativeImage.createFromBuffer(data.png);
+        if (image.isEmpty()) throw new Error('Clipboard PNG output could not be decoded for the system clipboard.');
+        clipboard.write({ text: data.text, html: data.html, image });
+      },
+      readHtml: () => clipboard.readHTML(),
+      readPng: () => {
+        const image = clipboard.readImage();
+        if (image.isEmpty()) return undefined;
+        const size = image.getSize();
+        assertClipboardImageGeometry(size.width, size.height);
+        return { bytes: image.toPNG(), width: size.width, height: size.height };
+      },
+    },
+  };
 }
 
-async function pasteClipboard(): Promise<ReturnType<DocumentService['apply']> extends Promise<infer R> ? R : never> {
-  const id = service.getActiveDocumentId(); const document = id ? service.getDocument(id) : undefined; if (!document) return { status: 'conflict', message: 'No active document.' };
-  let fragment: AIDrawFragment | undefined; const match = clipboard.readHTML().match(/data-aidraw="([A-Za-z0-9+/=]+)"/); if (match) { try { fragment = parseDocumentFragment(JSON.parse(Buffer.from(match[1], 'base64').toString('utf8'))); } catch { fragment = undefined; } }
-  const operations: CanvasOperation[] = [];
-  if (fragment) {
-    try { operations.push(...importDocumentFragmentOperations(document, fragment)); }
-    catch (error) { return { status: 'conflict', message: error instanceof Error ? error.message : 'The AIDraw fragment is invalid.' }; }
-  } else {
-    const image = clipboard.readImage(); if (image.isEmpty()) return { status: 'conflict', message: 'Clipboard has no AIDraw objects or image.' }; const bytes = image.toPNG(); const sha256 = createHash('sha256').update(bytes).digest('hex'); const asset: DocumentAsset = { id: createId('asset'), name: 'Clipboard image', mimeType: 'image/png', byteLength: bytes.byteLength, sha256, source: 'imported', data: bytes.toString('base64') }; operations.push({ kind: 'asset.add', asset });
-    if (document.kind === 'illustration') { const layer = Object.values(document.layers).find((entry) => entry.type === 'vector' && entry.visible && !entry.locked); if (!layer || layer.type !== 'vector') return { status: 'conflict', message: 'Add a vector layer before pasting.' }; const size = image.getSize(); const timestamp = nowIso(); const object: ImageObject = { id: createId('object'), revision: 0, name: 'Clipboard image', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, layerId: layer.id, visible: true, locked: false, opacity: 1, blendMode: 'normal', transform: { ...IDENTITY_TRANSFORM, x: 16, y: 16 }, type: 'image', assetId: asset.id, width: size.width, height: size.height, sourceWidth: size.width, sourceHeight: size.height, filters: [] }; operations.push({ kind: 'illustration.object.add', object }); }
-    else { const sprite = document.pixelAssets[document.activeAssetId]; if (sprite?.type !== 'sprite') return { status: 'conflict', message: 'Choose a sprite before pasting pixels.' }; const frameId = sprite.frameIds[0]; const layerId = [...sprite.layerIds].reverse().find((entry) => sprite.layers[entry]?.type === 'pixel'); const cel = Object.values(sprite.cels).find((entry) => entry.frameId === frameId && entry.layerId === layerId); if (!cel) return { status: 'conflict', message: 'The sprite has no editable cel.' }; operations.push({ kind: 'pixel.cel.set', spriteId: sprite.id, celId: cel.id, changes: quantizeToPalette(bytes, sprite.width, sprite.height, document.palette, document.conversionDefaults.alphaThreshold, document.conversionDefaults.dithering), expectedRevision: cel.revision }); }
-  }
-  const transaction: CanvasTransaction = { id: createId('tx'), clientOperationId: createId('clipboard'), documentId: document.id, actor: HUMAN_ACTOR, label: 'Paste', createdAt: nowIso(), operations, playback: { mode: 'instant', speed: 1 } }; return service.apply(transaction);
-}
+const copySelection = (objectIds: string[]) => copySelectionToClipboard(clipboardDependencies(), objectIds);
+const pasteClipboard = () => pasteFromClipboard(clipboardDependencies());
 
 function registerIpc(): void {
   const handle = <T extends unknown[], R>(
