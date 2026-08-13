@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { crc32, deflateSync } from 'node:zlib';
 import { PDFDocument, concatTransformationMatrix, drawObject, popGraphicsState, pushGraphicsState, rgb } from 'pdf-lib';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { createCanvas, type Canvas } from '@napi-rs/canvas';
 import { readTileAt, type PixelTilemap } from '@aidraw/core';
 
 vi.mock('electron', () => ({ nativeImage: { createFromBuffer: () => ({ isEmpty: () => true }) } }));
@@ -31,7 +32,7 @@ vi.mock('ag-psd', async (importOriginal) => {
     },
   };
 });
-const pdfBoundary = vi.hoisted((): { mode: 'real' | 'page-count' | 'page-dimension' | 'expanded'; getDocumentCalls: number; getPageCalls: number; renderCalls: number; destroyCalls: number; destroyFailure: boolean } => ({ mode: 'real', getDocumentCalls: 0, getPageCalls: 0, renderCalls: 0, destroyCalls: 0, destroyFailure: false }));
+const pdfBoundary = vi.hoisted((): { mode: 'real' | 'page-count' | 'page-dimension' | 'expanded'; getDocumentCalls: number; getPageCalls: number; renderCalls: number; cleanupCalls: number; destroyCalls: number; cleanupFailure: boolean; destroyFailure: boolean; events: string[] } => ({ mode: 'real', getDocumentCalls: 0, getPageCalls: 0, renderCalls: 0, cleanupCalls: 0, destroyCalls: 0, cleanupFailure: false, destroyFailure: false, events: [] }));
 vi.mock('pdfjs-dist/legacy/build/pdf.mjs', async (importOriginal) => {
   const original = await importOriginal<typeof import('pdfjs-dist/legacy/build/pdf.mjs')>();
   return {
@@ -43,10 +44,11 @@ vi.mock('pdfjs-dist/legacy/build/pdf.mjs', async (importOriginal) => {
         const observedPromise = task.promise.then((source) => new Proxy(source, {
           get(target, property) {
             if (property === 'getPage') return async (...pageArgs: Parameters<typeof target.getPage>) => {
-              pdfBoundary.getPageCalls += 1; const page = await target.getPage(...pageArgs);
+              const pageNumber = pageArgs[0]; pdfBoundary.getPageCalls += 1; pdfBoundary.events.push(`get:${pageNumber}`); const page = await target.getPage(...pageArgs);
               return new Proxy(page, {
                 get(pageTarget, pageProperty) {
-                  if (pageProperty === 'render') return (...renderArgs: Parameters<typeof pageTarget.render>) => { pdfBoundary.renderCalls += 1; return pageTarget.render(...renderArgs); };
+                  if (pageProperty === 'render') return (...renderArgs: Parameters<typeof pageTarget.render>) => { pdfBoundary.renderCalls += 1; pdfBoundary.events.push(`render:${pageNumber}`); return pageTarget.render(...renderArgs); };
+                  if (pageProperty === 'cleanup') return (...cleanupArgs: Parameters<typeof pageTarget.cleanup>) => { pdfBoundary.cleanupCalls += 1; pdfBoundary.events.push(`cleanup:${pageNumber}`); const cleaned = pageTarget.cleanup(...cleanupArgs); if (pdfBoundary.cleanupFailure) throw new Error('Injected PDF page cleanup failure.'); return cleaned; };
                   const value = Reflect.get(pageTarget, pageProperty, pageTarget); return typeof value === 'function' ? value.bind(pageTarget) : value;
                 },
               });
@@ -57,7 +59,7 @@ vi.mock('pdfjs-dist/legacy/build/pdf.mjs', async (importOriginal) => {
         return new Proxy(task, {
           get(target, property) {
             if (property === 'promise') return observedPromise;
-            if (property === 'destroy') return async () => { pdfBoundary.destroyCalls += 1; await target.destroy(); if (pdfBoundary.destroyFailure) throw new Error('Injected PDF loading-task destroy failure.'); };
+            if (property === 'destroy') return async () => { pdfBoundary.destroyCalls += 1; pdfBoundary.events.push('destroy'); await target.destroy(); if (pdfBoundary.destroyFailure) throw new Error('Injected PDF loading-task destroy failure.'); };
             const value = Reflect.get(target, property, target); return typeof value === 'function' ? value.bind(target) : value;
           },
         });
@@ -67,22 +69,23 @@ vi.mock('pdfjs-dist/legacy/build/pdf.mjs', async (importOriginal) => {
       return {
         promise: Promise.resolve({
           numPages,
-          getPage: async () => {
-            pdfBoundary.getPageCalls += 1;
+          getPage: async (pageNumber: number) => {
+            pdfBoundary.getPageCalls += 1; pdfBoundary.events.push(`get:${pageNumber}`);
             return {
               getViewport: () => ({ width, height }),
-              render: () => { pdfBoundary.renderCalls += 1; return { promise: Promise.resolve() }; },
+              render: () => { pdfBoundary.renderCalls += 1; pdfBoundary.events.push(`render:${pageNumber}`); return { promise: Promise.resolve() }; },
               getTextContent: async () => ({ items: [] }),
+              cleanup: () => { pdfBoundary.cleanupCalls += 1; pdfBoundary.events.push(`cleanup:${pageNumber}`); if (pdfBoundary.cleanupFailure) throw new Error('Injected PDF page cleanup failure.'); return true; },
             };
           },
         }),
-        destroy: async () => { pdfBoundary.destroyCalls += 1; if (pdfBoundary.destroyFailure) throw new Error('Injected PDF loading-task destroy failure.'); },
+        destroy: async () => { pdfBoundary.destroyCalls += 1; pdfBoundary.events.push('destroy'); if (pdfBoundary.destroyFailure) throw new Error('Injected PDF loading-task destroy failure.'); },
       } as unknown as ReturnType<typeof original.getDocument>;
     },
   };
 });
 
-import { importDocument, MAX_STRUCTURED_IMPORT_BYTES } from '../../src/main/import-document';
+import { importDocument, MAX_STRUCTURED_IMPORT_BYTES, renderPdfPagePng } from '../../src/main/import-document';
 import { inspectImageHeader } from '../../src/main/transaction-policy';
 import { runImportUtilityRequest } from '../../src/main/utility-import';
 
@@ -180,8 +183,8 @@ async function psdOverlappingLayerChannelLengthCorpus(): Promise<{ valid: Buffer
   return { valid, malformed, channelDataStart, channelLengthOffset, validLength, malformedLength };
 }
 
-async function minimalPdf(): Promise<Buffer> {
-  const pdf = await PDFDocument.create(); pdf.addPage([16, 12]);
+async function minimalPdf(pageCount = 1): Promise<Buffer> {
+  const pdf = await PDFDocument.create(); for (let page = 0; page < pageCount; page += 1) pdf.addPage([16, 12]);
   return Buffer.from(await pdf.save({ useObjectStreams: false }));
 }
 
@@ -405,7 +408,7 @@ async function temporaryDirectory(): Promise<string> {
 afterEach(async () => {
   decoderBoundary.calls = 0; decoderBoundary.reportedWidthOffset = 0;
   psdBoundary.calls = 0; psdBoundary.reportedWidthOffset = 0; psdBoundary.truncateCompositeBytes = false; psdBoundary.totalMemoryLimit = undefined;
-  pdfBoundary.mode = 'real'; pdfBoundary.getDocumentCalls = 0; pdfBoundary.getPageCalls = 0; pdfBoundary.renderCalls = 0; pdfBoundary.destroyCalls = 0; pdfBoundary.destroyFailure = false;
+  pdfBoundary.mode = 'real'; pdfBoundary.getDocumentCalls = 0; pdfBoundary.getPageCalls = 0; pdfBoundary.renderCalls = 0; pdfBoundary.cleanupCalls = 0; pdfBoundary.destroyCalls = 0; pdfBoundary.cleanupFailure = false; pdfBoundary.destroyFailure = false; pdfBoundary.events = [];
   await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
 
@@ -649,7 +652,28 @@ describe('untrusted import limits', () => {
     const directory = await temporaryDirectory(); const filePath = join(directory, 'minimal.pdf'); await writeFile(filePath, await minimalPdf());
     const imported = await runImportUtilityRequest({ id: 'minimal-pdf', kind: 'import-document', filePath, pixelMode: false }); const document = imported.documents[0]; if (document.kind !== 'illustration') throw new Error('Expected illustration document');
     expect(document.artboard).toMatchObject({ width: 16, height: 12 }); expect(imported.warnings).toEqual([expect.stringContaining('faithful raster fallback')]);
-    expect(pdfBoundary).toMatchObject({ getDocumentCalls: 1, getPageCalls: 1, renderCalls: 1, destroyCalls: 1 });
+    expect(pdfBoundary).toMatchObject({ getDocumentCalls: 1, getPageCalls: 1, renderCalls: 1, cleanupCalls: 1, destroyCalls: 1 });
+  });
+
+  it('releases a PDF page canvas after both successful encoding and render failure', async () => {
+    let successfulCanvas: Canvas | undefined;
+    const png = await renderPdfPagePng(4, 3, async (context) => { context.fillStyle = '#ff0000'; context.fillRect(0, 0, 4, 3); }, (width, height) => { const canvas = createCanvas(width, height); successfulCanvas = canvas; return canvas; });
+    expect(png.subarray(1, 4).toString()).toBe('PNG'); expect(successfulCanvas).toMatchObject({ width: 1, height: 1 });
+
+    let failedCanvas: Canvas | undefined; const renderError = new Error('Injected PDF page render failure.');
+    await expect(renderPdfPagePng(4, 3, async () => { throw renderError; }, (width, height) => { const canvas = createCanvas(width, height); failedCanvas = canvas; return canvas; })).rejects.toBe(renderError);
+    expect(failedCanvas).toMatchObject({ width: 1, height: 1 });
+    await expect(renderPdfPagePng(0, 3, async () => undefined)).rejects.toThrow(/8192px\/16MP import limit/);
+  });
+
+  it('cleans each processed PDF page before rendering the next page', async () => {
+    const directory = await temporaryDirectory(); const filePath = join(directory, 'three-pages.pdf'); await writeFile(filePath, await minimalPdf(3));
+    const imported = await runImportUtilityRequest({ id: 'three-page-pdf', kind: 'import-document', filePath, pixelMode: false });
+    expect(imported.documents).toHaveLength(3);
+    expect(pdfBoundary).toMatchObject({ getPageCalls: 3, renderCalls: 3, cleanupCalls: 3, destroyCalls: 1 });
+    expect(pdfBoundary.events.filter((event) => /^(?:render|cleanup|destroy)/.test(event))).toEqual([
+      'render:1', 'cleanup:1', 'render:2', 'cleanup:2', 'render:3', 'cleanup:3', 'destroy',
+    ]);
   });
 
   it('rejects locally generated truncated and hostile PDF containers through pdf.js and still destroys each loading task', async () => {
@@ -715,10 +739,12 @@ describe('untrusted import limits', () => {
     expect(valid.documents).toHaveLength(1); expect(corpus.valid.toString('latin1')).toContain('/Filter [ /ASCIIHexDecode /FlateDecode ]');
     const recovered = await runImportUtilityRequest({ id: 'pdf-multi-filter-reversed', kind: 'import-document', filePath: join(directory, 'reversed-order.pdf'), pixelMode: false });
     expect(recovered.documents).toHaveLength(1); expect(recovered.documents[0]).toMatchObject({ kind: 'illustration', artboard: { width: 16, height: 12 } });
+    pdfBoundary.cleanupFailure = true;
     let truncatedResult: unknown; let truncationError: unknown;
     try { truncatedResult = await runImportUtilityRequest({ id: 'pdf-multi-filter-truncated', kind: 'import-document', filePath: join(directory, 'truncated-stream.pdf'), pixelMode: false }); } catch (error) { truncationError = error; }
     expect(truncatedResult).toBeUndefined(); expect(truncationError).toMatchObject({ name: 'RangeError', message: 'Invalid typed array length: 4' });
-    expect(pdfBoundary).toMatchObject({ getDocumentCalls: 3, getPageCalls: 3, renderCalls: 3, destroyCalls: 3 });
+    expect((truncationError as Error).message).not.toContain('cleanup failure');
+    expect(pdfBoundary).toMatchObject({ getDocumentCalls: 3, getPageCalls: 3, renderCalls: 3, cleanupCalls: 3, destroyCalls: 3 });
   });
 
   it('rejects a premature ASCII85 end marker in an ASCII85/Flate image chain at render', async () => {
@@ -737,7 +763,13 @@ describe('untrusted import limits', () => {
   it('still fails closed when only PDF loading-task destruction fails', async () => {
     const directory = await temporaryDirectory(); const filePath = join(directory, 'cleanup-failure.pdf'); await writeFile(filePath, await minimalPdf()); pdfBoundary.destroyFailure = true;
     await expect(runImportUtilityRequest({ id: 'pdf-cleanup-only-failure', kind: 'import-document', filePath, pixelMode: false })).rejects.toThrow('Injected PDF loading-task destroy failure.');
-    expect(pdfBoundary).toMatchObject({ getDocumentCalls: 1, getPageCalls: 1, renderCalls: 1, destroyCalls: 1 });
+    expect(pdfBoundary).toMatchObject({ getDocumentCalls: 1, getPageCalls: 1, renderCalls: 1, cleanupCalls: 1, destroyCalls: 1 });
+  });
+
+  it('fails closed on page cleanup alone and still destroys the loading task', async () => {
+    const directory = await temporaryDirectory(); const filePath = join(directory, 'page-cleanup-failure.pdf'); await writeFile(filePath, await minimalPdf()); pdfBoundary.cleanupFailure = true;
+    await expect(runImportUtilityRequest({ id: 'pdf-page-cleanup-only-failure', kind: 'import-document', filePath, pixelMode: false })).rejects.toThrow('Injected PDF page cleanup failure.');
+    expect(pdfBoundary).toMatchObject({ getDocumentCalls: 1, getPageCalls: 1, renderCalls: 1, cleanupCalls: 1, destroyCalls: 1 });
   });
 
   it('enforces PDF page, per-page, and cumulative expansion limits before rendering', async () => {
@@ -749,8 +781,8 @@ describe('untrusted import limits', () => {
     ] as const) {
       pdfBoundary.mode = mode;
       await expect(runImportUtilityRequest({ id: `pdf-${mode}`, kind: 'import-document', filePath, pixelMode: false })).rejects.toThrow(message);
-      expect(pdfBoundary).toMatchObject({ getPageCalls, renderCalls: 0, destroyCalls: 1 });
-      pdfBoundary.getPageCalls = 0; pdfBoundary.destroyCalls = 0;
+      expect(pdfBoundary).toMatchObject({ getPageCalls, renderCalls: 0, cleanupCalls: getPageCalls, destroyCalls: 1 });
+      pdfBoundary.getPageCalls = 0; pdfBoundary.cleanupCalls = 0; pdfBoundary.destroyCalls = 0;
     }
   });
 

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { readFile, realpath, stat } from 'node:fs/promises';
 import { gunzipSync, inflateSync } from 'node:zlib';
 import { basename, dirname, extname, isAbsolute, relative, resolve } from 'node:path';
-import { createCanvas, DOMMatrix, ImageData, Path2D, loadImage } from '@napi-rs/canvas';
+import { createCanvas, DOMMatrix, ImageData, Path2D, loadImage, type Canvas } from '@napi-rs/canvas';
 import { initializeCanvas as initializePsdCanvas, readPsd, type Layer as PsdLayer } from 'ag-psd';
 import { decompressFrames, parseGIF, type ParsedFrame } from 'gifuct-js';
 import { XMLParser } from 'fast-xml-parser';
@@ -60,6 +60,25 @@ const MAX_TILED_LAYER_CELLS = 4_194_304;
 const MAX_TILED_TOTAL_CELLS = 16_777_216;
 const MAX_TILED_OBJECTS = 100_000;
 const MAX_TILESET_TILES = 1_048_576;
+
+export async function renderPdfPagePng(
+  width: number,
+  height: number,
+  render: (context: CanvasRenderingContext2D) => Promise<unknown>,
+  canvasFactory: (width: number, height: number) => Canvas = createCanvas,
+): Promise<Buffer> {
+  assertImageDimensions(width, height, 'PDF page');
+  const canvas = canvasFactory(width, height);
+  try {
+    await render(canvas.getContext('2d') as unknown as CanvasRenderingContext2D);
+    return canvas.toBuffer('image/png');
+  } finally {
+    // The encoded PNG owns its bytes. Release the native page surface before
+    // raster admission/text extraction or the next PDF page begins.
+    canvas.width = 1;
+    canvas.height = 1;
+  }
+}
 
 function safeJson(bytes: Buffer, label: string): Record<string, any> {
   try {
@@ -654,32 +673,48 @@ async function importTiled(bytes: Buffer, name: string, filePath: string): Promi
 async function importPdf(bytes: Buffer, name: string, pixelMode: boolean): Promise<ImportResult> {
   Object.assign(globalThis, { DOMMatrix, ImageData, Path2D });
   const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs'); const loadingTask = pdfjs.getDocument({ data: Uint8Array.from(bytes) }); const documents: AIDrawDocument[] = [];
+  type PdfPage = Awaited<ReturnType<Awaited<typeof loadingTask.promise>['getPage']>>;
+  type PdfViewport = ReturnType<PdfPage['getViewport']>;
+  const acquiredPages: PdfPage[] = []; const cleanupAttempted = new Set<PdfPage>(); let pageCleanupFailed = false; let pageCleanupError: unknown;
+  const cleanupPage = (page: PdfPage) => {
+    if (cleanupAttempted.has(page)) return;
+    cleanupAttempted.add(page);
+    try { page.cleanup(); } catch (error) { if (!pageCleanupFailed) { pageCleanupFailed = true; pageCleanupError = error; } }
+  };
   let result!: ImportResult; let importFailed = false; let importError: unknown;
   try {
     const source = await loadingTask.promise;
     if (source.numPages < 1 || source.numPages > MAX_PDF_PAGES) throw new Error(`PDF page count ${source.numPages} exceeds AIDraw's ${MAX_PDF_PAGES}-page import limit.`);
-    const pages: Array<{ pageNumber: number; page: Awaited<ReturnType<typeof source.getPage>>; viewport: ReturnType<Awaited<ReturnType<typeof source.getPage>>['getViewport']>; width: number; height: number }> = []; let expandedPixels = 0;
+    const pages: Array<{ pageNumber: number; page: PdfPage; viewport: PdfViewport; width: number; height: number }> = []; let expandedPixels = 0;
     for (let pageNumber = 1; pageNumber <= source.numPages; pageNumber += 1) {
-      const page = await source.getPage(pageNumber); const viewport = page.getViewport({ scale: 1 }); const width = Math.max(1, Math.ceil(viewport.width)); const height = Math.max(1, Math.ceil(viewport.height)); assertImageDimensions(width, height, `PDF page ${pageNumber}`); expandedPixels += width * height; if (expandedPixels > MAX_PDF_EXPANDED_PIXELS) throw new Error('PDF pages exceed the 64-megapixel expanded import budget.'); pages.push({ pageNumber, page, viewport, width, height });
+      const page = await source.getPage(pageNumber); acquiredPages.push(page); const viewport = page.getViewport({ scale: 1 }); const width = Math.max(1, Math.ceil(viewport.width)); const height = Math.max(1, Math.ceil(viewport.height)); assertImageDimensions(width, height, `PDF page ${pageNumber}`); expandedPixels += width * height; if (expandedPixels > MAX_PDF_EXPANDED_PIXELS) throw new Error('PDF pages exceed the 64-megapixel expanded import budget.'); pages.push({ pageNumber, page, viewport, width, height });
     }
     let extractedTextItems = 0;
     for (const { pageNumber, page, viewport, width, height } of pages) {
-      const canvas = createCanvas(width, height);
-      await page.render({ canvas: null, canvasContext: canvas.getContext('2d') as unknown as CanvasRenderingContext2D, viewport }).promise; const pageName = source.numPages > 1 ? `${name} · Page ${pageNumber}` : name; const imported = await importRaster(canvas.toBuffer('image/png'), pageName, 'image/png', pixelMode); const document = imported.documents[0];
-      if (document.kind === 'illustration') {
-        const timestamp = nowIso(); const textLayer: IllustrationLayer = { id: createId('layer'), revision: 0, name: 'Editable PDF text (hidden)', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, interchangeRole: 'pdf-extracted-text', visible: false, locked: false, opacity: 1, blendMode: 'normal', type: 'vector', objectIds: [] }; const text = await page.getTextContent(); extractedTextItems += text.items.length; if (extractedTextItems > 250_000) throw new Error('PDF exceeds the 250,000-item editable-text extraction limit.');
-        for (const item of text.items) if ('str' in item && item.str) { const fontSize = Math.max(1, Math.hypot(item.transform[0], item.transform[1])); const object: TextObject = { ...entityBase(item.str.slice(0, 32), textLayer.id), type: 'text', text: item.str, width: Math.max(1, item.width), height: Math.max(1, item.height || fontSize), align: 'left', lineHeight: 1.2, ranges: [{ start: 0, end: item.str.length, fontFamily: item.fontName || 'sans-serif', fontSize, fontWeight: 400, fontStyle: 'normal', color: '#000000', letterSpacing: 0 }] }; object.transform.x = item.transform[4]; object.transform.y = viewport.height - item.transform[5] - fontSize; document.objects[object.id] = object; textLayer.objectIds.push(object.id); }
-        if (textLayer.objectIds.length) { document.layers[textLayer.id] = textLayer; document.layerIds.push(textLayer.id); }
-      }
-      documents.push(document);
+      let pageFailed = false; let pageError: unknown;
+      try {
+        const png = await renderPdfPagePng(width, height, async (canvasContext) => { await page.render({ canvas: null, canvasContext, viewport }).promise; });
+        const pageName = source.numPages > 1 ? `${name} · Page ${pageNumber}` : name; const imported = await importRaster(png, pageName, 'image/png', pixelMode); const document = imported.documents[0];
+        if (document.kind === 'illustration') {
+          const timestamp = nowIso(); const textLayer: IllustrationLayer = { id: createId('layer'), revision: 0, name: 'Editable PDF text (hidden)', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, interchangeRole: 'pdf-extracted-text', visible: false, locked: false, opacity: 1, blendMode: 'normal', type: 'vector', objectIds: [] }; const text = await page.getTextContent(); extractedTextItems += text.items.length; if (extractedTextItems > 250_000) throw new Error('PDF exceeds the 250,000-item editable-text extraction limit.');
+          for (const item of text.items) if ('str' in item && item.str) { const fontSize = Math.max(1, Math.hypot(item.transform[0], item.transform[1])); const object: TextObject = { ...entityBase(item.str.slice(0, 32), textLayer.id), type: 'text', text: item.str, width: Math.max(1, item.width), height: Math.max(1, item.height || fontSize), align: 'left', lineHeight: 1.2, ranges: [{ start: 0, end: item.str.length, fontFamily: item.fontName || 'sans-serif', fontSize, fontWeight: 400, fontStyle: 'normal', color: '#000000', letterSpacing: 0 }] }; object.transform.x = item.transform[4]; object.transform.y = viewport.height - item.transform[5] - fontSize; document.objects[object.id] = object; textLayer.objectIds.push(object.id); }
+          if (textLayer.objectIds.length) { document.layers[textLayer.id] = textLayer; document.layerIds.push(textLayer.id); }
+        }
+        documents.push(document);
+      } catch (error) { pageFailed = true; pageError = error; }
+      cleanupPage(page);
+      if (pageFailed) throw pageError;
+      if (pageCleanupFailed) throw pageCleanupError;
     }
     result = { documents, warnings: ['PDF pages retain a faithful raster fallback. Extracted text is placed on a hidden editable layer and retained invisibly on PDF re-export when supported; unsupported operators and effects remain rasterized.'] };
   } catch (error) {
     importFailed = true; importError = error;
   }
+  for (const page of acquiredPages) cleanupPage(page);
   let destroyFailed = false; let destroyError: unknown;
   try { await loadingTask.destroy(); } catch (error) { destroyFailed = true; destroyError = error; }
   if (importFailed) throw importError;
+  if (pageCleanupFailed) throw pageCleanupError;
   if (destroyFailed) throw destroyError;
   return result;
 }
