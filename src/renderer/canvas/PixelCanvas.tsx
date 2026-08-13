@@ -37,7 +37,6 @@ import {
   transformPixelStamp,
   transformTileStamp,
   upsertPixelAnimationTag,
-  type PixelCel,
   type CanvasOperation,
   type CollisionShape,
   type BitmapFont,
@@ -74,8 +73,8 @@ import { tileAnimationFrameAt, tilesetTileSourceRect } from '../../common/tile-a
 import { parseBitmapFontJson } from '../../common/bitmap-font-interchange';
 import { cancelPixelGesture, releasePendingPixelLocks } from '../../common/pixel-gesture';
 import { BoundedResourceCache } from '../../common/bounded-resource-cache';
-import { pixelSpriteRegionPlan } from '../../common/pixel-sprite-render';
-import { editableSpriteLayer, recordValues, safeDecodePixelChunk, spriteRegionBitmap, visibleSpriteLayers, type SpriteRegionBitmap } from './pixel-bitmap';
+import { drawPixelSpriteRegion, pixelSpriteRegionPlan } from '../../common/pixel-sprite-render';
+import { editableSpriteLayer, spriteRegionBitmap, visibleSpriteLayers, type SpriteRegionBitmap } from './pixel-bitmap';
 
 interface PixelPoint { x: number; y: number }
 interface PixelView { scale: number; offsetX: number; offsetY: number; logicalWidth: number; logicalHeight: number }
@@ -455,14 +454,14 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     context.shadowColor = 'transparent';
     const isometricCellHeight = tilemap?.orientation === 'isometric' ? view.scale * tilemap.tileHeight / tilemap.tileWidth : view.scale;
     const orthogonalCellHeight = tilemap?.orientation === 'orthogonal' ? view.scale * tilemap.tileHeight / tilemap.tileWidth : view.scale;
-    const baseTilemapViewportRegion = tilemap ? coveringRasterViewportRegion({
+    const baseRasterViewportRegion = sprite || tilemap ? coveringRasterViewportRegion({
       viewportWidth: size.width,
       viewportHeight: size.height,
       viewOffsetX: view.offsetX,
       viewOffsetY: view.offsetY,
       layerOffsetX: 0,
       layerOffsetY: 0,
-      projectionScale: view.scale / tilemap.tileWidth,
+      projectionScale: sprite ? view.scale : view.scale / tilemap!.tileWidth,
     }) : undefined;
     const gridCellRect = (point: PixelPoint): IsometricCellRect => tilemap?.orientation === 'isometric'
       ? isometricCellRect(point.x, point.y, tilemap.height, view.scale, isometricCellHeight)
@@ -492,29 +491,17 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
           : index;
         return (sprite.paletteOverrides[activeFrameId] ?? document.palette)[cycled]?.color ?? '#ff00ff';
       };
-      const drawFrame = (targetFrame: string, alpha: number, tint?: string) => {
-        context.globalAlpha = alpha;
-        for (const entry of visibleSpriteLayers(sprite)) {
-          const { layer } = entry;
-          if (layer.type !== 'pixel') continue;
-          const cel = celFor(sprite, layer.id, targetFrame);
-          if (!cel) continue;
-          const hiddenPixels = replayMasks.celPixels.get(cel.id);
-          context.globalAlpha = alpha * entry.opacity; context.globalCompositeOperation = layer.blendMode === 'normal' ? 'source-over' : layer.blendMode;
-          for (const chunk of recordValues<PixelCel['chunks'][string]>(cel.chunks)) {
-            const values = safeDecodePixelChunk(chunk); if (!values) continue;
-            for (let localY = 0; localY < chunk.height; localY += 1) for (let localX = 0; localX < chunk.width; localX += 1) {
-              const x = chunk.x + localX;
-              const y = chunk.y + localY;
-              if (x < 0 || y < 0 || x >= sprite.width || y >= sprite.height) continue;
-              if (hiddenPixels?.has(replayPointKey(x, y))) continue;
-              const paletteIndex = values[localY * chunk.width + localX] ?? 0;
-              if (paletteIndex === 0) continue;
-              context.fillStyle = tint ?? paletteColor(paletteIndex);
-              context.fillRect(x * view.scale, y * view.scale, view.scale, view.scale);
-            }
-          }
-        }
+      const drawFrame = (targetFrame: string, alpha: number, tint?: string, source = baseRasterViewportRegion!) => {
+        context.save();
+        try {
+          context.translate(source.x * view.scale, source.y * view.scale); context.scale(view.scale, view.scale);
+          drawPixelSpriteRegion(context, sprite, targetFrame, document.palette, source, {
+            invalidChunk: 'skip',
+            opacityMultiplier: alpha,
+            colorForIndex: (index) => tint ?? paletteColor(index),
+            skipPixel: (cel, x, y) => replayMasks.celPixels.get(cel.id)?.has(replayPointKey(x, y)) ?? false,
+          });
+        } finally { context.restore(); }
       };
       if (onionSkin && sprite.frameIds.length > 1) {
         for (const onionLayer of onionSkinLayers(sprite.frameIds, activeFrameId, onionSettings)) drawFrame(onionLayer.frameId, onionLayer.opacity, onionLayer.tint);
@@ -523,7 +510,11 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       if (wrapPreview) {
         context.globalAlpha = 0.25;
         for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
-          context.save(); context.translate(Number(dx) * sprite.width * view.scale, Number(dy) * sprite.height * view.scale); drawFrame(activeFrameId, 1); context.restore();
+          const offsetX = Number(dx) * sprite.width; const offsetY = Number(dy) * sprite.height;
+          const source = baseRasterViewportRegion!;
+          context.save(); context.translate(offsetX * view.scale, offsetY * view.scale);
+          const shiftedSource = { ...source, x: source.x - offsetX, y: source.y - offsetY };
+          try { drawFrame(activeFrameId, 1, undefined, shiftedSource); } finally { context.restore(); }
         }
       }
       context.globalCompositeOperation = 'source-over';
@@ -565,7 +556,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
         }
         if (layer.type !== 'tile' || !layer.chunks) { context.restore(); continue; }
         const hiddenCells = replayMasks.tileCells.get(replayTileLayerKey(tilemap.id, layer.id));
-        const layerViewportRegion = layerOffsetX === 0 && layerOffsetY === 0 ? baseTilemapViewportRegion! : coveringRasterViewportRegion({
+        const layerViewportRegion = layerOffsetX === 0 && layerOffsetY === 0 ? baseRasterViewportRegion! : coveringRasterViewportRegion({
           viewportWidth: size.width,
           viewportHeight: size.height,
           viewOffsetX: view.offsetX,
@@ -696,7 +687,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       const rowHeight = tilemap?.orientation === 'orthogonal' ? orthogonalCellHeight : view.scale;
       const columnCount = tilemap?.orientation === 'orthogonal' ? tilemap.width : logical.gridWidth;
       const rowCount = tilemap?.orientation === 'orthogonal' ? tilemap.height : logical.gridHeight;
-      const gridRange = tilemap?.orientation === 'orthogonal' && baseTilemapViewportRegion ? tilemapGridLineRange(baseTilemapViewportRegion, { columns: tilemap.width, rows: tilemap.height, tileWidth: tilemap.tileWidth, tileHeight: tilemap.tileHeight }) : { columnStart: 0, columnEnd: columnCount, rowStart: 0, rowEnd: rowCount };
+      const gridRange = tilemap?.orientation === 'orthogonal' && baseRasterViewportRegion ? tilemapGridLineRange(baseRasterViewportRegion, { columns: tilemap.width, rows: tilemap.height, tileWidth: tilemap.tileWidth, tileHeight: tilemap.tileHeight }) : { columnStart: 0, columnEnd: columnCount, rowStart: 0, rowEnd: rowCount };
       for (let x = gridRange.columnStart; x <= gridRange.columnEnd; x += 1) { context.moveTo(x * columnWidth + 0.5, 0); context.lineTo(x * columnWidth + 0.5, rowCount * rowHeight); }
       for (let y = gridRange.rowStart; y <= gridRange.rowEnd; y += 1) { context.moveTo(0, y * rowHeight + 0.5); context.lineTo(columnCount * columnWidth, y * rowHeight + 0.5); }
       context.stroke();

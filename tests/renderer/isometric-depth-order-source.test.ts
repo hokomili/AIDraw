@@ -9,13 +9,13 @@ describe('tilemap traversal source wiring', () => {
     expect(interactive).toContain("import { coveringRasterViewportRegion, tilemapChunksIntersectingRegion, tilemapGridLineRange } from '../../common/tilemap-region'");
     expect(interactive).toContain("tilemap.orientation === 'isometric'");
     expect(interactive).toContain('const candidateChunks = tilemapChunksIntersectingRegion(Object.values(layer.chunks)');
-    expect(interactive).toContain('const layerViewportRegion = layerOffsetX === 0 && layerOffsetY === 0 ? baseTilemapViewportRegion!');
+    expect(interactive).toContain('const layerViewportRegion = layerOffsetX === 0 && layerOffsetY === 0 ? baseRasterViewportRegion!');
     expect(interactive).toContain('layerOffsetX,');
     expect(interactive).toContain('layerOffsetY,');
     expect(interactive).toContain('projectionScale: view.scale / tilemap.tileWidth');
     expect(interactive).toContain('isometricTileRenderCells(candidateChunks, safeDecodeTilemapChunk)');
     expect(interactive).toContain('else for (const chunk of candidateChunks)');
-    expect(interactive).toContain('tilemapGridLineRange(baseTilemapViewportRegion');
+    expect(interactive).toContain('tilemapGridLineRange(baseRasterViewportRegion');
     expect(interactive).toContain('for (let x = gridRange.columnStart; x <= gridRange.columnEnd; x += 1)');
     expect(interactive).toContain('for (let y = gridRange.rowStart; y <= gridRange.rowEnd; y += 1)');
     expect(headless).toContain("import { isometricTileRenderCells } from '../common/tile-render-order'");

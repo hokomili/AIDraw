@@ -628,6 +628,20 @@ The unchanged formal performance gate passes 1/1 at **861.42 MiB** RSS growth; t
 
 This checkpoint deliberately keeps an O(total chunks) geometry scan rather than adding mutable index state or changing canonical records. Canvas pixels and clipping, grid phase, signed chunks, nominal bounds, map origin, GIDs/transforms, Tiled bytes, and infinite-map policy are unchanged. Checker-pattern cell iteration, object/selection/replay traversal, native-size overhang policy, packaged pacing/visual acceptance, broad Tiled fidelity, Level 3, RC, and stable-v1 readiness remain unclaimed.
 
+## Latest source/headless sprite viewport checkpoint
+
+Source/headless PIX-10/FND-10/FND-12 editor evidence (2026-08-12): the live sprite path separately decoded every chunk in every visible layer for the base frame, each of up to eight bounded onion neighbors, and four wrap copies. Canvas clipped the final pixels, but linked-cel resolution, palette/tint, blend/opacity, and replay masking all occurred after full payload traversal. The already-shared placed-tile compositor had bounded region lookup but lacked the exact editor hooks needed to replace that loop.
+
+The generic outward-rounded viewport transform now serves both tilemaps and sprites. The editor translates/scales one canonical source region into its current CSS view and calls the shared compositor for base and onion frames. Wrap copies subtract their exact signed sprite offset from that source region before the existing context translation, so only the source pixels capable of reaching the viewport are candidates. Optional compositor hooks multiply existing nested opacity, choose the exact live palette-cycle/onion-tint color, and skip replay-masked coordinates after linked-cel resolution. Defaults remain unchanged for headless and placed-tile callers.
+
+Exact tests cover compositor opacity/color/replay hooks, invalid opacity, a nonintersecting payload getter that must never run, fractional viewport safety, and source wiring for base/onion/wrap. Focused pinned-Node-24 typecheck/targeted ESLint and **6 files / 17 tests** pass. The complete safe gate passes portability for **369 tracked + 76 prospective** paths, TypeScript, full ESLint, and **151 files / 869 tests**.
+
+The formal gate adds a canonical 2,048×2,048 cel with 4,096 stored 32×32 chunks, composites the one requested pixel in the final chunk through production `drawPixelSpriteRegion`, and trips at **100 ms**. The local Apple Silicon run passes at **0.31 ms** and **895.41 MiB** total gate RSS; the corresponding map region is **1.23 ms**, 65,536 addressed maximum-sheet tiles **155.82 ms**, native save **132.44 ms**, PNG export **42.14 ms**, one-million-sample accounting **1.38 ms**, and flood **168.39 ms**. `/private/tmp/aidraw-sprite-viewport-performance-gate.json` is temporary self-authored diagnostics, not packaged browser evidence.
+
+The compositor still performs an O(total stored chunks) key-count comparison before choosing candidate-key lookup versus stored-record traversal; no mutable index or schema state is added. Canonical cels/chunks/links, palettes, opacity/blend, onion settings/order, wrap offsets, replay semantics, output pixels, save/export/MCP behavior, and file bytes are unchanged. Packaged frame pacing and visual acceptance remain open.
+
+The adjacent checker-pattern loop was not changed. Its background and each dark cell currently draw while the map shadow is active, and Canvas shadow blur has no portable finite cutoff that would justify omitting offscreen cells as exact. A future review must choose between retaining that appearance with native visual evidence and moving shadow ownership to one whole-canvas rectangle as an explicit visual correction. This checkpoint does not silently make that choice or claim Level 3, RC, or stable-v1 readiness.
+
 ## Failure severity and reruns
 
 | Severity | Meaning | Gate effect |

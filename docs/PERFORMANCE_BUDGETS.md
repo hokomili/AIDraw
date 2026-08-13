@@ -10,13 +10,14 @@
 | Warm-render four materialized sparse 4096×4096 paint layers | 3,000 ms |
 | Render a 256×256 map (65,536 visible 8 px tiles from an 8192×8192 sparse source) | 5,000 ms |
 | Render one requested pixel from a map with 4,096 stored chunks | 100 ms |
+| Composite one requested pixel from a sprite cel with 4,096 stored chunks | 100 ms |
 | Atomically save and validate the 5,000-object native document | 5,000 ms |
 | Export that document to PNG | 5,000 ms |
 | Account for and slice one million compact playback samples | 500 ms |
 | Find and compact a one-million-cell flood-fill region | 2,000 ms |
 | Peak process RSS growth across the gate | 1,200 MiB |
 
-The regional-map scenario builds 4,096 canonical 32×32 chunks spread across a 2,048×2,048 nominal map, requests the one-pixel region containing the final stored cell, and measures only production regional rendering. It trips if bounded observation regresses toward decoding/scanning every stored chunk payload; the deliberate O(total chunks) geometry scan remains inside the measurement and is not represented as a spatial index. The editor shares that filtering kernel with an outward-rounded viewport transform, but this Node metric does not certify browser paint or packaged frame pacing. The flood scenario builds a real 1,000×1,000 indexed cel through canonical row-run storage, reads it through the cached production chunk reader, and requires exactly 1,000 output runs and 1,000,000 changed cells. Setup is outside each timing, but its memory remains inside the RSS gate.
+The regional-map scenario builds 4,096 canonical 32×32 chunks spread across a 2,048×2,048 nominal map, requests the one-pixel region containing the final stored cell, and measures only production regional rendering. It trips if bounded observation regresses toward decoding/scanning every stored chunk payload; the deliberate O(total chunks) geometry scan remains inside the measurement and is not represented as a spatial index. The regional-sprite scenario builds the same 4,096-chunk distribution in one canonical cel and measures the shared production compositor used by editor base/onion/wrap frames. Both retain setup memory inside RSS; neither Node metric certifies browser paint or packaged frame pacing. The flood scenario builds a real 1,000×1,000 indexed cel through canonical row-run storage, reads it through the cached production chunk reader, and requires exactly 1,000 output runs and 1,000,000 changed cells. Setup is outside each timing, but its memory remains inside the RSS gate.
 
 These thresholds are release tripwires, not product targets. The packaged Level 3 Computer Use pass separately measures pointer-to-preview latency, animation frame pacing, human input while four agent lanes are visible, 200% display scaling, and tablet latency; a headless Node test cannot honestly certify those interactions.
 

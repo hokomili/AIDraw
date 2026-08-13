@@ -34,4 +34,31 @@ describe('bounded pixel sprite rendering', () => {
     drawPixelSpriteRegion(canvas.getContext('2d'), sprite, sprite.frameIds[0], document.palette, { x: 64, y: 0, width: 1, height: 1 }, { invalidChunk: 'skip' });
     expect([...canvas.getContext('2d').getImageData(0, 0, 1, 1).data]).toEqual([0, 0, 0, 0]);
   });
+
+  it('supports exact editor opacity, color, and replay-mask hooks', () => {
+    const document = createPixelDocument('project', 'Editor hooks');
+    const sprite = createPixelSprite('Hooked source', 2, 1); const cel = Object.values(sprite.cels)[0];
+    writePixels(cel, [{ x: 0, y: 0, index: 2 }, { x: 1, y: 0, index: 3 }]);
+    const canvas = createCanvas(2, 1);
+    drawPixelSpriteRegion(canvas.getContext('2d'), sprite, sprite.frameIds[0], document.palette, { x: 0, y: 0, width: 2, height: 1 }, {
+      opacityMultiplier: 0.5,
+      colorForIndex: () => '#0000ffff',
+      skipPixel: (_targetCel, x) => x === 1,
+    });
+    const pixels = [...canvas.getContext('2d').getImageData(0, 0, 2, 1).data];
+    expect(pixels.slice(0, 3)).toEqual([0, 0, 255]);
+    expect(pixels[3]).toBeGreaterThanOrEqual(127); expect(pixels[3]).toBeLessThanOrEqual(128);
+    expect(pixels.slice(4)).toEqual([0, 0, 0, 0]);
+    expect(() => drawPixelSpriteRegion(canvas.getContext('2d'), sprite, sprite.frameIds[0], document.palette, { x: 0, y: 0, width: 1, height: 1 }, { opacityMultiplier: 2 })).toThrow(/between zero and one/);
+  });
+
+  it('does not access a nonintersecting stored chunk payload', () => {
+    const document = createPixelDocument('project', 'Candidate-only decode');
+    const sprite = createPixelSprite('Sparse source', 64, 1); const cel = Object.values(sprite.cels)[0];
+    writePixels(cel, [{ x: 32, y: 0, index: 2 }]);
+    Object.defineProperty(cel.chunks, '0,0', { configurable: true, enumerable: true, get: () => { throw new Error('A nonintersecting sprite chunk was decoded.'); } });
+    const canvas = createCanvas(1, 1);
+    drawPixelSpriteRegion(canvas.getContext('2d'), sprite, sprite.frameIds[0], document.palette, { x: 32, y: 0, width: 1, height: 1 }, { invalidChunk: 'skip' });
+    expect(canvas.getContext('2d').getImageData(0, 0, 1, 1).data[3]).toBe(255);
+  });
 });

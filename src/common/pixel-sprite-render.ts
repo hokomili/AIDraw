@@ -34,6 +34,9 @@ interface PixelSpriteCanvasContext {
 export interface DrawPixelSpriteRegionOptions {
   onlyLayerId?: string;
   invalidChunk?: 'throw' | 'skip';
+  opacityMultiplier?: number;
+  colorForIndex?: (index: number, cel: PixelCel) => string;
+  skipPixel?: (cel: PixelCel, x: number, y: number, index: number) => boolean;
 }
 
 function assertRegion(source: PixelSpriteRegion): void {
@@ -110,6 +113,8 @@ export function drawPixelSpriteRegion(
   options: DrawPixelSpriteRegionOptions = {},
 ): void {
   assertRegion(source);
+  const opacityMultiplier = options.opacityMultiplier ?? 1;
+  if (!Number.isFinite(opacityMultiplier) || opacityMultiplier < 0 || opacityMultiplier > 1) throw new RangeError('Pixel sprite opacity multiplier must be between zero and one.');
   const sourceEndX = source.x + source.width;
   const sourceEndY = source.y + source.height;
   const nominalStartX = Math.max(0, Math.floor(source.x));
@@ -130,7 +135,7 @@ export function drawPixelSpriteRegion(
       if (layer.type !== 'pixel') continue;
       const cel = pixelCelForFrame(sprite, layer.id, frameId);
       if (!cel) continue;
-      context.globalAlpha = opacity;
+      context.globalAlpha = opacity * opacityMultiplier;
       context.globalCompositeOperation = layer.blendMode === 'normal' ? 'source-over' : layer.blendMode;
       const chunks = cel.chunks ?? {};
       const drawChunk = (value: unknown) => {
@@ -144,8 +149,10 @@ export function drawPixelSpriteRegion(
         for (let y = startY; y < endY; y += 1) for (let x = startX; x < endX; x += 1) {
           const index = values[y * chunk.width + x] ?? 0;
           if (!index) continue;
-          context.fillStyle = colors[index]?.color ?? '#ff00ff';
-          context.fillRect(chunk.x + x - source.x, chunk.y + y - source.y, 1, 1);
+          const documentX = chunk.x + x; const documentY = chunk.y + y;
+          if (options.skipPixel?.(cel, documentX, documentY, index)) continue;
+          context.fillStyle = options.colorForIndex?.(index, cel) ?? colors[index]?.color ?? '#ff00ff';
+          context.fillRect(documentX - source.x, documentY - source.y, 1, 1);
         }
       };
       if (candidateChunkCount < Object.keys(chunks).length) {
