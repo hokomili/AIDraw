@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it } from 'vitest';
-import { createCanvas } from '@napi-rs/canvas';
+import { DOMMatrix, DOMPoint, Path2D, createCanvas } from '@napi-rs/canvas';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { cpus, freemem, hostname, platform, release, tmpdir, totalmem } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -31,10 +31,14 @@ import { renderIllustration, renderTilemap, renderTilemapRegion } from '@main/re
 import { mapObjectsIntersectingRasterRegion } from '@common/map-object-render';
 import { drawPixelSpriteRegion } from '@common/pixel-sprite-render';
 import { lassoSelectsIllustrationObjects } from '@common/illustration-lasso';
+import { hitTestAll } from '../../src/renderer/canvas/illustration-hit-test';
+
+Object.assign(globalThis, { DOMMatrix, DOMPoint, Path2D });
 
 const budgets = {
   vector5000RenderMs: 3_000,
   illustrationLasso5000Ms: 1_000,
+  illustrationHitTest5000Ms: 500,
   four4kPaintRenderMs: 8_000,
   coldCachedFour4kPaintRenderMs: 8_000,
   warmCachedFour4kPaintRenderMs: 3_000,
@@ -183,6 +187,16 @@ describe('Windows v1 non-GUI performance gate', () => {
     ));
     const afterVectorLassoRss = process.memoryUsage().rss;
     memoryProfile.push(memorySnapshot('after-5000-vector-lasso', startingRss));
+    const vectorHitCanvas = createCanvas(1, 1);
+    const vectorHitTest = await measured(() => hitTestAll(
+      vector,
+      { x: 1, y: 5.5, pressure: 0.5 },
+      vectorHitCanvas.getContext('2d') as unknown as CanvasRenderingContext2D,
+      1,
+    ));
+    const afterVectorHitTestRss = process.memoryUsage().rss;
+    memoryProfile.push(memorySnapshot('after-5000-vector-hit-test', startingRss));
+    releaseMeasuredCanvas(vectorHitCanvas);
     const paint = paintFixture();
     const paintRender = await measured(() => renderIllustration(paint));
     memoryProfile.push(memorySnapshot('after-editable-paint-render', startingRss));
@@ -229,10 +243,11 @@ describe('Windows v1 non-GUI performance gate', () => {
     memoryProfile.push(memorySnapshot('after-million-cell-flood-fixture', startingRss));
     const floodFill = await measured(() => floodPixelRegion({ width: floodFixture.sprite.width, height: floodFixture.sprite.height, start: { x: 0, y: 0 }, read: floodFixture.read }));
     memoryProfile.push(memorySnapshot('after-million-cell-flood-fill', startingRss));
-    const peakRss = Math.max(afterVectorRss, afterVectorLassoRss, afterPaintRss, afterMapRss, afterSparseMapRegionRss, afterSparseSpriteRegionRss, afterMapObjectFilterRss, process.memoryUsage().rss);
+    const peakRss = Math.max(afterVectorRss, afterVectorLassoRss, afterVectorHitTestRss, afterPaintRss, afterMapRss, afterSparseMapRegionRss, afterSparseSpriteRegionRss, afterMapObjectFilterRss, process.memoryUsage().rss);
     const metrics = {
       vector5000RenderMs: vectorRender.durationMs,
       illustrationLasso5000Ms: vectorLasso.durationMs,
+      illustrationHitTest5000Ms: vectorHitTest.durationMs,
       four4kPaintRenderMs: paintRender.durationMs,
       coldCachedFour4kPaintRenderMs: coldCachedPaintRender.durationMs,
       warmCachedFour4kPaintRenderMs: warmCachedPaintRender.durationMs,
@@ -246,11 +261,12 @@ describe('Windows v1 non-GUI performance gate', () => {
       millionCellFloodFillMs: floodFill.durationMs,
       rssGrowthMiB: Number(((peakRss - startingRss) / 1024 / 1024).toFixed(2)),
     };
-    const report = { version: 1, createdAt: new Date().toISOString(), build: process.env.GITHUB_SHA ?? 'local', machine: { hostname: hostname(), platform: platform(), release: release(), arch: process.arch, cpu: cpus()[0]?.model, logicalCpus: cpus().length, totalMemoryMiB: Math.round(totalmem() / 1024 / 1024), freeMemoryMiB: Math.round(freemem() / 1024 / 1024), node: process.version }, coverage: { automated: ['5,000 vector render', 'exact canonical lasso selection across 5,000 vector objects', 'four 4096×4096 editable paint layers', 'cold and warm four-layer 4096×4096 materialized sparse paint render', '65,536 addressed tiles from an 8192×8192 sparse source sheet', 'one-pixel regional render across 4,096 stored map chunks', 'one-pixel regional sprite composite across 4,096 stored cel chunks', 'regional projected-bounds filter across 100,000 map objects', 'native save', 'PNG export', 'one-million-sample compact accounting', 'one-million-cell bounded flood fill', 'RSS growth'], deferredToPackagedComputerUse: ['pointer-to-preview latency', 'requestAnimationFrame pacing', 'human input during four visible agent lanes', '200% display scaling and tablet latency'] }, budgets, metrics, diagnostics: { memoryProfile } };
+    const report = { version: 1, createdAt: new Date().toISOString(), build: process.env.GITHUB_SHA ?? 'local', machine: { hostname: hostname(), platform: platform(), release: release(), arch: process.arch, cpu: cpus()[0]?.model, logicalCpus: cpus().length, totalMemoryMiB: Math.round(totalmem() / 1024 / 1024), freeMemoryMiB: Math.round(freemem() / 1024 / 1024), node: process.version }, coverage: { automated: ['5,000 vector render', 'exact canonical lasso selection across 5,000 vector objects', 'path-authoritative click hit testing across 5,000 vector objects', 'four 4096×4096 editable paint layers', 'cold and warm four-layer 4096×4096 materialized sparse paint render', '65,536 addressed tiles from an 8192×8192 sparse source sheet', 'one-pixel regional render across 4,096 stored map chunks', 'one-pixel regional sprite composite across 4,096 stored cel chunks', 'regional projected-bounds filter across 100,000 map objects', 'native save', 'PNG export', 'one-million-sample compact accounting', 'one-million-cell bounded flood fill', 'RSS growth'], deferredToPackagedComputerUse: ['pointer-to-preview latency', 'requestAnimationFrame pacing', 'human input during four visible agent lanes', '200% display scaling and tablet latency'] }, budgets, metrics, diagnostics: { memoryProfile } };
     const reportPath = process.env.AIDRAW_PERFORMANCE_REPORT ?? join(process.cwd(), 'test-results', 'performance-gate.json');
     await mkdir(dirname(reportPath), { recursive: true }); await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
     expect(queueAccounting.value.samples).toBe(1_000_000); expect((queueAccounting.value.midpoint[0] as Extract<CanvasOperation, { kind: 'pixel.cel.region' }>).runs.reduce((sum, run) => sum + run.length, 0)).toBe(500_000);
     expect(vectorLasso.value).toHaveLength(5_000);
+    expect(vectorHitTest.value.map(({ id }) => id)).toEqual(['perf-shape-0']);
     expect(floodFill.value).toMatchObject({ ok: true, cellCount: 1_000_000 });
     expect(mapObjectRegionFilter.value.map(({ id }) => id)).toEqual(['regional-object-99999']);
     if (!floodFill.value.ok) throw new Error('Expected bounded flood fill to succeed.');

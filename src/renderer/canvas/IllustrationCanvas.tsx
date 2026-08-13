@@ -34,7 +34,6 @@ import { approximateLocalObjectBounds } from '../../common/illustration-geometry
 import { cropImageObject, normalizedDisplayCrop } from '../../common/image-crop';
 import {
   hitSelectionHandle,
-  objectWorldBounds,
   rotateSelection,
   scaleSelection,
   selectionHandlePoints,
@@ -44,6 +43,7 @@ import {
 } from '../../common/selection-transform';
 import { convertPathNode, deletePathNode, inspectPathNodes, insertPathNode, movePathPoint, nearestPathLocation, type PathPointKind } from '../../common/path-nodes';
 import { outlinePath, pressureOutline } from './geometry';
+import { hitTestAll, localObjectPath, objectMatrix, worldToLocal } from './illustration-hit-test';
 
 interface ViewTransform {
   scale: number;
@@ -121,30 +121,9 @@ function applyObjectTransform(context: CanvasRenderingContext2D, object: Illustr
   if (object.shadow) { context.shadowColor = object.shadow.color; context.shadowBlur = object.shadow.blur; context.shadowOffsetX = object.shadow.offsetX; context.shadowOffsetY = object.shadow.offsetY; }
 }
 
-function localObjectPath(object: IllustrationObject): Path2D | undefined {
-  const path = new Path2D();
-  if (object.type === 'path') return new Path2D(object.pathData);
-  if (object.type === 'vector-stroke') return outlinePath(pressureOutline(object.points, object.brush));
-  if (object.type === 'shape') {
-    if (object.shape === 'rectangle') path.roundRect(0, 0, object.width, object.height, object.cornerRadius ?? 0);
-    else if (object.shape === 'ellipse') path.ellipse(object.width / 2, object.height / 2, Math.abs(object.width / 2), Math.abs(object.height / 2), 0, 0, Math.PI * 2);
-    else if (object.shape === 'line' || object.shape === 'arrow') { path.moveTo(0, 0); path.lineTo(object.width, object.height); }
-    else { const count = object.shape === 'star' ? Math.max(3, object.sides ?? 5) * 2 : Math.max(3, object.sides ?? 6); const radius = Math.min(Math.abs(object.width), Math.abs(object.height)) / 2; for (let index = 0; index < count; index += 1) { const r = object.shape === 'star' && index % 2 ? radius * (object.innerRadius ?? .45) : radius; const angle = -Math.PI / 2 + index / count * Math.PI * 2; const x = object.width / 2 + Math.cos(angle) * r; const y = object.height / 2 + Math.sin(angle) * r; if (!index) path.moveTo(x, y); else path.lineTo(x, y); } path.closePath(); }
-    return path;
-  }
-  if (object.type === 'text' || object.type === 'image') { path.rect(0, 0, object.width, object.height); return path; }
-  return undefined;
-}
-
-function objectMatrix(object: IllustrationObject): DOMMatrix2DInit {
-  const value = object.transform; const angle = value.rotation * Math.PI / 180; const cosine = Math.cos(angle); const sine = Math.sin(angle); const skewX = Math.tan(value.skewX * Math.PI / 180); const skewY = Math.tan(value.skewY * Math.PI / 180);
-  return { a: cosine * value.scaleX - sine * skewY, b: sine * value.scaleX + cosine * skewY, c: cosine * skewX - sine * value.scaleY, d: sine * skewX + cosine * value.scaleY, e: value.x, f: value.y };
-}
-
 function transformedObjectPath(object: IllustrationObject): Path2D | undefined {
   const local = localObjectPath(object); if (!local) return undefined; const value = objectMatrix(object); const world = new Path2D(); world.addPath(local, new DOMMatrix([value.a!, value.b!, value.c!, value.d!, value.e!, value.f!])); return world;
 }
-function worldToLocal(object: IllustrationObject, point: PointSample): { x: number; y: number } { const value = objectMatrix(object); const local = new DOMMatrix([value.a!, value.b!, value.c!, value.d!, value.e!, value.f!]).inverse().transformPoint(new DOMPoint(point.x, point.y)); return { x: local.x, y: local.y }; }
 
 function adjustmentFilter(filters: IllustrationObject['filters']): string {
   return (filters ?? []).map((filter) => filter.type === 'brightness' ? `brightness(${Math.max(0, 1 + filter.value)})` : filter.type === 'contrast' ? `contrast(${Math.max(0, 1 + filter.value)})` : filter.type === 'saturation' ? `saturate(${Math.max(0, 1 + filter.value)})` : filter.type === 'hue' ? `hue-rotate(${filter.value}deg)` : `blur(${Math.max(0, filter.value)}px)`).join(' ');
@@ -243,24 +222,6 @@ function drawObject(context: CanvasRenderingContext2D, object: IllustrationObjec
 
 function approximateBounds(object: IllustrationObject): { x: number; y: number; width: number; height: number } {
   return approximateLocalObjectBounds(object);
-}
-
-function hitTestAll(document: IllustrationDocument, point: PointSample, context?: CanvasRenderingContext2D, viewScale = 1): IllustrationObject[] {
-  return Object.values(document.objects).reverse().filter((object) => {
-    if (!object.visible || object.locked) return false;
-    const localPath = localObjectPath(object);
-    if (context && localPath) {
-      try {
-        const local = worldToLocal(object, point); context.save(); context.setTransform(1, 0, 0, 1, 0, 0);
-        const tolerance = 8 / Math.max(0.05, viewScale * Math.max(Math.abs(object.transform.scaleX), Math.abs(object.transform.scaleY), 0.05));
-        let hit = object.type === 'vector-stroke' || object.type === 'text' || object.type === 'image' || ((object.type === 'shape' || object.type === 'path') && object.fill.kind !== 'none') ? context.isPointInPath(localPath, local.x, local.y) : false;
-        if (!hit && (object.type === 'shape' || object.type === 'path')) { context.lineWidth = Math.max(tolerance, object.stroke.width + tolerance); hit = context.isPointInStroke(localPath, local.x, local.y); }
-        context.restore(); if (hit) return true;
-      } catch { /* Approximate bounds remain a safe fallback for unsupported paths. */ }
-    }
-    const bounds = objectWorldBounds(object); const tolerance = 8 / Math.max(0.05, viewScale);
-    return point.x >= bounds.x - tolerance && point.y >= bounds.y - tolerance && point.x <= bounds.x + bounds.width + tolerance && point.y <= bounds.y + bounds.height + tolerance;
-  });
 }
 
 function hitTest(document: IllustrationDocument, point: PointSample, context?: CanvasRenderingContext2D, viewScale = 1): IllustrationObject | undefined { return hitTestAll(document, point, context, viewScale)[0]; }
