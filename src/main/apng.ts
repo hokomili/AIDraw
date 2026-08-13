@@ -5,7 +5,7 @@ export interface DecodedApng { width: number; height: number; frames: DecodedApn
 
 interface Header { width: number; height: number; depth: number; colorType: number; interlace: number }
 interface FrameControl { x: number; y: number; width: number; height: number; delayMs: number; dispose: 0 | 1 | 2; blend: 0 | 1 }
-interface CompressedFrame { control: FrameControl; chunks: Buffer[] }
+interface CompressedFrame { control: FrameControl; chunks: Buffer[]; dataKind: 'IDAT' | 'fdAT' }
 
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const MAX_APNG_FRAMES = 10_000;
@@ -86,6 +86,14 @@ function matchesTransparentSample(bytes: Uint8Array, sourceOffset: number, depth
     : transparency[transparencyOffset] === 0 && bytes[sourceOffset] === transparency[transparencyOffset + 1];
 }
 
+function channelsForHeader(header: Header): number {
+  const channels = [1, 0, 3, 1, 2, 0, 4][header.colorType] ?? 0;
+  if (!channels) throw new Error(`APNG color type ${header.colorType} is unsupported.`);
+  if (![1, 2, 4, 8, 16].includes(header.depth)) throw new Error(`APNG bit depth ${header.depth} is unsupported.`);
+  if (!LEGAL_DEPTHS[header.colorType]?.includes(header.depth)) throw new Error(`APNG bit depth ${header.depth} is unsupported for color type ${header.colorType}.`);
+  return channels;
+}
+
 function unfilter(compressed: Buffer[], width: number, height: number, channels: number, depth: number, interlace: number): Uint8Array {
   if (interlace !== 0 && interlace !== 1) throw new Error(`APNG interlace method ${interlace} is unsupported.`);
   const expected = interlace === 0
@@ -121,8 +129,7 @@ function unfilter(compressed: Buffer[], width: number, height: number, channels:
 }
 
 function rgbaFrame(header: Header, control: FrameControl, compressed: Buffer[], palette: Uint8Array | undefined, transparency: Uint8Array | undefined): Uint8ClampedArray {
-  const channels = [1, 0, 3, 1, 2, 0, 4][header.colorType] ?? 0; if (!channels) throw new Error(`APNG color type ${header.colorType} is unsupported.`); if (![1, 2, 4, 8, 16].includes(header.depth)) throw new Error(`APNG bit depth ${header.depth} is unsupported.`);
-  if (!LEGAL_DEPTHS[header.colorType]?.includes(header.depth)) throw new Error(`APNG bit depth ${header.depth} is unsupported for color type ${header.colorType}.`);
+  const channels = channelsForHeader(header);
   const bytes = unfilter(compressed, control.width, control.height, channels, header.depth, header.interlace); const rowBytes = Math.ceil(control.width * channels * header.depth / 8); const rgba = new Uint8ClampedArray(control.width * control.height * 4); const write = (pixel: number, red: number, green: number, blue: number, alpha = 255) => { const offset = pixel * 4; rgba[offset] = red; rgba[offset + 1] = green; rgba[offset + 2] = blue; rgba[offset + 3] = alpha; };
   for (let y = 0; y < control.height; y += 1) for (let x = 0; x < control.width; x += 1) {
     const pixel = y * control.width + x;
@@ -165,13 +172,14 @@ function containsAnimationControl(bytes: Buffer): boolean {
 export function decodeApng(bytes: Buffer): DecodedApng | undefined {
   if (bytes.length < 33 || !bytes.subarray(0, 8).equals(PNG_SIGNATURE)) throw new Error('The input is not a PNG file.');
   if (!containsAnimationControl(bytes)) return undefined;
-  let offset = 8; let header: Header | undefined; let declaredFrameCount: number | undefined; let expectedSequence = 0; let sawImageData = false; let sawPalette = false; let sawTransparency = false; let sawEnd = false;
-  let palette: Uint8Array | undefined; let transparency: Uint8Array | undefined; const frames: CompressedFrame[] = []; let current: CompressedFrame | undefined;
+  let offset = 8; let header: Header | undefined; let declaredFrameCount: number | undefined; let expectedSequence = 0; let sawImageData = false; let imageDataClosed = false; let sawPalette = false; let sawTransparency = false; let sawEnd = false;
+  let palette: Uint8Array | undefined; let transparency: Uint8Array | undefined; const defaultImageChunks: Buffer[] = []; const frames: CompressedFrame[] = []; let current: CompressedFrame | undefined;
   while (offset + 12 <= bytes.length) {
     const chunkOffset = offset; const length = bytes.readUInt32BE(offset); const type = bytes.toString('ascii', offset + 4, offset + 8); const start = offset + 8; const end = start + length;
     if (end + 4 > bytes.length) throw new Error(`PNG chunk ${type} at ${chunkOffset} declares ${length} bytes beyond the ${bytes.length}-byte file boundary.`);
     if ((crc32(bytes.subarray(chunkOffset + 4, end)) >>> 0) !== bytes.readUInt32BE(end)) throw new Error(`PNG chunk ${type} at ${chunkOffset} has an invalid CRC.`);
     const data = bytes.subarray(start, end); offset = end + 4;
+    if (sawImageData && type !== 'IDAT') imageDataClosed = true;
     if (type === 'IHDR') {
       if (header || chunkOffset !== 8 || length !== 13) throw new Error('PNG must begin with exactly one 13-byte IHDR chunk.');
       header = { width: data.readUInt32BE(0), height: data.readUInt32BE(4), depth: data[8], colorType: data[9], interlace: data[12] };
@@ -187,16 +195,23 @@ export function decodeApng(bytes: Buffer): DecodedApng | undefined {
       if (sawTransparency || sawImageData || header.colorType === 3 && !sawPalette) throw new Error('APNG tRNS must appear at most once after indexed PLTE and before image data.'); sawTransparency = true; transparency = Uint8Array.from(data);
     } else if (type === 'fcTL') {
       if (declaredFrameCount === undefined || length !== 26) throw new Error('APNG frame control is invalid.');
+      if (current && !current.chunks.length) throw new Error('APNG frame control cannot replace an incomplete frame.');
       const sequence = data.readUInt32BE(0); if (sequence !== expectedSequence) throw new Error(`APNG sequence number ${sequence} appears where ${expectedSequence} was required.`); expectedSequence += 1;
       const denominator = data.readUInt16BE(22) || 100; const control: FrameControl = { width: data.readUInt32BE(4), height: data.readUInt32BE(8), x: data.readUInt32BE(12), y: data.readUInt32BE(16), delayMs: Math.max(1, Math.round(data.readUInt16BE(20) * 1000 / denominator)), dispose: data[24] as 0 | 1 | 2, blend: data[25] as 0 | 1 };
       if (!control.width || !control.height || control.x + control.width > header.width || control.y + control.height > header.height || control.dispose > 2 || control.blend > 1) throw new Error('APNG frame control is invalid.');
-      current = { control, chunks: [] }; frames.push(current);
+      const dataKind = frames.length === 0 && !sawImageData ? 'IDAT' : 'fdAT';
+      if (dataKind === 'IDAT' && (control.width !== header.width || control.height !== header.height || control.x !== 0 || control.y !== 0)) throw new Error('APNG first frame using IDAT must cover the full PNG canvas.');
+      current = { control, chunks: [], dataKind }; frames.push(current);
     } else if (type === 'IDAT') {
+      if (declaredFrameCount === undefined) throw new Error('APNG animation control must appear before image data.');
+      if (current?.dataKind === 'fdAT') throw new Error('APNG frames after a separate default image must use fdAT data.');
+      if (imageDataClosed) throw new Error('PNG IDAT chunks must be consecutive.');
       sawImageData = true;
-      if (current && frames[0] === current && frames.length === 1) current.chunks.push(Buffer.from(data));
-      else if (current) throw new Error('APNG IDAT chunks cannot follow a later animation frame control.');
+      if (!current) defaultImageChunks.push(Buffer.from(data));
+      else current.chunks.push(Buffer.from(data));
     } else if (type === 'fdAT') {
       if (!sawImageData || !current || data.length < 4) throw new Error('APNG frame data has no preceding frame control.');
+      if (current.dataKind !== 'fdAT') throw new Error('APNG first frame using IDAT cannot also use fdAT data.');
       const sequence = data.readUInt32BE(0); if (sequence !== expectedSequence) throw new Error(`APNG sequence number ${sequence} appears where ${expectedSequence} was required.`); expectedSequence += 1; current.chunks.push(Buffer.from(data.subarray(4)));
     } else if (type === 'IEND') {
       if (length !== 0 || offset !== bytes.length) throw new Error('PNG IEND must be empty and end the file.');
@@ -209,6 +224,7 @@ export function decodeApng(bytes: Buffer): DecodedApng | undefined {
   if (!frames.length || frames.some((frame) => !frame.chunks.length)) throw new Error('APNG contains incomplete frame data.');
   if (header.width * header.height * frames.length > MAX_APNG_PIXELS) throw new Error('APNG expands beyond the 256-million-pixel animation limit.');
   validateColorMetadata(header, palette, transparency);
+  if (defaultImageChunks.length) void unfilter(defaultImageChunks, header.width, header.height, channelsForHeader(header), header.depth, header.interlace);
   const canvas = new Uint8ClampedArray(header.width * header.height * 4); const decoded: DecodedApngFrame[] = [];
   for (const frame of frames) { const previous = frame.control.dispose === 2 ? canvas.slice() : undefined; const patch = rgbaFrame(header, frame.control, frame.chunks, palette, transparency); composite(canvas, header.width, frame.control, patch); decoded.push({ rgba: canvas.slice(), delayMs: frame.control.delayMs, dispose: frame.control.dispose, blend: frame.control.blend }); if (frame.control.dispose === 1) clearRect(canvas, header.width, frame.control); else if (frame.control.dispose === 2 && previous) canvas.set(previous); }
   return { width: header.width, height: header.height, frames: decoded };

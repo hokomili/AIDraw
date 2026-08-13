@@ -167,6 +167,43 @@ function grayscale16TransparencyApng(): { bytes: Buffer; expected: Uint8ClampedA
   };
 }
 
+function separateDefaultImageApng(options: { malformedDefault?: boolean; frameUsesIdat?: boolean } = {}): { bytes: Buffer; expected: Uint8ClampedArray } {
+  const header = Buffer.alloc(13); header.writeUInt32BE(2, 0); header.writeUInt32BE(1, 4); header[8] = 8; header[9] = 6;
+  const animation = Buffer.alloc(8); animation.writeUInt32BE(1, 0);
+  const defaultRaw = options.malformedDefault
+    ? Buffer.from([0, 57, 120, 184, 255])
+    : Buffer.from([0, 57, 120, 184, 255, 155, 227, 194, 255]);
+  const defaultCompressed = deflateSync(defaultRaw); const defaultSplit = Math.max(1, Math.floor(defaultCompressed.length / 2));
+  const frameCompressed = deflateSync(Buffer.from([0, 255, 107, 122, 255]));
+  const frameData = options.frameUsesIdat ? frameCompressed : Buffer.concat([Buffer.from([0, 0, 0, 1]), frameCompressed]);
+  return {
+    bytes: Buffer.concat([
+      PNG_SIGNATURE,
+      pngChunk('IHDR', header),
+      pngChunk('acTL', animation),
+      pngChunk('IDAT', defaultCompressed.subarray(0, defaultSplit)),
+      pngChunk('IDAT', defaultCompressed.subarray(defaultSplit)),
+      pngChunk('fcTL', apngFrameControl(0, 1, 1, 1, 0, 9, 0, 0)),
+      pngChunk(options.frameUsesIdat ? 'IDAT' : 'fdAT', frameData),
+      pngChunk('IEND'),
+    ]),
+    expected: Uint8ClampedArray.from([0, 0, 0, 0, 255, 107, 122, 255]),
+  };
+}
+
+function partialIdatFirstFrameApng(): Buffer {
+  const header = Buffer.alloc(13); header.writeUInt32BE(2, 0); header.writeUInt32BE(1, 4); header[8] = 8; header[9] = 6;
+  const animation = Buffer.alloc(8); animation.writeUInt32BE(1, 0);
+  return Buffer.concat([
+    PNG_SIGNATURE,
+    pngChunk('IHDR', header),
+    pngChunk('acTL', animation),
+    pngChunk('fcTL', apngFrameControl(0, 1, 1, 1, 0, 9, 0, 0)),
+    pngChunk('IDAT', deflateSync(Buffer.from([0, 255, 107, 122, 255]))),
+    pngChunk('IEND'),
+  ]);
+}
+
 function animatedFixture() {
   const document = createPixelDocument('sprite', 'Round trip'); const sprite = document.pixelAssets[document.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('Expected sprite'); sprite.width = 4; sprite.height = 3; const firstCel = Object.values(sprite.cels)[0]; sprite.frames[sprite.frameIds[0]].durationMs = 80; writePixels(firstCel, [{ x: 0, y: 0, index: 4 }, { x: 3, y: 2, index: 2 }]);
   const timestamp = nowIso(); const frameId = 'frame-two'; const celId = 'cel-two'; sprite.frameIds.push(frameId); sprite.frames[frameId] = { id: frameId, revision: 0, name: 'Frame 2', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, durationMs: 170 }; sprite.cels[celId] = { id: celId, revision: 0, name: 'Frame 2', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, layerId: sprite.layerIds[0], frameId, chunks: {} }; writePixels(sprite.cels[celId], [{ x: 1, y: 1, index: 7 }]); return { document, sprite };
@@ -232,6 +269,25 @@ describe('animated pixel import', () => {
       ['grayscale-transparency-range', rewritePngChunk(grayscale, 'IHDR', 0, (data) => { data[8] = 8; }), /Grayscale APNG tRNS transparency is invalid/],
       ['truecolor-transparency-range', rewritePngChunk(truecolor, 'IHDR', 0, (data) => { data[8] = 8; }), /Truecolor APNG tRNS transparency is invalid/],
       ['rgba-transparency', insertPngChunkBefore(rgba, 'acTL', 'tRNS', Buffer.from([0, 0])), /color type 6 cannot use tRNS transparency/],
+    ];
+    for (const [name, bytes, message] of cases) expect(() => importApngBytes(bytes, `Invalid APNG ${name}`)).toThrow(message);
+  });
+
+  it('imports animation frames after a separate default image without compositing that fallback', () => {
+    const fixture = separateDefaultImageApng(); const decoded = decodeApng(fixture.bytes); expect(decoded).toBeTruthy(); expect(Buffer.from(decoded!.frames[0].rgba)).toEqual(Buffer.from(fixture.expected));
+    const imported = importApngBytes(fixture.bytes, 'Separate default APNG')!; const document = imported.documents[0]; if (document.kind !== 'pixel') throw new Error('Expected pixel'); const sprite = document.pixelAssets[document.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('Expected sprite'); const cel = Object.values(sprite.cels)[0];
+    expect([sprite.width, sprite.height, sprite.frames[sprite.frameIds[0]].durationMs]).toEqual([2, 1, 90]); expect([readPixel(cel, 0, 0), readPixel(cel, 1, 0)]).toEqual([0, 4]); expect(Object.values(document.assets)[0].data).toBe(fixture.bytes.toString('base64'));
+  });
+
+  it('rejects contradictory APNG default-image and frame-data layouts before import', () => {
+    const included = truecolor16TransparencyApng().bytes;
+    let nonconsecutive = insertPngChunkBefore(included, 'IEND', 'tEXt', Buffer.from('separator')); nonconsecutive = insertPngChunkBefore(nonconsecutive, 'IEND', 'IDAT', Buffer.alloc(0));
+    const cases: Array<[string, Buffer, RegExp]> = [
+      ['malformed-default', separateDefaultImageApng({ malformedDefault: true }).bytes, /decoded to 5 bytes instead of 9/],
+      ['default-frame-idat', separateDefaultImageApng({ frameUsesIdat: true }).bytes, /frames after a separate default image must use fdAT/],
+      ['partial-included-first-frame', partialIdatFirstFrameApng(), /first frame using IDAT must cover the full PNG canvas/],
+      ['included-first-frame-fdat', insertPngChunkBefore(included, 'IEND', 'fdAT', Buffer.from([0, 0, 0, 1])), /first frame using IDAT cannot also use fdAT/],
+      ['nonconsecutive-idat', nonconsecutive, /IDAT chunks must be consecutive/],
     ];
     for (const [name, bytes, message] of cases) expect(() => importApngBytes(bytes, `Invalid APNG ${name}`)).toThrow(message);
   });
