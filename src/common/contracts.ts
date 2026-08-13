@@ -6,7 +6,7 @@ import type {
   Id,
   NewDocumentOptionsInput,
 } from '@aidraw/core';
-import type { GenerationAcceptanceResult, GenerationProvider, GenerationRequest } from './generation';
+import type { GenerationAcceptanceResult, GenerationProvider, GenerationProviderStatus, GenerationRequest } from './generation';
 import type { CheckpointMergeCandidate } from './checkpoint-merge';
 import type { PaletteFileFormat, PaletteImportMode } from './palette-interchange';
 import type { SpriteSheetSliceOptions } from './sprite-sheet';
@@ -322,7 +322,7 @@ export interface AIDrawDesktopAPI {
   configureCodex(): Promise<AgentClientSetupResult>;
   resolveJob(jobId: Id, decision: 'allow-once' | 'allow-session' | 'allow-always' | 'deny'): Promise<AsyncJob | undefined>;
   setProviderCredential(provider: Exclude<GenerationProvider, 'comfyui'>, value: string): Promise<{ saved: boolean }>;
-  getProviderStatus(): Promise<Record<GenerationProvider, { configured: boolean }>>;
+  getProviderStatus(): Promise<GenerationProviderStatus>;
   generationStart(request: GenerationRequest): Promise<{ jobId: Id }>;
   generationAccept(jobId: Id, outputId: Id): Promise<GenerationAcceptanceResult>;
   generationReject(jobId: Id, outputId: Id): Promise<{ rejected: boolean; message?: string }>;

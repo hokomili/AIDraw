@@ -95,12 +95,14 @@ import {
   resolveRasterBrushPreset,
   textStyleAt,
 } from "@aidraw/core";
-import type {
-  GeneratedOutput,
-  GenerationJobResult,
-  GenerationMode,
-  GenerationProvider,
-  GenerationRequest,
+import {
+  MAX_PROVIDER_CREDENTIAL_BYTES,
+  type GeneratedOutput,
+  type GenerationJobResult,
+  type GenerationMode,
+  type GenerationProvider,
+  type GenerationProviderStatus,
+  type GenerationRequest,
 } from "../common/generation";
 import { GENERATION_PROVIDER_MODES, generationRequestError } from "../common/generation-capabilities";
 import { packPixelLinks, pixelLinkHealth } from "../common/pixel-links";
@@ -4612,8 +4614,8 @@ function GenerationPanel({ document }: { document: AIDrawDocument }) {
   const [maskAssetId, setMaskAssetId] = useState<string>();
   const [credential, setCredential] = useState("");
   const [showCredential, setShowCredential] = useState(false);
-  const [providerStatus, setProviderStatus] =
-    useState<Record<GenerationProvider, { configured: boolean }>>();
+  const [credentialRemovalPending, setCredentialRemovalPending] = useState(false);
+  const [providerStatus, setProviderStatus] = useState<GenerationProviderStatus>();
   const [comfyEndpoint, setComfyEndpoint] = useState("http://127.0.0.1:8188");
   const [comfyWorkflow, setComfyWorkflow] = useState<Record<string, unknown>>();
   const [comfyMappings, setComfyMappings] = useState<Record<string, string>>({});
@@ -4631,6 +4633,7 @@ function GenerationPanel({ document }: { document: AIDrawDocument }) {
   const requestedSize = aspectIntent === "square" ? { width: 1024, height: 1024 } : aspectIntent === "portrait" ? { width: 1024, height: 1536 } : aspectIntent === "landscape" ? { width: 1536, height: 1024 } : document.kind === "illustration" ? { width: document.artboard.width, height: document.artboard.height } : { width: 1024, height: 1024 };
   const generationDraft = { documentId: document.id, provider, mode, prompt, negativePrompt: negativePrompt || undefined, sourceAssetIds, maskAssetId, size: requestedSize, aspectIntent, resultCount, providerOptions: provider === "comfyui" ? { endpoint: comfyEndpoint, workflow: comfyWorkflow, mappings: Object.fromEntries(Object.entries(comfyMappings).filter(([, value]) => value.trim()).map(([key, value]) => [key, value.trim()])) } : provider === "stability" && mode === "outpaint" ? outpaint : {} } satisfies GenerationRequest;
   const generationError = generationRequestError(document, generationDraft);
+  const selectedProviderStatus = providerStatus?.[provider];
 
   useEffect(() => {
     void window.aidraw.getProviderStatus().then(setProviderStatus);
@@ -4660,7 +4663,7 @@ function GenerationPanel({ document }: { document: AIDrawDocument }) {
         <span>Provider</span>
         <select
           value={provider}
-          onChange={(event) => { const next = event.target.value as GenerationProvider; setProvider(next); if (!GENERATION_PROVIDER_MODES[next].includes(mode)) setMode(GENERATION_PROVIDER_MODES[next][0]); }}
+          onChange={(event) => { const next = event.target.value as GenerationProvider; setProvider(next); setCredential(""); setShowCredential(false); setCredentialRemovalPending(false); if (!GENERATION_PROVIDER_MODES[next].includes(mode)) setMode(GENERATION_PROVIDER_MODES[next][0]); }}
         >
           <option value="openai">
             OpenAI · gpt-image-2 {providerStatus?.openai.configured ? "✓" : ""}
@@ -4843,33 +4846,58 @@ function GenerationPanel({ document }: { document: AIDrawDocument }) {
       {provider !== "comfyui" && (
         <div className="provider-key-row">
           <span>
-            {providerStatus?.[provider].configured
-              ? "Encrypted credential configured"
-              : "API key required"}
+            {!selectedProviderStatus
+              ? "Checking credential storage…"
+              : !selectedProviderStatus.available
+              ? `${selectedProviderStatus?.stored ? "Encrypted credential stored but unavailable. " : ""}${selectedProviderStatus?.reason ?? "Operating-system credential protection is unavailable."}`
+              : selectedProviderStatus.configured
+                ? "Encrypted credential configured"
+                : "API key required"}
           </span>
-          <button onClick={() => setShowCredential((value) => !value)}>
-            {showCredential ? "Hide" : "Set key"}
-          </button>
+          <div className="provider-key-actions">
+            <button disabled={!selectedProviderStatus?.available} onClick={() => { setShowCredential((value) => !value); setCredentialRemovalPending(false); }}>
+              {showCredential ? "Hide" : selectedProviderStatus?.configured ? "Replace key" : "Set key"}
+            </button>
+            {selectedProviderStatus?.stored && <button className="remove-provider-key" onClick={async () => {
+              if (!credentialRemovalPending) { setCredentialRemovalPending(true); setShowCredential(false); return; }
+              try {
+                await window.aidraw.setProviderCredential(provider, "");
+                setCredential("");
+                setCredentialRemovalPending(false);
+                setProviderStatus(await window.aidraw.getProviderStatus());
+                notify("Encrypted provider credential removed.", "success");
+              } catch (error) {
+                notify(error instanceof Error ? error.message : String(error), "error");
+              }
+            }}>{credentialRemovalPending ? "Confirm remove" : "Remove"}</button>}
+          </div>
         </div>
       )}
-      {showCredential && provider !== "comfyui" && (
+      {showCredential && provider !== "comfyui" && selectedProviderStatus?.available && (
         <div className="credential-editor">
           <input
             type="password"
+            maxLength={MAX_PROVIDER_CREDENTIAL_BYTES}
             value={credential}
             onChange={(event) => setCredential(event.target.value)}
             placeholder={`${provider} API key`}
           />
           <button
+            disabled={!credential.trim()}
             onClick={async () => {
-              await window.aidraw.setProviderCredential(provider, credential);
-              setCredential("");
-              setShowCredential(false);
-              setProviderStatus(await window.aidraw.getProviderStatus());
-              notify("Credential encrypted with operating-system protected storage.", "success");
+              try {
+                await window.aidraw.setProviderCredential(provider, credential);
+                setCredential("");
+                setShowCredential(false);
+                setCredentialRemovalPending(false);
+                setProviderStatus(await window.aidraw.getProviderStatus());
+                notify("Credential encrypted with operating-system protected storage.", "success");
+              } catch (error) {
+                notify(error instanceof Error ? error.message : String(error), "error");
+              }
             }}
           >
-            Save encrypted
+            {selectedProviderStatus.configured ? "Replace encrypted" : "Save encrypted"}
           </button>
         </div>
       )}

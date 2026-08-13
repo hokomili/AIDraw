@@ -141,6 +141,19 @@ describe('preload window.aidraw security contract', () => {
     }
   });
 
+  it('allows provider credential writes and status only, never provider-secret retrieval', async () => {
+    expect(Object.keys(bridge).filter((key) => /provider/i.test(key)).sort()).toEqual(['getProviderStatus', 'setProviderCredential']);
+    expect(Object.hasOwn(bridge, 'getProviderCredential')).toBe(false);
+    expect(Object.hasOwn(bridge, 'listProviderCredentials')).toBe(false);
+
+    await bridge.setProviderCredential('openai', 'renderer-owned-input');
+    expect(electronMock.invoke).toHaveBeenCalledWith(IPC.setProviderCredential, 'openai', 'renderer-owned-input');
+    electronMock.invoke.mockClear();
+    await bridge.getProviderStatus();
+    expect(electronMock.invoke).toHaveBeenCalledWith(IPC.getProviderStatus);
+    expect(electronMock.invoke.mock.calls.flat()).not.toContain('renderer-owned-input');
+  });
+
   it('subscribes only to the two documented events and never passes the Electron event object across the bridge', () => {
     const rawElectronEvent = { sender: 'must-not-cross-contextBridge' };
 

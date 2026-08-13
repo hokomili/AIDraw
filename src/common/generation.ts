@@ -3,6 +3,20 @@ import type { Id } from '@aidraw/core';
 export type GenerationProvider = 'openai' | 'stability' | 'comfyui';
 export type GenerationMode = 'create' | 'edit' | 'inpaint' | 'outpaint' | 'variation';
 
+export const MAX_PROVIDER_CREDENTIAL_BYTES = 16 * 1024;
+
+export interface GenerationProviderCredentialStatus {
+  /** True only when the provider can use a stored credential now. */
+  configured: boolean;
+  /** Whether encrypted material exists, even if the OS backend is unavailable. */
+  stored: boolean;
+  /** Whether the operating-system credential backend can encrypt/decrypt now. */
+  available: boolean;
+  reason?: string;
+}
+
+export type GenerationProviderStatus = Record<GenerationProvider, GenerationProviderCredentialStatus>;
+
 export interface GenerationRequest {
   documentId: Id;
   provider: GenerationProvider;
