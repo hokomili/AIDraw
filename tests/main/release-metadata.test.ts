@@ -24,10 +24,15 @@ describe('honest release metadata', () => {
     const forge = await readFile(resolve(root, 'forge.config.ts'), 'utf8');
     const ci = await readFile(resolve(root, '.github/workflows/ci.yml'), 'utf8');
     const release = await readFile(resolve(root, '.github/workflows/release.yml'), 'utf8');
-    for (const maker of ['maker-squirrel', 'maker-dmg', 'maker-deb', 'maker-rpm', 'maker-zip']) {
+    for (const maker of ['maker-squirrel', 'maker-deb', 'maker-rpm', 'maker-zip']) {
       expect(packageJson.devDependencies?.[`@electron-forge/${maker}`]).toBe('7.11.2');
       expect(forge).toContain(`@electron-forge/${maker}`);
     }
+    expect(packageJson.devDependencies?.['@electron-forge/maker-base']).toBe('7.11.2');
+    expect(packageJson.devDependencies?.['@electron-forge/maker-dmg']).toBeUndefined();
+    expect(forge).toContain("from './scripts/safe-dmg-maker.mjs'");
+    expect(forge).toContain("new SafeDmgMaker({ name: 'AIDraw' }, ['darwin'])");
+    expect(forge).not.toContain('@electron-forge/maker-dmg');
     for (const runner of ['windows-latest', 'macos-latest', 'ubuntu-latest']) expect(ci).toContain(runner);
     expect(ci.match(/node scripts\/check-portability\.mjs/g)).toHaveLength(2);
     expect(release).toContain('name: Desktop release');

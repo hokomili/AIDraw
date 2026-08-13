@@ -15,6 +15,7 @@ import { assertPackagedUtilityExportResultSources } from './packaged-utility-exp
 import { assertPackagedUtilityImportResultSources } from './packaged-utility-import-result.mjs';
 import { assertPackagedUtilityGenerationResultSources } from './packaged-utility-generation-result.mjs';
 import { inspectPackagedFontLicense } from './packaged-font-license.mjs';
+import { assertPackagedElectronVersion, inspectDependencySecurityPolicy } from './dependency-security.mjs';
 
 const execute = promisify(execFile);
 
@@ -146,11 +147,20 @@ try {
   });
   const packagedSecurity = await inspectPackagedSecurity({ executable, archive });
   const packagedFontLicense = await inspectPackagedFontLicense({ packageDirectory: packageDir, platform });
+  const packageJson = JSON.parse(await readFile(resolve('package.json'), 'utf8'));
+  const packageLock = JSON.parse(await readFile(resolve('package-lock.json'), 'utf8'));
+  const dependencySecurity = inspectDependencySecurityPolicy({ packageJson, lockJson: packageLock });
+  const packagedElectronVersion = assertPackagedElectronVersion(
+    dependencySecurity.electron,
+    await readFile(join(packageDir, 'version'), 'utf8'),
+  );
   process.stdout.write(`${JSON.stringify({
     verified: true,
     node: process.version,
     platform,
     architecture,
+    packagedElectronVersion,
+    dependencySecurity,
     packageDir,
     executable,
     executableBytes: executableInfo.size,

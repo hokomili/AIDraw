@@ -44,7 +44,7 @@ jobs:
           sudo apt-get install -y fakeroot rpm
       - run: npm run verify
       - run: npm run test:performance
-      - run: npm audit --omit=dev --audit-level=high
+      - run: npm run security:verify
       - run: npm run make
       - run: node scripts/verify-package.mjs
       - run: npm run test:e2e:only

@@ -1,11 +1,11 @@
 import type { ForgeConfig } from '@electron-forge/shared-types';
 import { MakerSquirrel } from '@electron-forge/maker-squirrel';
 import { MakerZIP } from '@electron-forge/maker-zip';
-import { MakerDMG } from '@electron-forge/maker-dmg';
 import { MakerDeb } from '@electron-forge/maker-deb';
 import { MakerRpm } from '@electron-forge/maker-rpm';
 import { VitePlugin } from '@electron-forge/plugin-vite';
 import { AutoUnpackNativesPlugin } from '@electron-forge/plugin-auto-unpack-natives';
+import { SafeDmgMaker } from './scripts/safe-dmg-maker.mjs';
 import { resolve } from 'node:path';
 import process from 'node:process';
 
@@ -83,7 +83,7 @@ const config: ForgeConfig = {
       name: 'aidraw',
       setupExe: 'AIDraw-Setup.exe',
     }),
-    new MakerDMG({ name: 'AIDraw' }, ['darwin']),
+    new SafeDmgMaker({ name: 'AIDraw' }, ['darwin']),
     new MakerDeb({
       options: {
         name: 'aidraw', productName: 'AIDraw', genericName: 'Drawing Studio',

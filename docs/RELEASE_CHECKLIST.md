@@ -6,9 +6,11 @@ This checklist complements `FEATURE_TRACKER.md`; it cannot override a missing or
 
 - [ ] Choose a SemVer prerelease version and add its dated changelog section.
 - [ ] Run `node scripts/npm-node24.mjs run check:portability` and `node scripts/npm-node24.mjs run verify` on Windows, macOS, and Linux native runners.
+- [ ] Install the complete locked tree and run `node scripts/npm-node24.mjs run security:verify`. Require zero reachable high/critical findings in both the production audit and the explicitly included production/development/optional/peer complete audit, plus successful registry signature/attestation verification where npm supports it; never let ambient npm `omit` configuration narrow either gate.
 - [ ] Run the packaged Level 2 automated regression matrix.
 - [ ] Record known limitations and ensure README claims match the tracker.
 - [ ] Build Squirrel/DMG/DEB/RPM/ZIP artifacts on their native OS runners; generate per-platform SHA-256 and license reports.
+- [ ] Require package verification to report the exact manifest/lock Electron version from the packaged runtime itself. On macOS, require the native DMG maker and an independent `hdiutil verify`; treat the ad-hoc/unsigned image as development evidence until signing/notarization gates pass.
 - [ ] Require package verification to find the exact `LiberationSans-OFL-1.1.txt` resource in every native app layout, and require the generated license inventory to agree with its four bundled font hashes and complete OFL notice.
 - [ ] Retain each native job's `RELEASE_PROVENANCE-<platform>.json`; it must bind a clean commit and exact source/toolchain/checksum/artifact inventory.
 - [ ] Verify no credentials, MCP tokens, user profiles, QA artifacts, or personal artwork are staged.
@@ -24,7 +26,7 @@ This checklist complements `FEATURE_TRACKER.md`; it cannot override a missing or
 - [ ] macOS package evidence proves the native canvas binary, Keychain-backed `safeStorage`, hardened fuses, login-item lifecycle, DMG/ZIP contents, and graceful credential cleanup on the exact architecture.
 - [ ] Developer ID signing, hardened-runtime entitlements, notarization, and stapling are either independently verified or the ad-hoc/unsigned Gatekeeper limitation is explicit in every release artifact and note.
 - [ ] Rebuild each Windows x64, macOS arm64, and Linux x64 artifact set independently; require `node scripts/npm-node24.mjs run reproducibility:compare -- --left=<first-provenance.json> --right=<second-provenance.json> --output=<comparison.json>` to produce a hashed PASS report, or stop for an explicitly reviewed deterministic exception rather than normalizing a mismatch.
-- [ ] Dependency/license review is complete and agrees with the compared lockfile and retained license reports.
+- [ ] Dependency/license review is complete, covers runtime, packaged-Electron, and build/supply-chain surfaces separately, and agrees with the compared lockfile, registry-signature result, and retained license reports.
 - [ ] Repository baseline, owner, remote, CI evidence, signing status, and publication credentials are confirmed.
 - [ ] Require the same evidence manifest to pass `node scripts/npm-node24.mjs run rc:verify -- --evidence=test-results/luna-high/<run-id>/rc-evidence.json --stable-v1`; this machine check supplements rather than replaces independent evidence review.
 - [ ] Replace prerelease metadata with `1.0.0`, finalize the changelog, tag, and publish only after all prior boxes pass.
