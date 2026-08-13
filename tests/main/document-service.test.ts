@@ -13,6 +13,20 @@ import { strFromU8, unzipSync } from 'fflate';
 
 const temporaryPaths: string[] = [];
 const services: DocumentService[] = [];
+
+function pngAsset(id: string) {
+  const bytes = createCanvas(1, 1).toBuffer('image/png');
+  return {
+    id,
+    name: 'Serialized image asset',
+    mimeType: 'image/png' as const,
+    byteLength: bytes.byteLength,
+    sha256: createHash('sha256').update(bytes).digest('hex'),
+    source: 'embedded' as const,
+    data: bytes.toString('base64'),
+  };
+}
+
 afterEach(async () => {
   const flushResults = await Promise.allSettled(services.splice(0).map((service) => service.flushRecovery()));
   const cleanupResults = await Promise.allSettled(temporaryPaths.splice(0).map((path) => rm(path, { recursive: true, force: true })));
@@ -436,6 +450,156 @@ describe('document service collaboration semantics', () => {
     const recovered = await new RecoveryJournal(root).recover();
     expect(recovered).toHaveLength(1);
     expect(recovered[0]).toMatchObject({ id: existing.id, name: 'Existing imported work', revision: 0 });
+  });
+
+  it('serializes delayed apply, undo, and redo requests in invocation order for one document', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-service-mutation-queue-'));
+    temporaryPaths.push(root);
+    let markValidationStarted!: () => void;
+    let releaseValidation!: () => void;
+    const validationStarted = new Promise<void>((resolve) => { markValidationStarted = resolve; });
+    const validationRelease = new Promise<void>((resolve) => { releaseValidation = resolve; });
+    const decoder = vi.fn(async () => {
+      markValidationStarted();
+      await validationRelease;
+    });
+    const service = new DocumentService(new RecoveryJournal(root), '1.0.0', undefined, decoder);
+    services.push(service);
+    const document = service.create({ kind: 'illustration', name: 'Serialized source' }).activeDocument!;
+    const independent = service.create({ kind: 'illustration', name: 'Independent source' }).activeDocument!;
+    const asset = pngAsset('serialized-inline-asset');
+
+    let settled = 0;
+    const observe = <T>(promise: Promise<T>) => promise.then((value) => { settled += 1; return value; });
+    const add = observe(service.apply({
+      id: 'serialized-add-transaction', clientOperationId: 'serialized-add-operation', documentId: document.id,
+      actor: HUMAN_ACTOR, label: 'Add validated asset', createdAt: nowIso(), operations: [{ kind: 'asset.add', asset }],
+    }));
+    await validationStarted;
+    const rename = observe(service.apply({
+      id: 'serialized-rename-transaction', clientOperationId: 'serialized-rename-operation', documentId: document.id,
+      actor: HUMAN_ACTOR, label: 'Rename after validated asset', createdAt: nowIso(), operations: [{ kind: 'document.rename', name: 'Serialized result' }],
+    }));
+    const undo = observe(service.undo(document.id));
+    const redo = observe(service.redo(document.id));
+    await expect(service.apply({
+      id: 'independent-rename-transaction', clientOperationId: 'independent-rename-operation', documentId: independent.id,
+      actor: HUMAN_ACTOR, label: 'Rename independent document', createdAt: nowIso(), operations: [{ kind: 'document.rename', name: 'Independent result' }],
+    })).resolves.toMatchObject({ status: 'committed', revision: independent.revision + 1 });
+    expect(settled).toBe(0);
+    expect(decoder).toHaveBeenCalledOnce();
+    expect(service.getDocument(independent.id)).toMatchObject({ name: 'Independent result', revision: independent.revision + 1 });
+
+    releaseValidation();
+    const responses = await Promise.all([add, rename, undo, redo]);
+    expect(responses.map(({ status, revision }) => ({ status, revision }))).toEqual([
+      { status: 'committed', revision: document.revision + 1 },
+      { status: 'committed', revision: document.revision + 2 },
+      { status: 'committed', revision: document.revision + 3 },
+      { status: 'committed', revision: document.revision + 4 },
+    ]);
+    expect(service.getDocument(document.id)).toMatchObject({
+      name: 'Serialized result', revision: document.revision + 4, assets: { [asset.id]: asset }, dirty: true,
+    });
+    expect(service.getChanges(document.id, document.revision).map(({ revision }) => revision)).toEqual([
+      document.revision + 1, document.revision + 2, document.revision + 3, document.revision + 4,
+    ]);
+
+    await service.flushRecovery();
+    expect((await new RecoveryJournal(root).recover()).find(({ id }) => id === document.id)).toMatchObject({
+      name: 'Serialized result', revision: document.revision + 4, assets: { [asset.id]: asset }, dirty: true,
+    });
+  });
+
+  it('orders checkpoint restore behind a pending commit and preserves that committed branch', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-service-restore-queue-'));
+    temporaryPaths.push(root);
+    let markValidationStarted!: () => void;
+    let releaseValidation!: () => void;
+    const validationStarted = new Promise<void>((resolve) => { markValidationStarted = resolve; });
+    const validationRelease = new Promise<void>((resolve) => { releaseValidation = resolve; });
+    const decoder = vi.fn(async () => {
+      markValidationStarted();
+      await validationRelease;
+    });
+    const service = new DocumentService(new RecoveryJournal(root), '1.0.0', undefined, decoder);
+    services.push(service);
+    const document = service.create({ kind: 'illustration', name: 'Restore queue source' }).activeDocument!;
+    const checkpoint = service.createCheckpoint(document.id, 'Before delayed commit');
+    const asset = pngAsset('restore-queue-inline-asset');
+    const add = service.apply({
+      id: 'restore-queue-add-transaction', clientOperationId: 'restore-queue-add-operation', documentId: document.id,
+      actor: HUMAN_ACTOR, label: 'Add before queued restore', createdAt: nowIso(), operations: [{ kind: 'asset.add', asset }],
+    });
+    await validationStarted;
+    let restoreSettled = false;
+    const restore = service.restoreCheckpoint(document.id, checkpoint.id).then((value) => { restoreSettled = true; return value; });
+    await Promise.resolve();
+    expect(restoreSettled).toBe(false);
+
+    releaseValidation();
+    await expect(add).resolves.toMatchObject({ status: 'committed', revision: document.revision + 1 });
+    await expect(restore).resolves.toMatchObject({ status: 'committed', revision: document.revision + 2 });
+    const restoredDocument = service.getDocument(document.id);
+    expect(restoredDocument).toMatchObject({
+      name: 'Restore queue source', revision: document.revision + 2, assets: {}, dirty: true,
+    });
+    expect(restoredDocument?.assets[asset.id]).toBeUndefined();
+    const automatic = service.listCheckpoints(document.id).find(({ kind }) => kind === 'automatic');
+    expect(automatic).toMatchObject({ sourceRevision: document.revision + 1, name: 'Before restore · Before delayed commit' });
+    expect(service.getCheckpoint(document.id, automatic!.id)?.document).toMatchObject({
+      revision: document.revision + 1, assets: { [asset.id]: asset }, dirty: true,
+    });
+
+    await service.flushRecovery();
+    const recovered = (await new RecoveryJournal(root).recover()).find(({ id }) => id === document.id);
+    expect(recovered).toMatchObject({
+      name: 'Restore queue source', revision: document.revision + 2, assets: {}, dirty: true,
+    });
+    expect(recovered?.assets[asset.id]).toBeUndefined();
+  });
+
+  it('refuses a delayed transaction after close and same-ID replacement', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-service-mutation-incarnation-'));
+    temporaryPaths.push(root);
+    let markValidationStarted!: () => void;
+    let releaseValidation!: () => void;
+    const validationStarted = new Promise<void>((resolve) => { markValidationStarted = resolve; });
+    const validationRelease = new Promise<void>((resolve) => { releaseValidation = resolve; });
+    const decoder = vi.fn(async () => {
+      markValidationStarted();
+      await validationRelease;
+    });
+    const service = new DocumentService(new RecoveryJournal(root), '1.0.0', undefined, decoder);
+    services.push(service);
+    const original = service.create({ kind: 'illustration', name: 'Closing mutation source' }).activeDocument!;
+    const asset = pngAsset('stale-inline-asset');
+    const delayed = service.apply({
+      id: 'stale-add-transaction', clientOperationId: 'stale-add-operation', documentId: original.id,
+      actor: HUMAN_ACTOR, label: 'Stale validated asset', createdAt: nowIso(), operations: [{ kind: 'asset.add', asset }],
+    });
+    await validationStarted;
+
+    await expect(service.close(original.id, true)).resolves.toEqual({ closed: true });
+    const replacement = structuredClone(original);
+    replacement.name = 'Replacement incarnation';
+    replacement.dirty = true;
+    service.addDocument(replacement);
+    releaseValidation();
+
+    await expect(delayed).resolves.toEqual({ status: 'conflict', message: 'Document is no longer open.' });
+    const liveReplacement = service.getDocument(original.id);
+    expect(liveReplacement).toMatchObject({
+      name: 'Replacement incarnation', revision: original.revision, dirty: true, assets: {},
+    });
+    expect(liveReplacement?.assets[asset.id]).toBeUndefined();
+    expect(service.getChanges(original.id, -1)).toEqual([]);
+    await service.flushRecovery();
+    const recoveredReplacement = (await new RecoveryJournal(root).recover()).find(({ id }) => id === original.id);
+    expect(recoveredReplacement).toMatchObject({
+      name: 'Replacement incarnation', revision: original.revision, dirty: true, assets: {},
+    });
+    expect(recoveredReplacement?.assets[asset.id]).toBeUndefined();
   });
 
   it('keeps the attached editor advisory on the canonical active document and rejects stale tab updates', async () => {

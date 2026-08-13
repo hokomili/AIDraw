@@ -66,6 +66,13 @@ interface HistoryState {
   redo: HistoryEntry[];
 }
 
+interface ApplyOptions {
+  recordHistory?: boolean;
+  actorMayBypassLocks?: boolean;
+  activityStatus?: 'committed' | 'partial';
+  trustedProvenance?: boolean;
+}
+
 interface HumanLock extends HumanLockRequest {
   id: Id;
   acquiredAt: number;
@@ -98,6 +105,7 @@ export class DocumentService extends EventEmitter {
   private readonly presence = new Map<Id, AgentPresence>();
   private readonly acknowledgedAgentActivityCounts = new Map<Id, number>();
   private readonly documentIncarnations = new Map<Id, symbol>();
+  private readonly mutationQueues = new Map<Id, Promise<void>>();
   private readonly saveQueues = new Map<Id, Promise<void>>();
   private editorAdvisory: EditorAdvisoryState = { advisory: true, attached: false, updatedAt: nowIso() };
   private activeDocumentId?: Id;
@@ -349,7 +357,7 @@ export class DocumentService extends EventEmitter {
 
   async apply(
     value: CanvasTransaction,
-    options: { recordHistory?: boolean; actorMayBypassLocks?: boolean; activityStatus?: 'committed' | 'partial'; trustedProvenance?: boolean } = {},
+    options: ApplyOptions = {},
   ): Promise<ApplyTransactionResponse> {
     let transaction: CanvasTransaction;
     try {
@@ -365,8 +373,21 @@ export class DocumentService extends EventEmitter {
     if (size > MAX_TRANSACTION_SERIALIZED_BYTES) {
       return { status: 'busy', message: 'Transaction exceeds the 2 MiB request limit.' };
     }
+    const incarnation = this.documentIncarnations.get(transaction.documentId);
+    if (!incarnation || !this.documents.has(transaction.documentId)) return { status: 'conflict', message: 'Document is not open.' };
+    return this.enqueueMutation(transaction.documentId, () => this.applyQueued(transaction, { ...options }, incarnation));
+  }
+
+  private async applyQueued(
+    value: CanvasTransaction,
+    options: ApplyOptions,
+    incarnation: symbol,
+  ): Promise<ApplyTransactionResponse> {
+    let transaction = value;
     const current = this.documents.get(transaction.documentId);
-    if (!current) return { status: 'conflict', message: 'Document is not open.' };
+    if (!current || this.documentIncarnations.get(transaction.documentId) !== incarnation) {
+      return { status: 'conflict', message: 'Document is no longer open.' };
+    }
 
     const dedupe = this.operationIds.get(current.id) ?? new Map<string, number>();
     this.operationIds.set(current.id, dedupe);
@@ -385,6 +406,13 @@ export class DocumentService extends EventEmitter {
         trustedProvenance: options.trustedProvenance,
         imageDecoder: this.imageDecoder,
       });
+      if (this.documents.get(current.id) !== current || this.documentIncarnations.get(current.id) !== incarnation) {
+        return { status: 'conflict', message: 'Document is no longer open.' };
+      }
+      if (!options.actorMayBypassLocks && transaction.actor.kind !== 'human') {
+        const collision = this.findLockCollision(transaction);
+        if (collision) return { status: 'locked', message: collision, conflict: { retryable: true } };
+      }
       const result = applyTransaction(current, transaction, { status: options.activityStatus });
       const historyTargets = committedHistoryTargets(current, transaction, result.document, result.inverse);
       this.comparisons.set(current.id, { transactionId: transaction.id, before: structuredClone(current), afterRevision: result.document.revision });
@@ -425,8 +453,14 @@ export class DocumentService extends EventEmitter {
 
   async undo(documentId = this.activeDocumentId, actor: Actor = HUMAN_ACTOR): Promise<ApplyTransactionResponse> {
     if (!documentId) return { status: 'conflict', message: 'No active document.' };
+    const incarnation = this.documentIncarnations.get(documentId);
+    if (!incarnation || !this.documents.has(documentId)) return { status: 'conflict', message: 'Document is not open.' };
+    return this.enqueueMutation(documentId, () => this.undoQueued(documentId, structuredClone(actor), incarnation));
+  }
+
+  private async undoQueued(documentId: Id, actor: Actor, incarnation: symbol): Promise<ApplyTransactionResponse> {
     const current = this.documents.get(documentId);
-    if (!current) return { status: 'conflict', message: 'Document is not open.' };
+    if (!current || this.documentIncarnations.get(documentId) !== incarnation) return { status: 'conflict', message: 'Document is no longer open.' };
     const history = this.getHistory(documentId, actor.id);
     const entry = history.undo.at(-1);
     if (!entry) return { status: 'conflict', message: 'Nothing to undo.' };
@@ -455,8 +489,14 @@ export class DocumentService extends EventEmitter {
 
   async redo(documentId = this.activeDocumentId, actor: Actor = HUMAN_ACTOR): Promise<ApplyTransactionResponse> {
     if (!documentId) return { status: 'conflict', message: 'No active document.' };
+    const incarnation = this.documentIncarnations.get(documentId);
+    if (!incarnation || !this.documents.has(documentId)) return { status: 'conflict', message: 'Document is not open.' };
+    return this.enqueueMutation(documentId, () => this.redoQueued(documentId, structuredClone(actor), incarnation));
+  }
+
+  private async redoQueued(documentId: Id, actor: Actor, incarnation: symbol): Promise<ApplyTransactionResponse> {
     const current = this.documents.get(documentId);
-    if (!current) return { status: 'conflict', message: 'Document is not open.' };
+    if (!current || this.documentIncarnations.get(documentId) !== incarnation) return { status: 'conflict', message: 'Document is no longer open.' };
     const history = this.getHistory(documentId, actor.id);
     const entry = history.redo.at(-1);
     if (!entry) return { status: 'conflict', message: 'Nothing to redo.' };
@@ -558,9 +598,16 @@ export class DocumentService extends EventEmitter {
   }
 
   async restoreCheckpoint(documentId: Id, checkpointId: Id, actor: Actor = HUMAN_ACTOR): Promise<ApplyTransactionResponse> {
+    const incarnation = this.documentIncarnations.get(documentId);
+    if (!incarnation || !this.documents.has(documentId)) return { status: 'conflict', message: 'Checkpoint not found.' };
+    if (!this.checkpoints.get(documentId)?.has(checkpointId)) return { status: 'conflict', message: 'Checkpoint not found.' };
+    return this.enqueueMutation(documentId, () => this.restoreCheckpointQueued(documentId, checkpointId, structuredClone(actor), incarnation));
+  }
+
+  private async restoreCheckpointQueued(documentId: Id, checkpointId: Id, actor: Actor, incarnation: symbol): Promise<ApplyTransactionResponse> {
     const current = this.documents.get(documentId);
     const checkpoint = this.checkpoints.get(documentId)?.get(checkpointId);
-    if (!current || !checkpoint) return { status: 'conflict', message: 'Checkpoint not found.' };
+    if (!current || !checkpoint || this.documentIncarnations.get(documentId) !== incarnation) return { status: 'conflict', message: 'Checkpoint not found.' };
     if (actor.kind !== 'human' && [...this.locks.values()].some((lock) => lock.documentId === documentId)) {
       return { status: 'locked', message: 'A human is actively editing this document.', conflict: { retryable: true } };
     }
@@ -888,6 +935,17 @@ export class DocumentService extends EventEmitter {
     this.saveQueues.set(documentId, completion);
     void completion.then(() => {
       if (this.saveQueues.get(documentId) === completion) this.saveQueues.delete(documentId);
+    });
+    return result;
+  }
+
+  private enqueueMutation<T>(documentId: Id, operation: () => Promise<T>): Promise<T> {
+    const previous = this.mutationQueues.get(documentId) ?? Promise.resolve();
+    const result = previous.then(operation, operation);
+    const completion = result.then(() => undefined, () => undefined);
+    this.mutationQueues.set(documentId, completion);
+    void completion.then(() => {
+      if (this.mutationQueues.get(documentId) === completion) this.mutationQueues.delete(documentId);
     });
     return result;
   }
