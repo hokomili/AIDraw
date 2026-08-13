@@ -1,5 +1,6 @@
 import { afterAll, describe, expect, it } from 'vitest';
 import { DOMMatrix, DOMPoint, Path2D, createCanvas } from '@napi-rs/canvas';
+import { parseGIF } from 'gifuct-js';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { cpus, freemem, hostname, platform, release, tmpdir, totalmem } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -55,6 +56,7 @@ const budgets = {
   millionSampleGridSurfacePlanMs: 500,
   millionPixelNormalCompositeMs: 500,
   millionPixelExactGifMs: 750,
+  sixteenMillionPixelExactGifExportMs: 5_000,
   nativeSaveMs: 5_000,
   pngExportMs: 5_000,
   millionSampleAccountingMs: 500,
@@ -318,6 +320,22 @@ describe('Windows v1 non-GUI performance gate', () => {
     ));
     const afterExactGifRss = process.memoryUsage().rss;
     memoryProfile.push(memorySnapshot('after-million-pixel-exact-gif', startingRss));
+    const firstFrameId = normalCompositeFixtureValue.sprite.frameIds[0];
+    const firstFrame = normalCompositeFixtureValue.sprite.frames[firstFrameId];
+    for (let frameIndex = 1; frameIndex < 16; frameIndex += 1) {
+      const frameId = `perf-exact-gif-frame-${frameIndex}`;
+      normalCompositeFixtureValue.sprite.frameIds.push(frameId);
+      normalCompositeFixtureValue.sprite.frames[frameId] = { ...firstFrame, id: frameId, name: `Frame ${frameIndex + 1}` };
+      for (const layerId of normalCompositeFixtureValue.sprite.layerIds) {
+        const sourceCel = Object.values(normalCompositeFixtureValue.sprite.cels).find((cel) => cel.frameId === firstFrameId && cel.layerId === layerId);
+        if (!sourceCel) throw new Error(`Exact GIF performance cel for ${layerId} is missing.`);
+        const celId = `perf-exact-gif-cel-${frameIndex}-${layerId}`;
+        normalCompositeFixtureValue.sprite.cels[celId] = { ...sourceCel, id: celId, name: `Frame ${frameIndex + 1} · ${layerId}`, frameId, chunks: sourceCel.chunks };
+      }
+    }
+    const exactGifExport = await measured(() => exportDocument(normalCompositeFixtureValue.document, 'gif'));
+    const afterExactGifExportRss = process.memoryUsage().rss;
+    memoryProfile.push(memorySnapshot('after-sixteen-million-pixel-exact-gif-export', startingRss));
     const root = await mkdtemp(join(tmpdir(), 'aidraw-performance-')); temporaryPaths.push(root);
     const nativeSave = await measured(() => writeNativeDocument(join(root, 'vectors.aidraw'), vector, 'performance-gate'));
     memoryProfile.push(memorySnapshot('after-native-save', startingRss));
@@ -331,7 +349,7 @@ describe('Windows v1 non-GUI performance gate', () => {
     memoryProfile.push(memorySnapshot('after-million-cell-flood-fixture', startingRss));
     const floodFill = await measured(() => floodPixelRegion({ width: floodFixture.sprite.width, height: floodFixture.sprite.height, start: { x: 0, y: 0 }, read: floodFixture.read }));
     memoryProfile.push(memorySnapshot('after-million-cell-flood-fill', startingRss));
-    const peakRss = Math.max(afterVectorRss, afterSparseIllustrationRegionRss, afterVectorLassoRss, afterVectorHitTestRss, afterPaintRss, afterMapRss, afterSparseMapRegionRss, afterSparseSpriteRegionRss, afterMapObjectFilterRss, afterOverlayCullRss, afterGridSurfacePlanRss, afterNormalCompositeRss, afterExactGifRss, process.memoryUsage().rss);
+    const peakRss = Math.max(afterVectorRss, afterSparseIllustrationRegionRss, afterVectorLassoRss, afterVectorHitTestRss, afterPaintRss, afterMapRss, afterSparseMapRegionRss, afterSparseSpriteRegionRss, afterMapObjectFilterRss, afterOverlayCullRss, afterGridSurfacePlanRss, afterNormalCompositeRss, afterExactGifRss, afterExactGifExportRss, process.memoryUsage().rss);
     const metrics = {
       vector5000RenderMs: vectorRender.durationMs,
       illustration8192RegionRenderMs: sparseIllustrationRegionRender.durationMs,
@@ -348,13 +366,14 @@ describe('Windows v1 non-GUI performance gate', () => {
       millionSampleGridSurfacePlanMs: gridSurfacePlan.durationMs,
       millionPixelNormalCompositeMs: normalComposite.durationMs,
       millionPixelExactGifMs: exactGif.durationMs,
+      sixteenMillionPixelExactGifExportMs: exactGifExport.durationMs,
       nativeSaveMs: nativeSave.durationMs,
       pngExportMs: pngExport.durationMs,
       millionSampleAccountingMs: queueAccounting.durationMs,
       millionCellFloodFillMs: floodFill.durationMs,
       rssGrowthMiB: Number(((peakRss - startingRss) / 1024 / 1024).toFixed(2)),
     };
-    const report = { version: 1, createdAt: new Date().toISOString(), build: process.env.GITHUB_SHA ?? 'local', machine: { hostname: hostname(), platform: platform(), release: release(), arch: process.arch, cpu: cpus()[0]?.model, logicalCpus: cpus().length, totalMemoryMiB: Math.round(totalmem() / 1024 / 1024), freeMemoryMiB: Math.round(freemem() / 1024 / 1024), node: process.version }, coverage: { automated: ['5,000 vector render', 'one-pixel regional render on an 8192×8192 illustration', 'exact canonical lasso selection across 5,000 vector objects', 'path-authoritative click hit testing across 5,000 vector objects', 'four 4096×4096 editable paint layers', 'cold and warm four-layer 4096×4096 materialized sparse paint render', '65,536 addressed tiles from an 8192×8192 sparse source sheet', 'one-pixel regional render across 4,096 stored map chunks', 'one-pixel regional sprite composite across 4,096 stored cel chunks', 'regional projected-bounds filter across 100,000 map objects', 'viewport cull across 1,048,576 overlay cells in 65,536 compact runs', 'viewport checker planning, exact straight-path reduction across 1,000,001 lasso samples, and incremental validation to the 4,096-vertex ceiling', 'exact normal compositing across two one-million-pixel layers', 'exact GIF indexing across one million final binary-alpha normal-composite pixels', 'native save', 'PNG export', 'one-million-sample compact accounting', 'one-million-cell bounded flood fill', 'RSS growth'], deferredToPackagedComputerUse: ['pointer-to-preview latency', 'requestAnimationFrame pacing', 'human input while million-cell overlays are visible', '200% display scaling and tablet latency'] }, budgets, metrics, diagnostics: { memoryProfile } };
+    const report = { version: 1, createdAt: new Date().toISOString(), build: process.env.GITHUB_SHA ?? 'local', machine: { hostname: hostname(), platform: platform(), release: release(), arch: process.arch, cpu: cpus()[0]?.model, logicalCpus: cpus().length, totalMemoryMiB: Math.round(totalmem() / 1024 / 1024), freeMemoryMiB: Math.round(freemem() / 1024 / 1024), node: process.version }, coverage: { automated: ['5,000 vector render', 'one-pixel regional render on an 8192×8192 illustration', 'exact canonical lasso selection across 5,000 vector objects', 'path-authoritative click hit testing across 5,000 vector objects', 'four 4096×4096 editable paint layers', 'cold and warm four-layer 4096×4096 materialized sparse paint render', '65,536 addressed tiles from an 8192×8192 sparse source sheet', 'one-pixel regional render across 4,096 stored map chunks', 'one-pixel regional sprite composite across 4,096 stored cel chunks', 'regional projected-bounds filter across 100,000 map objects', 'viewport cull across 1,048,576 overlay cells in 65,536 compact runs', 'viewport checker planning, exact straight-path reduction across 1,000,001 lasso samples, and incremental validation to the 4,096-vertex ceiling', 'exact normal compositing across two one-million-pixel layers', 'exact GIF indexing across one million final binary-alpha normal-composite pixels', 'sequential exact GIF export across sixteen million final pixels', 'native save', 'PNG export', 'one-million-sample compact accounting', 'one-million-cell bounded flood fill', 'RSS growth'], deferredToPackagedComputerUse: ['pointer-to-preview latency', 'requestAnimationFrame pacing', 'human input while million-cell overlays are visible', '200% display scaling and tablet latency'] }, budgets, metrics, diagnostics: { memoryProfile } };
     const reportPath = process.env.AIDRAW_PERFORMANCE_REPORT ?? join(process.cwd(), 'test-results', 'performance-gate.json');
     await mkdir(dirname(reportPath), { recursive: true }); await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
     expect(queueAccounting.value.samples).toBe(1_000_000); expect((queueAccounting.value.midpoint[0] as Extract<CanvasOperation, { kind: 'pixel.cel.region' }>).runs.reduce((sum, run) => sum + run.length, 0)).toBe(500_000);
@@ -369,6 +388,9 @@ describe('Windows v1 non-GUI performance gate', () => {
     expect(exactGif.value?.indexes.byteLength).toBe(1_000_000);
     expect(Array.from(exactGif.value?.indexes.subarray(0, 1) ?? [])).toEqual([1]);
     expect(exactGif.value?.palette).toEqual([[0, 0, 0], [127, 0, 128]]);
+    expect(exactGifExport.value.mimeType).toBe('image/gif');
+    expect(exactGifExport.value.data.subarray(0, 6).toString()).toBe('GIF89a');
+    expect(parseGIF(Uint8Array.from(exactGifExport.value.data).buffer).frames.filter((frame) => 'image' in frame)).toHaveLength(16);
     if (!floodFill.value.ok) throw new Error('Expected bounded flood fill to succeed.');
     expect(floodFill.value.runs).toHaveLength(1_000);
     for (const [name, budget] of Object.entries(budgets)) expect(metrics[name as keyof typeof metrics], `${name} exceeded its documented budget; inspect ${reportPath}`).toBeLessThanOrEqual(budget);

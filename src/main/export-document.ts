@@ -40,6 +40,15 @@ export const MAX_EXPORT_SCALE = 64;
 
 const scalablePixelFormats = new Set<ExportFormat>(['png', 'jpeg', 'webp', 'svg', 'pdf', 'gif', 'apng', 'sprite-sheet']);
 const MAX_SCALED_PIXELS = MAX_STATIC_RASTER_PIXELS;
+export const MAX_ANIMATION_EXPANDED_PIXELS = 64 * 1024 * 1024;
+
+export function assertAnimationExpandedPixelBudget(width: number, height: number, frameCount: number): void {
+  if (!Number.isSafeInteger(width) || width < 1 || !Number.isSafeInteger(height) || height < 1) throw new RangeError('Animation frame dimensions must be positive safe integers.');
+  if (!Number.isSafeInteger(frameCount) || frameCount < 1) throw new RangeError('Animation frame count must be a positive safe integer.');
+  if (width > Math.floor(MAX_ANIMATION_EXPANDED_PIXELS / height)) throw new RangeError('Animation frames exceed the 64-megapixel expanded-frame safety budget. Reduce the exported frame dimensions or frame count.');
+  const pixels = width * height;
+  if (frameCount > Math.floor(MAX_ANIMATION_EXPANDED_PIXELS / pixels)) throw new RangeError('Animation frames exceed the 64-megapixel expanded-frame safety budget. Reduce the exported frame dimensions or frame count.');
+}
 
 export function normalizeExportScale(value: unknown): number {
   const scale = value === undefined ? 1 : Number(value);
@@ -881,6 +890,7 @@ async function animatedImage(document: PixelDocument, sprite: PixelSprite, forma
   const frameIds = pixelAnimationSequence(sprite, tagId);
   const delays = frameIds.map((frameId) => sprite.frames[frameId]?.durationMs ?? 100); const warnings = animationExportWarnings(sprite, tagId, scale);
   if (format === 'apng') {
+    assertAnimationExpandedPixelBudget(width, height, frameIds.length);
     const frames = frameIds.map((frameId) => {
       const exact = exactNormalCompositeAnimationFrame(document.palette, sprite, frameId);
       const rgba = exact ?? renderSprite(document, sprite, frameId).getContext('2d').getImageData(0, 0, sprite.width, sprite.height).data;
@@ -896,10 +906,17 @@ async function animatedImage(document: PixelDocument, sprite: PixelSprite, forma
     const encodeApng = UPNG.encode as unknown as (images: ArrayBuffer[], frameWidth: number, frameHeight: number, colors: number, frameDelays?: number[], forbidPalette?: boolean) => ArrayBuffer;
     return { data: Buffer.from(encodeApng(inputs, width, height, 0, delays, true)), mimeType: 'image/apng', extension: 'apng', report: { warnings, rasterized: [] } };
   }
-  const exactFrames = frameIds.map((frameId) => exactNormalCompositeGifFrame(document.palette, sprite, frameId));
+  let everyFrameIsExact = true;
+  for (const frameId of frameIds) {
+    if (!exactNormalCompositeGifFrame(document.palette, sprite, frameId)) { everyFrameIsExact = false; break; }
+  }
   const encoder = GIFEncoder();
-  if (exactFrames.every((frame): frame is NonNullable<typeof frame> => frame !== undefined)) {
-    exactFrames.forEach((frame, index) => encoder.writeFrame(nearestNeighborIndexes(frame.indexes, sprite.width, sprite.height, scale), width, height, { palette: frame.palette, transparent: true, transparentIndex: 0, delay: delays[index], repeat: 0 }));
+  if (everyFrameIsExact) {
+    for (let index = 0; index < frameIds.length; index += 1) {
+      const frame = exactNormalCompositeGifFrame(document.palette, sprite, frameIds[index]);
+      if (!frame) throw new Error('Exact GIF frame eligibility changed during synchronous export.');
+      encoder.writeFrame(nearestNeighborIndexes(frame.indexes, sprite.width, sprite.height, scale), width, height, { palette: frame.palette, transparent: true, transparentIndex: 0, delay: delays[index], repeat: 0 });
+    }
   } else {
     frameIds.forEach((frameId, index) => {
       const frame = nearestNeighborFrame(renderSprite(document, sprite, frameId).getContext('2d').getImageData(0, 0, sprite.width, sprite.height).data, sprite.width, sprite.height, scale);
@@ -909,8 +926,6 @@ async function animatedImage(document: PixelDocument, sprite: PixelSprite, forma
   encoder.finish();
   return { data: Buffer.from(encoder.bytes()), mimeType: 'image/gif', extension: 'gif', report: { warnings, rasterized: [] } };
 }
-
-const MAX_ANIMATION_EXPANDED_PIXELS = 64 * 1024 * 1024;
 
 async function animatedIllustrationImage(document: IllustrationDocument, format: 'gif' | 'apng'): Promise<ExportArtifact> {
   if (!document.animation.keyframeIds.length) throw new Error('Illustration animation export requires at least one keyframe.');

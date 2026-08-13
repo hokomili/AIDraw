@@ -19,7 +19,7 @@ import {
   type TextObject,
 } from '@aidraw/core';
 import { MAX_PSD_LAYER_NESTING_DEPTH, MAX_PSD_LAYER_RECORDS, assertPsdLayerStructureBudget } from '@common/psd-limits';
-import { assertPsdLayerRasterBudget, boundedInterchangeExportReport, exportDocument, illustrationToSvg, plannedExportCompanionPaths } from '@main/export-document';
+import { assertAnimationExpandedPixelBudget, assertPsdLayerRasterBudget, boundedInterchangeExportReport, exportDocument, illustrationToSvg, plannedExportCompanionPaths } from '@main/export-document';
 import { renderIllustrationLayerSource } from '@main/render-document';
 import { MAX_UTILITY_REPORT_SERIALIZED_BYTES, MAX_UTILITY_TEXT_BYTES, assertUtilityJsonBudget } from '@main/utility-resource-policy';
 import { decompressFrames, parseGIF } from 'gifuct-js';
@@ -209,6 +209,20 @@ describe('interchange exporters', () => {
     const timestamp = nowIso(); const frameId = createId('frame'); const celId = createId('cel'); sprite.frameIds.push(frameId); sprite.frames[frameId] = { id: frameId, revision: 0, name: 'Frame 2', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, durationMs: 140 }; sprite.cels[celId] = { id: celId, revision: 0, name: 'Frame 2 pixels', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, layerId: sprite.layerIds[0], frameId, chunks: {} }; writePixels(sprite.cels[celId], [{ x: 1, y: 0, index: 4 }]);
     const gif = await exportDocument(document, 'gif'); const apng = await exportDocument(document, 'apng');
     expect(decompressFrames(parseGIF(Uint8Array.from(gif.data).buffer), true)).toHaveLength(2); expect(UPNG.toRGBA8(UPNG.decode(Uint8Array.from(apng.data).buffer))).toHaveLength(2);
+  });
+
+  it('rejects retained APNG frame surfaces above the expanded-pixel budget before rendering', async () => {
+    expect(() => assertAnimationExpandedPixelBudget(8_192, 8_192, 1)).not.toThrow();
+    expect(() => assertAnimationExpandedPixelBudget(4_096, 4_096, 4)).not.toThrow();
+    expect(() => assertAnimationExpandedPixelBudget(8_192, 8_192, 2)).toThrow(/64-megapixel expanded-frame safety budget/);
+    expect(() => assertAnimationExpandedPixelBudget(4_096, 4_096, 5)).toThrow(/64-megapixel expanded-frame safety budget/);
+    expect(() => assertAnimationExpandedPixelBudget(0, 4_096, 1)).toThrow(/dimensions must be positive safe integers/);
+    expect(() => assertAnimationExpandedPixelBudget(4_096, 4_096, 0)).toThrow(/frame count must be a positive safe integer/);
+
+    const document = createPixelDocument('sprite', 'APNG retained-frame budget'); const sprite = document.pixelAssets[document.activeAssetId];
+    if (sprite.type !== 'sprite') throw new Error('Expected sprite'); sprite.width = 1_024; sprite.height = 1_024;
+    const frameId = createId('frame'); sprite.frameIds.push(frameId); sprite.frames[frameId] = { ...structuredClone(sprite.frames[sprite.frameIds[0]]), id: frameId, name: 'Frame 2' };
+    await expect(exportDocument(document, 'apng', { scale: 8 })).rejects.toThrow(/64-megapixel expanded-frame safety budget/);
   });
 
   it('renders canonical illustration keyframes into GIF and APNG frames', async () => {
