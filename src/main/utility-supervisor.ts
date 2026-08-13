@@ -27,6 +27,7 @@ import {
 } from './utility-contract';
 import {
   displayImageDimensions,
+  inspectEmbeddedDocumentImageAssets,
   inspectImageHeader,
   MAX_INLINE_IMAGE_DIMENSION,
   MAX_INLINE_IMAGE_PIXELS,
@@ -275,8 +276,9 @@ export class RasterUtilitySupervisor {
     control: { signal?: AbortSignal; timeoutMs?: number } = {},
   ): Promise<{ documents: AIDrawDocument[]; warnings: string[] }> {
     const request: Extract<UtilityRequest, { kind: 'import-document' }> = { id: createId('utility'), kind: 'import-document', filePath, pixelMode };
-    return this.enqueue(request, { ...control, timeoutMs: control.timeoutMs ?? 300_000 }).then((response) => {
+    return this.enqueue(request, { ...control, timeoutMs: control.timeoutMs ?? 300_000 }).then(async (response) => {
       if (response.kind !== 'import-document') throw new Error('Raster utility returned the wrong result kind.');
+      await this.validateImportedDocumentImages(response.documents, control);
       return { documents: response.documents, warnings: response.warnings };
     });
   }
@@ -300,8 +302,9 @@ export class RasterUtilitySupervisor {
       pixelMode: false,
       e2eResultFault: fault,
     };
-    return this.enqueue(request, { ...control, timeoutMs: control.timeoutMs ?? 15_000 }).then((response) => {
+    return this.enqueue(request, { ...control, timeoutMs: control.timeoutMs ?? 15_000 }).then(async (response) => {
       if (response.kind !== 'import-document') throw new Error('Raster utility returned the wrong import-result probe kind.');
+      await this.validateImportedDocumentImages(response.documents, control);
       return { documents: response.documents, warnings: response.warnings };
     });
   }
@@ -312,10 +315,39 @@ export class RasterUtilitySupervisor {
     control: { signal?: AbortSignal; timeoutMs?: number } = {},
   ): Promise<{ documents: AIDrawDocument[]; warnings: string[] }> {
     const request: Extract<UtilityRequest, { kind: 'import-document' }> = { id: createId('utility'), kind: 'import-document', filePath, pixelMode: true, spriteSheet: structuredClone(metadata) };
-    return this.enqueue(request, { ...control, timeoutMs: control.timeoutMs ?? 300_000 }).then((response) => {
+    return this.enqueue(request, { ...control, timeoutMs: control.timeoutMs ?? 300_000 }).then(async (response) => {
       if (response.kind !== 'import-document') throw new Error('Raster utility returned the wrong result kind.');
+      await this.validateImportedDocumentImages(response.documents, control);
       return { documents: response.documents, warnings: response.warnings };
     });
+  }
+
+  private async validateImportedDocumentImages(
+    documents: AIDrawDocument[],
+    control: { signal?: AbortSignal; timeoutMs?: number },
+  ): Promise<void> {
+    const validated = new Set<string>();
+    for (const document of documents) {
+      const images = inspectEmbeddedDocumentImageAssets(document, {
+        maxBytes: MAX_IMAGE_VALIDATION_UTILITY_SOURCE_BYTES,
+        limitLabel: '128 MiB',
+        labelPrefix: 'Raster utility imported asset',
+      });
+      for (const image of images) {
+        const identity = `${image.asset.sha256.toLowerCase()}:${image.expected.mimeType}:${image.expected.width}x${image.expected.height}`;
+        if (validated.has(identity)) continue;
+        validated.add(identity);
+        try {
+          await this.validateImage(image.bytes, image.expected, {
+            signal: control.signal,
+            timeoutMs: Math.min(control.timeoutMs ?? 120_000, 120_000),
+          });
+        } catch (error) {
+          if (error instanceof Error && error.name === 'AbortError') throw error;
+          throw new Error(`Raster utility returned an imported image that could not be decoded safely: ${error instanceof Error ? error.message : String(error)}.`);
+        }
+      }
+    }
   }
 
   captureObservation(

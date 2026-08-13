@@ -24,6 +24,7 @@ import {
   parseCheckpointSummary,
 } from './checkpoint-policy';
 import {
+  assertDocumentImageAssetMetadata,
   inspectDocumentImageAsset,
   inspectImageHeader,
   type ImageDecodeValidator,
@@ -43,7 +44,6 @@ const MAX_NATIVE_EXPANDED_BYTES = 512 * 1024 * 1024;
 const MAX_NATIVE_METADATA_BYTES = 64 * 1024 * 1024;
 const MAX_NATIVE_MANIFEST_BYTES = 1024 * 1024;
 const MAX_NATIVE_ENTRIES = 20_000;
-const NATIVE_ASSET_SOURCES = new Set(['imported', 'generated', 'embedded', 'rendered']);
 
 function safeArchiveEntryName(name: string): boolean {
   return Boolean(name) && !name.includes('\\') && !name.includes('\0') && !name.startsWith('/') && !/^[a-z]:/i.test(name) && !name.split('/').some((part) => part === '..' || part === '.');
@@ -229,18 +229,6 @@ function pruneUnreferencedPaintTiles(document: AIDrawDocument): void {
   }
 }
 
-function nativeAssetMetadata(assetId: string, candidate: unknown): DocumentAsset {
-  if (!isRecord(candidate) || candidate.id !== assetId || typeof candidate.name !== 'string' || !candidate.name
-    || typeof candidate.mimeType !== 'string' || !candidate.mimeType
-    || typeof candidate.byteLength !== 'number' || !Number.isSafeInteger(candidate.byteLength) || candidate.byteLength < 0
-    || typeof candidate.sha256 !== 'string' || !/^[0-9a-f]{64}$/i.test(candidate.sha256)
-    || typeof candidate.source !== 'string' || !NATIVE_ASSET_SOURCES.has(candidate.source)
-    || candidate.data !== undefined && typeof candidate.data !== 'string') {
-    throw new Error('AIDraw document contains invalid asset metadata.');
-  }
-  return candidate as unknown as DocumentAsset;
-}
-
 async function validateNativeImageAsset(asset: DocumentAsset, imageDecoder?: ImageDecodeValidator): Promise<void> {
   const inspected = inspectDocumentImageAsset(asset, {
     maxBytes: MAX_NATIVE_BINARY_ENTRY_BYTES,
@@ -263,7 +251,7 @@ async function hydrateNativeAssets(
   imageDecoder?: ImageDecodeValidator,
 ): Promise<void> {
   for (const [assetId, candidate] of Object.entries(document.assets)) {
-    const asset = nativeAssetMetadata(assetId, candidate);
+    const asset = assertDocumentImageAssetMetadata(assetId, candidate);
     delete asset.data;
     const bytes = archive[`assets/${asset.sha256}`];
     const label = checkpoint ? 'checkpoint asset' : 'asset';
@@ -292,7 +280,7 @@ async function validateSuppliedNativeAssets(
 ): Promise<void> {
   const documents = [document, ...checkpoints.slice(-32).map((checkpoint) => checkpoint.document)];
   for (const value of documents) for (const [assetId, candidate] of Object.entries(value.assets)) {
-    const asset = nativeAssetMetadata(assetId, candidate);
+    const asset = assertDocumentImageAssetMetadata(assetId, candidate);
     if (asset.data !== undefined) {
       const bytes = Buffer.from(asset.data, 'base64');
       if (bytes.toString('base64') !== asset.data || bytes.byteLength !== asset.byteLength || createHash('sha256').update(bytes).digest('hex') !== asset.sha256.toLowerCase()) {
@@ -424,7 +412,7 @@ function buildArchive(document: AIDrawDocument, appVersion: string, preview?: Ui
   const externalizeAssets = (value: AIDrawDocument) => {
     const assetMetadata: Record<string, DocumentAsset> = {};
     for (const [assetId, candidate] of Object.entries(value.assets)) {
-      const asset = nativeAssetMetadata(assetId, candidate);
+      const asset = assertDocumentImageAssetMetadata(assetId, candidate);
       const metadata = structuredClone(asset);
       if (metadata.data !== undefined) {
         const bytes = Buffer.from(metadata.data, 'base64');

@@ -117,6 +117,8 @@ export interface EngineStatus {
 export interface WorkspaceSnapshot {
   /** Monotonic canonical ordering for renderer hydration and IPC response races. */
   workspaceRevision: number;
+  /** Bounded startup diagnostics for repairs applied while recovering local journals. */
+  recoveryWarnings?: string[];
   documents: DocumentTab[];
   activeDocumentId?: Id;
   activeDocument?: AIDrawDocument;

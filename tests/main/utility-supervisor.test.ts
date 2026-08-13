@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { createHash } from 'node:crypto';
 import { crc32 } from 'node:zlib';
 import { createCanvas } from '@napi-rs/canvas';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -31,6 +32,22 @@ async function nextTurn(): Promise<void> {
 
 function observationPng(width: number, height: number): string {
   return createCanvas(width, height).toBuffer('image/png').toString('base64');
+}
+
+function importedDocumentWithPng(name: string) {
+  const document = createIllustrationDocument(name);
+  const bytes = createCanvas(2, 3).toBuffer('image/png');
+  const assetId = 'imported-image';
+  document.assets[assetId] = {
+    id: assetId,
+    name: 'Imported image',
+    mimeType: 'image/png',
+    byteLength: bytes.byteLength,
+    sha256: createHash('sha256').update(bytes).digest('hex'),
+    source: 'imported',
+    data: bytes.toString('base64'),
+  };
+  return { document, bytes };
 }
 
 function observationPngWithCorruptIdat(width: number, height: number): string {
@@ -261,6 +278,75 @@ describe('RasterUtilitySupervisor', () => {
 
   it('round-trips imported canonical documents through the supervised lane', async () => {
     const worker = new FakeUtility(); const supervisor = new RasterUtilitySupervisor(() => worker); const pending = supervisor.importDocument('C:\\approved\\drawing.svg', false); await nextTurn(); const request = worker.messages[0] as { id: string; kind: string; filePath: string; pixelMode: boolean }; expect(request).toMatchObject({ kind: 'import-document', filePath: 'C:\\approved\\drawing.svg', pixelMode: false }); const document = createIllustrationDocument('Imported in worker'); worker.respond({ id: request.id, ok: true, kind: 'import-document', documents: [document], warnings: ['One fallback'] }); await expect(pending).resolves.toEqual({ documents: [document], warnings: ['One fallback'] }); supervisor.stop();
+  });
+
+  it('holds imported image documents until their embedded payloads pass supervised decode', async () => {
+    const worker = new FakeUtility();
+    const supervisor = new RasterUtilitySupervisor(() => worker);
+    const { document } = importedDocumentWithPng('Validated imported image');
+    const pending = supervisor.importDocument('C:\\approved\\image.svg', false);
+    const resolved = vi.fn();
+    void pending.then(resolved);
+    await nextTurn();
+    const importRequest = worker.messages[0] as { id: string };
+    worker.respond({ id: importRequest.id, ok: true, kind: 'import-document', documents: [document], warnings: [] });
+    await nextTurn();
+
+    expect(resolved).not.toHaveBeenCalled();
+    expect(worker.messages).toHaveLength(2);
+    const validationRequest = worker.messages[1] as { id: string };
+    expect(validationRequest).toMatchObject({ kind: 'validate-image', mimeType: 'image/png', width: 2, height: 3 });
+    worker.respond({ id: validationRequest.id, ok: true, kind: 'validate-image', width: 2, height: 3 });
+    await expect(pending).resolves.toEqual({ documents: [document], warnings: [] });
+    expect(resolved).toHaveBeenCalledOnce();
+    supervisor.stop();
+  });
+
+  it('rejects malformed imported image envelopes and resumes later imports in a fresh worker', async () => {
+    const workers = [new FakeUtility(), new FakeUtility()];
+    const fork = vi.fn(() => workers[fork.mock.calls.length - 1]);
+    const supervisor = new RasterUtilitySupervisor(fork);
+    const { document } = importedDocumentWithPng('Malformed imported image');
+    document.assets['imported-image'].sha256 = '0'.repeat(64);
+    const malformed = supervisor.importDocument('C:\\approved\\malformed-image.svg', false);
+    await nextTurn();
+    const malformedRequest = workers[0].messages[0] as { id: string };
+    workers[0].respond({ id: malformedRequest.id, ok: true, kind: 'import-document', documents: [document], warnings: [] });
+    await expect(malformed).rejects.toThrow('Raster utility returned a malformed imported document.');
+    expect(workers[0].killed).toBe(true);
+
+    const canonical = createIllustrationDocument('Recovered import');
+    const recovered = supervisor.importDocument('C:\\approved\\recovered.svg', false);
+    await nextTurn();
+    const recoveredRequest = workers[1].messages[0] as { id: string };
+    workers[1].respond({ id: recoveredRequest.id, ok: true, kind: 'import-document', documents: [canonical], warnings: [] });
+    await expect(recovered).resolves.toEqual({ documents: [canonical], warnings: [] });
+    expect(fork).toHaveBeenCalledTimes(2);
+    supervisor.stop();
+  });
+
+  it('returns no imported image document when its supervised decoder process exits', async () => {
+    const workers = [new FakeUtility(), new FakeUtility()];
+    const fork = vi.fn(() => workers[fork.mock.calls.length - 1]);
+    const supervisor = new RasterUtilitySupervisor(fork);
+    const { document } = importedDocumentWithPng('Decoder-crash import');
+    const pending = supervisor.importDocument('C:\\approved\\decoder-crash.svg', false);
+    await nextTurn();
+    const importRequest = workers[0].messages[0] as { id: string };
+    workers[0].respond({ id: importRequest.id, ok: true, kind: 'import-document', documents: [document], warnings: [] });
+    await nextTurn();
+    expect(workers[0].messages[1]).toMatchObject({ kind: 'validate-image' });
+    workers[0].exit(139);
+    await expect(pending).rejects.toThrow('imported image that could not be decoded safely: Raster utility exited unexpectedly with code 139');
+
+    const canonical = createIllustrationDocument('Import after decoder crash');
+    const recovered = supervisor.importDocument('C:\\approved\\after-decoder-crash.svg', false);
+    await nextTurn();
+    const recoveredRequest = workers[1].messages[0] as { id: string };
+    workers[1].respond({ id: recoveredRequest.id, ok: true, kind: 'import-document', documents: [canonical], warnings: [] });
+    await expect(recovered).resolves.toEqual({ documents: [canonical], warnings: [] });
+    expect(fork).toHaveBeenCalledTimes(2);
+    supervisor.stop();
   });
 
   it('bounds and validates imported canonical documents and warnings before fresh-worker recovery', async () => {

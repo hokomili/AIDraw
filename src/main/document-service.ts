@@ -35,11 +35,17 @@ import { RecoveryJournal } from './journal';
 import { readNativeDocument, writeNativeDocument } from './persistence';
 import { renderDocument } from './render-document';
 import { TransactionTraceStore } from './trace-store';
-import { prepareTransactionForCommit, type ImageDecodeValidator } from './transaction-policy';
+import {
+  assertDocumentImageAssetMetadata,
+  inspectDocumentImageAsset,
+  prepareTransactionForCommit,
+  type ImageDecodeValidator,
+} from './transaction-policy';
 import { rebaseRestoredEntityRevisions } from '../common/document-branch';
 import { checkpointMergeCandidates, checkpointMergeOperations } from '../common/checkpoint-merge';
 import { MAX_TRANSACTION_SERIALIZED_BYTES } from '../common/transaction-limits';
 import { committedHistoryTargets, historyTargetsIntersect, mutationHistoryTargets } from './history-policy';
+import { MAX_NATIVE_BINARY_ENTRY_BYTES } from './native-container-limits';
 
 interface HistoryInvalidation {
   actorId: Id;
@@ -87,6 +93,7 @@ export class DocumentService extends EventEmitter {
   private editorAdvisory: EditorAdvisoryState = { advisory: true, attached: false, updatedAt: nowIso() };
   private activeDocumentId?: Id;
   private workspaceRevision = 0;
+  private recoveryWarnings: string[] = [];
   private mcpInfo: Pick<McpConnectionInfo, 'running' | 'url' | 'port' | 'tokenHint'> = { running: false };
 
   constructor(
@@ -105,14 +112,46 @@ export class DocumentService extends EventEmitter {
   async recover(): Promise<number> {
     const recovered = await this.journal.recoverWorkspace();
     const documents = recovered.documents;
+    this.recoveryWarnings = [];
+    let omittedPayloads = 0;
+    let affectedDocuments = 0;
     for (const document of documents) {
+      const omitted = await this.reconcileRecoveredImageAssets(document);
+      if (omitted > 0) {
+        omittedPayloads += omitted;
+        affectedDocuments += 1;
+      }
       this.documents.set(document.id, document); this.histories.set(document.id, new Map()); this.operationIds.set(document.id, new Map()); this.changes.set(document.id, []); this.checkpoints.set(document.id, new Map()); this.acknowledgedAgentActivityCounts.set(document.id, agentActivityEntries(document).length);
+    }
+    if (omittedPayloads > 0) {
+      this.recoveryWarnings.push(`Recovery omitted ${omittedPayloads} invalid embedded image payload${omittedPayloads === 1 ? '' : 's'} across ${affectedDocuments} recovered document${affectedDocuments === 1 ? '' : 's'}; the recovered document state and asset metadata were preserved.`);
     }
     this.activeDocumentId = recovered.activeDocumentId && this.documents.has(recovered.activeDocumentId)
       ? recovered.activeDocumentId
       : documents.at(-1)?.id;
     if (documents.length) this.publish();
     return documents.length;
+  }
+
+  private async reconcileRecoveredImageAssets(document: AIDrawDocument): Promise<number> {
+    let omitted = 0;
+    for (const [assetId, candidate] of Object.entries(document.assets)) {
+      if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate) || !Object.hasOwn(candidate, 'data')) continue;
+      try {
+        const asset = assertDocumentImageAssetMetadata(assetId, candidate);
+        if (asset.data === undefined) continue;
+        const inspected = inspectDocumentImageAsset(asset, {
+          maxBytes: MAX_NATIVE_BINARY_ENTRY_BYTES,
+          limitLabel: '128 MiB',
+          label: `Recovered asset ${assetId}`,
+        });
+        if (this.imageDecoder) await this.imageDecoder(inspected.bytes, inspected.expected);
+      } catch {
+        delete (candidate as { data?: unknown }).data;
+        omitted += 1;
+      }
+    }
+    return omitted;
   }
 
   async compactRecovery(): Promise<void> {
@@ -190,6 +229,7 @@ export class DocumentService extends EventEmitter {
     for (const entry of this.presence.values()) if (entry.actor.kind === 'agent' && (!active || !entry.documentId || entry.documentId === active.id)) agentActors.set(entry.actor.id, entry.actor);
     return {
       workspaceRevision: this.workspaceRevision,
+      ...(this.recoveryWarnings.length ? { recoveryWarnings: [...this.recoveryWarnings] } : {}),
       documents: [...this.documents.values()].map((document) => {
         const tab = {
           id: document.id,

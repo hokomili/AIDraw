@@ -76,6 +76,25 @@ describe('renderer workspace ordering and document isolation', () => {
     expect(useEditorStore.getState().snapshot?.workspaceRevision).toBe(2);
   });
 
+  it('surfaces recovered-image repair as one bounded bootstrap warning', async () => {
+    const document = createIllustrationDocument('Recovered document');
+    const warning = 'Recovery omitted 2 invalid embedded image payloads across 1 recovered document; the recovered document state and asset metadata were preserved.';
+    const recovered = { ...snapshot(1, document), recoveryWarnings: [warning] };
+    const setTimeout = vi.fn();
+    const api = {
+      bootstrap: vi.fn(async () => recovered),
+      onEvent: vi.fn(() => vi.fn()),
+    } as unknown as AIDrawDesktopAPI;
+    Object.defineProperty(globalThis, 'window', { configurable: true, value: { aidraw: api, setTimeout } });
+    useEditorStore.setState({ snapshot: undefined, loading: true, toast: undefined });
+
+    await useEditorStore.getState().initialize();
+
+    expect(useEditorStore.getState().snapshot).toEqual(recovered);
+    expect(useEditorStore.getState().toast).toMatchObject({ tone: 'warning', message: warning });
+    expect(setTimeout).toHaveBeenCalledOnce();
+  });
+
   it('cancels a late canvas gesture instead of routing old-document operations into the new active tab', async () => {
     const first = createIllustrationDocument('Gesture source');
     const second = createIllustrationDocument('Current tab');

@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { createHash } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -6,6 +7,7 @@ import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createId, createIllustrationDocument, 
 import { DocumentService } from '@main/document-service';
 import { RecoveryJournal } from '@main/journal';
 import { writeNativeDocument } from '@main/persistence';
+import { createCanvas } from '@napi-rs/canvas';
 
 const temporaryPaths: string[] = [];
 const services: DocumentService[] = [];
@@ -79,6 +81,45 @@ describe('document service collaboration semantics', () => {
       { id: dirtyTilemap.id, dirty: true, filePath: undefined },
       { id: cleanProject.id, dirty: false, filePath: undefined },
       { id: dirtyIllustration.id, dirty: true, filePath: undefined },
+    ]);
+  });
+
+  it('preserves recovered documents and asset metadata while omitting invalid embedded image payloads with one warning', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-service-image-recovery-'));
+    temporaryPaths.push(root);
+    const journal = new RecoveryJournal(root);
+    const document = createIllustrationDocument('Recovered image payloads');
+    const bytes = createCanvas(2, 3).toBuffer('image/png');
+    const sha256 = createHash('sha256').update(bytes).digest('hex');
+    document.assets['decoder-rejected'] = {
+      id: 'decoder-rejected', name: 'Decoder-rejected image', mimeType: 'image/png', byteLength: bytes.byteLength,
+      sha256, source: 'embedded', data: bytes.toString('base64'),
+    };
+    document.assets['hash-rejected'] = {
+      id: 'hash-rejected', name: 'Hash-rejected image', mimeType: 'image/png', byteLength: bytes.byteLength,
+      sha256: '0'.repeat(64), source: 'embedded', data: bytes.toString('base64'),
+    };
+    await journal.compact(document);
+    await journal.compactWorkspace([document.id], document.id);
+    const decoder = vi.fn(async () => { throw new Error('fixture decoder rejection'); });
+    const service = new DocumentService(new RecoveryJournal(root), '1.0.0', undefined, decoder);
+    services.push(service);
+
+    expect(await service.recover()).toBe(1);
+    const recovered = service.getDocument(document.id)!;
+    expect(recovered.assets['decoder-rejected']).toMatchObject({
+      id: 'decoder-rejected', name: 'Decoder-rejected image', mimeType: 'image/png', byteLength: bytes.byteLength, sha256, source: 'embedded',
+    });
+    expect(recovered.assets['hash-rejected']).toMatchObject({
+      id: 'hash-rejected', name: 'Hash-rejected image', mimeType: 'image/png', byteLength: bytes.byteLength, sha256: '0'.repeat(64), source: 'embedded',
+    });
+    expect(recovered.assets['decoder-rejected'].data).toBeUndefined();
+    expect(recovered.assets['hash-rejected'].data).toBeUndefined();
+    expect(recovered.dirty).toBe(document.dirty);
+    expect(decoder).toHaveBeenCalledOnce();
+    expect(decoder).toHaveBeenCalledWith(bytes, { mimeType: 'image/png', width: 2, height: 3 });
+    expect(service.snapshot().recoveryWarnings).toEqual([
+      'Recovery omitted 2 invalid embedded image payloads across 1 recovered document; the recovered document state and asset metadata were preserved.',
     ]);
   });
 

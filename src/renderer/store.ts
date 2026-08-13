@@ -143,6 +143,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     });
     const snapshot = await window.aidraw.bootstrap();
     set((state) => ({ ...reconcileWorkspaceSnapshot(state, snapshot), loading: false }));
+    if (snapshot.recoveryWarnings?.length) get().notify(snapshot.recoveryWarnings.join(' '), 'warning');
   },
   setSnapshot: (snapshot) => set((state) => reconcileWorkspaceSnapshot(state, snapshot)),
   setTool: (selectedTool) => set({ selectedTool }),

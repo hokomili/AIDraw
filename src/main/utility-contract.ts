@@ -12,7 +12,7 @@ import {
   type GeneratedOutput,
   type GenerationRequest,
 } from '../common/generation';
-import { displayImageDimensions, inspectImageHeader, MAX_INLINE_ASSET_BYTES, MAX_INLINE_IMAGE_DIMENSION, MAX_INLINE_IMAGE_PIXELS } from './transaction-policy';
+import { displayImageDimensions, inspectEmbeddedDocumentImageAssets, inspectImageHeader, MAX_INLINE_ASSET_BYTES, MAX_INLINE_IMAGE_DIMENSION, MAX_INLINE_IMAGE_PIXELS } from './transaction-policy';
 import { MAX_NATIVE_BINARY_ENTRY_BYTES } from './native-container-limits';
 import type { Fnd09QuantizationResultFault } from './utility-quantization-result-e2e-contract';
 import type { Fnd09ExportResultFault } from './utility-export-result-e2e-contract';
@@ -841,7 +841,15 @@ export function validateImportUtilityResponse(
   });
   const documents: AIDrawDocument[] = [];
   for (const document of response.documents) {
-    try { documents.push(migrateDocument(document)); }
+    try {
+      const migrated = migrateDocument(document);
+      inspectEmbeddedDocumentImageAssets(migrated, {
+        maxBytes: MAX_NATIVE_BINARY_ENTRY_BYTES,
+        limitLabel: '128 MiB',
+        labelPrefix: 'Raster utility imported asset',
+      });
+      documents.push(migrated);
+    }
     catch { throw new Error('Raster utility returned a malformed imported document.'); }
   }
   return { documents, warnings: [...response.warnings] };

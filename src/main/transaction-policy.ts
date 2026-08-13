@@ -35,11 +35,34 @@ export interface InspectedDocumentImageAsset {
   expected: ExpectedDecodedImage;
 }
 
+export interface InspectedDocumentImageAssetEntry extends InspectedDocumentImageAsset {
+  assetId: string;
+  asset: DocumentAsset;
+}
+
 export type ImageDecodeValidator = (bytes: Buffer, expected: ExpectedDecodedImage) => Promise<void>;
 
 export interface TransactionPolicyOptions {
   trustedProvenance?: boolean;
   imageDecoder?: ImageDecodeValidator;
+}
+
+const DOCUMENT_ASSET_SOURCES = new Set(['imported', 'generated', 'embedded', 'rendered']);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+export function assertDocumentImageAssetMetadata(assetId: string, candidate: unknown): DocumentAsset {
+  if (!isRecord(candidate) || candidate.id !== assetId || typeof candidate.name !== 'string' || !candidate.name
+    || typeof candidate.mimeType !== 'string' || !candidate.mimeType
+    || typeof candidate.byteLength !== 'number' || !Number.isSafeInteger(candidate.byteLength) || candidate.byteLength < 0
+    || typeof candidate.sha256 !== 'string' || !/^[0-9a-f]{64}$/i.test(candidate.sha256)
+    || typeof candidate.source !== 'string' || !DOCUMENT_ASSET_SOURCES.has(candidate.source)
+    || candidate.data !== undefined && typeof candidate.data !== 'string') {
+    throw new Error('AIDraw document contains invalid asset metadata.');
+  }
+  return candidate as unknown as DocumentAsset;
 }
 
 function pngHeader(bytes: Buffer): ImageHeader | undefined {
@@ -166,6 +189,27 @@ export function inspectDocumentImageAsset(
     throw new Error(`${label} dimensions ${display.width}×${display.height} exceed the 8192 px / 16 MP safety limit.`);
   }
   return { bytes, expected: { mimeType: header.mimeType, width: display.width, height: display.height } };
+}
+
+export function inspectEmbeddedDocumentImageAssets(
+  document: AIDrawDocument,
+  options: { maxBytes: number; limitLabel: string; labelPrefix: string },
+): InspectedDocumentImageAssetEntry[] {
+  const inspected: InspectedDocumentImageAssetEntry[] = [];
+  for (const [assetId, candidate] of Object.entries(document.assets)) {
+    const asset = assertDocumentImageAssetMetadata(assetId, candidate);
+    if (asset.data === undefined) continue;
+    inspected.push({
+      assetId,
+      asset,
+      ...inspectDocumentImageAsset(asset, {
+        maxBytes: options.maxBytes,
+        limitLabel: options.limitLabel,
+        label: `${options.labelPrefix} ${assetId}`,
+      }),
+    });
+  }
+  return inspected;
 }
 
 export async function validateInlineDocumentAsset(asset: DocumentAsset, imageDecoder?: ImageDecodeValidator): Promise<void> {
