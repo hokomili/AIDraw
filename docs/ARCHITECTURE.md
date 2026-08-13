@@ -108,6 +108,8 @@ Interchange is explicitly hybrid rather than pretending at lossless foreign seri
 
 SVG text positioning remains standards-first: the parent `<text>` owns its local x/y and `text-anchor`, using zero, half the canonical box width, or its full width for left, center, or right alignment. AIDraw additionally writes a strict `data-aidraw-text-box="1"` envelope for finite width, height, and line height within canonical schema ceilings. Re-import trusts all three fields only under that exact version and otherwise warns and keeps the general SVG inference path. The private attributes do not drive external rendering or promise wrapping, justification, font embedding/shaping, or foreign-editor round-trip retention.
 
+Cropped SVG images follow the same standards-first rule. The ordinary clip rectangle and positioned/scaled embedded image remain visual authority. A private version-1 envelope records the canonical display, source, and crop rectangles within the existing one-million-unit image schema ceiling. Re-import restores one canonical cropped image only when the wrapper contains exactly that clip/image template and all six rendered geometry values agree with the metadata; otherwise it warns and keeps the general editable group/image/mask interpretation. Private crop state never overrides changed visible SVG and is not inferred from unmarked foreign documents.
+
 For SVG paint-fallback eligibility, sparse tile data is only a validated derived cache bound to the editable stroke prefix; orphan cache records are not independent authored content or a widened paint-storage contract.
 
 ## Security boundary

@@ -241,7 +241,8 @@ function svgObject(document: IllustrationDocument, object: IllustrationObject, g
     if (!object.crop) return `<image ${common} width="${object.width}" height="${object.height}" preserveAspectRatio="none" href="data:${asset.mimeType};base64,${asset.data}"/>`;
     const sourceWidth = object.sourceWidth ?? object.crop.x + object.crop.width; const sourceHeight = object.sourceHeight ?? object.crop.y + object.crop.height;
     const scaleX = object.width / object.crop.width; const scaleY = object.height / object.crop.height;
-    return `<g ${common}><clipPath id="crop-${svgId(object.id)}"><rect width="${object.width}" height="${object.height}"/></clipPath><image clip-path="url(#crop-${svgId(object.id)})" x="${-object.crop.x * scaleX}" y="${-object.crop.y * scaleY}" width="${sourceWidth * scaleX}" height="${sourceHeight * scaleY}" preserveAspectRatio="none" href="data:${asset.mimeType};base64,${asset.data}"/></g>`;
+    const cropMetadata = `data-aidraw-image-crop="1" data-aidraw-display-width="${object.width}" data-aidraw-display-height="${object.height}" data-aidraw-source-width="${sourceWidth}" data-aidraw-source-height="${sourceHeight}" data-aidraw-crop-x="${object.crop.x}" data-aidraw-crop-y="${object.crop.y}" data-aidraw-crop-width="${object.crop.width}" data-aidraw-crop-height="${object.crop.height}"`;
+    return `<g ${common} ${cropMetadata}><clipPath id="crop-${svgId(object.id)}"><rect width="${object.width}" height="${object.height}"/></clipPath><image clip-path="url(#crop-${svgId(object.id)})" x="${-object.crop.x * scaleX}" y="${-object.crop.y * scaleY}" width="${sourceWidth * scaleX}" height="${sourceHeight * scaleY}" preserveAspectRatio="none" href="data:${asset.mimeType};base64,${asset.data}"/></g>`;
   }
   return '';
 }

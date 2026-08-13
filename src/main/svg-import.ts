@@ -9,6 +9,7 @@ import {
   type BlendMode,
   type DocumentAsset,
   type GroupObject,
+  type ImageObject,
   type IllustrationDocument,
   type IllustrationObject,
   type PaintStyle,
@@ -43,8 +44,16 @@ const supportedGeometry = new Set(['circle', 'ellipse', 'line', 'path', 'polygon
 const MAX_EDITABLE_OBJECTS = 100_000;
 const MAX_EMBEDDED_IMAGE_BYTES = 16 * 1024 * 1024;
 const MAX_ILLUSTRATION_TEXT_BOX_SIZE = 1_000_000;
+const MAX_ILLUSTRATION_IMAGE_SIZE = 1_000_000;
 
 interface AIDrawSvgTextBox { width: number; height: number; lineHeight: number }
+interface AIDrawSvgImageCrop {
+  displayWidth: number;
+  displayHeight: number;
+  sourceWidth: number;
+  sourceHeight: number;
+  crop: { x: number; y: number; width: number; height: number };
+}
 
 function nodeFromOrdered(value: Record<string, unknown>): SvgNode | undefined {
   const tag = Object.keys(value).find((key) => key !== ':@');
@@ -74,21 +83,47 @@ function positiveLength(value: unknown, fallback: number): number {
   return parsed > 0 ? parsed : fallback;
 }
 
+function exactFiniteNumber(value: unknown): number | undefined {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
+  if (typeof value !== 'string' || !value.trim()) return undefined;
+  const parsed = Number(value); return Number.isFinite(parsed) ? parsed : undefined;
+}
+
 function aidrawSvgTextBox(attributes: Attributes, warnings: Set<string>): AIDrawSvgTextBox | undefined {
   const marker = attributes['data-aidraw-text-box'];
   const fields = [attributes['data-aidraw-text-width'], attributes['data-aidraw-text-height'], attributes['data-aidraw-line-height']];
   if (marker === undefined && fields.every((value) => value === undefined)) return undefined;
-  const exactNumber = (value: unknown): number | undefined => {
-    if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
-    if (typeof value !== 'string' || !value.trim()) return undefined;
-    const parsed = Number(value); return Number.isFinite(parsed) ? parsed : undefined;
-  };
-  const width = exactNumber(fields[0]); const height = exactNumber(fields[1]); const lineHeight = exactNumber(fields[2]);
+  const width = exactFiniteNumber(fields[0]); const height = exactFiniteNumber(fields[1]); const lineHeight = exactFiniteNumber(fields[2]);
   if ((marker !== 1 && marker !== '1') || width === undefined || height === undefined || lineHeight === undefined || width < 0 || width > MAX_ILLUSTRATION_TEXT_BOX_SIZE || height < 0 || height > MAX_ILLUSTRATION_TEXT_BOX_SIZE || lineHeight < 0.1 || lineHeight > 10) {
     warnings.add('Invalid AIDraw SVG text-box metadata was ignored.');
     return undefined;
   }
   return { width, height, lineHeight };
+}
+
+function aidrawSvgImageCrop(attributes: Attributes, warnings: Set<string>): AIDrawSvgImageCrop | undefined {
+  const marker = attributes['data-aidraw-image-crop'];
+  const names = ['display-width', 'display-height', 'source-width', 'source-height', 'crop-x', 'crop-y', 'crop-width', 'crop-height'] as const;
+  const fields = names.map((name) => attributes[`data-aidraw-${name}`]);
+  if (marker === undefined && fields.every((value) => value === undefined)) return undefined;
+  const values = fields.map(exactFiniteNumber);
+  const [displayWidth, displayHeight, sourceWidth, sourceHeight, cropX, cropY, cropWidth, cropHeight] = values;
+  const positive = [displayWidth, displayHeight, sourceWidth, sourceHeight, cropWidth, cropHeight];
+  const valid = (marker === 1 || marker === '1')
+    && values.every((value) => value !== undefined)
+    && positive.every((value) => value! > 0 && value! <= MAX_ILLUSTRATION_IMAGE_SIZE)
+    && cropX! >= 0 && cropX! <= MAX_ILLUSTRATION_IMAGE_SIZE
+    && cropY! >= 0 && cropY! <= MAX_ILLUSTRATION_IMAGE_SIZE
+    && cropX! + cropWidth! <= sourceWidth!
+    && cropY! + cropHeight! <= sourceHeight!;
+  if (!valid) {
+    warnings.add('Invalid AIDraw SVG image-crop metadata was ignored.');
+    return undefined;
+  }
+  return {
+    displayWidth: displayWidth!, displayHeight: displayHeight!, sourceWidth: sourceWidth!, sourceHeight: sourceHeight!,
+    crop: { x: cropX!, y: cropY!, width: cropWidth!, height: cropHeight! },
+  };
 }
 
 function multiply(left: Matrix, right: Matrix): Matrix {
@@ -328,6 +363,42 @@ export function importEditableSvg(source: string, name: string): SvgImportResult
     return add(object);
   };
 
+  const aidrawCroppedImage = (node: SvgNode, style: Style, crop: AIDrawSvgImageCrop): ImageObject | undefined => {
+    const meaningfulChildren = node.children.filter((child) => child.tag !== '#text' || Boolean(child.text?.trim()));
+    const clipNodes = meaningfulChildren.filter((child) => child.tag === 'clipPath');
+    const imageNodes = meaningfulChildren.filter((child) => child.tag === 'image');
+    if (meaningfulChildren.length !== 2 || clipNodes.length !== 1 || imageNodes.length !== 1) return undefined;
+    const clipNode = clipNodes[0]; const imageNode = imageNodes[0];
+    const clipChildren = clipNode.children.filter((child) => child.tag !== '#text' || Boolean(child.text?.trim()));
+    if (clipChildren.length !== 1 || clipChildren[0].tag !== 'rect') return undefined;
+    const rectNode = clipChildren[0]; const clipId = String(clipNode.attributes.id ?? '');
+    const clipReference = String(imageNode.attributes['clip-path'] ?? '');
+    const exactKeys = (attributes: Attributes, allowed: Set<string>) => Object.keys(attributes).every((key) => allowed.has(key));
+    if (!clipId
+      || clipReference !== `url(#${clipId})`
+      || !exactKeys(clipNode.attributes, new Set(['id']))
+      || !exactKeys(rectNode.attributes, new Set(['width', 'height']))
+      || !exactKeys(imageNode.attributes, new Set(['clip-path', 'x', 'y', 'width', 'height', 'preserveAspectRatio', 'href']))
+      || imageNode.attributes.preserveAspectRatio !== 'none') return undefined;
+    const numeric = [rectNode.attributes.width, rectNode.attributes.height, imageNode.attributes.x, imageNode.attributes.y, imageNode.attributes.width, imageNode.attributes.height].map(exactFiniteNumber);
+    if (numeric.some((value) => value === undefined)) return undefined;
+    const [rectWidth, rectHeight, imageX, imageY, imageWidth, imageHeight] = numeric as number[];
+    const scaleX = crop.displayWidth / crop.crop.width; const scaleY = crop.displayHeight / crop.crop.height;
+    const expected = [crop.displayWidth, crop.displayHeight, -crop.crop.x * scaleX, -crop.crop.y * scaleY, crop.sourceWidth * scaleX, crop.sourceHeight * scaleY];
+    const nearlyEqual = (left: number, right: number) => Math.abs(left - right) <= Number.EPSILON * 16 * Math.max(1, Math.abs(left), Math.abs(right));
+    if (![rectWidth, rectHeight, imageX, imageY, imageWidth, imageHeight].every((value, index) => nearlyEqual(value, expected[index]))) return undefined;
+    const embedded = dataImage(imageNode.attributes.href);
+    if (!embedded) return undefined;
+    const assetId = createId('asset');
+    const asset: DocumentAsset = { id: assetId, name: String(node.attributes['aria-label'] ?? node.attributes.id ?? 'Embedded SVG image'), mimeType: embedded.mimeType, byteLength: embedded.bytes.byteLength, sha256: createHash('sha256').update(embedded.bytes).digest('hex'), source: 'imported', data: embedded.bytes.toString('base64') };
+    document.assets[asset.id] = asset;
+    const object: ImageObject = {
+      ...base(node, style, svgTransform(node.attributes.transform), 'Image'),
+      type: 'image', assetId, width: crop.displayWidth, height: crop.displayHeight, sourceWidth: crop.sourceWidth, sourceHeight: crop.sourceHeight, crop: crop.crop, filters: [],
+    };
+    return finish(object, style, false);
+  };
+
   function element(node: SvgNode, style: Style, matrix: Matrix, asMask = false): IllustrationObject | undefined {
     if (node.tag === 'rect') {
       const objectWidth = Math.max(0, finite(node.attributes.width)); const objectHeight = Math.max(0, finite(node.attributes.height)); const bounds = { x: 0, y: 0, width: objectWidth, height: objectHeight };
@@ -392,6 +463,14 @@ export function importEditableSvg(source: string, name: string): SvgImportResult
       return [finish(group, style, false).id];
     }
     if (node.tag === 'g' || node.tag === 'svg' || node.tag === 'symbol') {
+      if (node.tag === 'g') {
+        const crop = aidrawSvgImageCrop(node.attributes, warnings);
+        if (crop) {
+          const image = aidrawCroppedImage(node, style, crop);
+          if (image) return [image.id];
+          warnings.add('AIDraw SVG image-crop metadata did not match its standard SVG crop and was ignored.');
+        }
+      }
       const childIds = node.children.flatMap((child) => process(child, style, depth + 1, useStack));
       if (!childIds.length) return [];
       const offsetX = node.tag === 'svg' ? finite(node.attributes.x) : 0; const offsetY = node.tag === 'svg' ? finite(node.attributes.y) : 0;

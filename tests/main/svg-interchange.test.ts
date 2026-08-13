@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
+import { createCanvas } from '@napi-rs/canvas';
 import { importDocument } from '@main/import-document';
 import { illustrationToSvg } from '@main/export-document';
 import { importEditableSvg } from '@main/svg-import';
-import { createIllustrationDocument, HUMAN_ACTOR, IDENTITY_TRANSFORM, nowIso, type TextObject } from '@aidraw/core';
+import { renderIllustration } from '@main/render-document';
+import { createIllustrationDocument, HUMAN_ACTOR, IDENTITY_TRANSFORM, nowIso, type DocumentAsset, type ImageObject, type TextObject } from '@aidraw/core';
 
 const fixture = join(process.cwd(), 'tests', 'fixtures', 'svg', 'structured-editor.svg');
 
@@ -72,6 +75,47 @@ describe('editable SVG interchange', () => {
       const invalid = importEditableSvg(svg.replace(from, to), 'Invalid text metadata');
       expect(invalid.warnings).toContain('Invalid AIDraw SVG text-box metadata was ignored.');
       expect(Object.values(invalid.document.objects).find((object) => object.type === 'text' && object.text === centered.text)).toMatchObject({ lineHeight: 1.2 });
+    }
+  });
+
+  it('restores an exact AIDraw image crop only when its standard SVG crop still matches', async () => {
+    const document = createIllustrationDocument('SVG image crop'); document.artboard = { ...document.artboard, width: 240, height: 160, background: null };
+    const vector = Object.values(document.layers).find((layer) => layer.type === 'vector'); if (!vector || vector.type !== 'vector') throw new Error('Expected vector layer');
+    const source = createCanvas(8, 6); const sourceContext = source.getContext('2d');
+    sourceContext.fillStyle = '#ff0000'; sourceContext.fillRect(0, 0, 4, 3); sourceContext.fillStyle = '#00ff00'; sourceContext.fillRect(4, 0, 4, 3);
+    sourceContext.fillStyle = '#0000ff'; sourceContext.fillRect(0, 3, 4, 3); sourceContext.fillStyle = '#ffff00'; sourceContext.fillRect(4, 3, 4, 3);
+    const bytes = source.toBuffer('image/png'); source.width = 1; source.height = 1;
+    const asset: DocumentAsset = { id: 'crop-source', name: 'Crop source', mimeType: 'image/png', byteLength: bytes.byteLength, sha256: createHash('sha256').update(bytes).digest('hex'), source: 'embedded', data: bytes.toString('base64') };
+    const timestamp = nowIso(); const image: ImageObject = {
+      id: 'cropped-image', revision: 0, name: 'Cropped image', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, layerId: vector.id,
+      visible: true, locked: false, opacity: 0.75, blendMode: 'multiply', transform: { ...IDENTITY_TRANSFORM, x: 30, y: 40 }, type: 'image', assetId: asset.id,
+      width: 110, height: 85, sourceWidth: 8, sourceHeight: 6, crop: { x: 1.25, y: 0.5, width: 5.5, height: 4.25 }, filters: [],
+    };
+    document.assets[asset.id] = asset; document.objects[image.id] = image; vector.objectIds.push(image.id);
+    const before = structuredClone(document); const svg = illustrationToSvg(document);
+    expect(svg).toContain('data-aidraw-image-crop="1" data-aidraw-display-width="110" data-aidraw-display-height="85" data-aidraw-source-width="8" data-aidraw-source-height="6" data-aidraw-crop-x="1.25" data-aidraw-crop-y="0.5" data-aidraw-crop-width="5.5" data-aidraw-crop-height="4.25"');
+    expect(svg).toContain('clip-path="url(#crop-cropped-image)" x="-25" y="-10" width="160" height="120" preserveAspectRatio="none"');
+
+    const reopenedResult = importEditableSvg(svg, 'Reopened crop'); const reopened = reopenedResult.document;
+    const reopenedImage = Object.values(reopened.objects).find((object): object is ImageObject => object.type === 'image');
+    expect(reopenedResult.warnings).toEqual([]);
+    expect(reopenedImage).toMatchObject({ width: 110, height: 85, sourceWidth: 8, sourceHeight: 6, crop: { x: 1.25, y: 0.5, width: 5.5, height: 4.25 }, opacity: 0.75, blendMode: 'multiply', transform: { x: 30, y: 40 } });
+    expect(reopenedImage?.maskObjectId).toBeUndefined(); expect(document).toEqual(before);
+    const originalCanvas = await renderIllustration(document); const reopenedCanvas = await renderIllustration(reopened);
+    const originalPixels = Buffer.from(originalCanvas.getContext('2d').getImageData(0, 0, originalCanvas.width, originalCanvas.height).data);
+    const reopenedPixels = Buffer.from(reopenedCanvas.getContext('2d').getImageData(0, 0, reopenedCanvas.width, reopenedCanvas.height).data);
+    originalCanvas.width = 1; originalCanvas.height = 1; reopenedCanvas.width = 1; reopenedCanvas.height = 1;
+    expect(reopenedPixels).toEqual(originalPixels);
+
+    for (const [from, to, warning] of [
+      ['data-aidraw-image-crop="1"', 'data-aidraw-image-crop="2"', 'Invalid AIDraw SVG image-crop metadata was ignored.'],
+      ['data-aidraw-crop-width="5.5"', 'data-aidraw-crop-width="9"', 'Invalid AIDraw SVG image-crop metadata was ignored.'],
+      ['x="-25" y="-10"', 'x="-24" y="-10"', 'AIDraw SVG image-crop metadata did not match its standard SVG crop and was ignored.'],
+    ]) {
+      const invalid = importEditableSvg(svg.replace(from, to), 'Invalid crop metadata');
+      expect(invalid.warnings).toContain(warning);
+      const genericImage = Object.values(invalid.document.objects).find((object): object is ImageObject => object.type === 'image');
+      expect(genericImage?.crop).toBeUndefined(); expect(genericImage?.maskObjectId).toBeTruthy();
     }
   });
 });

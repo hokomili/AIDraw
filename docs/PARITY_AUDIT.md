@@ -20,6 +20,8 @@ MCP also accepts a bounded semantic layer that expands into canonical operations
 
 Human and headless agent path booleans share the exact Paper.js kernel in [`src/common/path-boolean.ts`](../src/common/path-boolean.ts), including transformed inputs and canonical delete/add replacement semantics. Import/export, quantization, observation compositing, and provider generation now run through supervised utility workers; generation cancellation allows provider cleanup before worker replacement. Packaged crash and resource-pressure acceptance remains performance hardening rather than a capability gap.
 
+Human and approved-agent SVG export share the same standards-first image-crop adapter. AIDraw re-import restores canonical crop controls only when its bounded versioned metadata still agrees with the ordinary clip/image geometry; edited or foreign wrappers keep the general editable group/image/mask interpretation rather than letting private state override visible content.
+
 ## Closed parity gaps
 
 | Area | Current contract and evidence |
