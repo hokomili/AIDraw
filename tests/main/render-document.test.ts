@@ -4,6 +4,26 @@ import { materializePaintTiles } from '@main/persistence';
 import { renderIllustration, renderSprite, renderTilemap } from '@main/render-document';
 
 describe('native document rendering', () => {
+  it('renders overlapping isometric cells right-down across reverse-inserted sparse chunks', () => {
+    const document = createPixelDocument('project', 'Isometric sparse depth order'); document.assetIds = []; document.pixelAssets = {};
+    const sprite = createPixelSprite('Depth tiles', 8, 4); const cel = Object.values(sprite.cels)[0];
+    writePixels(cel, Array.from({ length: 32 }, (_, offset) => ({ x: offset % 8, y: Math.floor(offset / 8), index: offset % 8 < 4 ? 2 : 8 })));
+    const tileset = createPixelTileset('Depth tiles', sprite.id, 4, 4, 2, 1); tileset.firstGid = 1;
+    const map = createPixelTilemap('Sparse diamond'); map.orientation = 'isometric'; map.infinite = true; map.width = 2; map.height = 64; map.tileWidth = 4; map.tileHeight = 4; map.tilesetIds = [tileset.id];
+    const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile' || !layer.chunks) throw new Error('Expected tile layer');
+    writeTiles(layer.chunks, [{ x: 0, y: 32, gid: 2 }, { x: 0, y: 31, gid: 1 }]);
+    expect(Object.keys(layer.chunks)).toEqual(['0,1', '0,0']);
+    document.pixelAssets = { [sprite.id]: sprite, [tileset.id]: tileset, [map.id]: map }; document.assetIds = [sprite.id, tileset.id, map.id]; document.activeAssetId = map.id;
+
+    const source = renderSprite(document, sprite).getContext('2d');
+    const backColor = [...source.getImageData(0, 0, 1, 1).data];
+    const frontColor = [...source.getImageData(4, 0, 1, 1).data];
+    const rendered = renderTilemap(document, map).getContext('2d');
+    expect([...rendered.getImageData(69, 62, 1, 1).data]).toEqual(backColor);
+    expect([...rendered.getImageData(64, 67, 1, 1).data]).toEqual(frontColor);
+    expect([...rendered.getImageData(66, 64, 1, 1).data]).toEqual(frontColor);
+  });
+
   it('renders all eight Tiled tile transforms in diagonal-first order', () => {
     const document = createPixelDocument('project', 'Tiled transform rendering'); document.assetIds = []; document.pixelAssets = {};
     const sprite = createPixelSprite('Labeled tile', 2, 2); const cel = Object.values(sprite.cels)[0];

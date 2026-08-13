@@ -19,6 +19,7 @@ import { colorWithOpacity } from '../common/color';
 import { paintTileCachePlan } from '../common/paint-tile-cache';
 import { renderRasterStroke } from '../common/raster-brush';
 import { renderStyledText } from '../common/text-layout';
+import { isometricTileRenderCells } from '../common/tile-render-order';
 
 type Context = ReturnType<Canvas['getContext']>;
 type LoadedImage = Awaited<ReturnType<typeof loadImage>>;
@@ -282,21 +283,22 @@ export function renderTilemap(document: PixelDocument, map: PixelTilemap, onlyLa
   for (const entry of visibleLayers) {
     const { layer } = entry; if (layer.type !== 'tile' || !layer.chunks) continue;
     context.globalAlpha = entry.opacity;
-    for (const chunk of Object.values(layer.chunks)) {
+    const drawCell = (tileX: number, tileY: number, raw: number) => {
+      const decoded = decodeTiledGid(raw); if (!decoded.gid) return;
+      const dx = isometric ? (tileX - tileY) * map.tileWidth / 2 + map.height * map.tileWidth / 2 : tileX * map.tileWidth;
+      const dy = isometric ? (tileX + tileY) * map.tileHeight / 2 : tileY * map.tileHeight;
+      const resolved = resolveTilesetForGid(document, map, decoded.gid); const sourceAsset = resolved ? document.pixelAssets[resolved.tileset.spriteAssetId] : undefined;
+      if (resolved && sourceAsset?.type === 'sprite') {
+        let source = sources.get(sourceAsset.id); if (!source) { source = renderSprite(document, sourceAsset); sources.set(sourceAsset.id, source); }
+        const definition = resolved.tileset.tiles[resolved.localId]; const sx = definition?.sourceX ?? resolved.localId % resolved.tileset.columns * resolved.tileset.tileWidth; const sy = definition?.sourceY ?? Math.floor(resolved.localId / resolved.tileset.columns) * resolved.tileset.tileHeight;
+        const transform = tiledTileTransformMatrix(decoded);
+        context.save(); context.translate(dx + map.tileWidth / 2, dy + map.tileHeight / 2); context.transform(transform.a, transform.b, transform.c, transform.d, 0, 0); context.drawImage(source, sx, sy, resolved.tileset.tileWidth, resolved.tileset.tileHeight, -map.tileWidth / 2, -map.tileHeight / 2, map.tileWidth, map.tileHeight); context.restore();
+      } else { context.fillStyle = `hsl(${decoded.gid * 47 % 360} 55% 60%)`; context.fillRect(dx, dy, map.tileWidth, map.tileHeight); }
+    };
+    if (isometric) for (const cell of isometricTileRenderCells(Object.values(layer.chunks), (chunk) => decodeTilemapChunk(chunk))) drawCell(cell.x, cell.y, cell.raw);
+    else for (const chunk of Object.values(layer.chunks)) {
       const values = decodeTilemapChunk(chunk);
-      for (let y = 0; y < 32; y += 1) for (let x = 0; x < 32; x += 1) {
-        const raw = values[y * 32 + x] ?? 0; const decoded = decodeTiledGid(raw); if (!decoded.gid) continue;
-        const tileX = chunk.x + x; const tileY = chunk.y + y;
-        const dx = isometric ? (tileX - tileY) * map.tileWidth / 2 + map.height * map.tileWidth / 2 : tileX * map.tileWidth;
-        const dy = isometric ? (tileX + tileY) * map.tileHeight / 2 : tileY * map.tileHeight;
-        const resolved = resolveTilesetForGid(document, map, decoded.gid); const sourceAsset = resolved ? document.pixelAssets[resolved.tileset.spriteAssetId] : undefined;
-        if (resolved && sourceAsset?.type === 'sprite') {
-          let source = sources.get(sourceAsset.id); if (!source) { source = renderSprite(document, sourceAsset); sources.set(sourceAsset.id, source); }
-          const definition = resolved.tileset.tiles[resolved.localId]; const sx = definition?.sourceX ?? resolved.localId % resolved.tileset.columns * resolved.tileset.tileWidth; const sy = definition?.sourceY ?? Math.floor(resolved.localId / resolved.tileset.columns) * resolved.tileset.tileHeight;
-          const transform = tiledTileTransformMatrix(decoded);
-          context.save(); context.translate(dx + map.tileWidth / 2, dy + map.tileHeight / 2); context.transform(transform.a, transform.b, transform.c, transform.d, 0, 0); context.drawImage(source, sx, sy, resolved.tileset.tileWidth, resolved.tileset.tileHeight, -map.tileWidth / 2, -map.tileHeight / 2, map.tileWidth, map.tileHeight); context.restore();
-        } else { context.fillStyle = `hsl(${decoded.gid * 47 % 360} 55% 60%)`; context.fillRect(dx, dy, map.tileWidth, map.tileHeight); }
-      }
+      for (let y = 0; y < 32; y += 1) for (let x = 0; x < 32; x += 1) drawCell(chunk.x + x, chunk.y + y, values[y * 32 + x] ?? 0);
     }
   }
   return canvas;

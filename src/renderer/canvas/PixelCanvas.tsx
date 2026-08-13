@@ -64,6 +64,7 @@ import { pixelSelectionBounds, transformPixelSelection, type PixelSelectionTrans
 import { captureGridSelection, combineGridSelection, placeGridClipboard, rasterizeGridLasso, scaleGridSelection, transformGridSelection, type GridSelectionClipboard } from '../../common/grid-selection';
 import { deleteMapObjectPoint, insertMapObjectPoint, mapObjectAtPoint, mapObjectBounds, moveMapObjectPoint, nearestMapObjectSegment, transformMapObject } from '../../common/map-objects';
 import { TILE_VARIANT_SEED_PROPERTY, chooseTileVariant, nextTileVariantSeed, tileVariantCandidates, tileVariantGroup } from '../../common/tile-variants';
+import { isometricTileRenderCells } from '../../common/tile-render-order';
 import { DEFAULT_ONION_SKIN_SETTINGS, onionSkinLayers, type OnionSkinSettings } from '../../common/onion-skin';
 import { parseBitmapFontJson } from '../../common/bitmap-font-interchange';
 import { cancelPixelGesture, releasePendingPixelLocks } from '../../common/pixel-gesture';
@@ -473,27 +474,25 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
         if (layer.type !== 'tile' || !layer.chunks) { context.restore(); continue; }
         const hiddenCells = replayMasks.tileCells.get(replayTileLayerKey(tilemap.id, layer.id));
         context.globalAlpha = entry.opacity;
-        for (const chunk of Object.values(layer.chunks)) {
-          const values = safeDecodeTilemapChunk(chunk); if (!values) continue;
-          for (let localY = 0; localY < 32; localY += 1) for (let localX = 0; localX < 32; localX += 1) {
-            const raw = values[localY * 32 + localX] ?? 0; const decoded = decodeTiledGid(raw);
-            if (!decoded.gid) continue;
-            const x = chunk.x + localX;
-            const y = chunk.y + localY;
-            if (hiddenCells?.has(replayPointKey(x, y))) continue;
-            const resolved = resolveTilesetForGid(document, tilemap, decoded.gid); const mapSourceAsset = resolved ? document.pixelAssets[resolved.tileset.spriteAssetId] : undefined;
-            let mapSource = mapSourceAsset?.type === 'sprite' ? mapSources.get(mapSourceAsset.id) : undefined; if (!mapSource && mapSourceAsset?.type === 'sprite') { mapSource = spriteBitmap(mapSourceAsset, mapSourceAsset.frameIds[0], document.palette); mapSources.set(mapSourceAsset.id, mapSource); }
-            const definition = resolved?.tileset.tiles[resolved.localId]; const sourceX = resolved ? definition?.sourceX ?? resolved.localId % resolved.tileset.columns * resolved.tileset.tileWidth : 0;
-            const sourceY = resolved ? definition?.sourceY ?? Math.floor(resolved.localId / resolved.tileset.columns) * resolved.tileset.tileHeight : 0;
-            const drawTile = (screenX: number, screenY: number) => { if (!mapSource || !resolved) return false; const transform = tiledTileTransformMatrix(decoded); context.save(); context.translate(screenX + view.scale / 2, screenY + view.scale / 2); context.transform(transform.a, transform.b, transform.c, transform.d, 0, 0); context.drawImage(mapSource, sourceX, sourceY, resolved.tileset.tileWidth, resolved.tileset.tileHeight, -view.scale / 2, -view.scale / 2, view.scale, view.scale); context.restore(); return true; };
-            if (tilemap.orientation === 'orthogonal') {
-              if (!drawTile(x * view.scale, y * view.scale)) { context.fillStyle = `hsl(${decoded.gid * 47 % 360} 52% 62%)`; context.fillRect(x * view.scale, y * view.scale, view.scale, view.scale); }
-            } else {
-              const screenX = (x - y) * view.scale / 2 + logical.width * view.scale / 2;
-              const screenY = (x + y) * view.scale / 4;
-              if (!drawTile(screenX - view.scale / 2, screenY - view.scale / 2)) { context.fillStyle = `hsl(${decoded.gid * 47 % 360} 52% 62%)`; context.beginPath(); context.moveTo(screenX, screenY); context.lineTo(screenX + view.scale / 2, screenY + view.scale / 4); context.lineTo(screenX, screenY + view.scale / 2); context.lineTo(screenX - view.scale / 2, screenY + view.scale / 4); context.closePath(); context.fill(); }
-            }
+        const drawCell = (x: number, y: number, raw: number) => {
+          const decoded = decodeTiledGid(raw); if (!decoded.gid || hiddenCells?.has(replayPointKey(x, y))) return;
+          const resolved = resolveTilesetForGid(document, tilemap, decoded.gid); const mapSourceAsset = resolved ? document.pixelAssets[resolved.tileset.spriteAssetId] : undefined;
+          let mapSource = mapSourceAsset?.type === 'sprite' ? mapSources.get(mapSourceAsset.id) : undefined; if (!mapSource && mapSourceAsset?.type === 'sprite') { mapSource = spriteBitmap(mapSourceAsset, mapSourceAsset.frameIds[0], document.palette); mapSources.set(mapSourceAsset.id, mapSource); }
+          const definition = resolved?.tileset.tiles[resolved.localId]; const sourceX = resolved ? definition?.sourceX ?? resolved.localId % resolved.tileset.columns * resolved.tileset.tileWidth : 0;
+          const sourceY = resolved ? definition?.sourceY ?? Math.floor(resolved.localId / resolved.tileset.columns) * resolved.tileset.tileHeight : 0;
+          const drawTile = (screenX: number, screenY: number) => { if (!mapSource || !resolved) return false; const transform = tiledTileTransformMatrix(decoded); context.save(); context.translate(screenX + view.scale / 2, screenY + view.scale / 2); context.transform(transform.a, transform.b, transform.c, transform.d, 0, 0); context.drawImage(mapSource, sourceX, sourceY, resolved.tileset.tileWidth, resolved.tileset.tileHeight, -view.scale / 2, -view.scale / 2, view.scale, view.scale); context.restore(); return true; };
+          if (tilemap.orientation === 'orthogonal') {
+            if (!drawTile(x * view.scale, y * view.scale)) { context.fillStyle = `hsl(${decoded.gid * 47 % 360} 52% 62%)`; context.fillRect(x * view.scale, y * view.scale, view.scale, view.scale); }
+          } else {
+            const screenX = (x - y) * view.scale / 2 + logical.width * view.scale / 2;
+            const screenY = (x + y) * view.scale / 4;
+            if (!drawTile(screenX - view.scale / 2, screenY - view.scale / 2)) { context.fillStyle = `hsl(${decoded.gid * 47 % 360} 52% 62%)`; context.beginPath(); context.moveTo(screenX, screenY); context.lineTo(screenX + view.scale / 2, screenY + view.scale / 4); context.lineTo(screenX, screenY + view.scale / 2); context.lineTo(screenX - view.scale / 2, screenY + view.scale / 4); context.closePath(); context.fill(); }
           }
+        };
+        if (tilemap.orientation === 'isometric') for (const cell of isometricTileRenderCells(Object.values(layer.chunks), safeDecodeTilemapChunk)) drawCell(cell.x, cell.y, cell.raw);
+        else for (const chunk of Object.values(layer.chunks)) {
+          const values = safeDecodeTilemapChunk(chunk); if (!values) continue;
+          for (let localY = 0; localY < 32; localY += 1) for (let localX = 0; localX < 32; localX += 1) drawCell(chunk.x + localX, chunk.y + localY, values[localY * 32 + localX] ?? 0);
         }
         context.restore();
       }
