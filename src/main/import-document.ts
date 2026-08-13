@@ -39,7 +39,7 @@ import { calculateSpriteSheetLayout, validateSpriteSheetSliceOptions, type Sprit
 import { createExactAnimationPalettePlanner, exactAnimationFrameChanges, type ExactAnimationPalettePlan } from '../common/animation-palette';
 import { aidrawPsdTextGeometry, aidrawPsdTextObjectName, psdLayerHasPartialLock, psdLayerIsLockedAll } from '../common/psd-text';
 import { MAX_PSD_EXPANDED_LAYER_PIXELS, MAX_PSD_LAYER_NESTING_DEPTH, MAX_PSD_LAYER_RECORDS } from '../common/psd-limits';
-import { displayImageDimensions, inspectImageHeader, MAX_INLINE_IMAGE_DIMENSION, MAX_INLINE_IMAGE_PIXELS } from './transaction-policy';
+import { displayImageDimensions, inspectImageHeader, MAX_INLINE_ASSET_BYTES, MAX_INLINE_IMAGE_DIMENSION, MAX_INLINE_IMAGE_PIXELS } from './transaction-policy';
 import { importEditableSvg } from './svg-import';
 import { MAX_IMPORT_UTILITY_DOCUMENTS, MAX_IMPORT_UTILITY_SERIALIZED_BYTES } from './utility-contract';
 import { jsonStringSerializedByteLength } from './utility-resource-policy';
@@ -162,11 +162,19 @@ function entityBase(name: string, layerId: string) {
   return { id: createId('object'), revision: 0, name, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, layerId, visible: true, locked: false, opacity: 1, blendMode: 'normal' as const, transform: structuredClone(IDENTITY_TRANSFORM) };
 }
 
+export function assertImportedInlineAssetBytes(bytes: Buffer, label = 'Imported image'): void {
+  if (bytes.byteLength > MAX_INLINE_ASSET_BYTES) {
+    throw new Error(`${label} exceeds AIDraw's ${MAX_INLINE_ASSET_BYTES.toLocaleString('en-US')}-byte editable-asset limit.`);
+  }
+}
+
 function imageAsset(name: string, mimeType: string, bytes: Buffer, source: DocumentAsset['source'] = 'imported'): DocumentAsset {
+  assertImportedInlineAssetBytes(bytes, name);
   return { id: createId('asset'), name, mimeType, byteLength: bytes.byteLength, sha256: sha256(bytes), source, data: bytes.toString('base64') };
 }
 
 async function importRaster(bytes: Buffer, name: string, mimeType: string, pixelMode: boolean): Promise<ImportResult> {
+  assertImportedInlineAssetBytes(bytes, 'Image source');
   const header = inspectImageHeader(bytes);
   const display = displayImageDimensions(header);
   assertImageDimensions(display.width, display.height, 'Image');
@@ -243,6 +251,7 @@ function visitCompositedGifFrames(
 }
 
 export function importApngBytes(bytes: Buffer, name: string): ImportResult | undefined {
+  assertImportedInlineAssetBytes(bytes, 'APNG source');
   const decoded = decodeApng(bytes); if (!decoded) return undefined;
   const document = createPixelDocument('sprite', name); const sprite = createPixelSprite(name, decoded.width, decoded.height);
   document.pixelAssets = { [sprite.id]: sprite }; document.assetIds = [sprite.id]; document.activeAssetId = sprite.id;
@@ -266,6 +275,7 @@ export function importApngBytes(bytes: Buffer, name: string): ImportResult | und
 }
 
 export function importGifBytes(bytes: Buffer, name: string): ImportResult {
+  assertImportedInlineAssetBytes(bytes, 'GIF source');
   const inspected = inspectGif(bytes); const parsed = parseGIF(Uint8Array.from(bytes).buffer); const frames = decompressFrames(parsed, true);
   if (!frames.length) throw new Error('GIF contains no decodable frames.');
   if (frames.length !== inspected.frameCount) throw new Error('GIF decoder frame count disagrees with the validated container.');
@@ -298,6 +308,7 @@ async function importSpriteSheet(bytes: Buffer, name: string, filePath: string):
   const firstRect = frameSources[0].frame ?? frameSources[0]; const width = Number(firstRect.w ?? firstRect.width); const height = Number(firstRect.h ?? firstRect.height); assertImageDimensions(width, height, 'Sprite frame');
   if (width * height * frameSources.length > MAX_SPRITE_SHEET_EXPANDED_PIXELS) throw new Error('Sprite-sheet frames exceed the 64-megapixel expanded import budget.');
   const imageReference = String(metadata.meta?.image ?? `${name}.png`); const companion = await readCompanionFile(filePath, filePath, imageReference, MAX_BINARY_IMPORT_BYTES, 'Sprite-sheet image'); const imagePath = companion.path; const imageBytes = companion.bytes;
+  assertImportedInlineAssetBytes(imageBytes, 'Sprite-sheet image');
   const imageHeader = inspectImageHeader(imageBytes); assertImageDimensions(imageHeader.width, imageHeader.height, 'Sprite-sheet image');
   let sourceImage;
   try { sourceImage = await loadImage(imageBytes); } catch { throw new Error(`Sprite-sheet image ${imageReference} is unreadable.`); }
@@ -326,6 +337,7 @@ function rgbaCrop(source: Uint8ClampedArray, sourceWidth: number, x: number, y: 
 }
 
 export async function importSlicedSpriteSheetBytes(bytes: Buffer, name: string, mimeType: string, value: SpriteSheetSliceOptions): Promise<ImportResult> {
+  assertImportedInlineAssetBytes(bytes, 'Sprite-sheet source');
   const options = validateSpriteSheetSliceOptions(value); const header = inspectImageHeader(bytes); assertImageDimensions(header.width, header.height, 'Sprite sheet'); const image = await loadImage(bytes);
   const width = image.width; const height = image.height;
   if (width !== header.width || height !== header.height) throw new Error('Decoded sprite-sheet dimensions disagree with its file header.');
@@ -761,6 +773,7 @@ export async function importDocument(filePath: string, pixelMode = false): Promi
   const extension = extname(filePath).toLowerCase(); const name = basename(filePath, extension); const supported = ['.png', '.apng', '.jpg', '.jpeg', '.webp', '.gif', '.svg', '.psd', '.pdf', '.json', '.tmj', '.tmx', '.tsj', '.tsx'];
   if (!supported.includes(extension)) throw new Error(`Unsupported import format: ${extension}`);
   const structured = ['.svg', '.json', '.tmj', '.tmx', '.tsj', '.tsx'].includes(extension); const bytes = await readBoundedImportFile(filePath, structured ? MAX_STRUCTURED_IMPORT_BYTES : MAX_BINARY_IMPORT_BYTES);
+  if (['.png', '.apng', '.jpg', '.jpeg', '.webp', '.gif'].includes(extension)) assertImportedInlineAssetBytes(bytes, 'Image source');
   if ((extension === '.png' || extension === '.apng') && pixelMode) { const animated = importApngBytes(bytes, name); if (animated) return animated; }
   if (extension === '.gif') { inspectGif(bytes); if (pixelMode) return importGifBytes(bytes, name); }
   if (['.png', '.apng', '.jpg', '.jpeg', '.webp', '.gif'].includes(extension)) return importRaster(bytes, name, extension === '.png' || extension === '.apng' ? 'image/png' : extension === '.webp' ? 'image/webp' : extension === '.gif' ? 'image/gif' : 'image/jpeg', pixelMode);

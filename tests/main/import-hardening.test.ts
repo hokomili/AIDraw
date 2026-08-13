@@ -96,8 +96,8 @@ vi.mock('pdfjs-dist/legacy/build/pdf.mjs', async (importOriginal) => {
   };
 });
 
-import { accountPdfEditableText, accountPsdEditableText, importDocument, MAX_STRUCTURED_IMPORT_BYTES, renderPdfPagePng } from '../../src/main/import-document';
-import { inspectImageHeader } from '../../src/main/transaction-policy';
+import { accountPdfEditableText, accountPsdEditableText, assertImportedInlineAssetBytes, importDocument, MAX_STRUCTURED_IMPORT_BYTES, renderPdfPagePng } from '../../src/main/import-document';
+import { inspectImageHeader, MAX_INLINE_ASSET_BYTES } from '../../src/main/transaction-policy';
 import { runImportUtilityRequest } from '../../src/main/utility-import';
 import { MAX_IMPORT_UTILITY_SERIALIZED_BYTES } from '../../src/main/utility-contract';
 
@@ -428,6 +428,26 @@ describe('untrusted import limits', () => {
   it('rejects a structured root file before reading beyond its byte budget', async () => {
     const directory = await temporaryDirectory(); const filePath = join(directory, 'oversized.tmj'); await writeFile(filePath, ''); await truncate(filePath, MAX_STRUCTURED_IMPORT_BYTES + 1);
     await expect(importDocument(filePath, true)).rejects.toThrow(/16 MiB safety limit/);
+  });
+
+  it('enforces the existing editable-asset byte ceiling before decoding a retained raster source', async () => {
+    expect(() => assertImportedInlineAssetBytes(Buffer.alloc(MAX_INLINE_ASSET_BYTES), 'Boundary source')).not.toThrow();
+    expect(() => assertImportedInlineAssetBytes(Buffer.alloc(MAX_INLINE_ASSET_BYTES + 1), 'Boundary source')).toThrow("Boundary source exceeds AIDraw's 1,500,000-byte editable-asset limit.");
+
+    const directory = await temporaryDirectory(); const oversized = Buffer.alloc(MAX_INLINE_ASSET_BYTES + 1); adam7Png().copy(oversized);
+    for (const [filename, pixelMode] of [['oversized-retained.png', false], ['oversized-retained.apng', true], ['oversized-retained.gif', true]] as const) {
+      const filePath = join(directory, filename); await writeFile(filePath, oversized);
+      await expect(importDocument(filePath, pixelMode)).rejects.toThrow("Image source exceeds AIDraw's 1,500,000-byte editable-asset limit.");
+    }
+    expect(decoderBoundary.calls).toBe(0);
+  });
+
+  it('rejects an oversized retained sprite-sheet companion before native image decode', async () => {
+    const directory = await temporaryDirectory(); const imagePath = join(directory, 'oversized-sheet.png'); const metadataPath = join(directory, 'oversized-sheet.json');
+    const oversized = Buffer.alloc(MAX_INLINE_ASSET_BYTES + 1); adam7Png().copy(oversized); await writeFile(imagePath, oversized);
+    await writeFile(metadataPath, JSON.stringify({ frames: [{ filename: 'frame-1', frame: { x: 0, y: 0, w: 1, h: 1 } }], meta: { image: 'oversized-sheet.png' } }));
+    await expect(importDocument(metadataPath, true)).rejects.toThrow("Sprite-sheet image exceeds AIDraw's 1,500,000-byte editable-asset limit.");
+    expect(decoderBoundary.calls).toBe(0);
   });
 
   it('rejects DTD and entity declarations in SVG and Tiled XML', async () => {

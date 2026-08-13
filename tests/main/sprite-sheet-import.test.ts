@@ -5,8 +5,13 @@ import { readPixel } from '@aidraw/core';
 vi.mock('electron', () => ({ nativeImage: { createFromBuffer: () => ({ isEmpty: () => true }) } }));
 
 import { importSlicedSpriteSheetBytes } from '../../src/main/import-document';
+import { MAX_INLINE_ASSET_BYTES } from '../../src/main/transaction-policy';
 
 describe('sprite-sheet image import', () => {
+  it('rejects an oversized retained source before parsing or native decode', async () => {
+    await expect(importSlicedSpriteSheetBytes(Buffer.alloc(MAX_INLINE_ASSET_BYTES + 1), 'Oversized sheet', 'image/png', { frameWidth: 1, frameHeight: 1, marginX: 0, marginY: 0, spacingX: 0, spacingY: 0, frameCount: 1, order: 'rows', durationMs: 100, trimTransparent: false, skipEmpty: false })).rejects.toThrow("Sprite-sheet source exceeds AIDraw's 1,500,000-byte editable-asset limit.");
+  });
+
   it('slices, skips empty frames, trims a shared border, preserves timing, and embeds the source', async () => {
     const canvas = createCanvas(14, 4); const context = canvas.getContext('2d'); context.clearRect(0, 0, 14, 4);
     context.fillStyle = '#ff6b7a'; context.fillRect(1, 1, 1, 1);
