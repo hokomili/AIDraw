@@ -19,7 +19,7 @@ vi.mock('@napi-rs/canvas', async (importOriginal) => {
     },
   };
 });
-const psdBoundary = vi.hoisted((): { calls: number; reportedWidthOffset: number; truncateCompositeBytes: boolean; totalMemoryLimit?: number } => ({ calls: 0, reportedWidthOffset: 0, truncateCompositeBytes: false }));
+const psdBoundary = vi.hoisted((): { calls: number; reportedWidthOffset: number; truncateCompositeBytes: boolean; totalMemoryLimit?: number; injectedText?: string; injectedFontSize?: number; injectedLayerName?: string; injectedOpacity?: number } => ({ calls: 0, reportedWidthOffset: 0, truncateCompositeBytes: false }));
 vi.mock('ag-psd', async (importOriginal) => {
   const original = await importOriginal<typeof import('ag-psd')>();
   return {
@@ -28,6 +28,16 @@ vi.mock('ag-psd', async (importOriginal) => {
       psdBoundary.calls += 1; psdBoundary.totalMemoryLimit = args[1]?.totalMemoryLimit; const decoded = original.readPsd(...args);
       if (psdBoundary.reportedWidthOffset) return { ...decoded, width: decoded.width + psdBoundary.reportedWidthOffset };
       if (psdBoundary.truncateCompositeBytes && decoded.imageData) return { ...decoded, imageData: { width: decoded.imageData.width, height: decoded.imageData.height, data: decoded.imageData.data.subarray(0, -4) } };
+      const layer = decoded.children?.[0];
+      if (layer && psdBoundary.injectedLayerName !== undefined) layer.name = psdBoundary.injectedLayerName;
+      if (layer && psdBoundary.injectedOpacity !== undefined) layer.opacity = psdBoundary.injectedOpacity;
+      if (layer && psdBoundary.injectedText !== undefined) layer.text = {
+        text: psdBoundary.injectedText,
+        transform: [1, 0, 0, 1, 0, 12],
+        style: { font: { name: 'ArialMT' }, fontSize: psdBoundary.injectedFontSize ?? 12, fillColor: { r: 0, g: 0, b: 0 } },
+        styleRuns: [{ length: psdBoundary.injectedText.length, style: {} }],
+        paragraphStyle: { justification: 'left' },
+      } as unknown as NonNullable<typeof layer.text>;
       return decoded;
     },
   };
@@ -86,7 +96,7 @@ vi.mock('pdfjs-dist/legacy/build/pdf.mjs', async (importOriginal) => {
   };
 });
 
-import { accountPdfEditableText, importDocument, MAX_STRUCTURED_IMPORT_BYTES, renderPdfPagePng } from '../../src/main/import-document';
+import { accountPdfEditableText, accountPsdEditableText, importDocument, MAX_STRUCTURED_IMPORT_BYTES, renderPdfPagePng } from '../../src/main/import-document';
 import { inspectImageHeader } from '../../src/main/transaction-policy';
 import { runImportUtilityRequest } from '../../src/main/utility-import';
 import { MAX_IMPORT_UTILITY_SERIALIZED_BYTES } from '../../src/main/utility-contract';
@@ -409,7 +419,7 @@ async function temporaryDirectory(): Promise<string> {
 
 afterEach(async () => {
   decoderBoundary.calls = 0; decoderBoundary.reportedWidthOffset = 0;
-  psdBoundary.calls = 0; psdBoundary.reportedWidthOffset = 0; psdBoundary.truncateCompositeBytes = false; psdBoundary.totalMemoryLimit = undefined;
+  psdBoundary.calls = 0; psdBoundary.reportedWidthOffset = 0; psdBoundary.truncateCompositeBytes = false; psdBoundary.totalMemoryLimit = undefined; psdBoundary.injectedText = undefined; psdBoundary.injectedFontSize = undefined; psdBoundary.injectedLayerName = undefined; psdBoundary.injectedOpacity = undefined;
   pdfBoundary.mode = 'real'; pdfBoundary.getDocumentCalls = 0; pdfBoundary.getPageCalls = 0; pdfBoundary.renderCalls = 0; pdfBoundary.cleanupCalls = 0; pdfBoundary.destroyCalls = 0; pdfBoundary.cleanupFailure = false; pdfBoundary.destroyFailure = false; pdfBoundary.events = []; pdfBoundary.textItems = undefined;
   await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
@@ -650,6 +660,24 @@ describe('untrusted import limits', () => {
     expect(psdBoundary.calls).toBe(2);
   });
 
+  it('admits only canonical decoded PSD documents before direct import returns', async () => {
+    const directory = await temporaryDirectory(); const { valid } = await psdLayerRecordLengthCorpus(); const filePath = join(directory, 'canonical.psd'); await writeFile(filePath, valid);
+    psdBoundary.injectedText = 'x'.repeat(MAX_ILLUSTRATION_TEXT_LENGTH);
+    const imported = await runImportUtilityRequest({ id: 'psd-canonical-text-boundary', kind: 'import-document', filePath, pixelMode: false });
+    const document = imported.documents[0]; if (document.kind !== 'illustration') throw new Error('Expected illustration document.');
+    expect(Object.values(document.objects).find((object) => object.type === 'text')).toMatchObject({ type: 'text', text: 'x'.repeat(MAX_ILLUSTRATION_TEXT_LENGTH) });
+
+    psdBoundary.injectedText = 'x'.repeat(MAX_ILLUSTRATION_TEXT_LENGTH + 1);
+    await expect(runImportUtilityRequest({ id: 'psd-overlong-text', kind: 'import-document', filePath, pixelMode: false })).rejects.toThrow("PSD import produced content outside AIDraw's canonical document limits.");
+    psdBoundary.injectedText = 'finite text'; psdBoundary.injectedFontSize = Number.POSITIVE_INFINITY;
+    await expect(runImportUtilityRequest({ id: 'psd-nonfinite-font', kind: 'import-document', filePath, pixelMode: false })).rejects.toThrow("PSD import produced content outside AIDraw's canonical document limits.");
+    psdBoundary.injectedFontSize = undefined; psdBoundary.injectedOpacity = Number.POSITIVE_INFINITY;
+    await expect(runImportUtilityRequest({ id: 'psd-nonfinite-opacity', kind: 'import-document', filePath, pixelMode: false })).rejects.toThrow("PSD import produced content outside AIDraw's canonical document limits.");
+    psdBoundary.injectedText = undefined; psdBoundary.injectedOpacity = undefined; psdBoundary.injectedLayerName = 'x'.repeat(201);
+    await expect(runImportUtilityRequest({ id: 'psd-overlong-pixel-layer', kind: 'import-document', filePath, pixelMode: true })).rejects.toThrow("PSD import produced content outside AIDraw's canonical document limits.");
+    expect(psdBoundary.calls).toBe(5);
+  });
+
   it('imports a locally generated PDF through the production utility and destroys its pdf.js loading task', async () => {
     const directory = await temporaryDirectory(); const filePath = join(directory, 'minimal.pdf'); await writeFile(filePath, await minimalPdf());
     const imported = await runImportUtilityRequest({ id: 'minimal-pdf', kind: 'import-document', filePath, pixelMode: false }); const document = imported.documents[0]; if (document.kind !== 'illustration') throw new Error('Expected illustration document');
@@ -657,11 +685,14 @@ describe('untrusted import limits', () => {
     expect(pdfBoundary).toMatchObject({ getDocumentCalls: 1, getPageCalls: 1, renderCalls: 1, cleanupCalls: 1, destroyCalls: 1 });
   });
 
-  it('accounts PDF editable text against existing canonical and transfer limits without allocating the transfer ceiling', () => {
+  it('accounts PDF and PSD editable text against existing canonical and transfer limits without allocating the transfer ceiling', () => {
     expect(accountPdfEditableText(0, '\u0000')).toBe(8);
     expect(accountPdfEditableText(MAX_IMPORT_UTILITY_SERIALIZED_BYTES - 3, 'x')).toBe(MAX_IMPORT_UTILITY_SERIALIZED_BYTES);
     expect(() => accountPdfEditableText(MAX_IMPORT_UTILITY_SERIALIZED_BYTES - 2, 'x')).toThrow('512 MiB imported-document transfer limit');
     expect(() => accountPdfEditableText(0, 'x'.repeat(MAX_ILLUSTRATION_TEXT_LENGTH + 1))).toThrow("canonical illustration limits");
+    expect(accountPsdEditableText(MAX_IMPORT_UTILITY_SERIALIZED_BYTES - 3, 'x')).toBe(MAX_IMPORT_UTILITY_SERIALIZED_BYTES);
+    expect(() => accountPsdEditableText(MAX_IMPORT_UTILITY_SERIALIZED_BYTES - 2, 'x')).toThrow('512 MiB imported-document transfer limit');
+    expect(() => accountPsdEditableText(0, 'x'.repeat(MAX_ILLUSTRATION_TEXT_LENGTH + 1))).toThrow("PSD import produced content outside AIDraw's canonical document limits.");
   });
 
   it('admits only canonical PDF extracted text before direct import returns', async () => {

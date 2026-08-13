@@ -15,8 +15,8 @@ import {
   createPixelDocument,
   createPixelSprite,
   createPixelTileset,
+  migrateDocument,
   nowIso,
-  validateDocument,
   writePixels,
   writeTiles,
   type AIDrawDocument,
@@ -59,6 +59,8 @@ const MAX_PDF_PAGES = MAX_IMPORT_UTILITY_DOCUMENTS;
 const MAX_PDF_EXPANDED_PIXELS = 64 * 1024 * 1024;
 const INVALID_CANONICAL_PDF_ERROR = "PDF extracted text exceeds AIDraw's canonical illustration limits.";
 const PDF_TEXT_TRANSFER_LIMIT_ERROR = `PDF editable text exceeds the ${Math.floor(MAX_IMPORT_UTILITY_SERIALIZED_BYTES / 1024 / 1024)} MiB imported-document transfer limit.`;
+const INVALID_CANONICAL_PSD_ERROR = "PSD import produced content outside AIDraw's canonical document limits.";
+const PSD_TEXT_TRANSFER_LIMIT_ERROR = `PSD editable text exceeds the ${Math.floor(MAX_IMPORT_UTILITY_SERIALIZED_BYTES / 1024 / 1024)} MiB imported-document transfer limit.`;
 const MAX_TILED_LAYERS = 4_096;
 const MAX_TILED_DEPTH = 64;
 const MAX_TILED_LAYER_CELLS = 4_194_304;
@@ -85,17 +87,33 @@ export async function renderPdfPagePng(
   }
 }
 
-export function accountPdfEditableText(serializedBytes: number, text: string): number {
-  if (!Number.isSafeInteger(serializedBytes) || serializedBytes < 0 || serializedBytes > MAX_IMPORT_UTILITY_SERIALIZED_BYTES) throw new Error(PDF_TEXT_TRANSFER_LIMIT_ERROR);
-  if (text.length > MAX_ILLUSTRATION_TEXT_LENGTH) throw new Error(INVALID_CANONICAL_PDF_ERROR);
+function accountImportedEditableText(serializedBytes: number, text: string, canonicalError: string, transferError: string): number {
+  if (!Number.isSafeInteger(serializedBytes) || serializedBytes < 0 || serializedBytes > MAX_IMPORT_UTILITY_SERIALIZED_BYTES) throw new Error(transferError);
+  if (text.length > MAX_ILLUSTRATION_TEXT_LENGTH) throw new Error(canonicalError);
   const itemBytes = jsonStringSerializedByteLength(text);
-  if (itemBytes > MAX_IMPORT_UTILITY_SERIALIZED_BYTES - serializedBytes) throw new Error(PDF_TEXT_TRANSFER_LIMIT_ERROR);
+  if (itemBytes > MAX_IMPORT_UTILITY_SERIALIZED_BYTES - serializedBytes) throw new Error(transferError);
   return serializedBytes + itemBytes;
 }
 
+export function accountPdfEditableText(serializedBytes: number, text: string): number {
+  return accountImportedEditableText(serializedBytes, text, INVALID_CANONICAL_PDF_ERROR, PDF_TEXT_TRANSFER_LIMIT_ERROR);
+}
+
+export function accountPsdEditableText(serializedBytes: number, text: string): number {
+  return accountImportedEditableText(serializedBytes, text, INVALID_CANONICAL_PSD_ERROR, PSD_TEXT_TRANSFER_LIMIT_ERROR);
+}
+
+function validateImportedDocument(document: AIDrawDocument, errorMessage: string): AIDrawDocument {
+  try { return migrateDocument(document); }
+  catch { throw new Error(errorMessage); }
+}
+
 function validateImportedPdfDocument(document: AIDrawDocument): AIDrawDocument {
-  try { return validateDocument(document); }
-  catch { throw new Error(INVALID_CANONICAL_PDF_ERROR); }
+  return validateImportedDocument(document, INVALID_CANONICAL_PDF_ERROR);
+}
+
+function validateImportedPsdDocument(document: AIDrawDocument): AIDrawDocument {
+  return validateImportedDocument(document, INVALID_CANONICAL_PSD_ERROR);
 }
 
 function safeJson(bytes: Buffer, label: string): Record<string, any> {
@@ -462,11 +480,12 @@ function importPsd(bytes: Buffer, name: string, pixelMode: boolean): ImportResul
     }
     if (!document.assetIds.length) { const sprite = createPixelSprite('Composite', psd.width, psd.height); document.pixelAssets[sprite.id] = sprite; document.assetIds = [sprite.id]; document.activeAssetId = sprite.id; }
     document.dirty = true;
-    return { documents: [document], warnings: ['PSD layers were independently quantized into pixel sprites. Unsupported effects use decoded raster fallbacks.'] };
+    return { documents: [validateImportedPsdDocument(document)], warnings: ['PSD layers were independently quantized into pixel sprites. Unsupported effects use decoded raster fallbacks.'] };
   }
   const document = createIllustrationDocument(name); document.artboard.width = psd.width; document.artboard.height = psd.height; document.artboard.background = null;
   const initialLayers = [...document.layerIds]; for (const id of initialLayers) delete document.layers[id]; document.layerIds = [];
   const stats = { groups: 0, text: 0, effects: 0, vector: 0, adjustments: 0, partialLocks: 0 };
+  let extractedTextSerializedBytes = 0;
   const addLayers = (layers: PsdLayer[] | undefined, parentId?: string) => {
     for (const [index, source] of (layers ?? []).entries()) {
       const timestamp = nowIso(); const id = createId('layer'); const isGroup = psdLayerIsGroup(source); const layerName = source.name ?? `${isGroup ? 'Group' : 'Layer'} ${index + 1}`;
@@ -482,6 +501,7 @@ function importPsd(bytes: Buffer, name: string, pixelMode: boolean): ImportResul
       document.layers[id] = layer;
       if (parentId) { const parent = document.layers[parentId]; if (parent?.type === 'group') parent.childIds.push(id); } else document.layerIds.push(id);
       if (source.imageData) addPsdRasterObject(document, layer, source.imageData, `${layerName} · raster fallback`, true, source.left ?? 0, source.top ?? 0);
+      if (source.text?.text) extractedTextSerializedBytes = accountPsdEditableText(extractedTextSerializedBytes, source.text.text);
       const importedText = importedPsdText(source, id, !source.hidden && !source.imageData); if (importedText) {
         const { object, aidrawCompanion } = importedText;
         if (aidrawCompanion) { layer.locked = false; layer.opacity = 1; layer.blendMode = 'normal'; }
@@ -502,7 +522,7 @@ function importPsd(bytes: Buffer, name: string, pixelMode: boolean): ImportResul
   if (stats.adjustments) warnings.push(`${stats.adjustments} adjustment layer${stats.adjustments === 1 ? '' : 's'} remain rasterized.`);
   if (stats.partialLocks) warnings.push(`${stats.partialLocks} PSD layer${stats.partialLocks === 1 ? '' : 's'} used a partial transparency, position, composite, or artboard lock and imported unlocked; AIDraw maps only Photoshop lock-all to its binary layer lock.`);
   if (psd.bitsPerChannel !== undefined && psd.bitsPerChannel !== 8) warnings.push(`The ${psd.bitsPerChannel}-bit PSD was decoded into AIDraw's 8-bit sRGB workflow.`);
-  return { documents: [document], warnings };
+  return { documents: [validateImportedPsdDocument(document)], warnings };
 }
 
 function tiledProperties(value: any): Record<string, string | number | boolean> {
