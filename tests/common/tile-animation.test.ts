@@ -1,9 +1,32 @@
 import { describe, expect, it } from 'vitest';
 import { createPixelTileset } from '@aidraw/core';
 
-import { moveTileAnimationFrame, tilesetTileSourceRect } from '../../src/common/tile-animation';
+import { moveTileAnimationFrame, tileAnimationFrameAt, tilesetTileSourceRect } from '../../src/common/tile-animation';
 
 describe('tile animation authoring', () => {
+  it('samples exact frame boundaries and loops without unsafe duration summation', () => {
+    const animation = [
+      { tileId: 3, durationMs: 80 },
+      { tileId: 7, durationMs: 120 },
+    ];
+    expect(tileAnimationFrameAt(animation, 0)).toEqual({ tileId: 3, frameIndex: 0, remainingMs: 80 });
+    expect(tileAnimationFrameAt(animation, 79)).toEqual({ tileId: 3, frameIndex: 0, remainingMs: 1 });
+    expect(tileAnimationFrameAt(animation, 80)).toEqual({ tileId: 7, frameIndex: 1, remainingMs: 120 });
+    expect(tileAnimationFrameAt(animation, 199)).toEqual({ tileId: 7, frameIndex: 1, remainingMs: 1 });
+    expect(tileAnimationFrameAt(animation, 200)).toEqual({ tileId: 3, frameIndex: 0, remainingMs: 80 });
+    expect(tileAnimationFrameAt([], 0)).toBeUndefined();
+
+    const maximum = Number.MAX_SAFE_INTEGER;
+    expect(tileAnimationFrameAt([{ tileId: 1, durationMs: maximum }, { tileId: 2, durationMs: maximum }], maximum)).toEqual({ tileId: 2, frameIndex: 1, remainingMs: maximum });
+  });
+
+  it('rejects time or frame metadata that cannot produce a deterministic sample', () => {
+    expect(() => tileAnimationFrameAt([{ tileId: 0, durationMs: 1 }], -1)).toThrow(/time/);
+    expect(() => tileAnimationFrameAt([{ tileId: 0, durationMs: 1 }], 0.5)).toThrow(/time/);
+    expect(() => tileAnimationFrameAt([{ tileId: -1, durationMs: 1 }], 0)).toThrow(/tile IDs/);
+    expect(() => tileAnimationFrameAt([{ tileId: 0, durationMs: 0 }], 0)).toThrow(/durations/);
+  });
+
   it('moves one frame without mutating the source or changing exact tile/duration pairs', () => {
     const source = [
       { tileId: 3, durationMs: 80 },

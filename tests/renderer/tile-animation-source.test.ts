@@ -23,6 +23,23 @@ describe('tile animation editor wiring', () => {
     expect(source).toContain('prefers-reduced-motion: reduce');
   });
 
+  it('samples placed animations through one clock and one shared source-rectangle contract', async () => {
+    const [renderer, headless] = await Promise.all([
+      readFile(new URL('../../src/renderer/canvas/PixelCanvas.tsx', import.meta.url), 'utf8'),
+      readFile(new URL('../../src/main/render-document.ts', import.meta.url), 'utf8'),
+    ]);
+    for (const source of [renderer, headless]) {
+      expect(source).toContain('tileAnimationFrameAt');
+      expect(source).toContain('tilesetTileSourceRect');
+      expect(source).toContain('animatedLocalId');
+      expect(source).toContain('tiledTileTransformMatrix(decoded)');
+    }
+    expect(renderer).toContain('tileAnimationTimeMs');
+    expect(renderer).toContain('MIN_TILE_ANIMATION_TICK_MS');
+    expect(renderer).toContain("matchMedia?.('(prefers-reduced-motion: reduce)')");
+    expect(headless).toContain('tileAnimationTimeMs = 0');
+  });
+
   it('renders a bounded weighted-variant strip that navigates exact tile IDs', async () => {
     const source = await readFile(new URL('../../src/renderer/components/TileVariantPreview.tsx', import.meta.url), 'utf8');
     expect(source).toContain('MAX_VISIBLE_VARIANTS = 12');

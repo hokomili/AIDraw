@@ -24,6 +24,42 @@ describe('native document rendering', () => {
     expect({ width: image.width, height: image.height }).toEqual({ width: 3, height: 5 });
   });
 
+  it('renders placed tile animations at exact times while retaining the stored GID transform', async () => {
+    const document = createPixelDocument('project', 'Animated tile surface'); document.assetIds = []; document.pixelAssets = {};
+    const sprite = createPixelSprite('Animated tile source', 6, 2); const cel = Object.values(sprite.cels)[0];
+    writePixels(cel, [
+      { x: 0, y: 0, index: 15 },
+      { x: 2, y: 0, index: 2 }, { x: 3, y: 0, index: 4 }, { x: 2, y: 1, index: 8 }, { x: 3, y: 1, index: 11 },
+      { x: 4, y: 0, index: 12 }, { x: 5, y: 0, index: 9 }, { x: 4, y: 1, index: 6 }, { x: 5, y: 1, index: 3 },
+    ]);
+    const tileset = createPixelTileset('Animated tiles', sprite.id, 2, 2, 3, 1); tileset.firstGid = 1;
+    tileset.tiles = {
+      0: { id: 0, sourceX: 0, sourceY: 0, probability: 1, animation: [{ tileId: 1, durationMs: 80 }, { tileId: 2, durationMs: 120 }], collisions: [], properties: {} },
+      1: { id: 1, sourceX: 2, sourceY: 0, probability: 1, animation: [], collisions: [], properties: {} },
+      2: { id: 2, sourceX: 4, sourceY: 0, probability: 1, animation: [], collisions: [], properties: {} },
+    };
+    const map = createPixelTilemap('Animated map'); map.width = 1; map.height = 1; map.tileWidth = 2; map.tileHeight = 2; map.tilesetIds = [tileset.id];
+    const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile' || !layer.chunks) throw new Error('Expected tile layer');
+    writeTiles(layer.chunks, [{ x: 0, y: 0, gid: encodeTiledGid(1, { hFlip: true }) }]);
+    document.pixelAssets = { [sprite.id]: sprite, [tileset.id]: tileset, [map.id]: map }; document.assetIds = [sprite.id, tileset.id, map.id]; document.activeAssetId = map.id;
+
+    const source = renderSprite(document, sprite).getContext('2d');
+    const flippedSource = (sourceX: number) => {
+      const data = source.getImageData(sourceX, 0, 2, 2).data;
+      return Buffer.concat([Buffer.from(data.slice(4, 8)), Buffer.from(data.slice(0, 4)), Buffer.from(data.slice(12, 16)), Buffer.from(data.slice(8, 12))]);
+    };
+    const renderedAt = (timeMs?: number) => Buffer.from((timeMs === undefined ? renderTilemap(document, map) : renderTilemap(document, map, undefined, timeMs)).getContext('2d').getImageData(0, 0, 2, 2).data);
+    expect(renderedAt()).toEqual(flippedSource(2));
+    expect(renderedAt(79)).toEqual(flippedSource(2));
+    expect(renderedAt(80)).toEqual(flippedSource(4));
+    expect(renderedAt(199)).toEqual(flippedSource(4));
+    expect(renderedAt(200)).toEqual(flippedSource(2));
+
+    const exported = await exportDocument(document, 'png'); const image = await loadImage(exported.data); const exportCanvas = createCanvas(2, 2); exportCanvas.getContext('2d').drawImage(image, 0, 0);
+    expect(exported.report).toEqual({ warnings: [], rasterized: [] });
+    expect(Buffer.from(exportCanvas.getContext('2d').getImageData(0, 0, 2, 2).data)).toEqual(flippedSource(2));
+  });
+
   it('renders a one-cell non-square isometric map without clipping either tile edge', () => {
     const document = createPixelDocument('project', 'Isometric edge bounds'); document.assetIds = []; document.pixelAssets = {};
     const sprite = createPixelSprite('Non-square tile', 4, 2); const cel = Object.values(sprite.cels)[0];

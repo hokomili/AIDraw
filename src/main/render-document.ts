@@ -22,6 +22,7 @@ import { orthogonalCellRect, orthogonalObjectMatrix, orthogonalProjectionExtent 
 import { paintTileCachePlan } from '../common/paint-tile-cache';
 import { renderRasterStroke } from '../common/raster-brush';
 import { renderStyledText } from '../common/text-layout';
+import { tileAnimationFrameAt, tilesetTileSourceRect } from '../common/tile-animation';
 import { isometricTileRenderCells } from '../common/tile-render-order';
 
 type Context = ReturnType<Canvas['getContext']>;
@@ -276,7 +277,7 @@ export function renderSprite(document: PixelDocument, sprite: PixelSprite, frame
   return canvas;
 }
 
-export function renderTilemap(document: PixelDocument, map: PixelTilemap, onlyLayerId?: string): Canvas {
+export function renderTilemap(document: PixelDocument, map: PixelTilemap, onlyLayerId?: string, tileAnimationTimeMs = 0): Canvas {
   const isometric = map.orientation === 'isometric';
   const projected = isometric
     ? isometricProjectionExtent(map.width, map.height, map.tileWidth, map.tileHeight)
@@ -285,6 +286,11 @@ export function renderTilemap(document: PixelDocument, map: PixelTilemap, onlyLa
   const height = Math.max(1, Math.ceil(projected.height));
   const canvas = createCanvas(width, height); const context = canvas.getContext('2d'); context.imageSmoothingEnabled = false;
   const sources = new Map<string, Canvas>();
+  const animatedLocalIds = new Map<string, number>();
+  const animatedLocalId = (tileset: Parameters<typeof tilesetTileSourceRect>[0], localId: number) => {
+    const key = `${tileset.id}\0${localId}`; const cached = animatedLocalIds.get(key); if (cached !== undefined) return cached;
+    const sampled = tileAnimationFrameAt(tileset.tiles[localId]?.animation ?? [], tileAnimationTimeMs)?.tileId ?? localId; animatedLocalIds.set(key, sampled); return sampled;
+  };
   const visibleLayers: Array<{ layer: PixelTilemap['layers'][string]; opacity: number }> = []; const visit = (id: string, opacity = 1) => { const layer = map.layers[id]; if (!layer?.visible) return; const combined = opacity * layer.opacity; if (layer.type === 'group') for (const childId of layer.childIds ?? []) visit(childId, combined); else visibleLayers.push({ layer, opacity: combined }); }; if (onlyLayerId) visit(onlyLayerId); else for (const id of map.layerIds) visit(id);
   for (const entry of visibleLayers) {
     const { layer } = entry;
@@ -312,10 +318,10 @@ export function renderTilemap(document: PixelDocument, map: PixelTilemap, onlyLa
       const resolved = resolveTilesetForGid(document, map, decoded.gid); const sourceAsset = resolved ? document.pixelAssets[resolved.tileset.spriteAssetId] : undefined;
       if (resolved && sourceAsset?.type === 'sprite') {
         let source = sources.get(sourceAsset.id); if (!source) { source = renderSprite(document, sourceAsset); sources.set(sourceAsset.id, source); }
-        const definition = resolved.tileset.tiles[resolved.localId]; const sx = definition?.sourceX ?? resolved.localId % resolved.tileset.columns * resolved.tileset.tileWidth; const sy = definition?.sourceY ?? Math.floor(resolved.localId / resolved.tileset.columns) * resolved.tileset.tileHeight;
+        const sourceRect = tilesetTileSourceRect(resolved.tileset, animatedLocalId(resolved.tileset, resolved.localId));
         const transform = tiledTileTransformMatrix(decoded);
-        context.save(); context.translate(rect.x + rect.width / 2, rect.y + rect.height / 2); context.transform(transform.a, transform.b, transform.c, transform.d, 0, 0); context.drawImage(source, sx, sy, resolved.tileset.tileWidth, resolved.tileset.tileHeight, -rect.width / 2, -rect.height / 2, rect.width, rect.height); context.restore();
-      } else { context.fillStyle = `hsl(${decoded.gid * 47 % 360} 55% 60%)`; context.fillRect(rect.x, rect.y, rect.width, rect.height); }
+        context.save(); context.translate(rect.x + rect.width / 2, rect.y + rect.height / 2); context.transform(transform.a, transform.b, transform.c, transform.d, 0, 0); context.drawImage(source, sourceRect.x, sourceRect.y, sourceRect.width, sourceRect.height, -rect.width / 2, -rect.height / 2, rect.width, rect.height); context.restore();
+      } else { const visibleGid = resolved ? resolved.tileset.firstGid + animatedLocalId(resolved.tileset, resolved.localId) : decoded.gid; context.fillStyle = `hsl(${visibleGid * 47 % 360} 55% 60%)`; context.fillRect(rect.x, rect.y, rect.width, rect.height); }
     };
     if (isometric) for (const cell of isometricTileRenderCells(Object.values(layer.chunks), (chunk) => decodeTilemapChunk(chunk))) drawCell(cell.x, cell.y, cell.raw);
     else for (const chunk of Object.values(layer.chunks)) {
