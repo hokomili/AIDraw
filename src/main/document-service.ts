@@ -211,6 +211,7 @@ export class DocumentService extends EventEmitter {
   }
 
   setEditorAttached(attached: boolean): void {
+    if (!attached) this.locks.clear();
     this.editorAdvisory = attached
       ? { advisory: true, attached: true, updatedAt: nowIso(), documentId: this.activeDocumentId, selectedEntityIds: [] }
       : { advisory: true, attached: false, updatedAt: nowIso() };

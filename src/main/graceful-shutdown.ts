@@ -20,6 +20,10 @@ export class GracefulShutdownCoordinator {
     return this.complete;
   }
 
+  isQuitPending(): boolean {
+    return Boolean(this.quitPromise);
+  }
+
   markComplete(): void {
     this.complete = true;
   }

@@ -18,6 +18,7 @@ describe('graceful application shutdown', () => {
     coordinator.handleBeforeQuit(secondEvent);
     const pending = coordinator.requestQuit();
     await Promise.resolve();
+    expect(coordinator.isQuitPending()).toBe(true);
     expect(firstEvent.preventDefault).toHaveBeenCalledOnce();
     expect(secondEvent.preventDefault).toHaveBeenCalledOnce();
     expect(stopEngine).toHaveBeenCalledOnce();
@@ -26,6 +27,7 @@ describe('graceful application shutdown', () => {
     releaseStop();
     await pending;
     expect(coordinator.isComplete()).toBe(true);
+    expect(coordinator.isQuitPending()).toBe(false);
     expect(quitApplication).toHaveBeenCalledOnce();
     expect(reportFailure).not.toHaveBeenCalled();
 
@@ -44,6 +46,7 @@ describe('graceful application shutdown', () => {
 
     await expect(coordinator.requestQuit()).rejects.toThrow('simulated final compaction failure');
     expect(coordinator.isComplete()).toBe(false);
+    expect(coordinator.isQuitPending()).toBe(false);
     expect(quitApplication).not.toHaveBeenCalled();
 
     await expect(coordinator.requestQuit()).resolves.toBeUndefined();

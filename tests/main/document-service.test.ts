@@ -889,6 +889,71 @@ describe('document service collaboration semantics', () => {
     await service.compactRecovery();
   });
 
+  it('releases transient human locks when the sole editor detaches', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-service-detached-locks-'));
+    temporaryPaths.push(root);
+    const service = new DocumentService(new RecoveryJournal(root), '1.0.0');
+    services.push(service);
+    service.initialize();
+    const snapshot = service.create({ kind: 'sprite', name: 'Detached lock recovery' });
+    const document = snapshot.activeDocument!;
+    if (document.kind !== 'pixel') throw new Error('Expected pixel document');
+    const sprite = document.pixelAssets[document.activeAssetId];
+    if (sprite.type !== 'sprite') throw new Error('Expected sprite');
+    const cel = Object.values(sprite.cels)[0];
+    const agent: Actor = { id: 'agent-detached-lock-test', kind: 'agent', name: 'Detached lock agent', color: '#8268dd' };
+    const write = (): CanvasTransaction => ({
+      id: createId('tx'), clientOperationId: createId('op'), documentId: document.id, actor: agent,
+      label: 'Write after editor detach', createdAt: nowIso(),
+      operations: [{ kind: 'pixel.cel.set', spriteId: sprite.id, celId: cel.id, changes: [{ x: 2, y: 3, index: 4 }], expectedRevision: 0 }],
+    });
+
+    service.setEditorAttached(true);
+    expect(service.acquireLock({
+      documentId: document.id,
+      region: { kind: 'pixel', assetId: sprite.id, x: 0, y: 0, width: 8, height: 8 },
+    }).acquired).toBe(true);
+    expect(service.getHumanOccupancy(document.id)).toMatchObject({ active: true, locks: [{ region: { assetId: sprite.id } }] });
+    expect(await service.apply(write())).toMatchObject({ status: 'locked', conflict: { retryable: true } });
+
+    service.setEditorAttached(false);
+    expect(service.getEditorAdvisory()).toMatchObject({ attached: false });
+    expect(service.getHumanOccupancy(document.id)).toMatchObject({ active: false, locks: [] });
+    expect(await service.apply(write())).toMatchObject({ status: 'committed', revision: 1 });
+  });
+
+  it('preserves a canonical human transaction already admitted before editor detach', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-service-detached-pending-human-'));
+    temporaryPaths.push(root);
+    let markValidationStarted!: () => void;
+    let releaseValidation!: () => void;
+    const validationStarted = new Promise<void>((resolve) => { markValidationStarted = resolve; });
+    const validationRelease = new Promise<void>((resolve) => { releaseValidation = resolve; });
+    const decoder = vi.fn(async () => {
+      markValidationStarted();
+      await validationRelease;
+    });
+    const service = new DocumentService(new RecoveryJournal(root), '1.0.0', undefined, decoder);
+    services.push(service);
+    const document = service.create({ kind: 'illustration', name: 'Pending human detach' }).activeDocument!;
+    const asset = pngAsset('pending-human-detach-asset');
+    service.setEditorAttached(true);
+    expect(service.acquireLock({ documentId: document.id, objectIds: [asset.id] }).acquired).toBe(true);
+
+    const pending = service.apply({
+      id: createId('tx'), clientOperationId: createId('op'), documentId: document.id, actor: HUMAN_ACTOR,
+      label: 'Admitted before renderer detach', createdAt: nowIso(), operations: [{ kind: 'asset.add', asset }],
+    });
+    await validationStarted;
+    service.setEditorAttached(false);
+    expect(service.getHumanOccupancy(document.id)).toMatchObject({ active: false, locks: [] });
+    expect(service.getDocument(document.id)).toMatchObject({ revision: 0, assets: {} });
+
+    releaseValidation();
+    await expect(pending).resolves.toMatchObject({ status: 'committed', revision: 1 });
+    expect(service.getDocument(document.id)).toMatchObject({ revision: 1, assets: { [asset.id]: asset } });
+  });
+
   it('protects a pixel asset replacement while its inspector gesture holds an asset lock', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aidraw-service-')); temporaryPaths.push(root);
     const service = new DocumentService(new RecoveryJournal(root), '1.0.0'); services.push(service); service.initialize();

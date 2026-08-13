@@ -51,6 +51,12 @@ import { buildCheckpointComparison } from './checkpoint-comparison';
 import { readBoundedRegularFile } from './bounded-file-read';
 import { resolveMcpConnectionHandoffPath, writeMcpConnectionHandoff } from './mcp-connection-handoff';
 import { GracefulShutdownCoordinator } from './graceful-shutdown';
+import {
+  EditorWindowLifecycle,
+  shouldRecoverMainFrameLoadFailure,
+  type EditorWindowEvents,
+  type EditorWindowFailure,
+} from './editor-window-lifecycle';
 
 declare const MAIN_WINDOW_VITE_DEV_SERVER_URL: string | undefined;
 declare const MAIN_WINDOW_VITE_NAME: string;
@@ -65,9 +71,11 @@ let batchDocumentWorkflows: BatchDocumentWorkflows;
 let engineQuitPending = false;
 let engineReadyPromise: Promise<void> | undefined;
 let suppressMacLoginActivationUntil = 0;
+let resumeEditorRecovery = (): void => {};
 const pendingSpriteSheets = new Map<string, { filePath: string; sha256: string; name: string; mimeType: 'image/png' | 'image/jpeg' | 'image/webp'; expiresAt: number }>();
 function reportGracefulShutdownFailure(error: unknown): void {
   process.stderr.write(`AIDraw graceful shutdown failed: ${error instanceof Error ? error.message : String(error)}\n`);
+  resumeEditorRecovery();
 }
 const gracefulShutdown = new GracefulShutdownCoordinator({
   stopEngine: async () => { await engineRuntime?.stop(); },
@@ -548,7 +556,9 @@ function registerIpc(): void {
     return service.close(id, force === true);
   });
   handle(IPC.stopAgents, (_event, id?: string) => mcpHost.scheduler.stop(id) + service.stopAgents(id));
-  handle(IPC.acquireHumanLock, (_event, request: HumanLockRequest) => service.acquireLock(request));
+  handle(IPC.acquireHumanLock, (_event, request: HumanLockRequest) => editorWindowLifecycle.isAttached()
+    ? service.acquireLock(request)
+    : { acquired: false, reason: 'Editor is not attached.' });
   handle(IPC.releaseHumanLock, (_event, id: string) => service.releaseLock(id));
   handle(IPC.mcpInfo, () => service.getMcpInfo());
   handle(IPC.mcpCredentials, () => mcpHost.credentials());
@@ -846,19 +856,20 @@ function createMenu(): void {
 async function requestNewDocument(kind: 'illustration' | 'sprite' = 'illustration'): Promise<void> {
   await createWindow();
   const window = mainWindow;
-  if (!window || window.isDestroyed()) return;
+  if (!editorWindowLifecycle.isAttached() || !window || window.isDestroyed() || window.webContents.isDestroyed()) return;
   window.webContents.send(IPC.newDocumentRequested, kind);
 }
 
 function engineStatus(): EngineStatus {
   const login = getStartAtLoginStatus({ app });
   const storage = secureStorageStatus(safeStorage);
+  const uiAttached = editorWindowLifecycle.isAttached();
   return {
     running: true,
-    uiAttached: Boolean(mainWindow && !mainWindow.isDestroyed()),
+    uiAttached,
     startsAtLogin: login.enabled,
     startAtLoginSupported: login.supported,
-    mode: mainWindow && !mainWindow.isDestroyed() ? 'interactive' : 'headless',
+    mode: uiAttached ? 'interactive' : 'headless',
     platform: storage.platform,
     secureStorageAvailable: storage.available,
   };
@@ -914,14 +925,19 @@ async function registerRendererProtocol(): Promise<void> {
   });
 }
 
-async function createWindow(): Promise<void> {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.show();
-    mainWindow.focus();
-    return;
-  }
-  const window = new BrowserWindow({
+function reportEditorWindowFailure(failure: EditorWindowFailure): void {
+  const detail = failure.kind === 'renderer-gone'
+    ? `renderer process exited (${failure.reason}, code ${failure.exitCode})`
+    : failure.kind === 'main-frame-load-failed'
+      ? `main frame failed to load (${failure.errorCode}: ${failure.errorDescription})`
+      : failure.kind === 'stale-window'
+        ? `existing editor shell was unusable (${failure.reason})`
+        : `${failure.kind} (${failure.message})`;
+  process.stderr.write(`AIDraw editor recovery: ${detail}. The editor was detached without replacing canonical engine state.\n`);
+}
+
+function createElectronWindow(): BrowserWindow {
+  return new BrowserWindow({
     width: 1520,
     height: 940,
     minWidth: 980,
@@ -938,28 +954,60 @@ async function createWindow(): Promise<void> {
       allowRunningInsecureContent: false,
     },
   });
-  mainWindow = window;
-  service.setEditorAttached(true);
-  mcpHost.scheduler.setVisualPlaybackEnabled(true);
-  if (startupCommand === 'headless') window.show();
+}
 
+function bindElectronWindowEvents(window: BrowserWindow, events: EditorWindowEvents): void {
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', (event, url) => {
     if (!isTrustedRendererUrl(url, MAIN_WINDOW_VITE_DEV_SERVER_URL)) event.preventDefault();
   });
-  window.on('closed', () => {
-    if (mainWindow === window) mainWindow = undefined;
-    service.setEditorAttached(false);
-    mcpHost.scheduler.setVisualPlaybackEnabled(false);
+  window.on('close', (event) => {
+    events.closeRequested();
+    queueMicrotask(() => { if (event.defaultPrevented) events.closeCancelled(); });
   });
-  window.once('ready-to-show', () => window.show());
+  window.on('closed', () => { events.closed(); });
+  window.webContents.on('will-prevent-unload', () => { events.closeCancelled(); });
+  window.webContents.on('did-start-navigation', (event) => {
+    if (event.isMainFrame && !event.isSameDocument) events.mainFrameLoadStarted();
+  });
+  window.webContents.on('did-stop-loading', () => { events.mainFrameLoadStopped(); });
+  window.webContents.on('did-finish-load', () => { events.ready(); });
+  window.webContents.on('render-process-gone', (_event, details) => {
+    events.rendererGone(details.reason, details.exitCode);
+  });
+  window.webContents.on('did-fail-load', (_event, errorCode, errorDescription, _validatedUrl, isMainFrame) => {
+    if (shouldRecoverMainFrameLoadFailure(errorCode, isMainFrame)) events.mainFrameLoadFailed(errorCode, errorDescription);
+  });
+}
 
-  if (MAIN_WINDOW_VITE_DEV_SERVER_URL) await window.loadURL(MAIN_WINDOW_VITE_DEV_SERVER_URL);
-  else await window.loadURL('aidraw://app/index.html');
-  if (!window.isDestroyed()) {
+const editorWindowLifecycle = new EditorWindowLifecycle<BrowserWindow>({
+  createWindow: createElectronWindow,
+  bindWindowEvents: bindElectronWindowEvents,
+  loadWindow: async (window) => {
+    if (MAIN_WINDOW_VITE_DEV_SERVER_URL) await window.loadURL(MAIN_WINDOW_VITE_DEV_SERVER_URL);
+    else await window.loadURL('aidraw://app/index.html');
+  },
+  revealWindow: (window) => {
+    if (window.isMinimized()) window.restore();
     window.show();
     window.focus();
-  }
+  },
+  destroyWindow: (window) => { window.destroy(); },
+  isWindowDestroyed: (window) => window.isDestroyed(),
+  isRendererDestroyed: (window) => window.webContents.isDestroyed(),
+  isRendererCrashed: (window) => window.webContents.isCrashed(),
+  setCurrentWindow: (window) => { mainWindow = window; },
+  setEditorAttached: (attached) => {
+    service.setEditorAttached(attached);
+    mcpHost.scheduler.setVisualPlaybackEnabled(attached);
+  },
+  canOpenWindow: () => !gracefulShutdown.isQuitPending() && !gracefulShutdown.isComplete(),
+  reportFailure: reportEditorWindowFailure,
+});
+resumeEditorRecovery = () => { editorWindowLifecycle.resumeRecovery(); };
+
+async function createWindow(): Promise<void> {
+  await editorWindowLifecycle.show();
 }
 
 app.on('web-contents-created', (_event, contents) => {
