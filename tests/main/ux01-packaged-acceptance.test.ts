@@ -62,8 +62,12 @@ describe('UX-01 retained exact-package acceptance boundary', () => {
     ]) expect(truth).toContain(claim);
     for (const claim of [
       'window-chrome r1 `20260814t092808z-7ff773c-r1`',
-      'failed **1/1 in 3.2 seconds** before native input',
-      'incorrectly compared Quartz absolute `x` with Blink `screenX`',
+      'failed **1/1 in 3.2 seconds** before input on invalid Quartz/Blink origin equality',
+      'r2 `20260814t102354z-f7e6d0c-r2`',
+      'failed **1/1 in 2.6 seconds** before input',
+      'Quartz `203,32 1514×936`',
+      'Blink `200,30 1520×940`',
+      'dynamic decorated-frame containment relation',
       'immutable controller evidence',
       'wholly fresh package and separate native authority remain required',
     ]) expect(truth).toContain(claim);

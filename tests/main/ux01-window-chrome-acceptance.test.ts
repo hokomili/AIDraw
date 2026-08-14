@@ -5,14 +5,17 @@ import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
 import { EDITOR_DENSITY, MACOS_EDITOR_WINDOW_CHROME } from '../../src/common/editor-layout';
 import {
+  assertUx01DecoratedFrameRelationStable,
   assertUx01WindowInsideWorkArea,
   assertUx01WindowMovedWithinCoordinateSpaces,
-  assertUx01WindowSizeMatchesRenderer,
   assertUx01WindowStationaryWithinCoordinateSpaces,
   assertUx01WindowChromeSafeReporterEnvironment,
   buildUx01WindowChromeChildEnvironment,
   createUx01WindowGeometryDiagnostics,
+  deriveUx01DecoratedFrameRelation,
   deriveUx01TrafficLightCenters,
+  mapUx01FramePointToQuartzLocal,
+  mapUx01RendererHitTargetToQuartzLocal,
   parseUx01WindowDriverAction,
   parseUx01WindowDriverInspection,
   parseUx01WindowDriverPreflight,
@@ -49,11 +52,25 @@ function inspection(overrides: Record<string, unknown> = {}) {
     version: 1,
     pid: 100,
     postEventAccess: true,
-    windows: [{ windowId: 200, onScreen: true, bounds: { x: 30, y: 40, width: 1_520, height: 940 } }],
+    windows: [{ windowId: 200, onScreen: true, bounds: { x: 203, y: 32, width: 1_514, height: 936 } }],
     buttonMetrics: {
       close: { width: 14, height: 14 },
       minimize: { offsetX: 20, width: 14, height: 14 },
       zoom: { offsetX: 40, width: 14, height: 14 },
+    },
+    ...overrides,
+  };
+}
+
+function rendererMeasurement(overrides: Record<string, unknown> = {}) {
+  return {
+    location: 'aidraw://app/index.html',
+    content: { width: 1_520, height: 940, devicePixelRatio: 1 },
+    outer: { x: 200, y: 30, width: 1_520, height: 940 },
+    screen: { width: 1_920, height: 1_080, availLeft: 0, availTop: 30, availWidth: 1_920, availHeight: 960 },
+    layout: {
+      root: { clientWidth: 1_520, clientHeight: 940, scrollWidth: 1_520, scrollHeight: 940 },
+      body: { clientWidth: 1_520, clientHeight: 940, scrollWidth: 1_520, scrollHeight: 940 },
     },
     ...overrides,
   };
@@ -106,7 +123,7 @@ describe('UX-01 exact-package native window-chrome preparation', () => {
     expect(() => resolveUx01WindowChromeAcceptance({ workspacePath: workspace, environment: {} })).toThrow(/is required/);
   });
 
-  it('parses one exact-owner Quartz window and derives bounded standard traffic-light centers', () => {
+  it('parses one exact-owner Quartz window and maps native-frame controls through the observed decorated-frame relation', () => {
     expect(parseUx01WindowDriverPreflight({ version: 1, postEventAccess: true })).toEqual({ version: 1, postEventAccess: true });
     const parsed = parseUx01WindowDriverInspection(inspection());
     expect(parsed).toEqual(inspection());
@@ -121,7 +138,25 @@ describe('UX-01 exact-package native window-chrome preparation', () => {
       minimize: { x: 39, y: 18 },
       zoom: { x: 59, y: 18 },
     });
-    expect(assertUx01WindowSizeMatchesRenderer(parsed.windows[0], { x: -500, y: 900, width: 1_520, height: 940 })).toBe(true);
+    const relation = deriveUx01DecoratedFrameRelation(parsed.windows[0], rendererMeasurement());
+    expect(relation).toMatchObject({
+      model: 'dynamic-contained-quartz-visible-frame',
+      windowId: 200,
+      nativeBounds: { x: 203, y: 32, width: 1_514, height: 936 },
+      rendererOuter: { x: 200, y: 30, width: 1_520, height: 940 },
+      insets: { left: 3, top: 2, right: 3, bottom: 2 },
+      mappingUncertainty: { x: 2, y: 2, source: 'exact-driver-current-bounds-reinspection' },
+    });
+    expect(mapUx01FramePointToQuartzLocal(relation, centers.close)).toEqual({ x: 16, y: 16 });
+    expect(mapUx01RendererHitTargetToQuartzLocal(relation, {
+      region: 'no-drag',
+      point: { x: 1_400, y: 28 },
+      safeRect: { x: 1_396, y: 24, width: 8, height: 8 },
+    })).toMatchObject({
+      region: 'no-drag',
+      point: { x: 1_397, y: 26 },
+      rendererPoint: { x: 1_400, y: 28 },
+    });
     expect(assertUx01WindowInsideWorkArea({
       outer: { x: 30, y: 40, width: 1_520, height: 940 },
       screen: { availLeft: 0, availTop: 0, availWidth: 1_920, availHeight: 1_080 },
@@ -134,7 +169,7 @@ describe('UX-01 exact-package native window-chrome preparation', () => {
     });
   });
 
-  it('rejects ambiguous windows, malformed metrics/actions, and renderer/native size drift', () => {
+  it('rejects ambiguous windows, malformed metrics/actions, and unsafe decorated-frame mappings', () => {
     expect(() => parseUx01WindowDriverPreflight({ version: 1, postEventAccess: 'yes' })).toThrow(/preflight contract/);
     expect(() => parseUx01WindowDriverInspection(inspection({ windows: [inspection().windows[0], { ...inspection().windows[0], windowId: 201 }] }))).toThrow(/ambiguous/);
     expect(() => parseUx01WindowDriverInspection(inspection({ buttonMetrics: { ...inspection().buttonMetrics, zoom: { offsetX: 100, width: 14, height: 14 } } }))).toThrow(/zoom button offset/);
@@ -144,47 +179,69 @@ describe('UX-01 exact-package native window-chrome preparation', () => {
     expect(() => parseUx01WindowDriverAction({ version: 1, action: 'click', posted: false, pid: 100, windowId: 200 })).toThrow(/did not confirm/);
     expect(() => parseUx01WindowDriverAction({ version: 1, action: 'fullscreen-click', posted: true, pid: 100, windowId: 200 })).toThrow(/did not confirm/);
     const parsed = parseUx01WindowDriverInspection(inspection());
-    expect(() => assertUx01WindowSizeMatchesRenderer(parsed.windows[0], { x: 30, y: 40, width: 1_525, height: 940 })).toThrow(/native width/);
-    expect(() => assertUx01WindowSizeMatchesRenderer(parsed.windows[0], { x: 30, y: 40, width: 1_520, height: 940 }, 20)).toThrow(/tolerance/);
+    expect(() => deriveUx01DecoratedFrameRelation(parsed.windows[0], rendererMeasurement({
+      content: { width: 1_520, height: 940, devicePixelRatio: 2 },
+    }))).toThrow(/DPR-1/);
+    expect(() => deriveUx01DecoratedFrameRelation(parsed.windows[0], rendererMeasurement({
+      screen: { width: 1_920, height: 1_080, availLeft: 1_920, availTop: 30, availWidth: 1_920, availHeight: 960 },
+    }))).toThrow(/main-display/);
+    expect(() => deriveUx01DecoratedFrameRelation(parsed.windows[0], rendererMeasurement({
+      content: { width: 1_519, height: 940, devicePixelRatio: 1 },
+    }))).toThrow(/viewport does not cover/);
+    expect(() => deriveUx01DecoratedFrameRelation(parsed.windows[0], rendererMeasurement({
+      layout: {
+        root: { clientWidth: 1_520, clientHeight: 940, scrollWidth: 1_521, scrollHeight: 940 },
+        body: { clientWidth: 1_520, clientHeight: 940, scrollWidth: 1_520, scrollHeight: 940 },
+      },
+    }))).toThrow(/cannot safely anchor/);
+    expect(() => deriveUx01DecoratedFrameRelation(
+      { ...parsed.windows[0], bounds: { x: 196, y: 30, width: 1_514, height: 936 } },
+      rendererMeasurement(),
+    )).toThrow(/not contained/);
+    const relation = deriveUx01DecoratedFrameRelation(parsed.windows[0], rendererMeasurement());
+    expect(() => mapUx01RendererHitTargetToQuartzLocal(relation, {
+      region: 'drag', point: { x: 100, y: 28 }, safeRect: { x: 99, y: 27, width: 2, height: 2 },
+    })).toThrow(/hit-target neighborhood/);
+    expect(() => mapUx01FramePointToQuartzLocal(relation, { x: 3, y: 2 })).toThrow(/mapped-action-neighborhood/);
+    expect(() => mapUx01FramePointToQuartzLocal({
+      ...relation,
+      insets: { ...relation.insets, left: 4 },
+    }, { x: 100, y: 28 })).toThrow(/internally inconsistent/);
     expect(() => assertUx01WindowInsideWorkArea({
       outer: { x: 30, y: 40, width: 1_900, height: 1_050 },
       screen: { availLeft: 0, availTop: 0, availWidth: 1_920, availHeight: 1_080 },
     })).toThrow(/outside the renderer-reported work area/);
   });
 
-  it('keeps Quartz and Blink origins raw while comparing only size across sources', () => {
+  it('keeps raw Quartz/Blink measurements while deriving a contained visible-frame relation instead of equality', () => {
     const parsed = parseUx01WindowDriverInspection(inspection());
-    const renderer = {
-      location: 'aidraw://app/index.html',
-      content: { width: 1_520, height: 912, devicePixelRatio: 2 },
-      outer: { x: -640, y: 26, width: 1_520, height: 940 },
-      screen: { width: 1_920, height: 1_080, availLeft: 0, availTop: 25, availWidth: 1_920, availHeight: 1_055 },
-      layout: { root: { clientWidth: 1_520 }, body: { clientWidth: 1_520 } },
-    };
+    const renderer = rendererMeasurement();
     const diagnostics = createUx01WindowGeometryDiagnostics(parsed, renderer);
     expect(diagnostics).toEqual({
       coordinateModel: {
         native: UX01_WINDOW_COORDINATE_SPACES.native,
         renderer: UX01_WINDOW_COORDINATE_SPACES.renderer,
-        crossSourceComparable: ['width', 'height'],
-        absoluteOriginsComparable: false,
+        sharedBasis: 'electron-43-primary-screen-top-left-at-dpr-1',
+        directBoundsEquality: false,
+        dynamicDecoratedFrameRelationRequired: true,
       },
       native: parsed,
       renderer,
     });
-    expect(diagnostics.native.windows[0].bounds.x).toBe(30);
-    expect(diagnostics.renderer.outer.x).toBe(-640);
-    expect(assertUx01WindowSizeMatchesRenderer(diagnostics.native.windows[0], diagnostics.renderer.outer)).toBe(true);
+    expect(diagnostics.native.windows[0].bounds).toEqual({ x: 203, y: 32, width: 1_514, height: 936 });
+    expect(diagnostics.renderer.outer).toEqual({ x: 200, y: 30, width: 1_520, height: 940 });
+    expect(deriveUx01DecoratedFrameRelation(diagnostics.native.windows[0], renderer).insets)
+      .toEqual({ left: 3, top: 2, right: 3, bottom: 2 });
   });
 
   it('proves no-drag and drag movement independently in Quartz and Blink coordinate spaces', () => {
     const nativeBefore = inspection().windows[0];
-    const rendererBefore = { x: -640, y: 26, width: 1_520, height: 940 };
+    const rendererBefore = { x: 200, y: 30, width: 1_520, height: 940 };
     expect(assertUx01WindowStationaryWithinCoordinateSpaces({
       nativeBefore,
-      nativeAfter: { ...nativeBefore, bounds: { x: 30, y: 40, width: 1_520, height: 940 } },
+      nativeAfter: { ...nativeBefore, bounds: { x: 203, y: 32, width: 1_514, height: 936 } },
       rendererBefore,
-      rendererAfter: { x: -640, y: 26, width: 1_520, height: 940 },
+      rendererAfter: { x: 200, y: 30, width: 1_520, height: 940 },
     })).toEqual({
       native: { x: 0, y: 0, width: 0, height: 0 },
       renderer: { x: 0, y: 0, width: 0, height: 0 },
@@ -192,9 +249,9 @@ describe('UX-01 exact-package native window-chrome preparation', () => {
 
     expect(assertUx01WindowMovedWithinCoordinateSpaces({
       nativeBefore,
-      nativeAfter: { ...nativeBefore, bounds: { x: 110, y: 40, width: 1_520, height: 940 } },
+      nativeAfter: { ...nativeBefore, bounds: { x: 283, y: 32, width: 1_514, height: 936 } },
       rendererBefore,
-      rendererAfter: { x: -560, y: 26, width: 1_520, height: 940 },
+      rendererAfter: { x: 280, y: 30, width: 1_520, height: 940 },
       requestedDelta: { x: 80, y: 0 },
     })).toEqual({
       native: { x: 80, y: 0, width: 0, height: 0 },
@@ -203,30 +260,30 @@ describe('UX-01 exact-package native window-chrome preparation', () => {
 
     expect(() => assertUx01WindowMovedWithinCoordinateSpaces({
       nativeBefore,
-      nativeAfter: { ...nativeBefore, bounds: { x: 30, y: 40, width: 1_520, height: 940 } },
+      nativeAfter: { ...nativeBefore, bounds: { x: 203, y: 32, width: 1_514, height: 936 } },
       rendererBefore,
-      rendererAfter: { x: -560, y: 26, width: 1_520, height: 940 },
+      rendererAfter: { x: 280, y: 30, width: 1_520, height: 940 },
       requestedDelta: { x: 80, y: 0 },
     })).toThrow(/native coordinate space/);
     expect(() => assertUx01WindowMovedWithinCoordinateSpaces({
       nativeBefore,
-      nativeAfter: { ...nativeBefore, bounds: { x: 110, y: 40, width: 1_520, height: 940 } },
+      nativeAfter: { ...nativeBefore, bounds: { x: 283, y: 32, width: 1_514, height: 936 } },
       rendererBefore,
-      rendererAfter: { x: -720, y: 26, width: 1_520, height: 940 },
+      rendererAfter: { x: 120, y: 30, width: 1_520, height: 940 },
       requestedDelta: { x: 80, y: 0 },
     })).toThrow(/renderer coordinate space/);
     expect(() => assertUx01WindowMovedWithinCoordinateSpaces({
       nativeBefore,
-      nativeAfter: { ...nativeBefore, bounds: { x: 115, y: 40, width: 1_520, height: 940 } },
+      nativeAfter: { ...nativeBefore, bounds: { x: 288, y: 32, width: 1_514, height: 936 } },
       rendererBefore,
-      rendererAfter: { x: -555, y: 26, width: 1_520, height: 940 },
+      rendererAfter: { x: 285, y: 30, width: 1_520, height: 940 },
       requestedDelta: { x: 80, y: 0 },
     })).toThrow(/native coordinate space/);
     expect(() => assertUx01WindowMovedWithinCoordinateSpaces({
       nativeBefore,
-      nativeAfter: { ...nativeBefore, bounds: { x: 110, y: 40, width: 1_525, height: 940 } },
+      nativeAfter: { ...nativeBefore, bounds: { x: 283, y: 32, width: 1_519, height: 936 } },
       rendererBefore,
-      rendererAfter: { x: -560, y: 26, width: 1_520, height: 940 },
+      rendererAfter: { x: 280, y: 30, width: 1_520, height: 940 },
       requestedDelta: { x: 80, y: 0 },
     })).toThrow(/resized the window in native coordinate space/);
     expect(() => assertUx01WindowStationaryWithinCoordinateSpaces({
@@ -235,6 +292,20 @@ describe('UX-01 exact-package native window-chrome preparation', () => {
       rendererBefore,
       rendererAfter: rendererBefore,
     })).toThrow(/window identity changed/);
+
+    const beforeRelation = deriveUx01DecoratedFrameRelation(nativeBefore, rendererMeasurement());
+    const afterRelation = deriveUx01DecoratedFrameRelation(
+      { ...nativeBefore, bounds: { x: 283, y: 32, width: 1_514, height: 936 } },
+      rendererMeasurement({ outer: { x: 280, y: 30, width: 1_520, height: 940 } }),
+    );
+    expect(assertUx01DecoratedFrameRelationStable(beforeRelation, afterRelation)).toEqual({
+      left: 0, top: 0, right: 0, bottom: 0,
+    });
+    const driftedRelation = deriveUx01DecoratedFrameRelation(
+      { ...nativeBefore, bounds: { x: 286, y: 32, width: 1_514, height: 936 } },
+      rendererMeasurement({ outer: { x: 280, y: 30, width: 1_520, height: 940 } }),
+    );
+    expect(() => assertUx01DecoratedFrameRelationStable(beforeRelation, driftedRelation)).toThrow(/left inset changed/);
   });
 
   it('rejects ambient reporter outputs that could retain local credentials', () => {
@@ -338,19 +409,26 @@ describe('UX-01 exact-package native window-chrome preparation', () => {
     expect(spec).toContain("signalOwner(configured.profile, '--show')");
     expect(spec).toContain("signalOwner(profile, '--quit-engine')");
     expect(spec).toContain("getPropertyValue('-webkit-app-region')");
-    expect(spec).toContain("expect(targets.topbarRegion).toBe('drag')");
-    expect(spec).toContain("expect(targets.buttonRegion).toBe('no-drag')");
+    expect(spec).toContain("expect(initialTargets.topbarRegion).toBe('drag')");
+    expect(spec).toContain("expect(initialTargets.buttonRegion).toBe('no-drag')");
+    expect(spec).toContain('verifyRect(interactiveSafeRect');
+    expect(spec).toContain("verifyRect(safeRect");
+    expect(spec).toContain('const step = 0.5');
     expect(spec).toContain('initialInspection.postEventAccess');
     expect(spec).toContain("'option-click'");
     expect(spec).toContain('assertUx01WindowInsideWorkArea(zoomedMeasurement)');
     expect(spec).toContain("action: 'native green-button Option-click'");
     expect(spec).not.toContain("stage: 'native-zoom-toggle'");
-    expect(spec).toContain('assertUx01WindowSizeMatchesRenderer');
+    expect(spec).toContain('deriveUx01DecoratedFrameRelation');
+    expect(spec).toContain('mapUx01FramePointToQuartzLocal');
+    expect(spec).toContain('mapUx01RendererHitTargetToQuartzLocal');
+    expect(spec).toContain('assertUx01DecoratedFrameRelationStable');
+    expect(spec).not.toContain('assertUx01WindowSizeMatchesRenderer');
     expect(spec).toContain('assertUx01WindowMovedWithinCoordinateSpaces');
     expect(spec).toContain('assertUx01WindowStationaryWithinCoordinateSpaces');
     expect(spec).toContain('createUx01WindowGeometryDiagnostics');
     expect(spec).not.toContain('assertUx01WindowBoundsMatchRenderer');
-    expect(spec.indexOf('geometry: initialGeometry')).toBeLessThan(spec.indexOf('assertUx01WindowSizeMatchesRenderer(initialWindow'));
+    expect(spec.indexOf('geometry: initialGeometry')).toBeLessThan(spec.indexOf('deriveUx01DecoratedFrameRelation(initialWindow'));
     expect(spec).not.toContain('newCDPSession');
     expect(spec).not.toContain('Browser.getWindowForTarget');
     expect(spec).not.toContain('Browser.setWindowBounds');
@@ -403,7 +481,7 @@ describe('UX-01 exact-package native window-chrome preparation', () => {
     for (const path of roots) expect(await access(path).then(() => true, () => false), `${path} must remain absent`).toBe(false);
   });
 
-  it('keeps UX-01 Working/P0 and records consumed r1 without promoting a native claim', async () => {
+  it('keeps UX-01 Working/P0 and records consumed r1/r2 without promoting a native claim', async () => {
     const [changelog, tracker, testing] = await Promise.all([
       readFile(resolve('CHANGELOG.md'), 'utf8'),
       readFile(resolve('docs/FEATURE_TRACKER.md'), 'utf8'),
@@ -415,8 +493,11 @@ describe('UX-01 exact-package native window-chrome preparation', () => {
     expect(ux01).toMatchObject({ status: '🟢 Working', priority: 'P0' });
     const truth = ux01?.truth ?? '';
     for (const claim of [
-      'failed **1/1 in 3.2 seconds** before native input',
-      'incorrectly compared Quartz absolute `x` with Blink `screenX`',
+      'Fresh r2 `20260814t102354z-f7e6d0c-r2`',
+      'failed **1/1 in 2.6 seconds** before input',
+      'Quartz `203,32 1514×936`',
+      'Blink `200,30 1520×940`',
+      'dynamic decorated-frame containment relation',
       'exact-PID/current-native-bounds action admission',
       'Accessibility API',
       'separate native authority',
@@ -425,17 +506,22 @@ describe('UX-01 exact-package native window-chrome preparation', () => {
     expect(truth).toContain('passed **1/1 in 5.5 seconds**');
     expect(truth).not.toContain('native traffic-light/top-bar PASS');
 
-    const section = testing.slice(testing.indexOf('### UX-01 native window-chrome preparation, consumed r1 coordinate-controller failure, and corrected source model'));
+    const section = testing.slice(testing.indexOf('### UX-01 native window-chrome preparation, consumed r1/r2 coordinate-controller failures, and corrected source model'));
     expect(section).toContain(UX01_WINDOW_CHROME_SCENARIO);
     expect(section).toContain('R1 `20260814t092808z-7ff773c-r1`');
-    expect(section).toContain('no CoreGraphics input was posted');
+    expect(section).toContain('Fresh r2 `20260814t102354z-f7e6d0c-r2`');
+    expect(section).toContain('Quartz reported `203,32 1514×936`');
+    expect(section).toContain('trusted Blink reported `200,30 1520×940`');
+    expect(section).toContain('No CoreGraphics input was posted');
     expect(section).toContain('not product traffic-light/drag behavior, privacy completion');
-    expect(section).toContain('`kCGWindowBounds` is in Quartz screen space');
-    expect(section).toContain('root-window rectangle in CSS pixels');
-    expect(section).toContain('absolute origins are therefore retained as distinct raw, labeled measurements');
-    expect(section).toContain('Cross-source comparison is limited to outer width and height');
+    expect(section).toContain('Apple documents `kCGWindowBounds` in Quartz screen space');
+    expect(section).toContain('`NativeWindowMac::GetBounds` reads `NSWindow.frame`');
+    expect(section).toContain("returns the embedder's `RootWindowRect`");
+    expect(section).toContain('invalidate both direct origin and size equality');
+    expect(section).toContain('dynamically requires the on-screen Quartz visible rectangle');
+    expect(section).toContain('complete 0.5-CSS-px hit-test neighborhood');
     expect(section).toContain('stationary independently in Quartz and Blink');
-    expect(section).toContain('before its assertions');
+    expect(section).toContain('Raw native and renderer records are retained before every assertion');
     expect(section).toContain('before the test can create its profile');
     expect(section).toContain('fails closed unless it returns true');
     expect(section).toContain('rechecks that permission immediately before every exact-PID action');
@@ -445,9 +531,10 @@ describe('UX-01 exact-package native window-chrome preparation', () => {
     expect(section).toContain('instead of entering fullscreen');
     expect(section).toContain('no Accessibility API');
     expect(changelog).toContain('Prepare a separate one-shot UX-01 native window-chrome acceptance');
-    expect(changelog).toContain('failed in 3.2 seconds');
-    expect(changelog).toContain('incorrectly equated Quartz-native absolute `x` with Blink `screenX`');
-    expect(changelog).toContain('R1 is an immutable controller failure');
+    expect(changelog).toContain('R2 then failed **1/1 in 2.6 seconds**');
+    expect(changelog).toContain('1514×936');
+    expect(changelog).toContain("dynamically requires Quartz's visible window-server rectangle");
+    expect(changelog).toContain('Both runs cleaned up gracefully with zero survivors and are immutable, non-reusable controller failures');
     expect(changelog).toContain('before the packaged app launches or its profile is created');
     expect(changelog).not.toContain('This checkpoint is source/headless preparation only: it has not been packaged or executed');
     expect(truth).not.toContain('prepared but has not been packaged or executed');

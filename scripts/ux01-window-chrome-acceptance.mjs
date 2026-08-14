@@ -13,9 +13,10 @@ export const UX01_WINDOW_CHROME_PROFILE_PREFIX = 'aidraw-e2e-ux01-window-chrome-
 export const UX01_WINDOW_CHROME_FAILURE_PREFIX = 'ux01-window-chrome-native-';
 export const UX01_WINDOW_CHROME_DRIVER_FILE = 'macos-window-chrome-driver';
 export const UX01_WINDOW_COORDINATE_SPACES = Object.freeze({
-  native: 'quartz-main-display-upper-left',
-  renderer: 'blink-root-window-css-pixels',
+  native: 'quartz-visible-window-main-display-upper-left',
+  renderer: 'blink-root-window-css-pixels-from-electron-nswindow-frame',
 });
+export const UX01_WINDOW_ACTION_MAPPING_UNCERTAINTY = 2;
 export const UX01_WINDOW_CHROME_UNSAFE_REPORT_ENVIRONMENTS = UX01_UNSAFE_REPORT_ENVIRONMENTS;
 export const UX01_WINDOW_CHROME_FILES = Object.freeze({
   evidence: 'ux01-window-chrome-evidence.json',
@@ -259,24 +260,232 @@ export function createUx01WindowGeometryDiagnostics(nativeInspection, rendererMe
     coordinateModel: {
       native: UX01_WINDOW_COORDINATE_SPACES.native,
       renderer: UX01_WINDOW_COORDINATE_SPACES.renderer,
-      crossSourceComparable: ['width', 'height'],
-      absoluteOriginsComparable: false,
+      sharedBasis: 'electron-43-primary-screen-top-left-at-dpr-1',
+      directBoundsEquality: false,
+      dynamicDecoratedFrameRelationRequired: true,
     },
     native: nativeInspection,
     renderer: { ...rendererMeasurement, outer: parsedBounds(rendererMeasurement.outer) },
   };
 }
 
-export function assertUx01WindowSizeMatchesRenderer(windowRecord, rendererOuter, tolerance = 2) {
-  const boundedTolerance = boundedWindowTolerance(tolerance);
-  const nativeBounds = parsedWindowRecord(windowRecord, 'current').bounds;
-  const rendererBounds = parsedBounds(rendererOuter);
+function parsedRendererFrameMeasurement(measurement) {
+  if (!measurement || typeof measurement !== 'object' || Array.isArray(measurement)) {
+    throw new Error('The UX-01 decorated-frame relation requires one trusted renderer measurement.');
+  }
+  const outer = parsedBounds(measurement.outer);
+  const content = measurement.content;
+  const screen = measurement.screen;
+  const layout = measurement.layout;
+  if (!content || typeof content !== 'object' || Array.isArray(content)
+    || !screen || typeof screen !== 'object' || Array.isArray(screen)
+    || !layout || typeof layout !== 'object' || Array.isArray(layout)) {
+    throw new Error('The UX-01 decorated-frame relation requires renderer content, screen, and layout evidence.');
+  }
+  const parsedContent = {
+    width: boundedNumber(content.width, 'renderer content width', { integer: true, minimum: 1, maximum: 32_768 }),
+    height: boundedNumber(content.height, 'renderer content height', { integer: true, minimum: 1, maximum: 32_768 }),
+    devicePixelRatio: boundedNumber(content.devicePixelRatio, 'renderer device-pixel ratio', { minimum: 0.25, maximum: 8 }),
+  };
+  const parsedScreen = {
+    width: boundedNumber(screen.width, 'renderer screen width', { integer: true, minimum: 1, maximum: 32_768 }),
+    height: boundedNumber(screen.height, 'renderer screen height', { integer: true, minimum: 1, maximum: 32_768 }),
+    availLeft: boundedNumber(screen.availLeft, 'renderer available-screen left', { integer: true }),
+    availTop: boundedNumber(screen.availTop, 'renderer available-screen top', { integer: true }),
+    availWidth: boundedNumber(screen.availWidth, 'renderer available-screen width', { integer: true, minimum: 1, maximum: 32_768 }),
+    availHeight: boundedNumber(screen.availHeight, 'renderer available-screen height', { integer: true, minimum: 1, maximum: 32_768 }),
+  };
+  const parseLayoutBox = (value, label) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error(`The UX-01 decorated-frame relation requires ${label} layout evidence.`);
+    }
+    return {
+      clientWidth: boundedNumber(value.clientWidth, `${label} client width`, { integer: true, minimum: 1, maximum: 32_768 }),
+      clientHeight: boundedNumber(value.clientHeight, `${label} client height`, { integer: true, minimum: 1, maximum: 32_768 }),
+      scrollWidth: boundedNumber(value.scrollWidth, `${label} scroll width`, { integer: true, minimum: 1, maximum: 32_768 }),
+      scrollHeight: boundedNumber(value.scrollHeight, `${label} scroll height`, { integer: true, minimum: 1, maximum: 32_768 }),
+    };
+  };
+  return {
+    outer,
+    content: parsedContent,
+    screen: parsedScreen,
+    layout: {
+      root: parseLayoutBox(layout.root, 'renderer root'),
+      body: parseLayoutBox(layout.body, 'renderer body'),
+    },
+  };
+}
+
+function assertRectInside(inside, outside, label) {
+  if (inside.x < outside.x || inside.y < outside.y
+    || inside.x + inside.width > outside.x + outside.width
+    || inside.y + inside.height > outside.y + outside.height) {
+    throw new Error(`The UX-01 ${label} rectangle is not contained by its declared coordinate-space boundary.`);
+  }
+}
+
+// Pinned source contract: Electron 43.4.0 NativeWindowMac::GetBounds reads
+// NSWindow.frame and flips it against the primary screen; Chromium 150 exposes
+// that root-window rect through screenX/screenY/outerWidth/outerHeight. Apple
+// documents kCGWindowBounds in upper-left-main-display screen space but does
+// not promise that its visible window-server rectangle equals NSWindow.frame.
+export function deriveUx01DecoratedFrameRelation(windowRecord, rendererMeasurement) {
+  const nativeWindow = parsedWindowRecord(windowRecord, 'current');
+  if (!nativeWindow.onScreen) throw new Error('The UX-01 decorated-frame relation requires one on-screen native window.');
+  const renderer = parsedRendererFrameMeasurement(rendererMeasurement);
+  if (renderer.content.devicePixelRatio !== 1) {
+    throw new Error('The UX-01 decorated-frame relation is limited to the declared DPR-1 acceptance host.');
+  }
+  if (renderer.screen.availLeft !== 0 || renderer.screen.availTop < 0
+    || renderer.screen.availWidth > renderer.screen.width
+    || renderer.screen.availTop + renderer.screen.availHeight > renderer.screen.height) {
+    throw new Error('The UX-01 decorated-frame relation is limited to the declared main-display screen basis.');
+  }
   for (const key of ['width', 'height']) {
-    if (Math.abs(nativeBounds[key] - rendererBounds[key]) > boundedTolerance) {
-      throw new Error(`The exact-owner native ${key} does not match the trusted renderer outer size.`);
+    if (renderer.content[key] !== renderer.outer[key]) {
+      throw new Error('The UX-01 renderer viewport does not cover the nominal root-window frame.');
     }
   }
-  return true;
+  for (const box of Object.values(renderer.layout)) {
+    if (box.clientWidth !== renderer.content.width || box.scrollWidth !== renderer.content.width
+      || box.clientHeight !== renderer.content.height || box.scrollHeight !== renderer.content.height) {
+      throw new Error('The UX-01 renderer root/body geometry cannot safely anchor a frame-local input target.');
+    }
+  }
+  const mainDisplay = { x: 0, y: 0, width: renderer.screen.width, height: renderer.screen.height };
+  assertRectInside(renderer.outer, mainDisplay, 'renderer nominal-frame');
+  assertRectInside(nativeWindow.bounds, mainDisplay, 'Quartz visible-window');
+  assertRectInside(nativeWindow.bounds, renderer.outer, 'Quartz-visible-inside-nominal-frame');
+  const insets = {
+    left: nativeWindow.bounds.x - renderer.outer.x,
+    top: nativeWindow.bounds.y - renderer.outer.y,
+    right: (renderer.outer.x + renderer.outer.width) - (nativeWindow.bounds.x + nativeWindow.bounds.width),
+    bottom: (renderer.outer.y + renderer.outer.height) - (nativeWindow.bounds.y + nativeWindow.bounds.height),
+  };
+  if (Object.values(insets).some((value) => !Number.isInteger(value) || value < 0)) {
+    throw new Error('The UX-01 decorated-frame relation has a fractional or negative visible-frame inset.');
+  }
+  return {
+    model: 'dynamic-contained-quartz-visible-frame',
+    windowId: nativeWindow.windowId,
+    nativeBounds: nativeWindow.bounds,
+    rendererOuter: renderer.outer,
+    rendererContent: renderer.content,
+    mainDisplay,
+    insets,
+    mappingUncertainty: {
+      x: UX01_WINDOW_ACTION_MAPPING_UNCERTAINTY,
+      y: UX01_WINDOW_ACTION_MAPPING_UNCERTAINTY,
+      source: 'exact-driver-current-bounds-reinspection',
+    },
+  };
+}
+
+function parsedFrameRelation(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || value.model !== 'dynamic-contained-quartz-visible-frame') {
+    throw new Error('The UX-01 action has no validated decorated-frame relation.');
+  }
+  const relation = {
+    ...value,
+    windowId: boundedNumber(value.windowId, 'relation window ID', { integer: true, minimum: 1, maximum: 4_294_967_295 }),
+    nativeBounds: parsedBounds(value.nativeBounds),
+    rendererOuter: parsedBounds(value.rendererOuter),
+    insets: {
+      left: boundedNumber(value.insets?.left, 'left visible-frame inset', { integer: true, minimum: 0, maximum: 32_768 }),
+      top: boundedNumber(value.insets?.top, 'top visible-frame inset', { integer: true, minimum: 0, maximum: 32_768 }),
+      right: boundedNumber(value.insets?.right, 'right visible-frame inset', { integer: true, minimum: 0, maximum: 32_768 }),
+      bottom: boundedNumber(value.insets?.bottom, 'bottom visible-frame inset', { integer: true, minimum: 0, maximum: 32_768 }),
+    },
+    mappingUncertainty: {
+      x: boundedWindowTolerance(value.mappingUncertainty?.x),
+      y: boundedWindowTolerance(value.mappingUncertainty?.y),
+    },
+  };
+  const expectedInsets = {
+    left: relation.nativeBounds.x - relation.rendererOuter.x,
+    top: relation.nativeBounds.y - relation.rendererOuter.y,
+    right: (relation.rendererOuter.x + relation.rendererOuter.width)
+      - (relation.nativeBounds.x + relation.nativeBounds.width),
+    bottom: (relation.rendererOuter.y + relation.rendererOuter.height)
+      - (relation.nativeBounds.y + relation.nativeBounds.height),
+  };
+  for (const key of ['left', 'top', 'right', 'bottom']) {
+    if (relation.insets[key] !== expectedInsets[key]) {
+      throw new Error('The UX-01 decorated-frame relation is internally inconsistent.');
+    }
+  }
+  return relation;
+}
+
+function parsedPoint(value, label) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`The UX-01 ${label} point is missing.`);
+  return {
+    x: boundedNumber(value.x, `${label} x`),
+    y: boundedNumber(value.y, `${label} y`),
+  };
+}
+
+function parsedSafeRect(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('The UX-01 renderer target has no complete safe hit-test rectangle.');
+  }
+  return parsedBounds(value);
+}
+
+export function mapUx01FramePointToQuartzLocal(relationValue, pointValue) {
+  const relation = parsedFrameRelation(relationValue);
+  const point = parsedPoint(pointValue, 'nominal-frame');
+  const mapped = { x: point.x - relation.insets.left, y: point.y - relation.insets.top };
+  const uncertaintyRect = {
+    x: mapped.x - relation.mappingUncertainty.x,
+    y: mapped.y - relation.mappingUncertainty.y,
+    width: relation.mappingUncertainty.x * 2,
+    height: relation.mappingUncertainty.y * 2,
+  };
+  assertRectInside(uncertaintyRect, { x: 0, y: 0, width: relation.nativeBounds.width, height: relation.nativeBounds.height }, 'mapped-action-neighborhood');
+  return mapped;
+}
+
+export function mapUx01RendererHitTargetToQuartzLocal(relationValue, targetValue) {
+  const relation = parsedFrameRelation(relationValue);
+  if (!targetValue || typeof targetValue !== 'object' || Array.isArray(targetValue)
+    || !['drag', 'no-drag'].includes(targetValue.region)) {
+    throw new Error('The UX-01 renderer target has no exact drag/no-drag region contract.');
+  }
+  const point = parsedPoint(targetValue.point, 'renderer hit-target');
+  const safeRect = parsedSafeRect(targetValue.safeRect);
+  const requiredNeighborhood = {
+    x: point.x - relation.mappingUncertainty.x,
+    y: point.y - relation.mappingUncertainty.y,
+    width: relation.mappingUncertainty.x * 2,
+    height: relation.mappingUncertainty.y * 2,
+  };
+  assertRectInside(requiredNeighborhood, safeRect, 'renderer hit-target neighborhood');
+  const mapped = mapUx01FramePointToQuartzLocal(relation, point);
+  return {
+    region: targetValue.region,
+    point: mapped,
+    rendererPoint: point,
+    safeRect,
+    mappingUncertainty: relation.mappingUncertainty,
+  };
+}
+
+export function assertUx01DecoratedFrameRelationStable(beforeValue, afterValue, tolerance = 2) {
+  const boundedTolerance = boundedWindowTolerance(tolerance);
+  const before = parsedFrameRelation(beforeValue);
+  const after = parsedFrameRelation(afterValue);
+  if (before.windowId !== after.windowId) throw new Error('The decorated-frame relation changed native window identity.');
+  const delta = {};
+  for (const key of ['left', 'top', 'right', 'bottom']) {
+    delta[key] = after.insets[key] - before.insets[key];
+    if (Math.abs(delta[key]) > boundedTolerance) {
+      throw new Error(`The decorated-frame ${key} inset changed outside the bounded action relation.`);
+    }
+  }
+  return delta;
 }
 
 export function assertUx01WindowStationaryWithinCoordinateSpaces(samples, tolerance = 2) {

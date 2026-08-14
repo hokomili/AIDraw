@@ -14,15 +14,19 @@ import {
   redactUx01FailureText,
 } from '../../scripts/ux01-packaged-acceptance.mjs';
 import {
+  assertUx01DecoratedFrameRelationStable,
   assertUx01WindowInsideWorkArea,
   assertUx01WindowMovedWithinCoordinateSpaces,
-  assertUx01WindowSizeMatchesRenderer,
   assertUx01WindowStationaryWithinCoordinateSpaces,
   createUx01WindowGeometryDiagnostics,
+  deriveUx01DecoratedFrameRelation,
   deriveUx01TrafficLightCenters,
+  mapUx01FramePointToQuartzLocal,
+  mapUx01RendererHitTargetToQuartzLocal,
   parseUx01WindowDriverAction,
   parseUx01WindowDriverInspection,
   resolveUx01WindowChromeAcceptance,
+  UX01_WINDOW_ACTION_MAPPING_UNCERTAINTY,
   UX01_WINDOW_CHROME_SCENARIO,
 } from '../../scripts/ux01-window-chrome-acceptance.mjs';
 import {
@@ -352,10 +356,15 @@ async function waitForWindowInspection(
 async function chromeHitTargets(page: Page): Promise<{
   topbarRegion: string;
   buttonRegion: string;
-  dragPoint: { x: number; y: number };
-  interactivePoint: { x: number; y: number };
+  verificationStep: number;
+  drag: { region: 'drag'; point: { x: number; y: number }; safeRect: { x: number; y: number; width: number; height: number } };
+  interactiveClick: { region: 'no-drag'; point: { x: number; y: number }; safeRect: { x: number; y: number; width: number; height: number } };
+  interactiveGesture: {
+    start: { region: 'no-drag'; point: { x: number; y: number }; safeRect: { x: number; y: number; width: number; height: number } };
+    end: { region: 'no-drag'; point: { x: number; y: number }; safeRect: { x: number; y: number; width: number; height: number } };
+  };
 }> {
-  return page.evaluate((reservedWidth) => {
+  return page.evaluate(({ reservedWidth, uncertainty }) => {
     const topbar = document.querySelector<HTMLElement>('.topbar');
     const brand = document.querySelector<HTMLElement>('.brand');
     const button = document.querySelector<HTMLElement>('button[aria-label="All open documents"]');
@@ -365,23 +374,69 @@ async function chromeHitTargets(page: Page): Promise<{
     const buttonRect = button.getBoundingClientRect();
     const topbarRegion = getComputedStyle(topbar).getPropertyValue('-webkit-app-region').trim();
     const buttonRegion = getComputedStyle(button).getPropertyValue('-webkit-app-region').trim();
+    if (topbarRegion !== 'drag' || buttonRegion !== 'no-drag') {
+      throw new Error('The exact renderer does not expose the declared drag/no-drag region contract.');
+    }
+    const step = 0.5;
+    const interactiveSelector = 'button,input,select,textarea,a,[role="menu"],[role="dialog"]';
+    const verifyRect = (
+      rect: { x: number; y: number; width: number; height: number },
+      predicate: (hit: Element) => boolean,
+      label: string,
+    ) => {
+      if (rect.width <= 0 || rect.height <= 0) throw new Error(`The exact renderer returned an empty ${label} hit-test rectangle.`);
+      for (let y = rect.y; y <= rect.y + rect.height; y += step) {
+        for (let x = rect.x; x <= rect.x + rect.width; x += step) {
+          const hit = document.elementFromPoint(x, y);
+          if (!hit || !predicate(hit)) throw new Error(`The complete ${label} hit-test neighborhood is not safe.`);
+        }
+      }
+    };
+    const pointRect = (left: number, right: number, y: number) => ({
+      x: left - uncertainty,
+      y: y - uncertainty,
+      width: (right - left) + uncertainty * 2,
+      height: uncertainty * 2,
+    });
     const y = topbarRect.top + topbarRect.height / 2;
     let dragPoint: { x: number; y: number } | undefined;
     for (let x = Math.max(brandRect.left + reservedWidth + 4, topbarRect.left + reservedWidth + 4); x < brandRect.right - 4; x += 2) {
-      const hit = document.elementFromPoint(x, y);
-      if (hit && topbar.contains(hit) && !hit.closest('button,input,select,textarea,a,[role="menu"],[role="dialog"]')) {
+      const safeRect = pointRect(x, x, y);
+      try {
+        verifyRect(safeRect, (hit) => topbar.contains(hit) && !hit.closest(interactiveSelector), 'app-region drag');
         dragPoint = { x, y };
         break;
-      }
+      } catch { /* keep searching for a complete non-interactive neighborhood */ }
     }
     if (!dragPoint) throw new Error('The exact renderer has no non-interactive point in its intended drag region.');
+    const interactiveCenter = { x: buttonRect.left + buttonRect.width / 2, y: buttonRect.top + buttonRect.height / 2 };
+    const gestureDistance = Math.min(4, Math.floor((buttonRect.width - (uncertainty * 2) - 4) / 4));
+    if (gestureDistance < 2) throw new Error('The exact no-drag control has no bounded in-control gesture corridor.');
+    const gestureStart = { x: interactiveCenter.x - gestureDistance, y: interactiveCenter.y };
+    const gestureEnd = { x: interactiveCenter.x + gestureDistance, y: interactiveCenter.y };
+    const interactiveSafeRect = pointRect(gestureStart.x, gestureEnd.x, interactiveCenter.y);
+    if (interactiveSafeRect.x < buttonRect.left || interactiveSafeRect.y < buttonRect.top
+      || interactiveSafeRect.x + interactiveSafeRect.width > buttonRect.right
+      || interactiveSafeRect.y + interactiveSafeRect.height > buttonRect.bottom) {
+      throw new Error('The no-drag action neighborhood does not fit inside its named control.');
+    }
+    verifyRect(interactiveSafeRect, (hit) => hit === button || hit.closest('button') === button, 'interactive no-drag');
+    const dragSafeRect = pointRect(dragPoint.x, dragPoint.x, dragPoint.y);
     return {
       topbarRegion,
       buttonRegion,
-      dragPoint,
-      interactivePoint: { x: buttonRect.left + buttonRect.width / 2, y: buttonRect.top + buttonRect.height / 2 },
+      verificationStep: step,
+      drag: { region: 'drag', point: dragPoint, safeRect: dragSafeRect },
+      interactiveClick: { region: 'no-drag', point: interactiveCenter, safeRect: interactiveSafeRect },
+      interactiveGesture: {
+        start: { region: 'no-drag', point: gestureStart, safeRect: interactiveSafeRect },
+        end: { region: 'no-drag', point: gestureEnd, safeRect: interactiveSafeRect },
+      },
     };
-  }, MACOS_EDITOR_WINDOW_CHROME.trafficLightReservedWidth);
+  }, {
+    reservedWidth: MACOS_EDITOR_WINDOW_CHROME.trafficLightReservedWidth,
+    uncertainty: UX01_WINDOW_ACTION_MAPPING_UNCERTAINTY,
+  });
 }
 
 function dragDelta(measurement: NativeMeasurement): { x: number; y: number } {
@@ -463,51 +518,64 @@ test(UX01_WINDOW_CHROME_SCENARIO, async ({ browserName }, testInfo) => {
       throw new Error('The exact UX-01 owner does not expose one on-screen native editor window.');
     }
     const initialWindow = initialInspection.windows[0];
-    assertUx01WindowSizeMatchesRenderer(initialWindow, initialMeasurement.outer);
-    const trafficLights = deriveUx01TrafficLightCenters(initialInspection.buttonMetrics, {
+    const initialRelation = deriveUx01DecoratedFrameRelation(initialWindow, initialMeasurement);
+    failureDiagnostics = { ...failureDiagnostics, relation: initialRelation };
+    const nominalTrafficLights = deriveUx01TrafficLightCenters(initialInspection.buttonMetrics, {
       trafficLightPosition: MACOS_EDITOR_WINDOW_CHROME.trafficLightPosition,
       trafficLightReservedWidth: MACOS_EDITOR_WINDOW_CHROME.trafficLightReservedWidth,
       topbarHeight: EDITOR_DENSITY.topbarHeight,
     });
-    const targets = await chromeHitTargets(page);
-    expect(targets.topbarRegion).toBe('drag');
-    expect(targets.buttonRegion).toBe('no-drag');
+    const initialTargets = await chromeHitTargets(page);
+    expect(initialTargets.topbarRegion).toBe('drag');
+    expect(initialTargets.buttonRegion).toBe('no-drag');
+    expect(initialTargets.verificationStep).toBe(0.5);
+    const initialInteractiveClick = mapUx01RendererHitTargetToQuartzLocal(initialRelation, initialTargets.interactiveClick);
 
-    failureDiagnostics = { stage: 'interactive-no-drag-click', ownerPid, processShapeBefore, before: initialGeometry };
-    await postClick(configured.driverExecutable, ownerPid, initialWindow, targets.interactivePoint);
+    failureDiagnostics = {
+      stage: 'interactive-no-drag-click', ownerPid, processShapeBefore,
+      before: initialGeometry, relation: initialRelation, target: initialInteractiveClick,
+    };
+    await postClick(configured.driverExecutable, ownerPid, initialWindow, initialInteractiveClick.point);
     await expect(page.getByRole('menu', { name: 'All open documents' })).toBeVisible();
     const afterInteractiveClick = await inspectOwner(configured.driverExecutable, ownerPid);
     const afterInteractiveClickMeasurement = await nativeMeasurement(page);
     const afterInteractiveClickGeometry = createUx01WindowGeometryDiagnostics(afterInteractiveClick, afterInteractiveClickMeasurement);
     failureDiagnostics = { ...failureDiagnostics, after: afterInteractiveClickGeometry };
     if (afterInteractiveClick.windows.length !== 1) throw new Error('The no-drag click changed the exact native window count.');
-    assertUx01WindowSizeMatchesRenderer(afterInteractiveClick.windows[0], afterInteractiveClickMeasurement.outer);
+    const afterInteractiveClickRelation = deriveUx01DecoratedFrameRelation(afterInteractiveClick.windows[0], afterInteractiveClickMeasurement);
+    failureDiagnostics = { ...failureDiagnostics, afterRelation: afterInteractiveClickRelation };
     const noDragClickDeltas = assertUx01WindowStationaryWithinCoordinateSpaces({
       nativeBefore: initialWindow,
       nativeAfter: afterInteractiveClick.windows[0],
       rendererBefore: initialMeasurement.outer,
       rendererAfter: afterInteractiveClickMeasurement.outer,
     });
+    const noDragClickRelationDeltas = assertUx01DecoratedFrameRelationStable(initialRelation, afterInteractiveClickRelation);
     await page.keyboard.press('Escape');
 
-    failureDiagnostics = { stage: 'interactive-no-drag-gesture', ownerPid, processShapeBefore, before: afterInteractiveClickGeometry };
-    const noDragEnd = {
-      x: targets.interactivePoint.x > afterInteractiveClick.windows[0].bounds.width - 64 ? targets.interactivePoint.x - 48 : targets.interactivePoint.x + 48,
-      y: targets.interactivePoint.y,
+    const noDragTargets = await chromeHitTargets(page);
+    const noDragStart = mapUx01RendererHitTargetToQuartzLocal(afterInteractiveClickRelation, noDragTargets.interactiveGesture.start);
+    const noDragEnd = mapUx01RendererHitTargetToQuartzLocal(afterInteractiveClickRelation, noDragTargets.interactiveGesture.end);
+    failureDiagnostics = {
+      stage: 'interactive-no-drag-gesture', ownerPid, processShapeBefore,
+      before: afterInteractiveClickGeometry, relation: afterInteractiveClickRelation,
+      targets: { start: noDragStart, end: noDragEnd },
     };
-    await postDrag(configured.driverExecutable, ownerPid, afterInteractiveClick.windows[0], targets.interactivePoint, noDragEnd);
+    await postDrag(configured.driverExecutable, ownerPid, afterInteractiveClick.windows[0], noDragStart.point, noDragEnd.point);
     const afterNoDrag = await inspectOwner(configured.driverExecutable, ownerPid);
     const afterNoDragMeasurement = await nativeMeasurement(page);
     const afterNoDragGeometry = createUx01WindowGeometryDiagnostics(afterNoDrag, afterNoDragMeasurement);
     failureDiagnostics = { ...failureDiagnostics, after: afterNoDragGeometry };
     if (afterNoDrag.windows.length !== 1) throw new Error('The no-drag gesture changed the exact native window count.');
-    assertUx01WindowSizeMatchesRenderer(afterNoDrag.windows[0], afterNoDragMeasurement.outer);
+    const afterNoDragRelation = deriveUx01DecoratedFrameRelation(afterNoDrag.windows[0], afterNoDragMeasurement);
+    failureDiagnostics = { ...failureDiagnostics, afterRelation: afterNoDragRelation };
     const noDragGestureDeltas = assertUx01WindowStationaryWithinCoordinateSpaces({
       nativeBefore: afterInteractiveClick.windows[0],
       nativeAfter: afterNoDrag.windows[0],
       rendererBefore: afterInteractiveClickMeasurement.outer,
       rendererAfter: afterNoDragMeasurement.outer,
     });
+    const noDragGestureRelationDeltas = assertUx01DecoratedFrameRelationStable(afterInteractiveClickRelation, afterNoDragRelation);
     const allDocuments = page.getByRole('button', { name: 'All open documents' });
     const documentsMenu = page.getByRole('menu', { name: 'All open documents' });
     if (await documentsMenu.isVisible()) await page.keyboard.press('Escape');
@@ -516,12 +584,19 @@ test(UX01_WINDOW_CHROME_SCENARIO, async ({ browserName }, testInfo) => {
     await expect(documentsMenu).toBeVisible();
     await page.keyboard.press('Escape');
 
-    failureDiagnostics = { stage: 'intended-app-region-drag', ownerPid, processShapeBefore, before: afterNoDragGeometry };
+    const dragTargets = await chromeHitTargets(page);
+    const dragStart = mapUx01RendererHitTargetToQuartzLocal(afterNoDragRelation, dragTargets.drag);
     const delta = dragDelta(afterNoDragMeasurement);
-    await postDrag(configured.driverExecutable, ownerPid, afterNoDrag.windows[0], targets.dragPoint, {
-      x: targets.dragPoint.x + delta.x,
-      y: targets.dragPoint.y + delta.y,
+    const dragEnd = mapUx01FramePointToQuartzLocal(afterNoDragRelation, {
+      x: dragTargets.drag.point.x + delta.x,
+      y: dragTargets.drag.point.y + delta.y,
     });
+    failureDiagnostics = {
+      stage: 'intended-app-region-drag', ownerPid, processShapeBefore,
+      before: afterNoDragGeometry, relation: afterNoDragRelation,
+      targets: { start: dragStart, end: dragEnd }, requestedDelta: delta,
+    };
+    await postDrag(configured.driverExecutable, ownerPid, afterNoDrag.windows[0], dragStart.point, dragEnd);
     const draggedMeasurement = await waitForMeasurement(
       page,
       (value) => Math.abs(value.outer.x - afterNoDragMeasurement.outer.x) >= 40
@@ -540,7 +615,8 @@ test(UX01_WINDOW_CHROME_SCENARIO, async ({ browserName }, testInfo) => {
     );
     const draggedGeometry = createUx01WindowGeometryDiagnostics(draggedInspection, draggedMeasurement);
     failureDiagnostics = { ...failureDiagnostics, after: draggedGeometry, requestedDelta: delta };
-    assertUx01WindowSizeMatchesRenderer(draggedInspection.windows[0], draggedMeasurement.outer);
+    const draggedRelation = deriveUx01DecoratedFrameRelation(draggedInspection.windows[0], draggedMeasurement);
+    failureDiagnostics = { ...failureDiagnostics, afterRelation: draggedRelation };
     const dragDeltas = assertUx01WindowMovedWithinCoordinateSpaces({
       nativeBefore: afterNoDrag.windows[0],
       nativeAfter: draggedInspection.windows[0],
@@ -548,10 +624,15 @@ test(UX01_WINDOW_CHROME_SCENARIO, async ({ browserName }, testInfo) => {
       rendererAfter: draggedMeasurement.outer,
       requestedDelta: delta,
     });
+    const dragRelationDeltas = assertUx01DecoratedFrameRelationStable(afterNoDragRelation, draggedRelation);
     expect(draggedMeasurement.content).toEqual(initialMeasurement.content);
 
-    failureDiagnostics = { stage: 'native-option-zoom-toggle', ownerPid, processShapeBefore, before: draggedGeometry };
-    await postOptionClick(configured.driverExecutable, ownerPid, draggedInspection.windows[0], trafficLights.zoom);
+    const draggedZoomPoint = mapUx01FramePointToQuartzLocal(draggedRelation, nominalTrafficLights.zoom);
+    failureDiagnostics = {
+      stage: 'native-option-zoom-toggle', ownerPid, processShapeBefore,
+      before: draggedGeometry, relation: draggedRelation, nativeTarget: draggedZoomPoint,
+    };
+    await postOptionClick(configured.driverExecutable, ownerPid, draggedInspection.windows[0], draggedZoomPoint);
     const zoomedMeasurement = await waitForMeasurement(
       page,
       (value) => !sameBounds(value.outer, draggedMeasurement.outer),
@@ -565,11 +646,13 @@ test(UX01_WINDOW_CHROME_SCENARIO, async ({ browserName }, testInfo) => {
     );
     const zoomedGeometry = createUx01WindowGeometryDiagnostics(zoomedInspection, zoomedMeasurement);
     failureDiagnostics = { ...failureDiagnostics, zoomed: zoomedGeometry };
-    assertUx01WindowSizeMatchesRenderer(zoomedInspection.windows[0], zoomedMeasurement.outer);
+    const zoomedRelation = deriveUx01DecoratedFrameRelation(zoomedInspection.windows[0], zoomedMeasurement);
+    failureDiagnostics = { ...failureDiagnostics, zoomedRelation };
     assertUx01WindowInsideWorkArea(zoomedMeasurement);
     expect(child.exitCode).toBeNull();
     expect(browser.isConnected()).toBe(true);
-    await postOptionClick(configured.driverExecutable, ownerPid, zoomedInspection.windows[0], trafficLights.zoom);
+    const zoomedZoomPoint = mapUx01FramePointToQuartzLocal(zoomedRelation, nominalTrafficLights.zoom);
+    await postOptionClick(configured.driverExecutable, ownerPid, zoomedInspection.windows[0], zoomedZoomPoint);
     const restoredAfterZoom = await waitForMeasurement(
       page,
       (value) => sameBounds(value.outer, draggedMeasurement.outer),
@@ -583,20 +666,24 @@ test(UX01_WINDOW_CHROME_SCENARIO, async ({ browserName }, testInfo) => {
     );
     const restoredAfterZoomGeometry = createUx01WindowGeometryDiagnostics(restoredAfterZoomInspection, restoredAfterZoom);
     failureDiagnostics = { ...failureDiagnostics, restored: restoredAfterZoomGeometry };
-    assertUx01WindowSizeMatchesRenderer(restoredAfterZoomInspection.windows[0], restoredAfterZoom.outer);
+    const restoredAfterZoomRelation = deriveUx01DecoratedFrameRelation(restoredAfterZoomInspection.windows[0], restoredAfterZoom);
+    failureDiagnostics = { ...failureDiagnostics, restoredRelation: restoredAfterZoomRelation };
     const zoomRestoreDeltas = assertUx01WindowStationaryWithinCoordinateSpaces({
       nativeBefore: draggedInspection.windows[0],
       nativeAfter: restoredAfterZoomInspection.windows[0],
       rendererBefore: draggedMeasurement.outer,
       rendererAfter: restoredAfterZoom.outer,
     });
+    const zoomRestoreRelationDeltas = assertUx01DecoratedFrameRelationStable(draggedRelation, restoredAfterZoomRelation);
 
     const beforeMinimizeInspection = await inspectOwner(configured.driverExecutable, ownerPid);
     const beforeMinimizeGeometry = createUx01WindowGeometryDiagnostics(beforeMinimizeInspection, restoredAfterZoom);
     failureDiagnostics = { stage: 'native-minimize-and-show', ownerPid, processShapeBefore, before: beforeMinimizeGeometry };
     if (beforeMinimizeInspection.windows.length !== 1) throw new Error('The exact native window disappeared before minimize.');
-    assertUx01WindowSizeMatchesRenderer(beforeMinimizeInspection.windows[0], restoredAfterZoom.outer);
-    await postClick(configured.driverExecutable, ownerPid, beforeMinimizeInspection.windows[0], trafficLights.minimize);
+    const beforeMinimizeRelation = deriveUx01DecoratedFrameRelation(beforeMinimizeInspection.windows[0], restoredAfterZoom);
+    const minimizePoint = mapUx01FramePointToQuartzLocal(beforeMinimizeRelation, nominalTrafficLights.minimize);
+    failureDiagnostics = { ...failureDiagnostics, relation: beforeMinimizeRelation, nativeTarget: minimizePoint };
+    await postClick(configured.driverExecutable, ownerPid, beforeMinimizeInspection.windows[0], minimizePoint);
     const minimizedInspection = await waitForWindowInspection(
       configured.driverExecutable,
       ownerPid,
@@ -617,17 +704,23 @@ test(UX01_WINDOW_CHROME_SCENARIO, async ({ browserName }, testInfo) => {
     const shownMeasurement = await waitForMeasurement(page, (value) => sameBounds(value.outer, restoredAfterZoom.outer), 'The restored minimized window changed geometry');
     const shownGeometry = createUx01WindowGeometryDiagnostics(shownInspection, shownMeasurement);
     failureDiagnostics = { ...failureDiagnostics, restored: shownGeometry };
-    assertUx01WindowSizeMatchesRenderer(shownInspection.windows[0], shownMeasurement.outer);
+    const shownRelation = deriveUx01DecoratedFrameRelation(shownInspection.windows[0], shownMeasurement);
+    failureDiagnostics = { ...failureDiagnostics, restoredRelation: shownRelation };
     const minimizeRestoreDeltas = assertUx01WindowStationaryWithinCoordinateSpaces({
       nativeBefore: beforeMinimizeInspection.windows[0],
       nativeAfter: shownInspection.windows[0],
       rendererBefore: restoredAfterZoom.outer,
       rendererAfter: shownMeasurement.outer,
     });
+    const minimizeRestoreRelationDeltas = assertUx01DecoratedFrameRelationStable(beforeMinimizeRelation, shownRelation);
 
-    failureDiagnostics = { stage: 'native-close-and-show', ownerPid, processShapeBefore, before: shownGeometry };
+    const closePoint = mapUx01FramePointToQuartzLocal(shownRelation, nominalTrafficLights.close);
+    failureDiagnostics = {
+      stage: 'native-close-and-show', ownerPid, processShapeBefore,
+      before: shownGeometry, relation: shownRelation, nativeTarget: closePoint,
+    };
     const closeEvent = page.waitForEvent('close');
-    await postClick(configured.driverExecutable, ownerPid, shownInspection.windows[0], trafficLights.close);
+    await postClick(configured.driverExecutable, ownerPid, shownInspection.windows[0], closePoint);
     await closeEvent;
     const closedInspection = await waitForWindowInspection(
       configured.driverExecutable,
@@ -653,7 +746,8 @@ test(UX01_WINDOW_CHROME_SCENARIO, async ({ browserName }, testInfo) => {
     const reopenedMeasurement = await nativeMeasurement(page);
     const reopenedGeometry = createUx01WindowGeometryDiagnostics(reopenedInspection, reopenedMeasurement);
     failureDiagnostics = { ...failureDiagnostics, reopened: reopenedGeometry, processShapeAfter };
-    assertUx01WindowSizeMatchesRenderer(reopenedInspection.windows[0], reopenedMeasurement.outer);
+    const reopenedRelation = deriveUx01DecoratedFrameRelation(reopenedInspection.windows[0], reopenedMeasurement);
+    failureDiagnostics = { ...failureDiagnostics, reopenedRelation };
     await expect(page.getByRole('button', { name: 'All open documents' })).toBeVisible();
     expect(externalRendererRequests).toEqual([]);
     for (const path of [configured.paths.providerCredentials, configured.paths.forbiddenNetwork]) {
@@ -703,21 +797,43 @@ test(UX01_WINDOW_CHROME_SCENARIO, async ({ browserName }, testInfo) => {
         contract: MACOS_EDITOR_WINDOW_CHROME,
         coordinateModel: initialGeometry.coordinateModel,
         standardButtonMetrics: initialInspection.buttonMetrics,
-        trafficLights,
-        initial: { renderer: initialMeasurement, native: initialWindow },
+        trafficLights: {
+          nominalFrame: nominalTrafficLights,
+          mappedZoomBeforeChange: draggedZoomPoint,
+          mappedZoomBeforeRestore: zoomedZoomPoint,
+          mappedMinimize: minimizePoint,
+          mappedClose: closePoint,
+        },
+        initial: {
+          renderer: initialMeasurement,
+          native: initialWindow,
+          decoratedFrameRelation: initialRelation,
+          interactiveTarget: initialInteractiveClick,
+        },
         noDrag: {
           nativeClickOpenedMenu: true,
           dragDidNotMoveWindow: true,
           keyboardStillUsable: true,
           clickDeltas: noDragClickDeltas,
+          clickRelationDeltas: noDragClickRelationDeltas,
           gestureDeltas: noDragGestureDeltas,
+          gestureRelationDeltas: noDragGestureRelationDeltas,
+          completeHitTestStep: noDragTargets.verificationStep,
         },
-        drag: { requestedDelta: delta, independentDeltas: dragDeltas, renderer: draggedMeasurement, native: draggedInspection.windows[0] },
+        drag: {
+          requestedDelta: delta,
+          independentDeltas: dragDeltas,
+          relationDeltas: dragRelationDeltas,
+          target: dragStart,
+          renderer: draggedMeasurement,
+          native: draggedInspection.windows[0],
+        },
         standardZoom: {
           action: 'native green-button Option-click',
           changed: { renderer: zoomedMeasurement, native: zoomedInspection.windows[0] },
           restored: { renderer: restoredAfterZoom, native: restoredAfterZoomInspection.windows[0] },
           restoreDeltas: zoomRestoreDeltas,
+          relationDeltas: zoomRestoreRelationDeltas,
           workAreaContained: true,
           windowIdPreserved: true,
         },
@@ -726,11 +842,13 @@ test(UX01_WINDOW_CHROME_SCENARIO, async ({ browserName }, testInfo) => {
           showSignal: minimizeShow,
           restored: { native: shownInspection.windows[0], renderer: shownMeasurement },
           restoreDeltas: minimizeRestoreDeltas,
+          relationDeltas: minimizeRestoreRelationDeltas,
         },
         close: {
           windowsAfterClose: closedInspection.windows.length,
           showSignal: closeShow,
           reopened: { native: reopenedInspection.windows[0], renderer: reopenedMeasurement },
+          reopenedRelation,
         },
       },
       privacy: {

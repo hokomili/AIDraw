@@ -157,7 +157,7 @@ describe('immutable package-output generations', () => {
     expect(provenance).toContain('packageGeneration');
     expect(packagedE2e).toContain('environment.AIDRAW_E2E_OUT_DIR) ?? nonEmpty(environment.AIDRAW_FORGE_OUT_DIR)');
     expect(changelog).toContain('supported Forge package output a single-use generation');
-    expect(tracker).toContain('window-chrome preparation checkpoints are synchronized through base `7ff773cd311bd7f6fc15cc03c7f81ef6c0289884`');
+    expect(tracker).toContain('window-chrome preparation/correction checkpoints are synchronized through base `f7e6d0cf836fce37763616395209ed654140bb53`');
     expect(tracker).toContain('supported package path separately refuses a same-root replacement');
     expect(testing).toContain('### Single-use package-generation roots');
   });

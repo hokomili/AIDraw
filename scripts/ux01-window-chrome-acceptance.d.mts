@@ -9,9 +9,10 @@ export const UX01_WINDOW_CHROME_PROFILE_PREFIX: 'aidraw-e2e-ux01-window-chrome-'
 export const UX01_WINDOW_CHROME_FAILURE_PREFIX: 'ux01-window-chrome-native-';
 export const UX01_WINDOW_CHROME_DRIVER_FILE: 'macos-window-chrome-driver';
 export const UX01_WINDOW_COORDINATE_SPACES: Readonly<{
-  native: 'quartz-main-display-upper-left';
-  renderer: 'blink-root-window-css-pixels';
+  native: 'quartz-visible-window-main-display-upper-left';
+  renderer: 'blink-root-window-css-pixels-from-electron-nswindow-frame';
 }>;
+export const UX01_WINDOW_ACTION_MAPPING_UNCERTAINTY: 2;
 export const UX01_WINDOW_CHROME_UNSAFE_REPORT_ENVIRONMENTS: readonly string[];
 export const UX01_WINDOW_CHROME_FILES: Readonly<{
   evidence: string;
@@ -79,8 +80,9 @@ export interface Ux01WindowGeometryDiagnostics {
   coordinateModel: {
     native: typeof UX01_WINDOW_COORDINATE_SPACES.native;
     renderer: typeof UX01_WINDOW_COORDINATE_SPACES.renderer;
-    crossSourceComparable: string[];
-    absoluteOriginsComparable: false;
+    sharedBasis: 'electron-43-primary-screen-top-left-at-dpr-1';
+    directBoundsEquality: false;
+    dynamicDecoratedFrameRelationRequired: true;
   };
   native: ReturnType<typeof parseUx01WindowDriverInspection>;
   renderer: {
@@ -96,11 +98,63 @@ export function createUx01WindowGeometryDiagnostics(
   nativeInspection: ReturnType<typeof parseUx01WindowDriverInspection>,
   rendererMeasurement: Ux01WindowGeometryDiagnostics['renderer'],
 ): Ux01WindowGeometryDiagnostics;
-export function assertUx01WindowSizeMatchesRenderer(
+export interface Ux01DecoratedFrameRelation {
+  model: 'dynamic-contained-quartz-visible-frame';
+  windowId: number;
+  nativeBounds: { x: number; y: number; width: number; height: number };
+  rendererOuter: { x: number; y: number; width: number; height: number };
+  rendererContent: { width: number; height: number; devicePixelRatio: number };
+  mainDisplay: { x: 0; y: 0; width: number; height: number };
+  insets: { left: number; top: number; right: number; bottom: number };
+  mappingUncertainty: {
+    x: typeof UX01_WINDOW_ACTION_MAPPING_UNCERTAINTY;
+    y: typeof UX01_WINDOW_ACTION_MAPPING_UNCERTAINTY;
+    source: 'exact-driver-current-bounds-reinspection';
+  };
+}
+export function deriveUx01DecoratedFrameRelation(
   windowRecord: Ux01WindowRecord,
-  rendererOuter: { x: number; y: number; width: number; height: number },
+  rendererMeasurement: {
+    outer: { x: number; y: number; width: number; height: number };
+    content: { width: number; height: number; devicePixelRatio: number };
+    screen: {
+      width: number;
+      height: number;
+      availLeft: number;
+      availTop: number;
+      availWidth: number;
+      availHeight: number;
+    };
+    layout: {
+      root: { clientWidth: number; clientHeight: number; scrollWidth: number; scrollHeight: number };
+      body: { clientWidth: number; clientHeight: number; scrollWidth: number; scrollHeight: number };
+    };
+  },
+): Ux01DecoratedFrameRelation;
+export function mapUx01FramePointToQuartzLocal(
+  relation: Ux01DecoratedFrameRelation,
+  point: { x: number; y: number },
+): { x: number; y: number };
+export interface Ux01RendererHitTarget {
+  region: 'drag' | 'no-drag';
+  point: { x: number; y: number };
+  safeRect: { x: number; y: number; width: number; height: number };
+}
+export function mapUx01RendererHitTargetToQuartzLocal(
+  relation: Ux01DecoratedFrameRelation,
+  target: Ux01RendererHitTarget,
+): {
+  region: Ux01RendererHitTarget['region'];
+  point: { x: number; y: number };
+  rendererPoint: { x: number; y: number };
+  safeRect: Ux01RendererHitTarget['safeRect'];
+  mappingUncertainty: Ux01DecoratedFrameRelation['mappingUncertainty'];
+};
+export function assertUx01DecoratedFrameRelationStable(
+  before: Ux01DecoratedFrameRelation,
+  after: Ux01DecoratedFrameRelation,
   tolerance?: number,
-): true;
+): { left: number; top: number; right: number; bottom: number };
 export interface Ux01WindowCoordinateSamples {
   nativeBefore: Ux01WindowRecord;
   nativeAfter: Ux01WindowRecord;
