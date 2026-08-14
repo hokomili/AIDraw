@@ -5,7 +5,14 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
-import { captureReleaseProvenance, compareReleaseProvenance, type ReleaseProvenance } from '../../scripts/release-provenance.mjs';
+import {
+  RELEASE_PROVENANCE_SCHEMA_VERSION,
+  REPRODUCIBILITY_REPORT_SCHEMA_VERSION,
+  captureReleaseProvenance,
+  compareReleaseProvenance,
+  type ReleaseProvenance,
+} from '../../scripts/release-provenance.mjs';
+import { reservePackageGeneration } from '../../scripts/package-output-policy.mjs';
 
 const temporaryRoots: string[] = [];
 const commit = 'b'.repeat(40);
@@ -16,13 +23,6 @@ function sha256(value: string | Buffer): string { return createHash('sha256').up
 async function releaseWorkspace() {
   const root = await mkdtemp(join(tmpdir(), 'aidraw-release-provenance-'));
   temporaryRoots.push(root);
-  const artifactPath = join(root, 'out', 'make', 'zip', 'AIDraw.zip');
-  await mkdir(join(root, 'out', 'make', 'zip'), { recursive: true });
-  const artifact = 'deterministic archive bytes\n';
-  await writeFile(artifactPath, artifact, 'utf8');
-  await writeFile(join(root, 'out', 'SHA256SUMS-windows-x64.txt'), `${sha256(artifact)}  make/zip/AIDraw.zip\n`, 'utf8');
-  await writeFile(join(root, 'out', 'THIRD_PARTY_LICENSES.json'), '[]\n', 'utf8');
-  await writeFile(join(root, 'out', 'THIRD_PARTY_LICENSES.md'), '# Licenses\n', 'utf8');
   const packageJson = {
     name: 'aidraw',
     version: '0.1.0-alpha.1',
@@ -34,6 +34,14 @@ async function releaseWorkspace() {
   await writeFile(join(root, 'package.json'), `${JSON.stringify(packageJson, null, 2)}\n`, 'utf8');
   await writeFile(join(root, 'package-lock.json'), `${JSON.stringify(packageLock, null, 2)}\n`, 'utf8');
   await writeFile(join(root, '.nvmrc'), '24\n', 'utf8');
+  await reservePackageGeneration({ workspace: root, environment: {}, platform: 'win32', architecture: 'x64' });
+  const artifactPath = join(root, 'out', 'make', 'zip', 'AIDraw.zip');
+  await mkdir(join(root, 'out', 'make', 'zip'), { recursive: true });
+  const artifact = 'deterministic archive bytes\n';
+  await writeFile(artifactPath, artifact, 'utf8');
+  await writeFile(join(root, 'out', 'SHA256SUMS-windows-x64.txt'), `${sha256(artifact)}  make/zip/AIDraw.zip\n`, 'utf8');
+  await writeFile(join(root, 'out', 'THIRD_PARTY_LICENSES.json'), '[]\n', 'utf8');
+  await writeFile(join(root, 'out', 'THIRD_PARTY_LICENSES.md'), '# Licenses\n', 'utf8');
   return root;
 }
 
@@ -57,9 +65,10 @@ describe('release provenance and reproducibility', () => {
     const root = await releaseWorkspace();
     const { manifest, outputPath } = await capture(root);
     expect(manifest).toMatchObject({
-      schemaVersion: 1,
+      schemaVersion: RELEASE_PROVENANCE_SCHEMA_VERSION,
       platform: { label: 'windows-x64', nodePlatform: 'win32', architecture: 'x64' },
       candidate: { version: '0.1.0-alpha.1', commit },
+      packageGeneration: { schemaVersion: 1, policy: 'exclusive-output-root-v1', target: { platform: 'win32', architecture: 'x64' } },
       source: { clean: true, lockfileVersion: 3 },
       runtime: { node: 'v24.14.0', npm: '11.7.0', nvmrc: '24', nodeEngine: '>=24 <25' },
       toolchain: { electron: '43.2.0', '@electron-forge/cli': '7.11.2' },
@@ -100,12 +109,33 @@ describe('release provenance and reproducibility', () => {
     const { manifest } = await capture(root);
     const rerun = copyManifest(manifest);
     rerun.candidate.commit = 'c'.repeat(40);
+    rerun.packageGeneration.target.architecture = 'arm64';
     rerun.artifacts[0].sha256 = 'd'.repeat(64);
     const report = compareReleaseProvenance(manifest, rerun, { comparedAt: '2026-08-13T00:00:00.000Z' });
     expect(report.result).toBe('FAIL');
     expect(report.sourceIdentityEqual).toBe(false);
     expect(report.artifactInventoryEqual).toBe(false);
-    expect(report.differences.map((entry) => entry.field)).toEqual(['artifacts.make/zip/AIDraw.zip', 'candidate.commit']);
+    expect(report.differences.map((entry) => entry.field)).toEqual(['artifacts.make/zip/AIDraw.zip', 'candidate.commit', 'packageGeneration']);
+  });
+
+  it('rejects retained pre-policy schema-1 provenance and keeps the comparison-report schema distinct', async () => {
+    const root = await releaseWorkspace();
+    const { manifest } = await capture(root);
+    const legacy = JSON.parse(JSON.stringify(manifest)) as Record<string, unknown>;
+    legacy.schemaVersion = 1;
+    delete legacy.packageGeneration;
+
+    const report = compareReleaseProvenance(manifest, legacy, { comparedAt: '2026-08-13T00:00:00.000Z' });
+    expect(report.schemaVersion).toBe(REPRODUCIBILITY_REPORT_SCHEMA_VERSION);
+    expect(report.result).toBe('FAIL');
+    expect(report.sourceIdentityEqual).toBe(false);
+    expect(report.differences.map((entry) => entry.field)).toEqual(['packageGeneration', 'right.packageGeneration', 'right.schemaVersion']);
+
+    const mislabeledCurrentShape = JSON.parse(JSON.stringify(manifest)) as Record<string, unknown>;
+    mislabeledCurrentShape.schemaVersion = 1;
+    const mislabeledReport = compareReleaseProvenance(manifest, mislabeledCurrentShape, { comparedAt: '2026-08-13T00:00:00.000Z' });
+    expect(mislabeledReport.result).toBe('FAIL');
+    expect(mislabeledReport.differences.map((entry) => entry.field)).toEqual(['right.schemaVersion']);
   });
 
   it('writes a hashed comparison report once and refuses to overwrite it', async () => {

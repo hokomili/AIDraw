@@ -6,12 +6,14 @@ import { MakerRpm } from '@electron-forge/maker-rpm';
 import { VitePlugin } from '@electron-forge/plugin-vite';
 import { AutoUnpackNativesPlugin } from '@electron-forge/plugin-auto-unpack-natives';
 import { SafeDmgMaker } from './scripts/safe-dmg-maker.mjs';
+import { reservePackageGeneration, resolvePackageOutputRoot } from './scripts/package-output-policy.mjs';
 import { resolve } from 'node:path';
 import process from 'node:process';
 
 const localElectronZipDirectory = process.env.AIDRAW_ELECTRON_ZIP_DIR;
 const macSigningIdentity = process.env.AIDRAW_MACOS_SIGN_IDENTITY?.trim();
 const macBundleIdentifier = 'com.electron.aidraw';
+const packageOutputRoot = resolvePackageOutputRoot();
 
 // Electron's downloaded macOS bundle is ad-hoc signed before Packager renames
 // the app and rewrites Info.plist. Sign the completed bundle again so local
@@ -53,7 +55,7 @@ const packagedRuntimeRoots = [
 ];
 
 const config: ForgeConfig = {
-  outDir: process.env.AIDRAW_FORGE_OUT_DIR || 'out',
+  outDir: packageOutputRoot,
   packagerConfig: {
     asar: { unpack: '**/*.node' },
     extraResource: [resolve('resources/licenses/LiberationSans-OFL-1.1.txt')],
@@ -103,6 +105,9 @@ const config: ForgeConfig = {
     new MakerZIP({}, ['win32', 'darwin', 'linux']),
   ],
   hooks: {
+    prePackage: async (_forgeConfig, platform, arch) => {
+      await reservePackageGeneration({ outputDirectory: packageOutputRoot, platform, architecture: arch });
+    },
     packageAfterCopy: async (_forgeConfig, buildPath, _electronVersion, platform, arch) => {
       const { flipFuses, FuseV1Options, FuseVersion } = await import('@electron/fuses');
       const electronBinary = platform === 'win32'

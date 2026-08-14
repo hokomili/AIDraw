@@ -15,7 +15,7 @@ npm run verify
 
 For a macOS transfer or first native bootstrap, follow [`docs/MACOS_DEVELOPMENT.md`](docs/MACOS_DEVELOPMENT.md). Do not copy Windows `node_modules`, packages, profiles, or retained QA evidence to the Mac, and do not treat a workflow definition as native acceptance.
 
-For UI or collaboration changes, also run `npm run test:e2e` on Windows. For packaging changes, run `npm run make` on every affected OS and verify its native artifacts: Squirrel/ZIP on Windows, DMG/ZIP on macOS, or DEB/RPM/ZIP on Linux.
+For UI or collaboration changes, also run `npm run test:e2e` on Windows. For packaging changes, run `npm run make` from one absent single-use output root on every affected OS and verify its native artifacts: Squirrel/ZIP on Windows, DMG/ZIP on macOS, or DEB/RPM/ZIP on Linux. Never rerun package/make into an existing generation; select a fresh workspace-contained `AIDRAW_FORGE_OUT_DIR` instead.
 
 ## Change expectations
 

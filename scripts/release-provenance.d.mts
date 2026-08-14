@@ -4,11 +4,15 @@ export interface ProvenanceFileRecord {
   sha256: string;
 }
 
+export const RELEASE_PROVENANCE_SCHEMA_VERSION: 2;
+export const REPRODUCIBILITY_REPORT_SCHEMA_VERSION: 1;
+
 export interface ReleaseProvenance {
-  schemaVersion: 1;
+  schemaVersion: 2;
   capturedAt: string;
   platform: { label: string; nodePlatform: string; architecture: string };
   candidate: { version: string; commit: string };
+  packageGeneration: { schemaVersion: 1; policy: string; target: { platform: string; architecture: string } };
   source: { clean: true; packageJsonSha256: string; packageLockSha256: string; lockfileVersion: number };
   runtime: { node: string; npm: string; nvmrc: string; nodeEngine: string; osRelease: string };
   toolchain: Record<string, string>;

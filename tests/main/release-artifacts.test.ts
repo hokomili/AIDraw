@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createPackageWithOptions } from '@electron/asar';
+import { reservePackageGeneration } from '../../scripts/package-output-policy.mjs';
 
 const execute = promisify(execFile);
 const temporaryDirectories: string[] = [];
@@ -14,6 +15,11 @@ const packagedUtilityWorkerSource = [
   'The utility containment probe is unavailable outside isolated packaged QA.',
   'process.crash',
 ].join('\n');
+
+async function reserveSyntheticPackage(workspace: string, platform: string, architecture: string) {
+  await writeFile(join(workspace, 'package.json'), '{"name":"aidraw","version":"0.1.0-alpha.1"}', 'utf8');
+  await reservePackageGeneration({ workspace, outputDirectory: join(workspace, 'out'), platform, architecture });
+}
 
 afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
@@ -26,28 +32,35 @@ describe('desktop release artifact preflight', () => {
     expect(forge).toContain('electronZipDir: resolve(localElectronZipDirectory)');
   });
 
-  it('removes only stale maker output and generated manifests', async () => {
+  it('leaves a fresh first-generation output available without creating it', async () => {
     const workspace = await mkdtemp(join(tmpdir(), 'aidraw-release-'));
     temporaryDirectories.push(workspace);
-    await mkdir(join(workspace, 'out', 'make', 'zip'), { recursive: true });
-    await mkdir(join(workspace, 'out', 'AIDraw-win32-x64'), { recursive: true });
-    await writeFile(join(workspace, 'package.json'), '{"name":"aidraw"}', 'utf8');
-    await writeFile(join(workspace, 'out', 'make', 'zip', 'AIDraw-win32-x64-1.0.0.zip'), 'stale', 'utf8');
-    await writeFile(join(workspace, 'out', 'SHA256SUMS.txt'), 'stale', 'utf8');
-    await writeFile(join(workspace, 'out', 'SHA256SUMS-linux-x64.txt'), 'stale', 'utf8');
-    await writeFile(join(workspace, 'out', 'THIRD_PARTY_LICENSES.json'), 'stale', 'utf8');
-    await writeFile(join(workspace, 'out', 'RELEASE_PROVENANCE-linux-x64.json'), 'stale', 'utf8');
-    await writeFile(join(workspace, 'out', 'AIDraw-win32-x64', 'keep.txt'), 'current package', 'utf8');
+    await writeFile(join(workspace, 'package.json'), '{"name":"aidraw","version":"0.1.0-alpha.1"}', 'utf8');
 
     const script = resolve('scripts/prepare-make-output.mjs');
     const result = await execute(process.execPath, [script], { cwd: workspace });
 
-    expect(result.stdout).toContain('release preflight: cleared');
-    await expect(readFile(join(workspace, 'out', 'make', 'zip', 'AIDraw-win32-x64-1.0.0.zip'))).rejects.toMatchObject({ code: 'ENOENT' });
-    await expect(readFile(join(workspace, 'out', 'SHA256SUMS.txt'))).rejects.toMatchObject({ code: 'ENOENT' });
-    await expect(readFile(join(workspace, 'out', 'SHA256SUMS-linux-x64.txt'))).rejects.toMatchObject({ code: 'ENOENT' });
-    await expect(readFile(join(workspace, 'out', 'THIRD_PARTY_LICENSES.json'))).rejects.toMatchObject({ code: 'ENOENT' });
-    await expect(readFile(join(workspace, 'out', 'RELEASE_PROVENANCE-linux-x64.json'))).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(result.stdout).toContain('release preflight: fresh package-generation root out');
+    await expect(readFile(join(workspace, 'out'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('refuses an existing generation without deleting package or maker bytes', async () => {
+    const workspace = await mkdtemp(join(tmpdir(), 'aidraw-release-existing-'));
+    temporaryDirectories.push(workspace);
+    await mkdir(join(workspace, 'out', 'make', 'zip'), { recursive: true });
+    await mkdir(join(workspace, 'out', 'AIDraw-win32-x64'), { recursive: true });
+    await writeFile(join(workspace, 'package.json'), '{"name":"aidraw","version":"0.1.0-alpha.1"}', 'utf8');
+    await writeFile(join(workspace, 'out', 'make', 'zip', 'AIDraw-win32-x64-1.0.0.zip'), 'stale', 'utf8');
+    await writeFile(join(workspace, 'out', 'SHA256SUMS.txt'), 'stale', 'utf8');
+    await writeFile(join(workspace, 'out', 'AIDraw-win32-x64', 'keep.txt'), 'current package', 'utf8');
+
+    const script = resolve('scripts/prepare-make-output.mjs');
+    await expect(execute(process.execPath, [script], { cwd: workspace })).rejects.toMatchObject({
+      stderr: expect.stringContaining('Refusing to replace package-generation root out'),
+    });
+
+    await expect(readFile(join(workspace, 'out', 'make', 'zip', 'AIDraw-win32-x64-1.0.0.zip'), 'utf8')).resolves.toBe('stale');
+    await expect(readFile(join(workspace, 'out', 'SHA256SUMS.txt'), 'utf8')).resolves.toBe('stale');
     await expect(readFile(join(workspace, 'out', 'AIDraw-win32-x64', 'keep.txt'), 'utf8')).resolves.toBe('current package');
   });
 
@@ -57,6 +70,7 @@ describe('desktop release artifact preflight', () => {
   ])('resolves the %s package layout instead of a Windows hard-coded path', async (platform, architecture, expectedDirectory) => {
     const workspace = await mkdtemp(join(tmpdir(), 'aidraw-package-layout-'));
     temporaryDirectories.push(workspace);
+    await reserveSyntheticPackage(workspace, platform, architecture);
     const script = resolve('scripts/verify-package.mjs');
     await expect(execute(process.execPath, [script], {
       cwd: workspace,
@@ -70,6 +84,7 @@ describe('desktop release artifact preflight', () => {
     const source = join(workspace, 'asar-source');
     const packageDirectory = join(workspace, 'out', 'AIDraw-win32-x64');
     const archive = join(packageDirectory, 'resources', 'app.asar');
+    await reserveSyntheticPackage(workspace, 'win32', 'x64');
     await mkdir(join(source, 'node_modules', 'tar'), { recursive: true });
     await mkdir(join(packageDirectory, 'resources'), { recursive: true });
     await writeFile(join(packageDirectory, 'AIDraw.exe'), Buffer.alloc(1_000_001, 1));
@@ -89,6 +104,7 @@ describe('desktop release artifact preflight', () => {
     const source = join(workspace, 'asar-source');
     const packageDirectory = join(workspace, 'out', 'AIDraw-win32-x64');
     const archive = join(packageDirectory, 'resources', 'app.asar');
+    await reserveSyntheticPackage(workspace, 'win32', 'x64');
     await mkdir(join(source, '.vite', 'build'), { recursive: true });
     await mkdir(join(packageDirectory, 'resources'), { recursive: true });
     await writeFile(join(packageDirectory, 'AIDraw.exe'), Buffer.alloc(1_000_001, 1));
@@ -110,6 +126,7 @@ describe('desktop release artifact preflight', () => {
     const source = join(workspace, 'asar-source');
     const packageDirectory = join(workspace, 'out', 'AIDraw-win32-x64');
     const archive = join(packageDirectory, 'resources', 'app.asar');
+    await reserveSyntheticPackage(workspace, 'win32', 'x64');
     await mkdir(join(source, '.vite', 'build'), { recursive: true });
     await mkdir(join(packageDirectory, 'resources'), { recursive: true });
     await writeFile(join(packageDirectory, 'AIDraw.exe'), Buffer.alloc(1_000_001, 1));
@@ -124,5 +141,21 @@ describe('desktop release artifact preflight', () => {
       cwd: workspace,
       env: { ...process.env, AIDRAW_FORGE_OUT_DIR: join(workspace, 'out'), AIDRAW_PACKAGE_PLATFORM: 'win32', AIDRAW_PACKAGE_ARCH: 'x64' },
     })).rejects.toMatchObject({ stderr: expect.stringContaining('missing current MCP discovery markers') });
+  });
+
+  it('rejects a retained pre-policy package root before inspecting or mutating package bytes', async () => {
+    const workspace = await mkdtemp(join(tmpdir(), 'aidraw-unreserved-package-'));
+    temporaryDirectories.push(workspace);
+    await writeFile(join(workspace, 'package.json'), '{"name":"aidraw","version":"0.1.0-alpha.1"}', 'utf8');
+    const retainedBytePath = join(workspace, 'out', 'AIDraw-win32-x64', 'AIDraw.exe');
+    await mkdir(join(workspace, 'out', 'AIDraw-win32-x64'), { recursive: true });
+    await writeFile(retainedBytePath, 'retained pre-policy package bytes\n', 'utf8');
+
+    const script = resolve('scripts/verify-package.mjs');
+    await expect(execute(process.execPath, [script], {
+      cwd: workspace,
+      env: { ...process.env, AIDRAW_FORGE_OUT_DIR: join(workspace, 'out'), AIDRAW_PACKAGE_PLATFORM: 'win32', AIDRAW_PACKAGE_ARCH: 'x64' },
+    })).rejects.toMatchObject({ stderr: expect.stringContaining('Package generation marker is missing or invalid') });
+    await expect(readFile(retainedBytePath, 'utf8')).resolves.toBe('retained pre-policy package bytes\n');
   });
 });

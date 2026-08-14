@@ -104,6 +104,8 @@ npm run release:current
 
 Run that command on the target OS. Forge writes Squirrel + ZIP on Windows, DMG + ZIP on macOS, and DEB + RPM + ZIP on Linux under `out/make`. `out/SHA256SUMS.txt` covers release files and `out/THIRD_PARTY_LICENSES.*` records dependency licenses. Prerelease artifacts do not yet carry a trusted publisher signature; local macOS bundles receive only an ad-hoc integrity signature with a stable app requirement, not Developer ID/notarization/Gatekeeper approval. Verify a downloaded file against the checksum published with its release. The tag workflow builds each OS on a native GitHub runner; a workflow definition is not release evidence until those hosted jobs pass.
 
+Package output roots are single-use generations. A clean checkout may use the default `out` once; a later package subject must use a fresh workspace-contained `AIDRAW_FORGE_OUT_DIR`. Forge reserves the root atomically and refuses any existing path rather than deleting or overwriting a bundle that a long-running owner might still map. The full release path starts with `npm run make`; `npm run package` is a package-only alternative, not a same-root prerequisite to `make`. Verification, checksums, default license/provenance output, and packaged-E2E discovery follow the selected generation. This is a build-output safety policy, not customer updater/restart behavior.
+
 The current transitive advisory review and build-only exceptions are documented in [docs/DEPENDENCY_AUDIT.md](docs/DEPENDENCY_AUDIT.md).
 
 ## Connect an agent

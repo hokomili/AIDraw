@@ -547,10 +547,11 @@ describe('FND-05 retained exact-package acceptance boundary', () => {
       'not directly observed',
       'Renderer-local work never submitted to the canonical engine is not promised',
     ]) expect(truth).toContain(claim);
-    expect(truth).toContain('historical executable/profile/cause, cache repair, broader platforms');
+    expect(truth).toContain('The initiating renderer-loss trigger');
+    expect(truth).toContain('customer updater/restart semantics');
     expect(truth).not.toContain('alive-hang route has no PASS');
-    expect(tracker).toContain('synchronized through base `41a3b0c6cf1851b01cf79c4d022632dc736c73d2`');
-    expect(tracker).toContain('This bounded four-path source/headless reconciliation');
+    expect(tracker).toContain('synchronized through base `4ce0a8293916d8884b30cca4570b66cadd553be6`');
+    expect(tracker).toContain('This bounded **22-path** source/headless package-lifecycle candidate');
     expect(tracker).toContain("clean synchronized base's non-certifying audit remains Level 3 blocked **1** / stable v1 blocked **4**");
     expect(tracker).toContain('producing **2 / 5** until ordinary review and commit');
 

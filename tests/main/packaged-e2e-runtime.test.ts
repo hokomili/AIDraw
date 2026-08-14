@@ -22,6 +22,11 @@ describe('packaged Level 2 platform routing', () => {
     const mac = resolvePackagedE2eArtifact({ workspacePath, environment: { AIDRAW_E2E_OUT_DIR: 'out-macos' }, platform: 'darwin', arch: 'arm64' });
     expect(mac.executable).toBe(join(workspacePath, 'out-macos', 'AIDraw-darwin-arm64', 'AIDraw.app', 'Contents', 'MacOS', 'AIDraw'));
     expect(mac.asar).toBe(join(workspacePath, 'out-macos', 'AIDraw-darwin-arm64', 'AIDraw.app', 'Contents', 'Resources', 'app.asar'));
+
+    const sharedGeneration = resolvePackagedE2eArtifact({ workspacePath, environment: { AIDRAW_FORGE_OUT_DIR: 'out-generation-3' }, platform: 'linux', arch: 'x64' });
+    expect(sharedGeneration.outRoot).toBe(join(workspacePath, 'out-generation-3'));
+    const explicitE2e = resolvePackagedE2eArtifact({ workspacePath, environment: { AIDRAW_FORGE_OUT_DIR: 'out-generation-3', AIDRAW_E2E_OUT_DIR: 'reviewed-package' }, platform: 'linux', arch: 'x64' });
+    expect(explicitE2e.outRoot).toBe(join(workspacePath, 'reviewed-package'));
   });
 
   it('accepts an explicit macOS app or launcher while still deriving the matching ASAR', () => {

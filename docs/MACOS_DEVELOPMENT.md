@@ -44,12 +44,13 @@ Do not interpret a successful `npm ci` alone as proof that the optional DMG depe
 Run these only on the macOS host after the source gate is green:
 
 ```sh
-npm run package
-AIDRAW_PACKAGE_PLATFORM=darwin AIDRAW_PACKAGE_ARCH="$(node -p 'process.arch')" node scripts/verify-package.mjs
 npm run make
+AIDRAW_PACKAGE_PLATFORM=darwin AIDRAW_PACKAGE_ARCH="$(node -p 'process.arch')" node scripts/verify-package.mjs
 npm run checksums
 npm run licenses
 ```
+
+That is the full maker path: Forge packages once into a fresh single-use root and then creates the DMG/ZIP. For a package-only acceptance subject, use `npm run package` instead and do not follow it with an ordinary same-root `npm run make`. The default `out` works only while absent. To retain multiple generations, pre-create a workspace-contained parent and export a unique `AIDRAW_FORGE_OUT_DIR` child before the command; verification, checksums, default license/provenance output, and packaged-E2E discovery follow it. A failed attempt consumes its root. The supported workflow never clears or replaces an existing generation automatically.
 
 Forge declares DMG and ZIP makers for Darwin. The fuse hook resolves `AIDraw.app/Contents/MacOS/Electron` while packaging and now keys ad-hoc-signature reset to Forge's target architecture rather than the build host. The release workflow also fails closed if its `macos-arm64` label disagrees with Node's actual platform/architecture.
 

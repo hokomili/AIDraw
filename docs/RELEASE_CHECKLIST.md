@@ -10,9 +10,10 @@ This checklist complements `FEATURE_TRACKER.md`; it cannot override a missing or
 - [ ] Run the packaged Level 2 automated regression matrix.
 - [ ] Record known limitations and ensure README claims match the tracker.
 - [ ] Build Squirrel/DMG/DEB/RPM/ZIP artifacts on their native OS runners; generate per-platform SHA-256 and license reports.
+- [ ] Start each package/make attempt in one absent single-use generation root, retain its `.aidraw-package-generation.json` identity through verification, and never reuse or silently clear a consumed root.
 - [ ] Require package verification to report the exact manifest/lock Electron version from the packaged runtime itself. On macOS, require the native DMG maker and an independent `hdiutil verify`; treat the ad-hoc/unsigned image as development evidence until signing/notarization gates pass.
 - [ ] Require package verification to find the exact `LiberationSans-OFL-1.1.txt` resource in every native app layout, and require the generated license inventory to agree with its four bundled font hashes and complete OFL notice.
-- [ ] Retain each native job's `RELEASE_PROVENANCE-<platform>.json`; it must bind a clean commit and exact source/toolchain/checksum/artifact inventory.
+- [ ] Retain each native job's schema-2 `RELEASE_PROVENANCE-<platform>.json`; it must bind a clean commit, single-use package generation, and exact source/toolchain/checksum/artifact inventory. Preserve pre-policy schema-1 manifests as historical evidence only; do not mix, migrate, or compare them as current release inputs.
 - [ ] Verify no credentials, MCP tokens, user profiles, QA artifacts, or personal artwork are staged.
 - [ ] Run `node scripts/npm-node24.mjs run rc:audit`; treat its ranked output as planning evidence only, not as a release certificate.
 - [ ] After fresh independent Level 3 evidence exists, fill an ignored copy of `docs/testing/RC_EVIDENCE_TEMPLATE.json` and require `node scripts/npm-node24.mjs run rc:verify -- --evidence=test-results/luna-high/<run-id>/rc-evidence.json` to pass on the exact clean candidate.

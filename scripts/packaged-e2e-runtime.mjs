@@ -54,7 +54,7 @@ export function resolvePackagedE2eArtifact({
 } = {}) {
   const workspace = resolve(workspacePath);
   const targetArch = normalizeArch(nonEmpty(environment.AIDRAW_E2E_ARCH) ?? arch);
-  const outRoot = resolve(workspace, nonEmpty(environment.AIDRAW_E2E_OUT_DIR) ?? 'out');
+  const outRoot = resolve(workspace, nonEmpty(environment.AIDRAW_E2E_OUT_DIR) ?? nonEmpty(environment.AIDRAW_FORGE_OUT_DIR) ?? 'out');
   const explicitExecutable = nonEmpty(environment.AIDRAW_E2E_EXECUTABLE);
   let executable;
 

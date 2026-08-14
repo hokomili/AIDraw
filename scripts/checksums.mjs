@@ -2,8 +2,14 @@ import { createHash } from 'node:crypto';
 import { readdir, readFile, writeFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import process from 'node:process';
+import { readPackageGeneration, resolvePackageOutputRoot } from './package-output-policy.mjs';
 
-const root = join(process.cwd(), 'out');
+const root = resolvePackageOutputRoot();
+await readPackageGeneration({
+  outputDirectory: root,
+  platform: process.env.AIDRAW_PACKAGE_PLATFORM || process.platform,
+  architecture: process.env.AIDRAW_PACKAGE_ARCH || process.arch,
+});
 async function files(directory) { return (await readdir(directory, { withFileTypes: true })).flatMap((entry) => entry.name === 'SHA256SUMS.txt' ? [] : entry.isDirectory() ? [files(join(directory, entry.name))] : [join(directory, entry.name)]); }
 async function flatten(values) { const result = []; for (const value of values) result.push(...(value instanceof Promise ? await flatten(await value) : Array.isArray(value) ? await flatten(value) : [value])); return result; }
 const artifacts = (await flatten(await files(join(root, 'make')))).sort(); const lines = [];

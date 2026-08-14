@@ -16,10 +16,11 @@ import { assertPackagedUtilityImportResultSources } from './packaged-utility-imp
 import { assertPackagedUtilityGenerationResultSources } from './packaged-utility-generation-result.mjs';
 import { inspectPackagedFontLicense } from './packaged-font-license.mjs';
 import { assertPackagedElectronVersion, inspectDependencySecurityPolicy } from './dependency-security.mjs';
+import { readPackageGeneration, resolvePackageOutputRoot } from './package-output-policy.mjs';
 
 const execute = promisify(execFile);
 
-const outDir = resolve(process.env.AIDRAW_FORGE_OUT_DIR || 'out');
+const outDir = resolvePackageOutputRoot();
 const platform = process.env.AIDRAW_PACKAGE_PLATFORM || process.platform;
 const architecture = process.env.AIDRAW_PACKAGE_ARCH || process.arch;
 const packageDir = join(outDir, `AIDraw-${platform}-${architecture}`);
@@ -37,6 +38,11 @@ const runtime = platform === 'darwin'
 const appBundle = platform === 'darwin' ? join(packageDir, 'AIDraw.app') : undefined;
 
 try {
+  const packageGeneration = await readPackageGeneration({
+    outputDirectory: outDir,
+    platform,
+    architecture,
+  });
   let executable;
   for (const candidate of executableCandidates) {
     if (await access(candidate).then(() => true, () => false)) { executable = candidate; break; }
@@ -162,6 +168,7 @@ try {
     packagedElectronVersion,
     dependencySecurity,
     packageDir,
+    packageGeneration: packageGeneration.generation,
     executable,
     executableBytes: executableInfo.size,
     runtimeBytes: runtimeInfo.size,

@@ -7,8 +7,11 @@ import { basename, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import process from 'node:process';
+import { readPackageGeneration, resolvePackageOutputRoot } from './package-output-policy.mjs';
 
 const execute = promisify(execFile);
+export const RELEASE_PROVENANCE_SCHEMA_VERSION = 2;
+export const REPRODUCIBILITY_REPORT_SCHEMA_VERSION = 1;
 const SHA256 = /^[a-f0-9]{64}$/i;
 const COMMIT = /^[a-f0-9]{40}$/i;
 const PLATFORM_LABELS = new Map([
@@ -129,7 +132,7 @@ function validateRepository(repository) {
 
 export async function captureReleaseProvenance(options = {}) {
   const cwd = resolve(options.cwd ?? process.cwd());
-  const outDirectory = resolve(cwd, options.outDirectory ?? 'out');
+  const outDirectory = resolvePackageOutputRoot({ workspace: cwd, outputDirectory: options.outDirectory });
   const makeDirectory = join(outDirectory, 'make');
   const packagePath = join(cwd, 'package.json');
   const lockPath = join(cwd, 'package-lock.json');
@@ -157,6 +160,12 @@ export async function captureReleaseProvenance(options = {}) {
   const npmVersion = options.runtime?.npmVersion ?? npmVersionFromEnvironment();
   if (!EXACT_VERSION.test(npmVersion)) throw new Error(`Release provenance requires an exact npm version; found ${npmVersion}.`);
   if (nvmrc.trim() !== '24' || packageJson.engines?.node !== '>=24 <25') throw new Error('Release provenance requires the repository Node 24 runtime contract.');
+  const packageGeneration = await readPackageGeneration({
+    workspace: cwd,
+    outputDirectory: outDirectory,
+    platform: nodePlatform,
+    architecture,
+  });
 
   const makeFiles = await filesBelow(makeDirectory);
   if (!makeFiles.length) throw new Error('Release maker output is empty.');
@@ -182,10 +191,15 @@ export async function captureReleaseProvenance(options = {}) {
   if (platformLabel === 'windows-x64' && licenseReports.length !== 2) throw new Error('Windows release provenance requires both third-party license reports.');
 
   const manifest = {
-    schemaVersion: 1,
+    schemaVersion: RELEASE_PROVENANCE_SCHEMA_VERSION,
     capturedAt: options.capturedAt ?? new Date().toISOString(),
     platform: { label: platformLabel, nodePlatform, architecture },
     candidate: { version: packageJson.version, commit: repository.commit.toLowerCase() },
+    packageGeneration: {
+      schemaVersion: packageGeneration.generation.schemaVersion,
+      policy: packageGeneration.generation.policy,
+      target: packageGeneration.generation.target,
+    },
     source: {
       clean: true,
       packageJsonSha256: sha256Bytes(packageBytes),
@@ -246,9 +260,22 @@ export function compareReleaseProvenance(left, right, options = {}) {
   const artifactDifferences = [];
   const environmentDifferences = [];
   for (const [side, manifest] of [['left', left], ['right', right]]) {
-    if (!isRecord(manifest) || manifest.schemaVersion !== 1) sourceDifferences.push({ field: `${side}.schemaVersion`, left: side === 'left' ? manifest?.schemaVersion ?? null : null, right: side === 'right' ? manifest?.schemaVersion ?? null : null });
+    if (!isRecord(manifest) || manifest.schemaVersion !== RELEASE_PROVENANCE_SCHEMA_VERSION) sourceDifferences.push({ field: `${side}.schemaVersion`, left: side === 'left' ? manifest?.schemaVersion ?? null : null, right: side === 'right' ? manifest?.schemaVersion ?? null : null });
+    const generation = manifest?.packageGeneration;
+    if (!isRecord(generation)
+      || generation.schemaVersion !== 1
+      || generation.policy !== 'exclusive-output-root-v1'
+      || !isRecord(generation.target)
+      || !['darwin', 'linux', 'win32'].includes(generation.target.platform)
+      || !['arm64', 'x64'].includes(generation.target.architecture)) {
+      sourceDifferences.push({
+        field: `${side}.packageGeneration`,
+        left: side === 'left' ? generation ?? null : null,
+        right: side === 'right' ? generation ?? null : null,
+      });
+    }
   }
-  for (const field of ['platform.label', 'platform.nodePlatform', 'platform.architecture', 'candidate.version', 'candidate.commit', 'source.clean', 'source.packageJsonSha256', 'source.packageLockSha256', 'source.lockfileVersion']) addDifference(sourceDifferences, field, valueAt(left, field), valueAt(right, field));
+  for (const field of ['platform.label', 'platform.nodePlatform', 'platform.architecture', 'candidate.version', 'candidate.commit', 'packageGeneration', 'source.clean', 'source.packageJsonSha256', 'source.packageLockSha256', 'source.lockfileVersion']) addDifference(sourceDifferences, field, valueAt(left, field), valueAt(right, field));
   if (valueAt(left, 'source.clean') !== true || valueAt(right, 'source.clean') !== true) sourceDifferences.push({ field: 'source.clean.required', left: valueAt(left, 'source.clean') ?? null, right: valueAt(right, 'source.clean') ?? null });
   for (const field of ['runtime.node', 'runtime.npm', 'runtime.nvmrc', 'runtime.nodeEngine', 'toolchain']) addDifference(toolchainDifferences, field, valueAt(left, field), valueAt(right, field));
   addDifference(environmentDifferences, 'runtime.osRelease', valueAt(left, 'runtime.osRelease'), valueAt(right, 'runtime.osRelease'));
@@ -269,7 +296,7 @@ export function compareReleaseProvenance(left, right, options = {}) {
   }
   differences.sort((a, b) => compare(a.field, b.field));
   return {
-    schemaVersion: 1,
+    schemaVersion: REPRODUCIBILITY_REPORT_SCHEMA_VERSION,
     comparedAt: options.comparedAt ?? new Date().toISOString(),
     result: differences.length ? 'FAIL' : 'PASS',
     platform: valueAt(left, 'platform.label') ?? null,
