@@ -41,4 +41,23 @@ describe('pixel tool renderer wiring', () => {
     expect(source).toContain('existing painted tiles do not change');
     expect(source).toContain("kind: 'pixel.asset.replace', asset: map, expectedRevision: tilemap.revision");
   });
+
+  it('turns repeated sprite copies into exact wrapped edits through the ordinary cel transaction', async () => {
+    const source = await readFile(new URL('../../src/renderer/canvas/PixelCanvas.tsx', import.meta.url), 'utf8');
+    expect(source).toContain('wrapPixelPoint');
+    expect(source).toContain('wrapPixelPoints(preview, sprite.width, sprite.height)');
+    expect(source).toContain('wrapPixelPoints(stampPreview, sprite.width, sprite.height)');
+    expect(source).toContain("tool !== 'select' && tool !== 'lasso'");
+    expect(source).toContain('placePixelStamp(placementStamp, entry.x, entry.y, wrapEditing ? undefined');
+    expect(source).toContain('const spritePoint = sprite && wrapEditing ? wrapPixelPoint(point, sprite.width, sprite.height) : point');
+    expect(source).toContain('pixelAt(sprite, activeFrameId, spritePoint.x, spritePoint.y)');
+    expect(source).toContain('start: spritePoint, read: compositePixelReader(sprite, activeFrameId)');
+    expect(source).toContain('wrapPixelPoints(authoredPoints, sprite.width, sprite.height)');
+    expect(source).toContain('wrap={wrapEditing}');
+    expect(source).toContain('orderedDitherIndex(sample.x, sample.y');
+    expect(source).toContain('Preview and edit through repeated copies across opposite sprite edges');
+    expect(source).toContain('aria-pressed={wrapEditing}');
+    expect(source).toContain("kind: 'pixel.cel.set'");
+    expect(source).toContain("region: { kind: bounds.kind, assetId: sprite.id, x: 0, y: 0, width: bounds.width, height: bounds.height }");
+  });
 });

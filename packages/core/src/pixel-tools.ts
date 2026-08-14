@@ -211,6 +211,37 @@ export function pixelPerfectStrokePoints(points: readonly PixelToolPoint[]): Pix
   return result;
 }
 
+function wrapPixelCoordinate(value: number, size: number, name: string): number {
+  if (!Number.isSafeInteger(value)) throw new Error(`${name} must be a safe integer.`);
+  return ((value % size) + size) % size;
+}
+
+/** Maps one repeated-tile coordinate into the canonical sprite rectangle. */
+export function wrapPixelPoint<T extends PixelToolPoint>(point: T, width: number, height: number): T {
+  const boundedWidth = positiveInteger(width, 'width');
+  const boundedHeight = positiveInteger(height, 'height');
+  return {
+    ...point,
+    x: wrapPixelCoordinate(point.x, boundedWidth, 'point.x'),
+    y: wrapPixelCoordinate(point.y, boundedHeight, 'point.y'),
+  };
+}
+
+/**
+ * Maps a drawing sequence into canonical sprite coordinates without changing
+ * its order or collapsing revisits. The ordinary cel writer remains the
+ * authority for deterministic last-write behavior and undo.
+ */
+export function wrapPixelPoints<T extends PixelToolPoint>(points: readonly T[], width: number, height: number): T[] {
+  const boundedWidth = positiveInteger(width, 'width');
+  const boundedHeight = positiveInteger(height, 'height');
+  return points.map((point) => ({
+    ...point,
+    x: wrapPixelCoordinate(point.x, boundedWidth, 'point.x'),
+    y: wrapPixelCoordinate(point.y, boundedHeight, 'point.y'),
+  }));
+}
+
 /** Returns a symmetric integer outline inside the inclusive endpoint box. */
 export function ellipsePixels(x0: number, y0: number, x1: number, y1: number): PixelToolPoint[] {
   const left = Math.min(Math.round(x0), Math.round(x1));

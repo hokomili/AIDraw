@@ -1,11 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import {
+  HUMAN_ACTOR,
+  applyTransaction,
   createPixelCelReader,
+  createId,
   createPixelDocument,
   ellipsePixels,
   floodPixelRegion,
+  nowIso,
   pixelPerfectStrokePoints,
+  readPixel,
   replacePixelRegion,
+  wrapPixelPoint,
+  wrapPixelPoints,
   writePixels,
 } from '@aidraw/core';
 
@@ -105,6 +112,54 @@ describe('bounded pixel tool kernels', () => {
     expect(pixelPerfectStrokePoints([{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1 }, { x: 2, y: 1 }, { x: 2, y: 2 }])).toEqual([{ x: 0, y: 0 }, { x: 1, y: 1 }, { x: 2, y: 2 }]);
     const revisited = pixelPerfectStrokePoints([{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1 }, { x: 0, y: 0 }, { x: 0, y: 1 }]);
     expect(revisited.filter((point) => point.x === 0 && point.y === 0)).toHaveLength(2);
+  });
+
+  it('maps repeated sprite coordinates exactly while preserving order and payloads', () => {
+    expect(wrapPixelPoint({ x: -1, y: 3, index: 7 }, 4, 3)).toEqual({ x: 3, y: 0, index: 7 });
+    expect(wrapPixelPoints([
+      { x: -5, y: -4, index: 2 },
+      { x: 4, y: 3, index: 3 },
+      { x: 9, y: 7, index: 4 },
+      { x: 1, y: 1, index: 5 },
+    ], 4, 3)).toEqual([
+      { x: 3, y: 2, index: 2 },
+      { x: 0, y: 0, index: 3 },
+      { x: 1, y: 1, index: 4 },
+      { x: 1, y: 1, index: 5 },
+    ]);
+    expect(() => wrapPixelPoint({ x: 0.5, y: 0 }, 4, 3)).toThrow(/point\.x/);
+    expect(() => wrapPixelPoints([], 0, 3)).toThrow(/width/);
+  });
+
+  it('commits one exact wrapped indexed edit and restores it through the ordinary inverse', () => {
+    const document = createPixelDocument('sprite');
+    const sprite = document.pixelAssets[document.activeAssetId];
+    if (sprite.type !== 'sprite') throw new Error('Expected sprite');
+    sprite.width = 4; sprite.height = 3;
+    const cel = Object.values(sprite.cels)[0];
+    const changes = wrapPixelPoints([
+      { x: -1, y: 0, index: 2 },
+      { x: 4, y: 2, index: 3 },
+      { x: 1, y: -1, index: 4 },
+      { x: 5, y: 2, index: 5 },
+    ], sprite.width, sprite.height);
+    const applied = applyTransaction(document, {
+      id: createId('tx'), clientOperationId: createId('op'), documentId: document.id,
+      actor: HUMAN_ACTOR, label: 'Draw wrapped pixels', createdAt: nowIso(),
+      operations: [{ kind: 'pixel.cel.set', spriteId: sprite.id, celId: cel.id, changes, expectedRevision: cel.revision }],
+    });
+    if (applied.document.kind !== 'pixel') throw new Error('Expected pixel document');
+    const nextSprite = applied.document.pixelAssets[sprite.id];
+    if (nextSprite.type !== 'sprite') throw new Error('Expected sprite');
+    expect(nextSprite.revision).toBe(sprite.revision + 1);
+    expect(nextSprite.cels[cel.id].revision).toBe(cel.revision + 1);
+    expect([readPixel(nextSprite.cels[cel.id], 3, 0), readPixel(nextSprite.cels[cel.id], 0, 2), readPixel(nextSprite.cels[cel.id], 1, 2)]).toEqual([2, 3, 5]);
+
+    const restored = applyTransaction(applied.document, applied.inverse).document;
+    if (restored.kind !== 'pixel') throw new Error('Expected pixel document');
+    const restoredSprite = restored.pixelAssets[sprite.id];
+    if (restoredSprite.type !== 'sprite') throw new Error('Expected sprite');
+    expect([readPixel(restoredSprite.cels[cel.id], 3, 0), readPixel(restoredSprite.cels[cel.id], 0, 2), readPixel(restoredSprite.cels[cel.id], 1, 2)]).toEqual([0, 0, 0]);
   });
 
   it('keeps exact symmetric ellipse, point, and line goldens', () => {

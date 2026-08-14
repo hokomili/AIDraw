@@ -37,6 +37,8 @@ import {
   transformPixelStamp,
   transformTileStamp,
   upsertPixelAnimationTag,
+  wrapPixelPoint,
+  wrapPixelPoints,
   type CanvasOperation,
   type CollisionShape,
   type BitmapFont,
@@ -204,9 +206,9 @@ function rectangleFill(start: PixelPoint, end: PixelPoint): PixelPoint[] {
 
 interface BitmapTextRequest { text: string; fontId: string; letterSpacing: number; lineSpacing: number; scale: number; align: 'left' | 'center' | 'right' }
 
-function BitmapTextDialog({ fonts, origin, spriteSize, paletteIndex, onSubmit, onFontsReplace, onClose }: { fonts: BitmapFont[]; origin: PixelPoint; spriteSize: { width: number; height: number }; paletteIndex: number; onSubmit: (request: BitmapTextRequest) => Promise<void>; onFontsReplace: (fonts: BitmapFont[]) => Promise<boolean>; onClose: () => void }) {
+function BitmapTextDialog({ fonts, origin, spriteSize, paletteIndex, wrap, onSubmit, onFontsReplace, onClose }: { fonts: BitmapFont[]; origin: PixelPoint; spriteSize: { width: number; height: number }; paletteIndex: number; wrap: boolean; onSubmit: (request: BitmapTextRequest) => Promise<void>; onFontsReplace: (fonts: BitmapFont[]) => Promise<boolean>; onClose: () => void }) {
   const [text, setText] = useState('PIXEL'); const [fontId, setFontId] = useState(fonts[0]?.id ?? ''); const [letterSpacing, setLetterSpacing] = useState(0); const [lineSpacing, setLineSpacing] = useState(0); const [scale, setScale] = useState(1); const [align, setAlign] = useState<BitmapTextRequest['align']>('left'); const [busy, setBusy] = useState(false); const [importError, setImportError] = useState<string>(); const font = fonts.find((entry) => entry.id === fontId) ?? fonts[0];
-  const options = { x: origin.x, y: origin.y, letterSpacing, lineSpacing, scale, align }; const points = font ? bitmapTextCells(font, text, options) : []; const footprint = font ? measureBitmapText(font, text, options) : { width: 0, height: 0 }; const visible = points.some((point) => point.x >= 0 && point.y >= 0 && point.x < spriteSize.width && point.y < spriteSize.height); const local = points.length ? { minX: Math.min(...points.map((point) => point.x)), minY: Math.min(...points.map((point) => point.y)), maxX: Math.max(...points.map((point) => point.x)), maxY: Math.max(...points.map((point) => point.y)) } : { minX: 0, minY: 0, maxX: 1, maxY: 1 };
+  const options = { x: origin.x, y: origin.y, letterSpacing, lineSpacing, scale, align }; const authoredPoints = font ? bitmapTextCells(font, text, options) : []; const points = wrap ? wrapPixelPoints(authoredPoints, spriteSize.width, spriteSize.height) : authoredPoints; const footprint = font ? measureBitmapText(font, text, options) : { width: 0, height: 0 }; const visible = points.some((point) => point.x >= 0 && point.y >= 0 && point.x < spriteSize.width && point.y < spriteSize.height); const local = points.length ? { minX: Math.min(...points.map((point) => point.x)), minY: Math.min(...points.map((point) => point.y)), maxX: Math.max(...points.map((point) => point.x)), maxY: Math.max(...points.map((point) => point.y)) } : { minX: 0, minY: 0, maxX: 1, maxY: 1 };
   const importFont = async (file: File) => {
     setImportError(undefined);
     try {
@@ -270,7 +272,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const [onionSkin, setOnionSkin] = useState(true);
   const [onionSettings, setOnionSettings] = useState<OnionSkinSettings>(() => ({ ...DEFAULT_ONION_SKIN_SETTINGS }));
   const [onionSettingsOpen, setOnionSettingsOpen] = useState(false);
-  const [wrapPreview, setWrapPreview] = useState(false);
+  const [wrapEditing, setWrapEditing] = useState(false);
   const [symmetry, setSymmetry] = useState<'none' | 'horizontal' | 'vertical' | 'both'>('none');
   const [paletteCycling, setPaletteCycling] = useState(false);
   const [paletteOffset, setPaletteOffset] = useState(0);
@@ -532,7 +534,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
         for (const onionLayer of onionSkinLayers(sprite.frameIds, activeFrameId, onionSettings)) drawFrame(onionLayer.frameId, onionLayer.opacity, onionLayer.tint);
       }
       drawFrame(activeFrameId, 1);
-      if (wrapPreview) {
+      if (wrapEditing) {
         context.globalAlpha = 0.25;
         for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
           const offsetX = Number(dx) * sprite.width; const offsetY = Number(dy) * sprite.height;
@@ -647,16 +649,17 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
         context.fillRect(point.x * view.scale, point.y * view.scale, view.scale, view.scale);
       } else if (tool === 'dither') {
         for (const point of preview) {
-          if (point.x < 0 || point.y < 0 || point.x >= logical.gridWidth || point.y >= logical.gridHeight) continue;
+          if (!(sprite && wrapEditing) && (point.x < 0 || point.y < 0 || point.x >= logical.gridWidth || point.y >= logical.gridHeight)) continue;
           if (overlayRegionFilter && !overlayRegionFilter.cellIntersects(point.x, point.y)) continue;
-          const index = orderedDitherIndex(point.x, point.y, ditherMixIndex, pixelIndex, ditherCoverage, ditherMatrixSize);
+          const sample = sprite && wrapEditing ? wrapPixelPoint(point, sprite.width, sprite.height) : point;
+          const index = orderedDitherIndex(sample.x, sample.y, ditherMixIndex, pixelIndex, ditherCoverage, ditherMatrixSize);
           context.fillStyle = index === 0 ? '#ffffff80' : (activePaletteOverride ?? document.palette)[index]?.color ?? '#ff00ff';
           context.fillRect(point.x * view.scale, point.y * view.scale, view.scale, view.scale);
         }
       } else {
         const drawIndex = tool === 'eraser' ? 0 : pixelIndex;
         context.fillStyle = drawIndex === 0 ? '#ffffff80' : document.palette[drawIndex]?.color ?? '#ff00ff';
-        for (const point of preview) if (point.x >= 0 && point.y >= 0 && point.x < logical.gridWidth && point.y < logical.gridHeight && (!overlayRegionFilter || overlayRegionFilter.cellIntersects(point.x, point.y))) fillGridCell(point);
+        for (const point of preview) if (((sprite && wrapEditing) || (point.x >= 0 && point.y >= 0 && point.x < logical.gridWidth && point.y < logical.gridHeight)) && (!overlayRegionFilter || overlayRegionFilter.cellIntersects(point.x, point.y))) fillGridCell(point);
       }
     }
 
@@ -734,7 +737,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       context.stroke();
     }
     context.restore();
-  }, [activeFrameId, activePaletteCycle, activePaletteOverride, bulkPreview, ditherCoverage, ditherMatrixSize, ditherMixIndex, document, lassoPath, logical, mapObjectGesture, onionSettings, onionSkin, paletteCycling, paletteOffset, pan.x, pan.y, pixelIndex, playbacks, preview, selectedEntityId, selection, selectionOffset, size, sprite, stampPreview, tileAnimationTimeMs, tilemap, tileStampPreview, tileset, tool, view, wrapPreview]);
+  }, [activeFrameId, activePaletteCycle, activePaletteOverride, bulkPreview, ditherCoverage, ditherMatrixSize, ditherMixIndex, document, lassoPath, logical, mapObjectGesture, onionSettings, onionSkin, paletteCycling, paletteOffset, pan.x, pan.y, pixelIndex, playbacks, preview, selectedEntityId, selection, selectionOffset, size, sprite, stampPreview, tileAnimationTimeMs, tilemap, tileStampPreview, tileset, tool, view, wrapEditing]);
 
   const toPixel = (event: ReactPointerEvent<HTMLCanvasElement>): PixelPoint => {
     const bounds = event.currentTarget.getBoundingClientRect();
@@ -952,7 +955,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     else {
       const line = cursor ? bresenham(cursor.x, cursor.y, point.x, point.y) : [point];
       if (tool === 'stamp' && sprite) {
-        const placed = line.flatMap((entry) => placePixelStamp(placementStamp, entry.x, entry.y, { width: sprite.width, height: sprite.height }).changes);
+        const placed = line.flatMap((entry) => placePixelStamp(placementStamp, entry.x, entry.y, wrapEditing ? undefined : { width: sprite.width, height: sprite.height }).changes);
         setStampPreview((current) => [...new Map([...current, ...placed].map((entry) => [`${entry.x},${entry.y}`, entry])).values()]);
         setPreview((current) => [...new Map([...current, ...placed].map((entry) => [`${entry.x},${entry.y}`, { x: entry.x, y: entry.y }])).values()]);
         return;
@@ -976,6 +979,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const onPointerDown = async (event: ReactPointerEvent<HTMLCanvasElement>) => {
     event.currentTarget.setPointerCapture(event.pointerId);
     const point = toPixel(event);
+    const spritePoint = sprite && wrapEditing ? wrapPixelPoint(point, sprite.width, sprite.height) : point;
     if (tool === 'zoom') { setZoom(zoom * (event.shiftKey ? 0.5 : 2)); return; }
     if (tool === 'hand' || event.button === 1) { setStart(point); setCursor(point); return; }
     if (!sprite && !tilemap) return;
@@ -991,7 +995,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       }
     }
     if (tool === 'eyedropper' && sprite && activeFrameId) {
-      const value = pixelAt(sprite, activeFrameId, point.x, point.y);
+      const value = pixelAt(sprite, activeFrameId, spritePoint.x, spritePoint.y);
       setPixelIndex(value);
       const color = document.palette[value]?.color;
       if (color) useEditorStore.getState().setColor(color.slice(0, 7));
@@ -999,8 +1003,8 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     }
     const combination: SelectionCombination = event.shiftKey && event.altKey ? 'intersect' : event.shiftKey ? 'add' : event.altKey ? 'subtract' : 'replace'; selectionCombination.current = combination;
     if (tool === 'wand' && sprite && activeFrameId) {
-      if (point.x < 0 || point.y < 0 || point.x >= sprite.width || point.y >= sprite.height) return;
-      const selected = floodPixelRegion({ width: sprite.width, height: sprite.height, start: point, read: compositePixelReader(sprite, activeFrameId) });
+      if (spritePoint.x < 0 || spritePoint.y < 0 || spritePoint.x >= sprite.width || spritePoint.y >= sprite.height) return;
+      const selected = floodPixelRegion({ width: sprite.width, height: sprite.height, start: spritePoint, read: compositePixelReader(sprite, activeFrameId) });
       if (!selected.ok) notify(pixelToolLimitMessage('Magic-wand selection', selected), 'warning');
       else setSelection((current) => combineGridSelection(current, pixelRegionPoints(selected.runs), combination));
       setPreview([]); setBulkPreview([]); return;
@@ -1015,22 +1019,22 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       setSelectionOffset(undefined); setStart(point); setCursor(point); setLassoPath(path); setPreview(tool === 'lasso' ? [] : [point]); return;
     }
     if (tool === 'text' && sprite && activeFrameId) {
-      setBitmapTextPoint(point);
+      setBitmapTextPoint(spritePoint);
       return;
     }
     const bounds = sprite ? { width: sprite.width, height: sprite.height, kind: 'pixel' as const } : { width: tilemap!.width, height: tilemap!.height, kind: 'tile' as const };
     if ((tool === 'fill' || tool === 'replace') && sprite && activeFrameId) {
-      if (point.x < 0 || point.y < 0 || point.x >= sprite.width || point.y >= sprite.height) return;
+      if (spritePoint.x < 0 || spritePoint.y < 0 || spritePoint.x >= sprite.width || spritePoint.y >= sprite.height) return;
       const read = compositePixelReader(sprite, activeFrameId);
-      const source = read(point.x, point.y);
+      const source = read(spritePoint.x, spritePoint.y);
       if (source === pixelIndex) { notify(tool === 'fill' ? 'This region already uses the selected palette index.' : 'The source and replacement palette indices are identical.', 'info'); return; }
       const result = tool === 'fill'
-        ? floodPixelRegion({ width: sprite.width, height: sprite.height, start: point, read })
+        ? floodPixelRegion({ width: sprite.width, height: sprite.height, start: spritePoint, read })
         : replacePixelRegion({ width: sprite.width, height: sprite.height, matchIndex: source, read });
       if (!result.ok) { notify(pixelToolLimitMessage(tool === 'fill' ? 'Pixel flood fill' : 'Pixel color replacement', result), 'warning'); return; }
       if (!result.runs.length) { notify('The pixel operation would not change any cells.', 'info'); return; }
       const pendingLock = window.aidraw.acquireHumanLock({ documentId: document.id, region: { kind: bounds.kind, assetId: sprite.id, x: 0, y: 0, width: bounds.width, height: bounds.height } });
-      setLockPromise(pendingLock); setStart(point); setCursor(point); setPreview([]); setBulkPreview(result.runs.map((run) => ({ ...run, index: pixelIndex }))); setStampPreview([]); setTileStampPreview([]);
+      setLockPromise(pendingLock); setStart(spritePoint); setCursor(point); setPreview([]); setBulkPreview(result.runs.map((run) => ({ ...run, index: pixelIndex }))); setStampPreview([]); setTileStampPreview([]);
       return;
     }
     setLockPromise(window.aidraw.acquireHumanLock({ documentId: document.id, region: { kind: bounds.kind, assetId: sprite?.id ?? asset!.id, x: 0, y: 0, width: bounds.width, height: bounds.height } }));
@@ -1080,8 +1084,10 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     const pendingRuns = bulkPreview;
     const pendingLassoPath = lassoDraftRef.current?.points ?? [];
     if (tool === 'lasso' && pendingLassoPath.length === 0) return;
-    const points = preview.filter((point) => tilemap?.infinite || (point.x >= 0 && point.y >= 0 && point.x < logical.gridWidth && point.y < logical.gridHeight));
-    const placedStamp = stampPreview; const placedTiles = tileStampPreview; setStart(undefined); setPreview([]); setBulkPreview([]); setLassoPath([]); setStampPreview([]); setTileStampPreview([]);
+    const points = sprite && wrapEditing && tool !== 'select' && tool !== 'lasso'
+      ? wrapPixelPoints(preview, sprite.width, sprite.height)
+      : preview.filter((point) => tilemap?.infinite || (point.x >= 0 && point.y >= 0 && point.x < logical.gridWidth && point.y < logical.gridHeight));
+    const placedStamp = sprite && wrapEditing ? wrapPixelPoints(stampPreview, sprite.width, sprite.height) : stampPreview; const placedTiles = tileStampPreview; setStart(undefined); setPreview([]); setBulkPreview([]); setLassoPath([]); setStampPreview([]); setTileStampPreview([]);
     lassoDraftRef.current = undefined;
     if (selectionOffset && tool === 'select') { const offset = selectionOffset; setSelectionOffset(undefined); if (offset.x || offset.y) await transformSelection('move', offset); return; }
     if (tool === 'select') { setSelection((current) => combineGridSelection(current, points, selectionCombination.current)); return; }
@@ -1220,7 +1226,8 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     const frame = activeFrameId;
     const font = document.bitmapFonts.find((entry) => entry.id === request.fontId);
     if (!sprite || !point || !frame || !request.text.trim() || !font) return;
-    const points = bitmapTextCells(font, request.text, { x: point.x, y: point.y, letterSpacing: request.letterSpacing, lineSpacing: request.lineSpacing, scale: request.scale, align: request.align }).filter((entry) => entry.x >= 0 && entry.y >= 0 && entry.x < sprite.width && entry.y < sprite.height);
+    const authoredPoints = bitmapTextCells(font, request.text, { x: point.x, y: point.y, letterSpacing: request.letterSpacing, lineSpacing: request.lineSpacing, scale: request.scale, align: request.align });
+    const points = wrapEditing ? wrapPixelPoints(authoredPoints, sprite.width, sprite.height) : authoredPoints.filter((entry) => entry.x >= 0 && entry.y >= 0 && entry.x < sprite.width && entry.y < sprite.height);
     if (!points.length) return;
     const xs = points.map((entry) => entry.x); const ys = points.map((entry) => entry.y);
     const lock = await window.aidraw.acquireHumanLock({ documentId: document.id, region: { kind: 'pixel', assetId: sprite.id, x: Math.min(...xs), y: Math.min(...ys), width: Math.max(...xs) - Math.min(...xs) + 1, height: Math.max(...ys) - Math.min(...ys) + 1 } });
@@ -1315,7 +1322,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       <div className="pixel-floating-controls">
         {hasTimeline && <button className={onionSkin ? 'is-active' : ''} onClick={() => setOnionSkin((value) => !value)} title="Onion skin"><Eye size={14} /> Onion</button>}
         {hasTimeline && <button className={onionSettingsOpen ? 'is-active' : ''} aria-expanded={onionSettingsOpen} aria-controls="onion-skin-settings" onClick={() => { setOnionSettingsOpen((open) => !open); setExposureGridOpen(false); }} title="Configure bounded onion skin frames, tint, and opacity"><SlidersHorizontal size={13} /> Onion setup</button>}
-        <button className={wrapPreview ? 'is-active' : ''} onClick={() => setWrapPreview((value) => !value)} title="Tile wrap preview"><Repeat2 size={14} /> Wrap</button>
+        {sprite && <button className={wrapEditing ? 'is-active' : ''} aria-pressed={wrapEditing} onClick={() => setWrapEditing((value) => !value)} title="Preview and edit through repeated copies across opposite sprite edges"><Repeat2 size={14} /> Wrap edit</button>}
         {sprite && <button className={symmetry !== 'none' ? 'is-active' : ''} onClick={() => setSymmetry((value) => value === 'none' ? 'horizontal' : value === 'horizontal' ? 'vertical' : value === 'vertical' ? 'both' : 'none')} title="Cycle symmetry: none, horizontal, vertical, both"><FlipHorizontal2 size={14} /> {symmetry === 'none' ? 'Sym' : symmetry[0].toUpperCase()}</button>}
         {sprite && <button className={paletteCycling ? 'is-active' : ''} onClick={() => { if (paletteCycling) setPaletteOffset(0); setPaletteCycling(!paletteCycling); }} title="Palette cycling preview"><Repeat2 size={14} /> Cycle</button>}
         {paletteCycling && document.paletteCycles.length > 0 && <select aria-label="Active palette cycle" value={activePaletteCycle?.id} onChange={(event) => { setActivePaletteCycleId(event.target.value); setPaletteOffset(0); }} title="Named palette cycle">{document.paletteCycles.map((cycle) => <option key={cycle.id} value={cycle.id}>{cycle.name}</option>)}</select>}
@@ -1384,7 +1391,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       )}
       {exposureGridOpen && sprite && activeFrameId && <CelExposureGrid key={`${sprite.id}:${sprite.revision}:${activeFrameId}:${selectedEntityId ?? ''}`} sprite={sprite} activeFrameId={activeFrameId} activeLayerId={selectedEntityId} onSelect={(nextFrameId, layerId) => { setFrameId(nextFrameId); setSelectedEntity(layerId); }} onToggleLink={(layerId, nextFrameId) => void toggleCelExposureLink(layerId, nextFrameId)} onClose={() => setExposureGridOpen(false)} />}
       {onionSettingsOpen && hasTimeline && sprite && <OnionSkinSettingsPanel settings={onionSettings} onChange={setOnionSettings} onClose={() => setOnionSettingsOpen(false)} />}
-      {bitmapTextPoint && sprite && <BitmapTextDialog fonts={document.bitmapFonts} origin={bitmapTextPoint} spriteSize={{ width: sprite.width, height: sprite.height }} paletteIndex={pixelIndex} onSubmit={addBitmapText} onFontsReplace={(fonts) => apply('Replace bitmap font library', [{ kind: 'pixel.bitmap-fonts.replace', fonts }])} onClose={() => setBitmapTextPoint(undefined)} />}
+      {bitmapTextPoint && sprite && <BitmapTextDialog fonts={document.bitmapFonts} origin={bitmapTextPoint} spriteSize={{ width: sprite.width, height: sprite.height }} paletteIndex={pixelIndex} wrap={wrapEditing} onSubmit={addBitmapText} onFontsReplace={(fonts) => apply('Replace bitmap font library', [{ kind: 'pixel.bitmap-fonts.replace', fonts }])} onClose={() => setBitmapTextPoint(undefined)} />}
       {stampCaptureOpen && (sprite || tilemap) && <EntryDialog
         title="Save reusable stamp"
         description={sprite ? "The current selection is captured with exact palette indices, including transparent cells and its center anchor." : "The current map selection is captured with exact 32-bit GIDs, transformations, empty cells, and its center anchor."}

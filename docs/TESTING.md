@@ -1,6 +1,6 @@
 # AIDraw testing workflow
 
-Last updated: 2026-08-13
+Last updated: 2026-08-15
 
 ## Source-control and macOS migration preflight
 
@@ -180,7 +180,7 @@ Computer Use core workflows:
 - use native **File → Open**, keyboard Open, Save As to a new disposable path, and the close flow;
 - create custom-size Illustration, Pixel Sprite, Pixel Tilemap, and Pixel Project documents from the dialog;
 - illustration: select/multiselect, lasso, move/snapping, pressure/vector stroke, raster brush/eraser, path/node basics, all shapes, gradient, crop, text, eyedropper, layer operations, mask, alignment/distribution, boolean operation, opacity/blend/shadow/blur, Undo/Redo;
-- pixel: pencil/eraser/fill/replace/line/shapes/wand/stamp/dither/lighten/darken/text/picker, selection, symmetry, wrap preview, palette edit/reorder, resize, linked and independent frames, duration, onion skin, loop/ping-pong, replay;
+- pixel: pencil/eraser/fill/replace/line/shapes/wand/stamp/dither/lighten/darken/text/picker, selection, symmetry, wrap preview/edit, palette edit/reorder, resize, linked and independent frames, duration, onion skin, loop/ping-pong, replay;
 - tabs: overflow scrolling/all-documents menu, background activity badge, close/save behavior, and no resurrected discarded document;
 - Activity: presence, named cursor, approval card, Stop All Agents, trace replay, and reconnect notice;
 - verify no white screen, malformed-event crash, coordinate offset, or unreachable tab regression.
@@ -535,6 +535,16 @@ Verification fails closed unless the manifest matches the current `package.json`
 The manifest also requires native verify/package evidence and repository-contained full-SHA-256 files for `windows-x64:squirrel`, `windows-x64:zip`, `windows-x64:checksums`, `macos-arm64:dmg`, `macos-arm64:zip`, `macos-arm64:checksums`, `linux-x64:deb`, `linux-x64:rpm`, `linux-x64:zip`, `linux-x64:checksums`, `all:licenses-json`, and `all:licenses-markdown`. Windows clean-install lifecycle evidence is part of Level 3. Add `--stable-v1` to require macOS/Linux clean-install evidence, every P0 Verified, every selected-v1 P1 Verified or Deferred, the complete utility/corrupt/provider/performance/accessibility/E2E gate, macOS native package lifecycle, signing/notarization or the explicitly documented unsigned limitation allowed by the checklist, three exact hashed per-platform reproducibility PASS reports, dependency/license review, and repository/publication prerequisites.
 
 This preflight is deliberately separate from `verify`, `release:current`, and `test:level3:auto`: exact reports and artifact hashes exist only after packaging and independent native QA, so gating the build that creates them would be circular. The verifier indexes and cross-checks evidence; it does not launch Electron, generate or accept evidence, auto-edit tracker status, infer stable-v1 scope, sign, tag, publish, or turn an unsigned build into a signed one. A prose-only assertion, a self-authored implementation-task report, auto-promoting P0/P1 rows, and silently blocking ordinary source verification were rejected because each would weaken either evidence independence or the normal development gate.
+
+## Latest source/headless seamless sprite wrap-edit checkpoint
+
+Source/headless PIX-08 evidence (2026-08-15): the sprite canvas's existing repeated-copy preview is now an explicit **Wrap edit** mode. One shared pure kernel maps any safe-integer repeated-copy coordinate into the canonical finite sprite with Euclidean modulo. It preserves point order, payloads, and revisits; the established per-tool change preparation and indexed cel writer retain deterministic last-write behavior and reversible undo when multiple repeated points address the same canonical pixel.
+
+Freehand pencil/eraser, line, rectangle, ellipse, dither, lighten/darken, and reusable-stamp gestures retain their raw repeated-copy geometry through brush, symmetry, and pixel-perfect processing, then map immediately before the existing indexed commit. Bitmap text uses the same kernel. Eyedropper, wand, fill, replace, and text origins map once before reading or authoring. Dither phase is sampled in canonical coordinates, and a stamp crossing any edge is placed without premature clipping. Every ordinary pointer gesture still takes the existing full-sprite human lock and submits one expected-cel-revision transaction; fill/replace retain their compact region operation, and bitmap text retains its exact written-cell lock. Canonical palette indices, linked-cel resolution, replay, persistence, and export paths are unchanged.
+
+Pure regression coverage binds negative and multi-period mapping, payload/order/revisit retention, validation, one exact indexed commit with two repeated points resolving to the same canonical pixel, and complete inverse restoration. Renderer-source coverage binds the explicit pressed-state control, stamp/text/dither/sample paths, one finish-time canonicalization boundary, bounded selection policy, and unchanged full-sprite gesture lock. The focused pinned-Node-24 selection passes **5 files / 36 tests**, TypeScript, and targeted ESLint.
+
+Rectangle and lasso selection geometry plus flood connectivity deliberately remain finite and nontoroidal. Wrap edit is session-local; there is no document schema, map GID, Tiled field, AGT-11 action, authored-axis, animated-cycle-export, packaged pointer/visual, Aseprite round-trip, broad parity, Level 3, RC, or stable-v1 claim.
 
 ## Latest headless pixel-tool checkpoint
 
