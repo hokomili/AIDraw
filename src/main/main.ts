@@ -929,6 +929,8 @@ async function registerRendererProtocol(): Promise<void> {
 function reportEditorWindowFailure(failure: EditorWindowFailure): void {
   const detail = failure.kind === 'renderer-gone'
     ? `renderer process exited (${failure.reason}, code ${failure.exitCode})`
+    : failure.kind === 'renderer-unresponsive'
+      ? `renderer remained unresponsive for ${failure.graceMs} ms`
     : failure.kind === 'main-frame-load-failed'
       ? `main frame failed to load (${failure.errorCode}: ${failure.errorDescription})`
       : failure.kind === 'stale-window'
@@ -989,6 +991,8 @@ function bindElectronWindowEvents(window: BrowserWindow, events: EditorWindowEve
     queueMicrotask(() => { if (event.defaultPrevented) events.closeCancelled(); });
   });
   window.on('closed', () => { events.closed(); });
+  window.on('unresponsive', () => { events.rendererUnresponsive(); });
+  window.on('responsive', () => { events.rendererResponsive(); });
   window.webContents.on('will-prevent-unload', () => { events.closeCancelled(); });
   window.webContents.on('did-start-navigation', (event) => {
     if (event.isMainFrame && !event.isSameDocument) events.mainFrameLoadStarted();
@@ -1018,6 +1022,11 @@ const editorWindowLifecycle = new EditorWindowLifecycle<BrowserWindow>({
   isWindowDestroyed: (window) => window.isDestroyed(),
   isRendererDestroyed: (window) => window.webContents.isDestroyed(),
   isRendererCrashed: (window) => window.webContents.isCrashed(),
+  scheduleUnresponsiveConfirmation: (delayMs, confirm) => {
+    const timeout = setTimeout(confirm, delayMs);
+    timeout.unref();
+    return () => { clearTimeout(timeout); };
+  },
   setCurrentWindow: (window) => { mainWindow = window; },
   setEditorAttached: (attached) => {
     service.setEditorAttached(attached);

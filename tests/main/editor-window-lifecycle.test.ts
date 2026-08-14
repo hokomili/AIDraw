@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  EDITOR_RENDERER_UNRESPONSIVE_GRACE_MS,
   EditorWindowLifecycle,
   shouldRecoverMainFrameLoadFailure,
   type EditorWindowEvents,
@@ -25,6 +26,12 @@ interface HarnessOptions {
   destroyFailures?: number;
 }
 
+interface ScheduledUnresponsiveConfirmation {
+  delayMs: number;
+  confirm(): void;
+  cancelled: boolean;
+}
+
 const inertEvents: EditorWindowEvents = {
   closeRequested: () => undefined,
   closeCancelled: () => undefined,
@@ -32,6 +39,8 @@ const inertEvents: EditorWindowEvents = {
   mainFrameLoadStarted: () => undefined,
   mainFrameLoadStopped: () => undefined,
   ready: () => undefined,
+  rendererUnresponsive: () => undefined,
+  rendererResponsive: () => undefined,
   rendererGone: () => undefined,
   mainFrameLoadFailed: () => undefined,
 };
@@ -40,6 +49,7 @@ function createHarness(options: HarnessOptions = {}) {
   const windows: FakeWindow[] = [];
   const failures: EditorWindowFailure[] = [];
   const attachments: boolean[] = [];
+  const unresponsiveConfirmations: ScheduledUnresponsiveConfirmation[] = [];
   let current: FakeWindow | undefined;
   let recoverable = true;
   let createAttempts = 0;
@@ -75,6 +85,11 @@ function createHarness(options: HarnessOptions = {}) {
     isWindowDestroyed: (window) => window.destroyed,
     isRendererDestroyed: (window) => window.rendererDestroyed,
     isRendererCrashed: (window) => window.rendererCrashed,
+    scheduleUnresponsiveConfirmation: (delayMs, confirm) => {
+      const scheduled: ScheduledUnresponsiveConfirmation = { delayMs, confirm, cancelled: false };
+      unresponsiveConfirmations.push(scheduled);
+      return () => { scheduled.cancelled = true; };
+    },
     setCurrentWindow: (window) => { current = window; },
     setEditorAttached: (attached) => { attachments.push(attached); },
     canOpenWindow: () => recoverable,
@@ -85,6 +100,7 @@ function createHarness(options: HarnessOptions = {}) {
     windows,
     failures,
     attachments,
+    unresponsiveConfirmations,
     revealWindow,
     current: () => current,
     setRecoverable: (value: boolean) => { recoverable = value; },
@@ -123,6 +139,171 @@ describe('editor window lifecycle', () => {
     expect(first.minimized).toBe(false);
     expect(harness.attachments).toEqual([true]);
     expect(harness.revealWindow).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps one transiently stalled shell when Electron reports it responsive inside the fixed grace', async () => {
+    const harness = createHarness();
+    await harness.lifecycle.show();
+    const first = harness.windows[0];
+
+    first.events.rendererUnresponsive();
+    first.events.rendererUnresponsive();
+    expect(harness.unresponsiveConfirmations).toHaveLength(1);
+    expect(harness.unresponsiveConfirmations[0]).toMatchObject({
+      delayMs: EDITOR_RENDERER_UNRESPONSIVE_GRACE_MS,
+      cancelled: false,
+    });
+
+    first.events.rendererResponsive();
+    expect(harness.unresponsiveConfirmations[0].cancelled).toBe(true);
+    harness.unresponsiveConfirmations[0].confirm();
+    await Promise.resolve();
+
+    expect(harness.windows).toEqual([first]);
+    expect(harness.current()).toBe(first);
+    expect(harness.lifecycle.isAttached()).toBe(true);
+    expect(harness.attachments).toEqual([true]);
+    expect(harness.failures).toEqual([]);
+  });
+
+  it('replaces a persistently unresponsive shell once and preserves the explicit-show retry boundary', async () => {
+    const harness = createHarness();
+    await harness.lifecycle.show();
+    const first = harness.windows[0];
+
+    first.events.rendererUnresponsive();
+    harness.unresponsiveConfirmations[0].confirm();
+    await vi.waitFor(() => { expect(harness.windows).toHaveLength(2); });
+    const replacement = harness.windows[1];
+    expect(first.destroyed).toBe(true);
+    expect(harness.current()).toBe(replacement);
+    expect(harness.failures).toEqual([{
+      kind: 'renderer-unresponsive',
+      graceMs: EDITOR_RENDERER_UNRESPONSIVE_GRACE_MS,
+    }]);
+
+    first.events.rendererResponsive();
+    first.events.rendererUnresponsive();
+    expect(harness.unresponsiveConfirmations).toHaveLength(1);
+
+    replacement.events.rendererUnresponsive();
+    harness.unresponsiveConfirmations[1].confirm();
+    await vi.waitFor(() => { expect(harness.current()).toBeUndefined(); });
+    expect(harness.windows).toHaveLength(2);
+    expect(harness.lifecycle.isAttached()).toBe(false);
+
+    await expect(harness.lifecycle.show()).resolves.toBe(true);
+    expect(harness.windows).toHaveLength(3);
+    expect(harness.current()).toBe(harness.windows[2]);
+    expect(harness.attachments).toEqual([true, false, true, false, true]);
+  });
+
+  it('recovers a persistent initial-load hang once across concurrent show requests', async () => {
+    const never = new Promise<void>(() => undefined);
+    const harness = createHarness({ loadWindow: async (window) => {
+      if (window.id === 1) await never;
+      else window.events.ready();
+    } });
+    const firstShow = harness.lifecycle.show();
+    const secondShow = harness.lifecycle.show();
+    await vi.waitFor(() => { expect(harness.windows).toHaveLength(1); });
+
+    harness.windows[0].events.rendererUnresponsive();
+    harness.unresponsiveConfirmations[0].confirm();
+
+    await expect(Promise.all([firstShow, secondShow])).resolves.toEqual([true, true]);
+    expect(harness.windows).toHaveLength(2);
+    expect(harness.windows[0].destroyed).toBe(true);
+    expect(harness.current()).toBe(harness.windows[1]);
+  });
+
+  it('distinguishes responsive and persistent stalls across tentative close cancellation', async () => {
+    const harness = createHarness();
+    await harness.lifecycle.show();
+    const first = harness.windows[0];
+
+    first.events.rendererUnresponsive();
+    first.events.closeRequested();
+    first.events.rendererResponsive();
+    first.events.closeCancelled();
+    harness.unresponsiveConfirmations[0].confirm();
+    expect(harness.windows).toEqual([first]);
+    expect(harness.failures).toEqual([]);
+
+    first.events.rendererUnresponsive();
+    first.events.closeRequested();
+    const pendingShow = harness.lifecycle.show();
+    await Promise.resolve();
+    harness.unresponsiveConfirmations[1].confirm();
+    await expect(pendingShow).resolves.toBe(true);
+    expect(first.destroyed).toBe(true);
+    expect(harness.current()).toBe(harness.windows[1]);
+    expect(harness.failures).toEqual([{
+      kind: 'renderer-unresponsive',
+      graceMs: EDITOR_RENDERER_UNRESPONSIVE_GRACE_MS,
+    }]);
+
+    first.events.closeCancelled();
+    expect(harness.current()).toBe(harness.windows[1]);
+  });
+
+  it('does not revive an intentionally closed shell from a stale unresponsive confirmation', async () => {
+    const harness = createHarness();
+    await harness.lifecycle.show();
+    const first = harness.windows[0];
+    first.events.rendererUnresponsive();
+    first.events.closeRequested();
+    first.destroyed = true;
+    first.events.closed();
+
+    harness.unresponsiveConfirmations[0].confirm();
+    await Promise.resolve();
+    expect(harness.unresponsiveConfirmations[0].cancelled).toBe(true);
+    expect(harness.windows).toEqual([first]);
+    expect(harness.current()).toBeUndefined();
+    expect(harness.failures).toEqual([]);
+  });
+
+  it('keeps a responsive reload and replaces a persistently hung reload without stale reattachment', async () => {
+    const harness = createHarness();
+    await harness.lifecycle.show();
+    const first = harness.windows[0];
+
+    first.events.rendererUnresponsive();
+    first.events.mainFrameLoadStarted();
+    first.events.rendererResponsive();
+    first.events.ready();
+    harness.unresponsiveConfirmations[0].confirm();
+    expect(harness.current()).toBe(first);
+    expect(harness.lifecycle.isAttached()).toBe(true);
+
+    first.events.mainFrameLoadStarted();
+    first.events.rendererUnresponsive();
+    harness.unresponsiveConfirmations[1].confirm();
+    await vi.waitFor(() => { expect(harness.windows).toHaveLength(2); });
+    expect(first.destroyed).toBe(true);
+    expect(harness.current()).toBe(harness.windows[1]);
+    expect(harness.attachments).toEqual([true, false, true, false, true]);
+  });
+
+  it('defers persistent-hang replacement during shutdown and resumes it only if shutdown fails', async () => {
+    const harness = createHarness();
+    await harness.lifecycle.show();
+    const first = harness.windows[0];
+    first.events.rendererUnresponsive();
+    harness.setRecoverable(false);
+    harness.unresponsiveConfirmations[0].confirm();
+    await Promise.resolve();
+
+    expect(first.destroyed).toBe(true);
+    expect(harness.windows).toHaveLength(1);
+    expect(harness.current()).toBeUndefined();
+
+    harness.setRecoverable(true);
+    harness.lifecycle.resumeRecovery();
+    await vi.waitFor(() => { expect(harness.windows).toHaveLength(2); });
+    expect(harness.current()).toBe(harness.windows[1]);
+    expect(harness.lifecycle.isAttached()).toBe(true);
   });
 
   it('replaces one gone renderer without detaching the canonical engine or accepting stale close events', async () => {
@@ -487,11 +668,15 @@ describe('editor window lifecycle', () => {
   it('wires failures and close cancellation into the production Electron window', async () => {
     const source = await readFile(join(process.cwd(), 'src/main/main.ts'), 'utf8');
     expect(source).toContain("window.webContents.on('render-process-gone'");
+    expect(source).toContain("window.on('unresponsive'");
+    expect(source).toContain("window.on('responsive'");
     expect(source).toContain("window.webContents.on('did-fail-load'");
     expect(source).toContain("window.webContents.on('will-prevent-unload'");
     expect(source).toContain("window.webContents.on('did-start-navigation'");
     expect(source).toContain("window.webContents.on('did-stop-loading'");
     expect(source).toContain('events.rendererGone(details.reason, details.exitCode);');
+    expect(source).toContain('events.rendererUnresponsive();');
+    expect(source).toContain('events.rendererResponsive();');
     expect(source).toContain('if (shouldRecoverMainFrameLoadFailure(errorCode, isMainFrame)) events.mainFrameLoadFailed(errorCode, errorDescription);');
     expect(source).toContain('handle(IPC.acquireHumanLock, (_event, request: HumanLockRequest) => editorWindowLifecycle.isAttached()');
     expect(source).toContain('if (event.defaultPrevented) events.closeCancelled();');

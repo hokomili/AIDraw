@@ -1,5 +1,8 @@
+export const EDITOR_RENDERER_UNRESPONSIVE_GRACE_MS = 10_000;
+
 export type EditorWindowFailure =
   | { kind: 'renderer-gone'; reason: string; exitCode: number }
+  | { kind: 'renderer-unresponsive'; graceMs: number }
   | { kind: 'main-frame-load-failed'; errorCode: number; errorDescription: string }
   | { kind: 'load-rejected'; message: string }
   | { kind: 'create-rejected'; message: string }
@@ -15,6 +18,8 @@ export interface EditorWindowEvents {
   mainFrameLoadStarted(): void;
   mainFrameLoadStopped(): void;
   ready(): void;
+  rendererUnresponsive(): void;
+  rendererResponsive(): void;
   rendererGone(reason: string, exitCode: number): void;
   mainFrameLoadFailed(errorCode: number, errorDescription: string): void;
 }
@@ -28,6 +33,7 @@ export interface EditorWindowLifecycleDependencies<Window> {
   isWindowDestroyed(window: Window): boolean;
   isRendererDestroyed(window: Window): boolean;
   isRendererCrashed(window: Window): boolean;
+  scheduleUnresponsiveConfirmation(delayMs: number, confirm: () => void): () => void;
   setCurrentWindow(window: Window | undefined): void;
   setEditorAttached(attached: boolean): void;
   canOpenWindow(): boolean;
@@ -43,6 +49,8 @@ interface WindowEntry<Window> {
   terminal: { promise: Promise<void>; resolve: () => void; settled: boolean };
   detached: boolean;
   reloadPending: boolean;
+  responsiveness: 'responsive' | 'grace' | 'confirmed-unresponsive';
+  cancelUnresponsiveConfirmation?: () => void;
   retiring: boolean;
   recoverWhenRetired: boolean;
   allowAutomaticRecovery: boolean;
@@ -169,6 +177,8 @@ export class EditorWindowLifecycle<Window> {
       terminal: { promise: terminalPromise, resolve: settleTerminal, settled: false },
       detached: false,
       reloadPending: false,
+      responsiveness: 'responsive',
+      cancelUnresponsiveConfirmation: undefined,
       retiring: false,
       recoverWhenRetired: false,
       allowAutomaticRecovery,
@@ -181,6 +191,8 @@ export class EditorWindowLifecycle<Window> {
       mainFrameLoadStarted: () => { this.beginMainFrameLoad(entry); },
       mainFrameLoadStopped: () => { this.finishAbortedMainFrameLoad(entry); },
       ready: () => { this.markReady(entry); },
+      rendererUnresponsive: () => { this.beginUnresponsiveGrace(entry); },
+      rendererResponsive: () => { this.markRendererResponsive(entry); },
       rendererGone: (reason, exitCode) => {
         this.handleFailure(entry, { kind: 'renderer-gone', reason, exitCode });
       },
@@ -304,8 +316,52 @@ export class EditorWindowLifecycle<Window> {
     this.markReady(entry);
   }
 
+  private beginUnresponsiveGrace(entry: WindowEntry<Window>): void {
+    if (
+      this.active !== entry
+      || entry.retiring
+      || entry.responsiveness !== 'responsive'
+      || entry.failureDuringClose
+    ) return;
+    entry.responsiveness = 'grace';
+    const cancel = this.dependencies.scheduleUnresponsiveConfirmation(
+      EDITOR_RENDERER_UNRESPONSIVE_GRACE_MS,
+      () => {
+        if (this.active !== entry || entry.retiring || entry.responsiveness !== 'grace') return;
+        entry.cancelUnresponsiveConfirmation = undefined;
+        entry.responsiveness = 'confirmed-unresponsive';
+        // A close still unresolved after Electron's unresponsive signal and the
+        // full grace is not a confirmed close. Release any waiter before retiring
+        // the unusable shell; a real close would already have emitted `closed`.
+        if (entry.closeRequested) {
+          entry.closeRequested = false;
+          this.settleClose(entry);
+        }
+        this.handleFailure(entry, {
+          kind: 'renderer-unresponsive',
+          graceMs: EDITOR_RENDERER_UNRESPONSIVE_GRACE_MS,
+        });
+      },
+    );
+    if (entry.responsiveness === 'grace') entry.cancelUnresponsiveConfirmation = cancel;
+    else cancel();
+  }
+
+  private markRendererResponsive(entry: WindowEntry<Window>): void {
+    if (this.active !== entry || entry.retiring || entry.responsiveness !== 'grace') return;
+    this.cancelUnresponsiveConfirmation(entry);
+  }
+
+  private cancelUnresponsiveConfirmation(entry: WindowEntry<Window>): void {
+    const cancel = entry.cancelUnresponsiveConfirmation;
+    entry.cancelUnresponsiveConfirmation = undefined;
+    if (entry.responsiveness === 'grace') entry.responsiveness = 'responsive';
+    cancel?.();
+  }
+
   private handleFailure(entry: WindowEntry<Window>, failure: EditorWindowFailure): void {
     if (this.active !== entry || entry.retiring) return;
+    this.cancelUnresponsiveConfirmation(entry);
     if (entry.closeRequested) {
       entry.failureDuringClose = failure;
       this.settleClose(entry);
@@ -337,6 +393,7 @@ export class EditorWindowLifecycle<Window> {
   /** Returns true only after the old native shell is confirmed retired. */
   private fail(entry: WindowEntry<Window>, failure: EditorWindowFailure, recover: boolean): boolean {
     if (this.active !== entry || entry.retiring) return false;
+    this.cancelUnresponsiveConfirmation(entry);
     entry.retiring = true;
     entry.recoverWhenRetired = recover;
     this.settleTerminal(entry);
@@ -351,6 +408,7 @@ export class EditorWindowLifecycle<Window> {
   /** A quit race is not a renderer failure; retain the interrupted show for a failed quit. */
   private deferUntilWindowOpeningResumes(entry: WindowEntry<Window>): void {
     if (this.active !== entry || entry.retiring) return;
+    this.cancelUnresponsiveConfirmation(entry);
     entry.retiring = true;
     entry.recoverWhenRetired = true;
     this.settleTerminal(entry);
@@ -386,6 +444,7 @@ export class EditorWindowLifecycle<Window> {
 
   private release(entry: WindowEntry<Window>): void {
     if (this.active !== entry) return;
+    this.cancelUnresponsiveConfirmation(entry);
     const recover = entry.retiring && entry.recoverWhenRetired;
     this.active = undefined;
     this.settleTerminal(entry);
