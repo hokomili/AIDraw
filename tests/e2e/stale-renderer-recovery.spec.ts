@@ -8,12 +8,22 @@ import { createServer } from 'node:net';
 import { promisify } from 'node:util';
 import { HUMAN_ACTOR, type Actor, type IllustrationDocument, type IllustrationObject } from '@aidraw/core';
 import {
+  assertFnd05OwnedProcessShape,
   assertFnd05EvidenceRedacted,
+  assertFnd05UnresponsiveSafeReporterEnvironment,
+  classifyFnd05BoundedStallSettlement,
   FND05_PACKAGED_SCENARIO,
+  FND05_UNRESPONSIVE_OBSERVATION_MS,
+  FND05_UNRESPONSIVE_PACKAGED_SCENARIO,
+  FND05_UNRESPONSIVE_POLICY_GRACE_MS,
+  FND05_UNRESPONSIVE_STALL_EXPRESSION,
+  FND05_UNRESPONSIVE_STALL_MS,
+  inspectFnd05EncryptedToken,
   observeFnd05DeliberatePageCrash,
   parseFnd05OwnedProcesses,
   redactFnd05FailureText,
   resolveFnd05PackagedAcceptance,
+  resolveFnd05UnresponsiveAcceptance,
 } from '../../scripts/fnd05-packaged-acceptance.mjs';
 import {
   resolvePackagedE2eArtifact,
@@ -43,7 +53,7 @@ interface McpConnection {
 }
 
 interface OwnerRun {
-  phase: 'owner' | 'relaunch';
+  phase: 'owner' | 'relaunch' | 'unresponsive-owner';
   connectionPath: string;
   child?: ChildProcess;
   browser?: Browser;
@@ -144,15 +154,32 @@ function isPermittedRendererUrl(value: string): boolean {
   }
 }
 
-async function startOwner(run: OwnerRun, profile: string): Promise<void> {
+async function startOwner(run: OwnerRun, profile: string, stripProviderEnvironment = false): Promise<void> {
   const port = await reservePort();
   run.child = spawnPackagedE2e(executable, [
     `--remote-debugging-port=${port}`,
     '--remote-debugging-address=127.0.0.1',
     ...networkDisabledArguments,
+    ...(stripProviderEnvironment ? ['--proxy-server=http://127.0.0.1:9'] : []),
     `--user-data-dir=${profile}`,
     `--write-mcp-connection=${run.connectionPath}`,
-  ], { stdio: ['ignore', 'ignore', 'pipe'] });
+  ], {
+    stdio: ['ignore', 'ignore', 'pipe'],
+    ...(stripProviderEnvironment ? {
+      env: {
+        OPENAI_API_KEY: '',
+        STABILITY_API_KEY: '',
+        HTTP_PROXY: 'http://127.0.0.1:9',
+        HTTPS_PROXY: 'http://127.0.0.1:9',
+        ALL_PROXY: 'socks5://127.0.0.1:9',
+        NO_PROXY: '127.0.0.1,localhost',
+        http_proxy: 'http://127.0.0.1:9',
+        https_proxy: 'http://127.0.0.1:9',
+        all_proxy: 'socks5://127.0.0.1:9',
+        no_proxy: '127.0.0.1,localhost',
+      },
+    } : {}),
+  });
   run.child.stderr?.on('data', (chunk: Buffer) => run.stderr.push(chunk));
   run.connection = await waitForConnection(run.connectionPath, run.child);
   if (!run.child.pid || run.connection.pid !== run.child.pid) throw new Error('The retained connection PID does not match the exact spawned owner.');
@@ -176,8 +203,8 @@ async function startOwner(run: OwnerRun, profile: string): Promise<void> {
   run.page = await waitForSingleRendererPage(run.context);
 }
 
-async function waitForSingleRendererPage(context: BrowserContext, previous?: Page): Promise<Page> {
-  const deadline = Date.now() + 20_000;
+async function waitForSingleRendererPage(context: BrowserContext, previous?: Page, timeoutMs = 20_000): Promise<Page> {
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const pages = context.pages().filter((candidate) => !candidate.isClosed() && candidate.url().startsWith('aidraw://app/') && candidate !== previous);
     if (pages.length === 1) {
@@ -200,12 +227,10 @@ async function waitForProcessShape(profile: string, expectedOwnerPid: number, pr
   let last: Array<{ pid: number; ppid: number; type: string }> = [];
   while (Date.now() < deadline) {
     last = await processRows(profile);
-    const renderers = last.filter((entry) => entry.type === 'renderer');
-    if (last.some((entry) => entry.pid === expectedOwnerPid && entry.type === 'browser')
-      && renderers.length === 1
-      && (previousRendererPid === undefined || renderers[0].pid !== previousRendererPid)) {
-      return { rows: last, rendererPid: renderers[0].pid };
-    }
+    try {
+      const shape = assertFnd05OwnedProcessShape(last, expectedOwnerPid, previousRendererPid);
+      return { rows: last, rendererPid: shape.rendererPid };
+    } catch { /* continue until the exact owner/renderer shape settles */ }
     await new Promise((resolveWait) => setTimeout(resolveWait, 100));
   }
   throw new Error(`The retained FND-05 process shape never reached one owner and one renderer: ${JSON.stringify(last)}.`);
@@ -289,6 +314,11 @@ async function redactConnection(path: string): Promise<{ status: 'redacted-after
   delete connection.token;
   await writeFile(path, `${JSON.stringify({ ...connection, credentialStatus: 'redacted-after-graceful-stop' }, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
   return { status: 'redacted-after-graceful-stop', secret };
+}
+
+async function writePrivateRecord(path: string, text: string): Promise<void> {
+  await writeFile(path, text, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+  if (((await stat(path)).mode & 0o777) !== 0o600) throw new Error(`The retained FND-05 record is not mode 0600: ${path}.`);
 }
 
 async function stopOwner(run: OwnerRun, profile: string, secrets: string[]): Promise<CleanupRecord> {
@@ -578,4 +608,328 @@ test(FND05_PACKAGED_SCENARIO, async () => {
   const evidenceText = `${JSON.stringify(evidence, null, 2)}\n`;
   assertFnd05EvidenceRedacted(evidenceText, secrets);
   await writeFile(configured.paths.evidence, evidenceText, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+});
+
+test(FND05_UNRESPONSIVE_PACKAGED_SCENARIO, async (_fixtures, testInfo) => {
+  test.skip(process.platform !== 'darwin', 'This prepared checkpoint is the exact current macOS/arm64 acceptance only.');
+  test.setTimeout(150_000);
+  if (process.env.AIDRAW_E2E_FND05_UNRESPONSIVE_WRAPPER !== '1' || process.env.PLAYWRIGHT_NO_COPY_PROMPT !== '1') {
+    throw new Error('FND-05 unresponsive-renderer acceptance must run through its credential-safe wrapper.');
+  }
+  if (testInfo.project.metadata.suite !== 'retained-fnd05-unresponsive-renderer'
+    || testInfo.project.metadata.automaticCredentialCapableArtifacts !== false) {
+    throw new Error('FND-05 unresponsive-renderer acceptance refuses a non-dedicated Playwright project.');
+  }
+  assertFnd05UnresponsiveSafeReporterEnvironment();
+  const configured = resolveFnd05UnresponsiveAcceptance();
+  expect(artifact.platform).toBe('darwin');
+  expect(artifact.arch).toBe('arm64');
+  expect(artifact.outRoot).toBe(configured.packageRoot);
+  expect(await sha256(executable)).toBe(configured.executableSha256);
+  expect(await sha256(asar)).toBe(configured.asarSha256);
+  expect(await access(configured.profile).then(() => true, () => false), 'The retained FND-05 unresponsive-renderer profile must not exist before launch.').toBe(false);
+  await mkdir(configured.profile, { recursive: false, mode: 0o700 });
+  if (((await stat(configured.profile)).mode & 0o777) !== 0o700) throw new Error('The retained FND-05 unresponsive-renderer profile is not mode 0700.');
+  for (const path of Object.values(configured.paths)) {
+    expect(await access(path).then(() => true, () => false), `${path} must be absent before launch`).toBe(false);
+  }
+
+  const secrets: string[] = [];
+  const cleanup: CleanupRecord[] = [];
+  let active: OwnerRun | undefined;
+  let acceptanceFailure: Error | undefined;
+  let evidence: Record<string, unknown> | undefined;
+
+  try {
+    const owner: OwnerRun = { phase: 'unresponsive-owner', connectionPath: configured.paths.ownerConnection, stderr: [], externalRendererRequests: [] };
+    active = owner;
+    await startOwner(owner, configured.profile, true);
+    const ownerPid = owner.child!.pid!;
+    const ownerConnection = owner.connection!;
+    secrets.push(ownerConnection.token);
+    const beforeProcess = await waitForProcessShape(configured.profile, ownerPid);
+    const beforeTarget = await rendererTarget(owner.page!);
+    const aliveProbe = await beforeTarget.session.send('Runtime.evaluate', {
+      expression: "'fnd05-original-renderer-alive'",
+      returnByValue: true,
+    });
+    if (aliveProbe.result.value !== 'fnd05-original-renderer-alive') throw new Error('The original FND-05 renderer did not answer the pre-stall CDP probe.');
+
+    const canonicalBefore = await owner.page!.evaluate(async (actor) => {
+      const snapshot = await window.aidraw.bootstrap();
+      const document = snapshot.activeDocument;
+      if (!document || document.kind !== 'illustration') throw new Error('The FND-05 unresponsive-renderer illustration document is unavailable.');
+      const layer = Object.values(document.layers).find((candidate) => candidate.type === 'vector');
+      if (!layer) throw new Error('The FND-05 unresponsive-renderer vector layer is unavailable.');
+      const timestamp = new Date().toISOString();
+      const object = {
+        id: 'fnd05-unresponsive-renderer-shape', revision: 0, name: 'Before persistent renderer stall', createdAt: timestamp, updatedAt: timestamp,
+        createdBy: actor.id, layerId: layer.id, visible: true, locked: false, opacity: 1, blendMode: 'normal' as const,
+        transform: { x: 56, y: 60, scaleX: 1, scaleY: 1, rotation: 0, skewX: 0, skewY: 0 },
+        type: 'shape' as const, shape: 'rectangle' as const, width: 104, height: 76,
+        fill: { kind: 'solid' as const, color: '#4f9d92' },
+        stroke: { paint: { kind: 'none' as const }, width: 0, opacity: 1, lineCap: 'round' as const, lineJoin: 'round' as const, dash: [] },
+      };
+      const applied = await window.aidraw.applyTransaction({
+        id: 'tx-fnd05-before-unresponsive-renderer', clientOperationId: 'fnd05-before-unresponsive-renderer', documentId: document.id,
+        actor, label: 'Prepare persistent renderer recovery', createdAt: timestamp, operations: [{ kind: 'illustration.object.add', object }],
+        playback: { mode: 'instant', speed: 1 },
+      });
+      if (applied.status !== 'committed') throw new Error(`The FND-05 unresponsive-renderer human preparation did not commit: ${applied.status}.`);
+      const prepared = await window.aidraw.bootstrap();
+      const lock = await window.aidraw.acquireHumanLock({ documentId: document.id, objectIds: [object.id] });
+      if (!lock.acquired || !lock.lockId) throw new Error('The FND-05 unresponsive-renderer transient human lock was not acquired.');
+      const activeDocument = prepared.activeDocument;
+      if (!activeDocument || activeDocument.kind !== 'illustration') throw new Error('The prepared FND-05 unresponsive-renderer document is unavailable.');
+      return {
+        documentId: activeDocument.id,
+        documentName: activeDocument.name,
+        revision: activeDocument.revision,
+        object: activeDocument.objects[object.id],
+        activity: activeDocument.activity,
+        canUndo: prepared.canUndo,
+        canRedo: prepared.canRedo,
+        lockId: lock.lockId,
+      };
+    }, HUMAN_ACTOR);
+    expect(canonicalBefore).toMatchObject({ canUndo: true, canRedo: false, object: { id: 'fnd05-unresponsive-renderer-shape', name: 'Before persistent renderer stall', revision: 0 } });
+
+    const client = await connectMcp(ownerConnection);
+    let requestId = 3;
+    const occupied = await callMcpTool(ownerConnection.url, client.headers, requestId++, 'session_manage', { action: 'inspect', documentId: canonicalBefore.documentId });
+    expect(occupied).toMatchObject({ workspace: { humanOccupancy: { active: true, locks: [{ objectIds: [canonicalBefore.object.id] }] }, editorAdvisory: { attached: true, documentId: canonicalBefore.documentId } } });
+    const replacementObject = { ...canonicalBefore.object, name: 'Recovered after persistent stall' } as IllustrationObject;
+    const locked = await callMcpTool(ownerConnection.url, client.headers, requestId++, 'canvas_apply', {
+      documentId: canonicalBefore.documentId,
+      clientOperationId: 'fnd05-agent-retry-after-unresponsive-renderer',
+      label: 'Retry after persistent renderer stall',
+      operations: [{ kind: 'illustration.object.replace', object: replacementObject, expectedRevision: canonicalBefore.object.revision }],
+      playback: { mode: 'instant', speed: 1 },
+    });
+    expect(locked).toMatchObject({ status: 'locked', conflict: { retryable: true } });
+
+    const replacementEvents: Page[] = [];
+    const onReplacement = (candidate: Page) => {
+      if (candidate.url().startsWith('aidraw://app/')) replacementEvents.push(candidate);
+      else candidate.once('domcontentloaded', () => { if (candidate.url().startsWith('aidraw://app/')) replacementEvents.push(candidate); });
+    };
+    owner.context!.on('page', onReplacement);
+    let stallCommandState: 'pending' | 'resolved' | 'rejected' = 'pending';
+    const stallStartedAt = performance.now();
+    const stallSettlement: Promise<{ status: 'resolved' } | { status: 'rejected'; reason: unknown }> = beforeTarget.session.send('Runtime.evaluate', {
+      expression: FND05_UNRESPONSIVE_STALL_EXPRESSION,
+      returnByValue: true,
+    }).then(
+      () => { stallCommandState = 'resolved'; return { status: 'resolved' as const }; },
+      (reason: unknown) => { stallCommandState = 'rejected'; return { status: 'rejected' as const, reason }; },
+    );
+
+    await new Promise((resolveWait) => setTimeout(resolveWait, FND05_UNRESPONSIVE_OBSERVATION_MS));
+    expect(stallCommandState).toBe('pending');
+    const duringProcess = await waitForProcessShape(configured.profile, ownerPid);
+    expect(duringProcess.rendererPid).toBe(beforeProcess.rendererPid);
+    expect(owner.context!.pages().filter((candidate) => !candidate.isClosed() && candidate.url().startsWith('aidraw://app/'))).toEqual([owner.page]);
+    const occupiedDuringStall = await callMcpTool(ownerConnection.url, client.headers, requestId++, 'session_manage', { action: 'inspect', documentId: canonicalBefore.documentId });
+    expect(occupiedDuringStall).toMatchObject({ workspace: { humanOccupancy: { active: true, locks: [{ objectIds: [canonicalBefore.object.id] }] }, editorAdvisory: { attached: true, documentId: canonicalBefore.documentId } } });
+
+    const replacementPage = await waitForSingleRendererPage(owner.context!, owner.page, 50_000);
+    const replacementElapsedMs = performance.now() - stallStartedAt;
+    owner.page = replacementPage;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 750));
+    owner.context!.off('page', onReplacement);
+    expect(replacementElapsedMs).toBeGreaterThanOrEqual(FND05_UNRESPONSIVE_POLICY_GRACE_MS);
+    expect(replacementEvents).toHaveLength(1);
+    expect(replacementEvents[0]).toBe(replacementPage);
+    expect(owner.context!.pages().filter((candidate) => !candidate.isClosed() && candidate.url().startsWith('aidraw://app/'))).toEqual([replacementPage]);
+    const replacementTarget = await rendererTarget(replacementPage);
+    const afterProcess = await waitForProcessShape(configured.profile, ownerPid, beforeProcess.rendererPid);
+    expect(replacementTarget.targetId).not.toBe(beforeTarget.targetId);
+    expect(afterProcess.rendererPid).not.toBe(beforeProcess.rendererPid);
+    expect(owner.child!.pid).toBe(ownerConnection.pid);
+    expect((JSON.parse(await readFile(configured.paths.ownerConnection, 'utf8')) as McpConnection).pid).toBe(ownerPid);
+
+    const boundedSettlement = await Promise.race([
+      stallSettlement,
+      new Promise<{ status: 'timeout' }>((resolveTimeout) => setTimeout(() => resolveTimeout({ status: 'timeout' }), 5_000)),
+    ]);
+    const stallProof = classifyFnd05BoundedStallSettlement(boundedSettlement, {
+      originalRendererAliveBeforeStall: true,
+      originalRendererResponsiveBeforeStall: true,
+      commandPendingDuringObservation: true,
+      originalRendererAliveDuringObservation: duringProcess.rendererPid === beforeProcess.rendererPid,
+      sameOwnerMcpResponsiveDuringObservation: true,
+      replacementCount: replacementEvents.length,
+      replacementElapsedMs,
+    });
+    expect(stallProof.command).toBe('rejected-after-confirmed-replacement');
+
+    const inspectedAfterDetach = await callMcpTool(ownerConnection.url, client.headers, requestId++, 'session_manage', { action: 'inspect', documentId: canonicalBefore.documentId });
+    expect(inspectedAfterDetach).toMatchObject({ workspace: { humanOccupancy: { active: false, locks: [] }, editorAdvisory: { attached: true, documentId: canonicalBefore.documentId } } });
+    const canonicalAfterDetach = await replacementPage.evaluate(async () => {
+      const snapshot = await window.aidraw.bootstrap();
+      const engine = await window.aidraw.getEngineStatus();
+      return { snapshot, engine };
+    });
+    const recoveredDocument = canonicalAfterDetach.snapshot.activeDocument as IllustrationDocument;
+    expect({
+      documentId: recoveredDocument.id,
+      name: recoveredDocument.name,
+      revision: recoveredDocument.revision,
+      object: recoveredDocument.objects[canonicalBefore.object.id],
+      activity: recoveredDocument.activity,
+      canUndo: canonicalAfterDetach.snapshot.canUndo,
+      canRedo: canonicalAfterDetach.snapshot.canRedo,
+      engine: canonicalAfterDetach.engine,
+    }).toEqual({
+      documentId: canonicalBefore.documentId,
+      name: canonicalBefore.documentName,
+      revision: canonicalBefore.revision,
+      object: canonicalBefore.object,
+      activity: canonicalBefore.activity,
+      canUndo: true,
+      canRedo: false,
+      engine: expect.objectContaining({ running: true, uiAttached: true, mode: 'interactive' }),
+    });
+
+    const retried = await callMcpTool(ownerConnection.url, client.headers, requestId++, 'canvas_apply', {
+      documentId: canonicalBefore.documentId,
+      clientOperationId: 'fnd05-agent-retry-after-unresponsive-renderer',
+      label: 'Retry after persistent renderer stall',
+      operations: [{ kind: 'illustration.object.replace', object: replacementObject, expectedRevision: canonicalBefore.object.revision }],
+      playback: { mode: 'instant', speed: 1 },
+    });
+    expect(retried).toMatchObject({ status: 'committed', revision: canonicalBefore.revision + 1 });
+    const afterRetry = await replacementPage.evaluate(async (objectId) => {
+      const snapshot = await window.aidraw.bootstrap();
+      const document = snapshot.activeDocument;
+      return {
+        documentId: document?.id,
+        revision: document?.revision,
+        object: document?.kind === 'illustration' ? document.objects[objectId] : undefined,
+        activityLabels: document?.activity.map((entry) => entry.label),
+      };
+    }, canonicalBefore.object.id);
+    expect(afterRetry).toMatchObject({
+      documentId: canonicalBefore.documentId,
+      revision: canonicalBefore.revision + 1,
+      object: { name: 'Recovered after persistent stall' },
+      activityLabels: expect.arrayContaining(['Prepare persistent renderer recovery', 'Retry after persistent renderer stall']),
+    });
+
+    const encryptedCredential = JSON.parse(await readFile(configured.paths.tokenCredentials, 'utf8')) as unknown;
+    const encryptedToken = inspectFnd05EncryptedToken(encryptedCredential, ownerConnection.token);
+    if (!encryptedToken.encryptedValuePresent) throw new Error('The FND-05 encrypted credential shape was not confirmed.');
+    if (((await stat(configured.paths.tokenCredentials)).mode & 0o777) !== 0o600) throw new Error('The FND-05 encrypted credential record is not mode 0600.');
+    expect(await access(configured.paths.providerCredentials).then(() => true, () => false)).toBe(false);
+    expect(await access(configured.paths.forbiddenNetwork).then(() => true, () => false)).toBe(false);
+    expect(owner.externalRendererRequests).toEqual([]);
+
+    const ownerCleanup = await stopOwner(owner, configured.profile, secrets);
+    cleanup.push(ownerCleanup);
+    active = undefined;
+    expect(ownerCleanup).toMatchObject({ graceful: true, ownerPid, ownerExitCode: 0, signalExitCode: 0, connectionCredentials: 'redacted-after-graceful-stop', ownedSurvivors: [] });
+
+    const executableInfo = await stat(executable);
+    const asarInfo = await stat(asar);
+    evidence = {
+      version: 1,
+      scenario: FND05_UNRESPONSIVE_PACKAGED_SCENARIO,
+      package: {
+        packageRoot: configured.packageRoot,
+        executable,
+        asar,
+        platform: artifact.platform,
+        architecture: artifact.arch,
+        executableBytes: executableInfo.size,
+        asarBytes: asarInfo.size,
+        executableSha256: configured.executableSha256,
+        asarSha256: configured.asarSha256,
+        hardenedFuseAndPackagedSecurityPreflight: true,
+      },
+      isolation: {
+        profile: configured.profile,
+        defaultProfileUntouched: true,
+        priorRetainedRunsUntouched: true,
+        remoteDebuggingAddress: '127.0.0.1',
+        productionHookAdded: false,
+      },
+      rendererStall: {
+        mechanism: `bounded ${FND05_UNRESPONSIVE_STALL_MS} ms synchronous Runtime.evaluate in the exact isolated renderer`,
+        observationMs: FND05_UNRESPONSIVE_OBSERVATION_MS,
+        declaredPolicyGraceMs: FND05_UNRESPONSIVE_POLICY_GRACE_MS,
+        beforeTargetId: beforeTarget.targetId,
+        replacementTargetId: replacementTarget.targetId,
+        beforeRendererPid: beforeProcess.rendererPid,
+        replacementRendererPid: afterProcess.rendererPid,
+        ...stallProof,
+      },
+      ownerContinuity: {
+        ownerPid,
+        connectionPid: ownerConnection.pid,
+        sameOwnerAndMcpThroughReplacement: true,
+        exactlyOneWindowBeforeAndAfter: true,
+      },
+      canonicalContinuity: {
+        documentId: canonicalBefore.documentId,
+        revisionBeforeStall: canonicalBefore.revision,
+        revisionAfterAgentRetry: canonicalBefore.revision + 1,
+        objectId: canonicalBefore.object.id,
+        humanUndoHistoryPresentAfterDetach: true,
+        activityPreservedAfterDetach: true,
+        transientHumanOccupancyRetainedDuringStall: true,
+        transientHumanOccupancyClearedAfterConfirmedDetach: true,
+        sameAgentRetryCommitted: true,
+      },
+      credentialsAndNetwork: {
+        connectionFileRedactedAfterConfirmedExit: true,
+        localMcpCredentialEncryptedAtRest: true,
+        providerCredentialFileAbsent: true,
+        rendererExternalRequestsObserved: 0,
+        backgroundNetworkDisabled: true,
+      },
+      nonclaims: {
+        rendererLocalWorkNotSubmittedToCanonicalEnginePreserved: false,
+        historicalDefaultProfileCauseEstablished: false,
+        cacheOrProfileRepairEstablished: false,
+        broaderPlatformsEstablished: false,
+        releaseCandidateEstablished: false,
+      },
+      cleanup,
+    };
+  } catch (error) {
+    acceptanceFailure = error instanceof Error ? error : new Error(String(error));
+  } finally {
+    if (active) {
+      const cleanupRecord = await stopOwner(active, configured.profile, secrets);
+      cleanup.push(cleanupRecord);
+      if (!cleanupRecord.graceful) {
+        const detail = `Graceful-only ${active.phase} cleanup failed${cleanupRecord.error ? `: ${cleanupRecord.error}` : '.'}`;
+        acceptanceFailure = acceptanceFailure ? new Error(`${acceptanceFailure.message}\n${detail}`) : new Error(detail);
+      }
+    }
+
+    const cleanupText = `${JSON.stringify({ version: 1, scenario: FND05_UNRESPONSIVE_PACKAGED_SCENARIO, cleanup }, null, 2)}\n`;
+    assertFnd05EvidenceRedacted(cleanupText, secrets);
+    await writePrivateRecord(configured.paths.cleanup, cleanupText);
+
+    if (acceptanceFailure) {
+      const stderr = active ? Buffer.concat(active.stderr).toString('utf8') : '';
+      const failureText = `${JSON.stringify({
+        version: 1,
+        scenario: FND05_UNRESPONSIVE_PACKAGED_SCENARIO,
+        status: 'failed',
+        failure: redactFnd05FailureText(acceptanceFailure.message, secrets),
+        stderr: redactFnd05FailureText(stderr, secrets),
+        cleanup,
+      }, null, 2)}\n`;
+      assertFnd05EvidenceRedacted(failureText, secrets);
+      await writePrivateRecord(configured.paths.failure, failureText);
+    }
+  }
+
+  if (acceptanceFailure) throw new Error(redactFnd05FailureText(acceptanceFailure.message, secrets));
+  if (!evidence || cleanup.length !== 1 || cleanup.some((entry) => !entry.graceful)) throw new Error('The retained FND-05 unresponsive-renderer evidence did not reach its complete graceful boundary.');
+  const evidenceText = `${JSON.stringify(evidence, null, 2)}\n`;
+  assertFnd05EvidenceRedacted(evidenceText, secrets);
+  await writePrivateRecord(configured.paths.evidence, evidenceText);
 });

@@ -2,16 +2,35 @@ import { describe, expect, it } from 'vitest';
 import { readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import {
+  assertFnd05OwnedProcessShape,
   assertFnd05EvidenceRedacted,
+  assertFnd05UnresponsiveSafeReporterEnvironment,
+  classifyFnd05BoundedStallSettlement,
   FND05_PACKAGED_ASAR_HASH_ENV,
   FND05_PACKAGED_EXE_HASH_ENV,
   FND05_PACKAGED_FILES,
   FND05_PACKAGED_PROFILE_ENV,
+  FND05_UNRESPONSIVE_ASAR_HASH_ENV,
+  FND05_UNRESPONSIVE_EXE_HASH_ENV,
+  FND05_UNRESPONSIVE_FAILURE_PREFIX,
+  FND05_UNRESPONSIVE_FAILURE_ROOT_ENV,
+  FND05_UNRESPONSIVE_OBSERVATION_MS,
+  FND05_UNRESPONSIVE_PACKAGE_PREFIX,
+  FND05_UNRESPONSIVE_PACKAGED_SCENARIO,
+  FND05_UNRESPONSIVE_POLICY_GRACE_MS,
+  FND05_UNRESPONSIVE_PROFILE_ENV,
+  FND05_UNRESPONSIVE_PROFILE_PREFIX,
+  FND05_UNRESPONSIVE_STALL_EXPRESSION,
+  FND05_UNRESPONSIVE_STALL_MS,
+  inspectFnd05EncryptedToken,
   observeFnd05DeliberatePageCrash,
   parseFnd05OwnedProcesses,
   redactFnd05FailureText,
   resolveFnd05PackagedAcceptance,
+  resolveFnd05UnresponsiveAcceptance,
 } from '../../scripts/fnd05-packaged-acceptance.mjs';
+import { EDITOR_RENDERER_UNRESPONSIVE_GRACE_MS } from '../../src/main/editor-window-lifecycle';
+import { parseFeatureTracker } from '../../scripts/check-rc-readiness.mjs';
 
 const digest = 'A'.repeat(64);
 
@@ -20,6 +39,16 @@ function environment(profile: string): NodeJS.ProcessEnv {
     [FND05_PACKAGED_PROFILE_ENV]: profile,
     [FND05_PACKAGED_EXE_HASH_ENV]: digest,
     [FND05_PACKAGED_ASAR_HASH_ENV]: digest.toLowerCase(),
+  };
+}
+
+function unresponsiveEnvironment(workspace: string, runId: string): NodeJS.ProcessEnv {
+  return {
+    AIDRAW_E2E_OUT_DIR: join(workspace, 'test-results', 'prepared-packages', `${FND05_UNRESPONSIVE_PACKAGE_PREFIX}${runId}`),
+    [FND05_UNRESPONSIVE_PROFILE_ENV]: join(workspace, 'test-results', 'retained', `${FND05_UNRESPONSIVE_PROFILE_PREFIX}${runId}`),
+    [FND05_UNRESPONSIVE_FAILURE_ROOT_ENV]: join(workspace, 'test-results', 'retained-failures', `${FND05_UNRESPONSIVE_FAILURE_PREFIX}${runId}`),
+    [FND05_UNRESPONSIVE_EXE_HASH_ENV]: digest,
+    [FND05_UNRESPONSIVE_ASAR_HASH_ENV]: digest.toLowerCase(),
   };
 }
 
@@ -110,5 +139,199 @@ describe('FND-05 retained exact-package acceptance boundary', () => {
     expect(source).not.toContain('injectRendererRecoveryTestEvent');
     expect(source).not.toMatch(/\.kill\s*\(/);
     expect(source).not.toMatch(/\brm\s*\(/);
+  });
+
+  it('correlates one fresh prepared package, profile, failure root, selector, and exact hashes for the alive-hang route', () => {
+    const workspace = resolve('synthetic-workspace');
+    const runId = '20260814t120000z-a3e4de5-r1';
+    const configured = resolveFnd05UnresponsiveAcceptance({ workspacePath: workspace, environment: unresponsiveEnvironment(workspace, runId) });
+    expect(configured).toMatchObject({
+      workspace,
+      runId,
+      packageRoot: join(workspace, 'test-results', 'prepared-packages', `${FND05_UNRESPONSIVE_PACKAGE_PREFIX}${runId}`),
+      profile: join(workspace, 'test-results', 'retained', `${FND05_UNRESPONSIVE_PROFILE_PREFIX}${runId}`),
+      failureRoot: join(workspace, 'test-results', 'retained-failures', `${FND05_UNRESPONSIVE_FAILURE_PREFIX}${runId}`),
+      executableSha256: digest,
+      asarSha256: digest,
+    });
+    expect(configured.playwrightOutput).toBe(join(configured.failureRoot, 'playwright'));
+    expect(FND05_UNRESPONSIVE_PACKAGED_SCENARIO).toContain('exact package replaces one persistently unresponsive renderer');
+  });
+
+  it('fails closed on uncorrelated output/failure roots, nested profiles, and wrong hashes', () => {
+    const workspace = resolve('synthetic-workspace');
+    const runId = '20260814t120000z-a3e4de5-r1';
+    const valid = unresponsiveEnvironment(workspace, runId);
+    expect(() => resolveFnd05UnresponsiveAcceptance({
+      workspacePath: workspace,
+      environment: { ...valid, [FND05_UNRESPONSIVE_PROFILE_ENV]: join(String(valid[FND05_UNRESPONSIVE_PROFILE_ENV]), 'nested') },
+    })).toThrow(/direct child/);
+    expect(() => resolveFnd05UnresponsiveAcceptance({
+      workspacePath: workspace,
+      environment: { ...valid, AIDRAW_E2E_OUT_DIR: join(workspace, 'test-results', 'prepared-packages', `${FND05_UNRESPONSIVE_PACKAGE_PREFIX}other-run`) },
+    })).toThrow(/matching fresh/);
+    expect(() => resolveFnd05UnresponsiveAcceptance({
+      workspacePath: workspace,
+      environment: { ...valid, [FND05_UNRESPONSIVE_FAILURE_ROOT_ENV]: join(workspace, 'test-results', 'retained-failures', `${FND05_UNRESPONSIVE_FAILURE_PREFIX}other-run`) },
+    })).toThrow(/matching fresh/);
+    expect(() => resolveFnd05UnresponsiveAcceptance({
+      workspacePath: workspace,
+      environment: { ...valid, [FND05_UNRESPONSIVE_EXE_HASH_ENV]: 'not-a-digest' },
+    })).toThrow(/SHA-256/);
+    expect(() => resolveFnd05UnresponsiveAcceptance({ workspacePath: workspace, environment: {} })).toThrow(/is required/);
+  });
+
+  it('requires one exact owner and one direct-child renderer for the declared profile', () => {
+    const rows = [
+      { pid: 100, ppid: 1, type: 'browser' },
+      { pid: 101, ppid: 100, type: 'renderer' },
+      { pid: 102, ppid: 100, type: 'gpu-process' },
+    ];
+    expect(assertFnd05OwnedProcessShape(rows, 100)).toEqual({ ownerPid: 100, rendererPid: 101 });
+    expect(assertFnd05OwnedProcessShape([{ pid: 100, ppid: 1, type: 'browser' }, { pid: 201, ppid: 100, type: 'renderer' }], 100, 101)).toEqual({ ownerPid: 100, rendererPid: 201 });
+    expect(() => assertFnd05OwnedProcessShape([...rows, { pid: 103, ppid: 100, type: 'renderer' }], 100)).toThrow(/one expected owner/);
+    expect(() => assertFnd05OwnedProcessShape([{ pid: 100, ppid: 1, type: 'browser' }, { pid: 101, ppid: 999, type: 'renderer' }], 100)).toThrow(/direct-child renderer/);
+    expect(() => assertFnd05OwnedProcessShape(rows, 999)).toThrow(/one expected owner/);
+  });
+
+  it('binds the bounded stall to the production grace and accepts only retirement of a proven post-policy target', () => {
+    expect(FND05_UNRESPONSIVE_POLICY_GRACE_MS).toBe(EDITOR_RENDERER_UNRESPONSIVE_GRACE_MS);
+    expect(FND05_UNRESPONSIVE_OBSERVATION_MS).toBeLessThan(FND05_UNRESPONSIVE_POLICY_GRACE_MS);
+    expect(FND05_UNRESPONSIVE_STALL_MS).toBeGreaterThan(FND05_UNRESPONSIVE_POLICY_GRACE_MS);
+    expect(FND05_UNRESPONSIVE_STALL_EXPRESSION).toContain('performance.now()');
+    expect(FND05_UNRESPONSIVE_STALL_EXPRESSION).toContain(String(FND05_UNRESPONSIVE_STALL_MS));
+    expect(FND05_UNRESPONSIVE_STALL_EXPRESSION).not.toMatch(/aidraw|ipc|preload|fetch|WebSocket|Page\.crash/);
+    const proof = {
+      originalRendererAliveBeforeStall: true,
+      originalRendererResponsiveBeforeStall: true,
+      commandPendingDuringObservation: true,
+      originalRendererAliveDuringObservation: true,
+      sameOwnerMcpResponsiveDuringObservation: true,
+      replacementCount: 1,
+      replacementElapsedMs: FND05_UNRESPONSIVE_POLICY_GRACE_MS + 1,
+    };
+    expect(classifyFnd05BoundedStallSettlement(
+      { status: 'rejected', reason: new Error('cdpSession.send: Protocol error (Runtime.evaluate): Target closed') },
+      proof,
+    )).toMatchObject({ command: 'rejected-after-confirmed-replacement', replacementCount: 1 });
+    expect(classifyFnd05BoundedStallSettlement(
+      { status: 'rejected', reason: new Error('cdpSession.send: Target page, context or browser has been closed') },
+      proof,
+    )).toMatchObject({ command: 'rejected-after-confirmed-replacement' });
+    expect(() => classifyFnd05BoundedStallSettlement({ status: 'resolved' }, proof)).toThrow(/did not settle by retirement/);
+    expect(() => classifyFnd05BoundedStallSettlement({ status: 'timeout' }, proof)).toThrow(/did not settle by retirement/);
+    expect(() => classifyFnd05BoundedStallSettlement(
+      { status: 'rejected', reason: new Error('cdpSession.send: Protocol error (Runtime.evaluate): Permission denied: Target closed') },
+      proof,
+    )).toThrow(/unrelated reason/);
+    expect(() => classifyFnd05BoundedStallSettlement(
+      { status: 'rejected', reason: new Error('cdpSession.send: Protocol error (Runtime.evaluate): Target closed') },
+      { ...proof, replacementElapsedMs: FND05_UNRESPONSIVE_POLICY_GRACE_MS - 1 },
+    )).toThrow(/post-policy replacement/);
+    expect(() => classifyFnd05BoundedStallSettlement(
+      { status: 'rejected', reason: new Error('cdpSession.send: Protocol error (Runtime.evaluate): Target closed') },
+      { ...proof, sameOwnerMcpResponsiveDuringObservation: false },
+    )).toThrow(/same-owner MCP continuity/);
+  });
+
+  it('keeps token/ciphertext values out of reporter surfaces and rejects credential-capable reporters', () => {
+    const liveToken = 'synthetic-live-token-that-must-not-reach-playwright';
+    expect(inspectFnd05EncryptedToken({ version: 1, encryption: 'electron-safe-storage', value: 'encrypted-ciphertext' }, liveToken)).toEqual({
+      version: 1,
+      encryption: 'electron-safe-storage',
+      encryptedValuePresent: true,
+    });
+    let message = '';
+    try {
+      inspectFnd05EncryptedToken({ version: 1, encryption: 'electron-safe-storage', value: liveToken }, liveToken);
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toMatch(/expected encrypted safe-storage record/);
+    expect(message).not.toContain(liveToken);
+    expect(assertFnd05UnresponsiveSafeReporterEnvironment({})).toBe(true);
+    for (const name of ['PLAYWRIGHT_HTML_OUTPUT_DIR', 'PLAYWRIGHT_JSON_OUTPUT_FILE', 'PLAYWRIGHT_JUNIT_OUTPUT_FILE', 'PLAYWRIGHT_BLOB_OUTPUT_DIR']) {
+      expect(() => assertFnd05UnresponsiveSafeReporterEnvironment({ [name]: '/tmp/unsafe' })).toThrow(new RegExp(name));
+    }
+  });
+
+  it('uses only the exact renderer Runtime.evaluate stimulus and a secure private graceful-only wrapper', async () => {
+    const [source, wrapper, config, mainSource, preloadSource, electronTypes, playwrightArtifacts] = await Promise.all([
+      readFile(resolve('tests/e2e/stale-renderer-recovery.spec.ts'), 'utf8'),
+      readFile(resolve('scripts/run-fnd05-unresponsive-acceptance.mjs'), 'utf8'),
+      readFile(resolve('playwright.fnd05-unresponsive.config.ts'), 'utf8'),
+      readFile(resolve('src/main/main.ts'), 'utf8'),
+      readFile(resolve('src/preload/preload.ts'), 'utf8'),
+      readFile(resolve('node_modules/electron/electron.d.ts'), 'utf8'),
+      readFile(resolve('node_modules/playwright/lib/index.js'), 'utf8'),
+    ]);
+    const start = source.indexOf('test(FND05_UNRESPONSIVE_PACKAGED_SCENARIO');
+    expect(start).toBeGreaterThan(0);
+    const acceptance = source.slice(start);
+    expect(acceptance).toContain("beforeTarget.session.send('Runtime.evaluate'");
+    expect(acceptance).toContain('FND05_UNRESPONSIVE_STALL_EXPRESSION');
+    expect(acceptance).toContain('replacementElapsedMs');
+    expect(acceptance).toContain("AIDRAW_E2E_FND05_UNRESPONSIVE_WRAPPER !== '1'");
+    expect(acceptance).toContain('assertFnd05UnresponsiveSafeReporterEnvironment()');
+    expect(acceptance).toContain("testInfo.project.metadata.suite !== 'retained-fnd05-unresponsive-renderer'");
+    expect(acceptance).toContain('stopOwner(owner, configured.profile, secrets)');
+    expect(source).toContain("signalOwner(profile, '--quit-engine')");
+    expect(acceptance).toContain('inspectFnd05EncryptedToken(encryptedCredential, ownerConnection.token)');
+    expect(acceptance).not.toContain('Page.crash');
+    expect(acceptance).not.toContain('injectRendererRecoveryTestEvent');
+    expect(acceptance).not.toContain('renderer-recovery:test-event');
+    expect(acceptance).not.toMatch(/\.kill\s*\(/);
+    expect(acceptance).not.toMatch(/\brm\s*\(/);
+    expect(mainSource).not.toContain('FND05_UNRESPONSIVE_STALL_EXPRESSION');
+    expect(preloadSource).not.toContain('FND05_UNRESPONSIVE_STALL_EXPRESSION');
+    expect(electronTypes).toContain("on(event: 'unresponsive', listener: () => void): this;");
+    expect(electronTypes).toContain("on(event: 'responsive', listener: () => void): this;");
+
+    expect(wrapper).toContain('process.umask(0o077)');
+    expect(wrapper).toContain('inspectPackagedSecurity');
+    expect(wrapper).toContain("mode: 0o700");
+    expect(wrapper).toContain("'--config=playwright.fnd05-unresponsive.config.ts'");
+    expect(wrapper).toContain('assertFnd05UnresponsiveSafeReporterEnvironment()');
+    expect(wrapper).not.toMatch(/\.kill\s*\(/);
+    expect(wrapper).not.toMatch(/\brm\s*\(/);
+    expect(config).toContain("reporter: [['list']]");
+    expect(config).toContain("trace: 'off'");
+    expect(config).toContain("screenshot: 'off'");
+    expect(config).toContain("video: 'off'");
+    expect(config).toContain("AIDRAW_E2E_FND05_UNRESPONSIVE_WRAPPER !== '1'");
+    expect(config).not.toContain("['html'");
+    expect(playwrightArtifacts).toMatch(/if \(process\.env\.PLAYWRIGHT_NO_COPY_PROMPT\)\s+return;/);
+  });
+
+  it('records the alive-hang route as unexecuted Working/P0 preparation with exact nonclaims', async () => {
+    const [changelog, tracker, testing] = await Promise.all([
+      readFile(resolve('CHANGELOG.md'), 'utf8'),
+      readFile(resolve('docs/FEATURE_TRACKER.md'), 'utf8'),
+      readFile(resolve('docs/TESTING.md'), 'utf8'),
+    ]);
+    const parsed = parseFeatureTracker(tracker);
+    expect(parsed.errors).toEqual([]);
+    const fnd05 = parsed.items.find((item) => item.id === 'FND-05');
+    expect(fnd05).toMatchObject({ status: '🟢 Working', priority: 'P0' });
+    const truth = fnd05?.truth ?? '';
+    for (const claim of [
+      'unexecuted, test/controller-only exact-package route',
+      '30,000 ms renderer-only CDP stall',
+      '10,000 ms floor',
+      'no identity or native result exists yet',
+      'Renderer-local work never submitted to the canonical engine is not promised',
+    ]) expect(truth).toContain(claim);
+    expect(truth).toContain('native packaged alive-hang PASS, and broader platforms remain open');
+
+    const changelogEntry = changelog.split(/\r?\n/u).find((line) => line.startsWith('- Prepare a separate retained exact-package acceptance')) ?? '';
+    expect(changelogEntry).toContain('unexecuted test/controller preparation only');
+    expect(changelogEntry).toContain('renderer-local work never submitted to the canonical engine');
+    expect(testing).toContain('Thirteen exact-checkpoint cases');
+    expect(testing).toContain('### Prepared FND-05 alive-but-unresponsive exact-package acceptance (not executed)');
+    expect(testing).toContain('These are naming templates, not reserved or runnable identities');
+    expect(testing).toContain('No package was built, no Electron/helper/native process was launched');
+    expect(testing).toContain('renderer-local work never submitted before a confirmed hang may be lost');
+    expect(testing).toContain('exact **12-path** controller/truth candidate');
+    expect(testing).toContain('**193 files / 1,184 tests**');
   });
 });
