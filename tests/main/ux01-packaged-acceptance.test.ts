@@ -60,10 +60,10 @@ describe('UX-01 retained exact-package acceptance boundary', () => {
       'zero external renderer requests',
       'must never be reused',
     ]) expect(truth).toContain(claim);
+    expect(truth).toContain('native traffic-light/top-bar route is prepared but has not been packaged or executed');
     const lowercaseTruth = truth.toLowerCase();
     for (const nonclaim of [
-      'native traffic-light clicks',
-      'drag/no-drag interaction',
+      'native window-chrome pass',
       'customizable workspace persistence',
       'progressive-disclosure completion',
       '200% text',
@@ -210,7 +210,7 @@ describe('UX-01 retained exact-package acceptance boundary', () => {
     expect(electronTypes).toContain('By default, this will move the window.');
     expect(electronTypes).toContain('requested new content bounds');
     expect(electronTypes).toContain("titleBarStyle?: ('default' | 'hidden' | 'hiddenInset' | 'customButtonsOnHover')");
-    expect(mainSource).toContain("titleBarStyle: 'hiddenInset'");
+    expect(mainSource).toContain('titleBarStyle: MACOS_EDITOR_WINDOW_CHROME.titleBarStyle');
     expect(mainSource).not.toContain('enableLargerThanScreen: true');
     expect(styles).toContain('html[data-native-titlebar="hidden-inset"] .topbar { -webkit-app-region: drag; }');
     expect(styles).toContain('--macos-traffic-light-inset: 84px;');

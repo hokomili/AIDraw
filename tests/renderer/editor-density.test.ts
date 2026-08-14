@@ -1,6 +1,11 @@
 import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
-import { EDITOR_CONTENT_VIEWPORT, EDITOR_DENSITY, editorOuterMinimumSize } from '../../src/common/editor-layout';
+import {
+  EDITOR_CONTENT_VIEWPORT,
+  EDITOR_DENSITY,
+  MACOS_EDITOR_WINDOW_CHROME,
+  editorOuterMinimumSize,
+} from '../../src/common/editor-layout';
 
 describe('professional editor density contract', () => {
   it('keeps a bounded canvas floor at the supported minimum content viewport', () => {
@@ -48,7 +53,13 @@ describe('professional editor density contract', () => {
       expect(main).toContain(`EDITOR_CONTENT_VIEWPORT.${property}`);
     }
     expect(main).toContain('useContentSize: true');
-    expect(main).toContain("titleBarStyle: 'hiddenInset'");
+    expect(MACOS_EDITOR_WINDOW_CHROME).toEqual({
+      titleBarStyle: 'hiddenInset',
+      trafficLightPosition: { x: 12, y: 11 },
+      trafficLightReservedWidth: 84,
+    });
+    expect(main).toContain('titleBarStyle: MACOS_EDITOR_WINDOW_CHROME.titleBarStyle');
+    expect(main).toContain('trafficLightPosition: MACOS_EDITOR_WINDOW_CHROME.trafficLightPosition');
     expect(main).toContain("url.searchParams.set('native-titlebar', 'hidden-inset')");
     expect(main).toContain("editorRendererUrl(MAIN_WINDOW_VITE_DEV_SERVER_URL ?? 'aidraw://app/index.html')");
     expect(main).not.toContain('enableLargerThanScreen: true');
@@ -80,7 +91,7 @@ describe('professional editor density contract', () => {
     expect(styles).toContain(`@media (max-width: ${EDITOR_CONTENT_VIEWPORT.compactBreakpointWidth}px)`);
     expect(styles).toContain('var(--shell-sidebar-compact-width)');
     expect(styles).toContain('html[data-native-titlebar="hidden-inset"] .topbar { -webkit-app-region: drag; }');
-    expect(styles).toContain('--macos-traffic-light-inset: 84px;');
+    expect(styles).toContain(`--macos-traffic-light-inset: ${MACOS_EDITOR_WINDOW_CHROME.trafficLightReservedWidth}px;`);
     expect(styles).toContain('html[data-native-titlebar="hidden-inset"] .brand { width: calc(118px + var(--macos-traffic-light-inset)); padding-left: var(--macos-traffic-light-inset); }');
     expect(styles).toContain('html[data-native-titlebar="hidden-inset"] .topbar button,');
     expect(styles).toContain('-webkit-app-region: no-drag;');

@@ -32,3 +32,12 @@ export const EDITOR_DENSITY = {
   sidebarWidth: 318,
   compactSidebarWidth: 286,
 } as const;
+
+export const MACOS_EDITOR_WINDOW_CHROME = {
+  titleBarStyle: 'hiddenInset',
+  // Electron 43.4.0's hiddenInset implementation and WindowButtonsProxy use
+  // (12, 11) as the standard buttons' left-top margin. Restating that pinned
+  // default makes the acceptance target explicit without repositioning chrome.
+  trafficLightPosition: { x: 12, y: 11 },
+  trafficLightReservedWidth: 84,
+} as const;

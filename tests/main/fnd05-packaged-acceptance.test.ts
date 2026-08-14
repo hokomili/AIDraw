@@ -550,8 +550,8 @@ describe('FND-05 retained exact-package acceptance boundary', () => {
     expect(truth).toContain('The initiating renderer-loss trigger');
     expect(truth).toContain('customer updater/restart semantics');
     expect(truth).not.toContain('alive-hang route has no PASS');
-    expect(tracker).toContain('synchronized through base `4ce0a8293916d8884b30cca4570b66cadd553be6`');
-    expect(tracker).toContain('This bounded **22-path** source/headless package-lifecycle candidate');
+    expect(tracker).toContain('synchronized through base `10b5379212dc17f1754025b42b23952be087a588`');
+    expect(tracker).toContain('This bounded **19-path** source/headless UX-01 candidate');
     expect(tracker).toContain("clean synchronized base's non-certifying audit remains Level 3 blocked **1** / stable v1 blocked **4**");
     expect(tracker).toContain('producing **2 / 5** until ordinary review and commit');
 
@@ -579,7 +579,7 @@ describe('FND-05 retained exact-package acceptance boundary', () => {
     expect(changelog).toContain('The separate immutable r5 result above supplies narrow macOS/arm64 current-package input-ACK-hang acceptance');
     expect(changelog).not.toContain('still needs native packaged acceptance');
     expect(tracker).not.toContain('still lacks native packaged acceptance');
-    expect(testing).toContain('Thirteen exact-checkpoint cases');
+    expect(testing).toContain('Fourteen exact-checkpoint cases');
     expect(testing).toContain('### FND-05 alive-but-unresponsive controller, consumed r1/r2/r3/r4 failures, and narrow r5 PASS');
     expect(testing).toContain('exited 1 before any application/helper launch, stall, or product assertion');
     expect(testing).toContain('object-destructures the built-in `browserName` fixture');

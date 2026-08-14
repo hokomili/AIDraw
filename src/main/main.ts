@@ -6,7 +6,7 @@ import { basename, dirname, extname, isAbsolute, relative, resolve } from 'node:
 import { pathToFileURL } from 'node:url';
 import { CanvasTransactionSchema, HUMAN_ACTOR, createId, nowIso, type AsyncJob, type CanvasOperation } from '@aidraw/core';
 import { IPC, type BatchDocumentResult, type DocumentPresetInput, type EngineStatus, type ExportOptions, type HumanLockRequest, type InterchangeReportInput, type NewDocumentOptions, type PixelLinkAction, type PixelLinkActionResult } from '../common/contracts';
-import { EDITOR_CONTENT_VIEWPORT, editorOuterMinimumSize } from '../common/editor-layout';
+import { EDITOR_CONTENT_VIEWPORT, MACOS_EDITOR_WINDOW_CHROME, editorOuterMinimumSize } from '../common/editor-layout';
 import { MAX_PALETTE_FILE_BYTES, applyPortablePalette, parsePaletteFile, serializePaletteFile, type PaletteFileFormat, type PaletteImportMode } from '../common/palette-interchange';
 import type { DocumentService } from './document-service';
 import type { McpHost } from './mcp-host';
@@ -953,7 +953,10 @@ function createElectronWindow(): BrowserWindow {
     // Keep macOS traffic lights while letting the existing app top bar own the
     // vertical chrome; a separate native title bar would exceed the supported
     // 940 px content viewport on the reviewed 960 px-tall work area.
-    ...(process.platform === 'darwin' ? { titleBarStyle: 'hiddenInset' as const } : {}),
+    ...(process.platform === 'darwin' ? {
+      titleBarStyle: MACOS_EDITOR_WINDOW_CHROME.titleBarStyle,
+      trafficLightPosition: MACOS_EDITOR_WINDOW_CHROME.trafficLightPosition,
+    } : {}),
     backgroundColor: '#eeeae4',
     title: 'AIDraw',
     show: false,
