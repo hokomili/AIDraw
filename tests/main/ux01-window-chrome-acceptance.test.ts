@@ -5,10 +5,13 @@ import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
 import { EDITOR_DENSITY, MACOS_EDITOR_WINDOW_CHROME } from '../../src/common/editor-layout';
 import {
-  assertUx01WindowBoundsMatchRenderer,
   assertUx01WindowInsideWorkArea,
+  assertUx01WindowMovedWithinCoordinateSpaces,
+  assertUx01WindowSizeMatchesRenderer,
+  assertUx01WindowStationaryWithinCoordinateSpaces,
   assertUx01WindowChromeSafeReporterEnvironment,
   buildUx01WindowChromeChildEnvironment,
+  createUx01WindowGeometryDiagnostics,
   deriveUx01TrafficLightCenters,
   parseUx01WindowDriverAction,
   parseUx01WindowDriverInspection,
@@ -24,6 +27,7 @@ import {
   UX01_WINDOW_CHROME_PROFILE_PREFIX,
   UX01_WINDOW_CHROME_SCENARIO,
   UX01_WINDOW_CHROME_UNSAFE_REPORT_ENVIRONMENTS,
+  UX01_WINDOW_COORDINATE_SPACES,
 } from '../../scripts/ux01-window-chrome-acceptance.mjs';
 import { parseFeatureTracker } from '../../scripts/check-rc-readiness.mjs';
 
@@ -117,7 +121,7 @@ describe('UX-01 exact-package native window-chrome preparation', () => {
       minimize: { x: 39, y: 18 },
       zoom: { x: 59, y: 18 },
     });
-    expect(assertUx01WindowBoundsMatchRenderer(parsed.windows[0], { x: 30, y: 40, width: 1_520, height: 940 })).toBe(true);
+    expect(assertUx01WindowSizeMatchesRenderer(parsed.windows[0], { x: -500, y: 900, width: 1_520, height: 940 })).toBe(true);
     expect(assertUx01WindowInsideWorkArea({
       outer: { x: 30, y: 40, width: 1_520, height: 940 },
       screen: { availLeft: 0, availTop: 0, availWidth: 1_920, availHeight: 1_080 },
@@ -130,7 +134,7 @@ describe('UX-01 exact-package native window-chrome preparation', () => {
     });
   });
 
-  it('rejects ambiguous windows, malformed metrics/actions, and renderer/native identity drift', () => {
+  it('rejects ambiguous windows, malformed metrics/actions, and renderer/native size drift', () => {
     expect(() => parseUx01WindowDriverPreflight({ version: 1, postEventAccess: 'yes' })).toThrow(/preflight contract/);
     expect(() => parseUx01WindowDriverInspection(inspection({ windows: [inspection().windows[0], { ...inspection().windows[0], windowId: 201 }] }))).toThrow(/ambiguous/);
     expect(() => parseUx01WindowDriverInspection(inspection({ buttonMetrics: { ...inspection().buttonMetrics, zoom: { offsetX: 100, width: 14, height: 14 } } }))).toThrow(/zoom button offset/);
@@ -140,12 +144,97 @@ describe('UX-01 exact-package native window-chrome preparation', () => {
     expect(() => parseUx01WindowDriverAction({ version: 1, action: 'click', posted: false, pid: 100, windowId: 200 })).toThrow(/did not confirm/);
     expect(() => parseUx01WindowDriverAction({ version: 1, action: 'fullscreen-click', posted: true, pid: 100, windowId: 200 })).toThrow(/did not confirm/);
     const parsed = parseUx01WindowDriverInspection(inspection());
-    expect(() => assertUx01WindowBoundsMatchRenderer(parsed.windows[0], { x: 35, y: 40, width: 1_520, height: 940 })).toThrow(/native x/);
-    expect(() => assertUx01WindowBoundsMatchRenderer(parsed.windows[0], { x: 30, y: 40, width: 1_520, height: 940 }, 20)).toThrow(/tolerance/);
+    expect(() => assertUx01WindowSizeMatchesRenderer(parsed.windows[0], { x: 30, y: 40, width: 1_525, height: 940 })).toThrow(/native width/);
+    expect(() => assertUx01WindowSizeMatchesRenderer(parsed.windows[0], { x: 30, y: 40, width: 1_520, height: 940 }, 20)).toThrow(/tolerance/);
     expect(() => assertUx01WindowInsideWorkArea({
       outer: { x: 30, y: 40, width: 1_900, height: 1_050 },
       screen: { availLeft: 0, availTop: 0, availWidth: 1_920, availHeight: 1_080 },
     })).toThrow(/outside the renderer-reported work area/);
+  });
+
+  it('keeps Quartz and Blink origins raw while comparing only size across sources', () => {
+    const parsed = parseUx01WindowDriverInspection(inspection());
+    const renderer = {
+      location: 'aidraw://app/index.html',
+      content: { width: 1_520, height: 912, devicePixelRatio: 2 },
+      outer: { x: -640, y: 26, width: 1_520, height: 940 },
+      screen: { width: 1_920, height: 1_080, availLeft: 0, availTop: 25, availWidth: 1_920, availHeight: 1_055 },
+      layout: { root: { clientWidth: 1_520 }, body: { clientWidth: 1_520 } },
+    };
+    const diagnostics = createUx01WindowGeometryDiagnostics(parsed, renderer);
+    expect(diagnostics).toEqual({
+      coordinateModel: {
+        native: UX01_WINDOW_COORDINATE_SPACES.native,
+        renderer: UX01_WINDOW_COORDINATE_SPACES.renderer,
+        crossSourceComparable: ['width', 'height'],
+        absoluteOriginsComparable: false,
+      },
+      native: parsed,
+      renderer,
+    });
+    expect(diagnostics.native.windows[0].bounds.x).toBe(30);
+    expect(diagnostics.renderer.outer.x).toBe(-640);
+    expect(assertUx01WindowSizeMatchesRenderer(diagnostics.native.windows[0], diagnostics.renderer.outer)).toBe(true);
+  });
+
+  it('proves no-drag and drag movement independently in Quartz and Blink coordinate spaces', () => {
+    const nativeBefore = inspection().windows[0];
+    const rendererBefore = { x: -640, y: 26, width: 1_520, height: 940 };
+    expect(assertUx01WindowStationaryWithinCoordinateSpaces({
+      nativeBefore,
+      nativeAfter: { ...nativeBefore, bounds: { x: 30, y: 40, width: 1_520, height: 940 } },
+      rendererBefore,
+      rendererAfter: { x: -640, y: 26, width: 1_520, height: 940 },
+    })).toEqual({
+      native: { x: 0, y: 0, width: 0, height: 0 },
+      renderer: { x: 0, y: 0, width: 0, height: 0 },
+    });
+
+    expect(assertUx01WindowMovedWithinCoordinateSpaces({
+      nativeBefore,
+      nativeAfter: { ...nativeBefore, bounds: { x: 110, y: 40, width: 1_520, height: 940 } },
+      rendererBefore,
+      rendererAfter: { x: -560, y: 26, width: 1_520, height: 940 },
+      requestedDelta: { x: 80, y: 0 },
+    })).toEqual({
+      native: { x: 80, y: 0, width: 0, height: 0 },
+      renderer: { x: 80, y: 0, width: 0, height: 0 },
+    });
+
+    expect(() => assertUx01WindowMovedWithinCoordinateSpaces({
+      nativeBefore,
+      nativeAfter: { ...nativeBefore, bounds: { x: 30, y: 40, width: 1_520, height: 940 } },
+      rendererBefore,
+      rendererAfter: { x: -560, y: 26, width: 1_520, height: 940 },
+      requestedDelta: { x: 80, y: 0 },
+    })).toThrow(/native coordinate space/);
+    expect(() => assertUx01WindowMovedWithinCoordinateSpaces({
+      nativeBefore,
+      nativeAfter: { ...nativeBefore, bounds: { x: 110, y: 40, width: 1_520, height: 940 } },
+      rendererBefore,
+      rendererAfter: { x: -720, y: 26, width: 1_520, height: 940 },
+      requestedDelta: { x: 80, y: 0 },
+    })).toThrow(/renderer coordinate space/);
+    expect(() => assertUx01WindowMovedWithinCoordinateSpaces({
+      nativeBefore,
+      nativeAfter: { ...nativeBefore, bounds: { x: 115, y: 40, width: 1_520, height: 940 } },
+      rendererBefore,
+      rendererAfter: { x: -555, y: 26, width: 1_520, height: 940 },
+      requestedDelta: { x: 80, y: 0 },
+    })).toThrow(/native coordinate space/);
+    expect(() => assertUx01WindowMovedWithinCoordinateSpaces({
+      nativeBefore,
+      nativeAfter: { ...nativeBefore, bounds: { x: 110, y: 40, width: 1_525, height: 940 } },
+      rendererBefore,
+      rendererAfter: { x: -560, y: 26, width: 1_520, height: 940 },
+      requestedDelta: { x: 80, y: 0 },
+    })).toThrow(/resized the window in native coordinate space/);
+    expect(() => assertUx01WindowStationaryWithinCoordinateSpaces({
+      nativeBefore,
+      nativeAfter: { ...nativeBefore, windowId: 201 },
+      rendererBefore,
+      rendererAfter: rendererBefore,
+    })).toThrow(/window identity changed/);
   });
 
   it('rejects ambient reporter outputs that could retain local credentials', () => {
@@ -256,7 +345,12 @@ describe('UX-01 exact-package native window-chrome preparation', () => {
     expect(spec).toContain('assertUx01WindowInsideWorkArea(zoomedMeasurement)');
     expect(spec).toContain("action: 'native green-button Option-click'");
     expect(spec).not.toContain("stage: 'native-zoom-toggle'");
-    expect(spec).toContain('assertUx01WindowBoundsMatchRenderer');
+    expect(spec).toContain('assertUx01WindowSizeMatchesRenderer');
+    expect(spec).toContain('assertUx01WindowMovedWithinCoordinateSpaces');
+    expect(spec).toContain('assertUx01WindowStationaryWithinCoordinateSpaces');
+    expect(spec).toContain('createUx01WindowGeometryDiagnostics');
+    expect(spec).not.toContain('assertUx01WindowBoundsMatchRenderer');
+    expect(spec.indexOf('geometry: initialGeometry')).toBeLessThan(spec.indexOf('assertUx01WindowSizeMatchesRenderer(initialWindow'));
     expect(spec).not.toContain('newCDPSession');
     expect(spec).not.toContain('Browser.getWindowForTarget');
     expect(spec).not.toContain('Browser.setWindowBounds');
@@ -309,7 +403,7 @@ describe('UX-01 exact-package native window-chrome preparation', () => {
     for (const path of roots) expect(await access(path).then(() => true, () => false), `${path} must remain absent`).toBe(false);
   });
 
-  it('keeps UX-01 Working/P0 and records preparation without promoting an unexecuted native claim', async () => {
+  it('keeps UX-01 Working/P0 and records consumed r1 without promoting a native claim', async () => {
     const [changelog, tracker, testing] = await Promise.all([
       readFile(resolve('CHANGELOG.md'), 'utf8'),
       readFile(resolve('docs/FEATURE_TRACKER.md'), 'utf8'),
@@ -321,19 +415,27 @@ describe('UX-01 exact-package native window-chrome preparation', () => {
     expect(ux01).toMatchObject({ status: '🟢 Working', priority: 'P0' });
     const truth = ux01?.truth ?? '';
     for (const claim of [
-      'native traffic-light/top-bar route is prepared but has not been packaged or executed',
-      'exact-PID action',
-      'no Accessibility API',
+      'failed **1/1 in 3.2 seconds** before native input',
+      'incorrectly compared Quartz absolute `x` with Blink `screenX`',
+      'exact-PID/current-native-bounds action admission',
+      'Accessibility API',
       'separate native authority',
     ]) expect(truth).toContain(claim);
     expect(truth).toContain('Secure r5');
     expect(truth).toContain('passed **1/1 in 5.5 seconds**');
     expect(truth).not.toContain('native traffic-light/top-bar PASS');
 
-    const section = testing.slice(testing.indexOf('### UX-01 native window-chrome acceptance preparation'));
+    const section = testing.slice(testing.indexOf('### UX-01 native window-chrome preparation, consumed r1 coordinate-controller failure, and corrected source model'));
     expect(section).toContain(UX01_WINDOW_CHROME_SCENARIO);
-    expect(section).toContain('source/headless preparation only');
-    expect(section).toContain('has not been packaged or executed');
+    expect(section).toContain('R1 `20260814t092808z-7ff773c-r1`');
+    expect(section).toContain('no CoreGraphics input was posted');
+    expect(section).toContain('not product traffic-light/drag behavior, privacy completion');
+    expect(section).toContain('`kCGWindowBounds` is in Quartz screen space');
+    expect(section).toContain('root-window rectangle in CSS pixels');
+    expect(section).toContain('absolute origins are therefore retained as distinct raw, labeled measurements');
+    expect(section).toContain('Cross-source comparison is limited to outer width and height');
+    expect(section).toContain('stationary independently in Quartz and Blink');
+    expect(section).toContain('before its assertions');
     expect(section).toContain('before the test can create its profile');
     expect(section).toContain('fails closed unless it returns true');
     expect(section).toContain('rechecks that permission immediately before every exact-PID action');
@@ -343,7 +445,11 @@ describe('UX-01 exact-package native window-chrome preparation', () => {
     expect(section).toContain('instead of entering fullscreen');
     expect(section).toContain('no Accessibility API');
     expect(changelog).toContain('Prepare a separate one-shot UX-01 native window-chrome acceptance');
+    expect(changelog).toContain('failed in 3.2 seconds');
+    expect(changelog).toContain('incorrectly equated Quartz-native absolute `x` with Blink `screenX`');
+    expect(changelog).toContain('R1 is an immutable controller failure');
     expect(changelog).toContain('before the packaged app launches or its profile is created');
-    expect(changelog).toContain('does not itself earn a native PASS');
+    expect(changelog).not.toContain('This checkpoint is source/headless preparation only: it has not been packaged or executed');
+    expect(truth).not.toContain('prepared but has not been packaged or executed');
   });
 });

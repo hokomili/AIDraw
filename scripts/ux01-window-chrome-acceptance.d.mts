@@ -8,6 +8,10 @@ export const UX01_WINDOW_CHROME_PACKAGE_PREFIX: 'ux01-window-chrome-';
 export const UX01_WINDOW_CHROME_PROFILE_PREFIX: 'aidraw-e2e-ux01-window-chrome-';
 export const UX01_WINDOW_CHROME_FAILURE_PREFIX: 'ux01-window-chrome-native-';
 export const UX01_WINDOW_CHROME_DRIVER_FILE: 'macos-window-chrome-driver';
+export const UX01_WINDOW_COORDINATE_SPACES: Readonly<{
+  native: 'quartz-main-display-upper-left';
+  renderer: 'blink-root-window-css-pixels';
+}>;
 export const UX01_WINDOW_CHROME_UNSAFE_REPORT_ENVIRONMENTS: readonly string[];
 export const UX01_WINDOW_CHROME_FILES: Readonly<{
   evidence: string;
@@ -71,11 +75,52 @@ export function deriveUx01TrafficLightCenters(
   metrics: Ux01StandardButtonMetrics,
   contract: { trafficLightPosition: { x: number; y: number }; trafficLightReservedWidth: number; topbarHeight: number },
 ): { close: { x: number; y: number }; minimize: { x: number; y: number }; zoom: { x: number; y: number } };
-export function assertUx01WindowBoundsMatchRenderer(
+export interface Ux01WindowGeometryDiagnostics {
+  coordinateModel: {
+    native: typeof UX01_WINDOW_COORDINATE_SPACES.native;
+    renderer: typeof UX01_WINDOW_COORDINATE_SPACES.renderer;
+    crossSourceComparable: string[];
+    absoluteOriginsComparable: false;
+  };
+  native: ReturnType<typeof parseUx01WindowDriverInspection>;
+  renderer: {
+    outer: { x: number; y: number; width: number; height: number };
+    location?: string;
+    content?: unknown;
+    screen?: unknown;
+    layout?: unknown;
+  };
+}
+
+export function createUx01WindowGeometryDiagnostics(
+  nativeInspection: ReturnType<typeof parseUx01WindowDriverInspection>,
+  rendererMeasurement: Ux01WindowGeometryDiagnostics['renderer'],
+): Ux01WindowGeometryDiagnostics;
+export function assertUx01WindowSizeMatchesRenderer(
   windowRecord: Ux01WindowRecord,
   rendererOuter: { x: number; y: number; width: number; height: number },
   tolerance?: number,
 ): true;
+export interface Ux01WindowCoordinateSamples {
+  nativeBefore: Ux01WindowRecord;
+  nativeAfter: Ux01WindowRecord;
+  rendererBefore: { x: number; y: number; width: number; height: number };
+  rendererAfter: { x: number; y: number; width: number; height: number };
+}
+export function assertUx01WindowStationaryWithinCoordinateSpaces(
+  samples: Ux01WindowCoordinateSamples,
+  tolerance?: number,
+): {
+  native: { x: number; y: number; width: number; height: number };
+  renderer: { x: number; y: number; width: number; height: number };
+};
+export function assertUx01WindowMovedWithinCoordinateSpaces(
+  samples: Ux01WindowCoordinateSamples & { requestedDelta: { x: number; y: number } },
+  options?: { tolerance?: number; minimumDistance?: number },
+): {
+  native: { x: number; y: number; width: number; height: number };
+  renderer: { x: number; y: number; width: number; height: number };
+};
 export function assertUx01WindowInsideWorkArea(
   measurement: {
     outer: { x: number; y: number; width: number; height: number };

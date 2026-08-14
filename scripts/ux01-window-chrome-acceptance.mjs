@@ -12,6 +12,10 @@ export const UX01_WINDOW_CHROME_PACKAGE_PREFIX = 'ux01-window-chrome-';
 export const UX01_WINDOW_CHROME_PROFILE_PREFIX = 'aidraw-e2e-ux01-window-chrome-';
 export const UX01_WINDOW_CHROME_FAILURE_PREFIX = 'ux01-window-chrome-native-';
 export const UX01_WINDOW_CHROME_DRIVER_FILE = 'macos-window-chrome-driver';
+export const UX01_WINDOW_COORDINATE_SPACES = Object.freeze({
+  native: 'quartz-main-display-upper-left',
+  renderer: 'blink-root-window-css-pixels',
+});
 export const UX01_WINDOW_CHROME_UNSAFE_REPORT_ENVIRONMENTS = UX01_UNSAFE_REPORT_ENVIRONMENTS;
 export const UX01_WINDOW_CHROME_FILES = Object.freeze({
   evidence: 'ux01-window-chrome-evidence.json',
@@ -214,18 +218,123 @@ export function deriveUx01TrafficLightCenters(buttonMetrics, contract) {
   return centers;
 }
 
-export function assertUx01WindowBoundsMatchRenderer(windowRecord, rendererOuter, tolerance = 2) {
+function boundedWindowTolerance(tolerance) {
   if (!Number.isFinite(tolerance) || tolerance < 0 || tolerance > 4) throw new Error('The UX-01 native-window tolerance must remain bounded.');
-  for (const key of ['x', 'y', 'width', 'height']) {
-    if (Math.abs(windowRecord.bounds[key] - Number(rendererOuter?.[key])) > tolerance) {
-      throw new Error(`The exact-owner native ${key} does not match the trusted renderer outer bounds.`);
+  return tolerance;
+}
+
+function parsedWindowRecord(value, label) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`The UX-01 ${label} native window is missing.`);
+  if (typeof value.onScreen !== 'boolean') throw new Error(`The UX-01 ${label} native window has no on-screen state.`);
+  return {
+    windowId: boundedNumber(value.windowId, `${label} window ID`, { integer: true, minimum: 1, maximum: 4_294_967_295 }),
+    onScreen: value.onScreen,
+    bounds: parsedBounds(value.bounds),
+  };
+}
+
+function sameWindowIdentity(before, after) {
+  if (before.windowId !== after.windowId) throw new Error('The exact-owner native window identity changed across one bounded action.');
+  if (!before.onScreen || !after.onScreen) throw new Error('The exact-owner native window left the on-screen set during one bounded action.');
+}
+
+function boundsDelta(before, after) {
+  return {
+    x: after.x - before.x,
+    y: after.y - before.y,
+    width: after.width - before.width,
+    height: after.height - before.height,
+  };
+}
+
+export function createUx01WindowGeometryDiagnostics(nativeInspection, rendererMeasurement) {
+  if (!nativeInspection || typeof nativeInspection !== 'object' || Array.isArray(nativeInspection)
+    || !Array.isArray(nativeInspection.windows)) {
+    throw new Error('The UX-01 native geometry diagnostics require one parsed exact-owner inspection.');
+  }
+  if (!rendererMeasurement || typeof rendererMeasurement !== 'object' || Array.isArray(rendererMeasurement)) {
+    throw new Error('The UX-01 renderer geometry diagnostics require one trusted root-window measurement.');
+  }
+  return {
+    coordinateModel: {
+      native: UX01_WINDOW_COORDINATE_SPACES.native,
+      renderer: UX01_WINDOW_COORDINATE_SPACES.renderer,
+      crossSourceComparable: ['width', 'height'],
+      absoluteOriginsComparable: false,
+    },
+    native: nativeInspection,
+    renderer: { ...rendererMeasurement, outer: parsedBounds(rendererMeasurement.outer) },
+  };
+}
+
+export function assertUx01WindowSizeMatchesRenderer(windowRecord, rendererOuter, tolerance = 2) {
+  const boundedTolerance = boundedWindowTolerance(tolerance);
+  const nativeBounds = parsedWindowRecord(windowRecord, 'current').bounds;
+  const rendererBounds = parsedBounds(rendererOuter);
+  for (const key of ['width', 'height']) {
+    if (Math.abs(nativeBounds[key] - rendererBounds[key]) > boundedTolerance) {
+      throw new Error(`The exact-owner native ${key} does not match the trusted renderer outer size.`);
     }
   }
   return true;
 }
 
+export function assertUx01WindowStationaryWithinCoordinateSpaces(samples, tolerance = 2) {
+  const boundedTolerance = boundedWindowTolerance(tolerance);
+  const nativeBefore = parsedWindowRecord(samples?.nativeBefore, 'previous');
+  const nativeAfter = parsedWindowRecord(samples?.nativeAfter, 'current');
+  const rendererBefore = parsedBounds(samples?.rendererBefore);
+  const rendererAfter = parsedBounds(samples?.rendererAfter);
+  sameWindowIdentity(nativeBefore, nativeAfter);
+  const deltas = {
+    native: boundsDelta(nativeBefore.bounds, nativeAfter.bounds),
+    renderer: boundsDelta(rendererBefore, rendererAfter),
+  };
+  for (const [coordinateSpace, delta] of Object.entries(deltas)) {
+    for (const key of ['x', 'y', 'width', 'height']) {
+      if (Math.abs(delta[key]) > boundedTolerance) {
+        throw new Error(`The exact window moved in ${coordinateSpace} coordinate space during a no-drag action.`);
+      }
+    }
+  }
+  return deltas;
+}
+
+export function assertUx01WindowMovedWithinCoordinateSpaces(samples, options = {}) {
+  const tolerance = boundedWindowTolerance(options.tolerance ?? 2);
+  const minimumDistance = boundedNumber(options.minimumDistance ?? 40, 'minimum independent drag distance', { minimum: 1, maximum: 512 });
+  const requestedDelta = {
+    x: boundedNumber(samples?.requestedDelta?.x, 'requested drag x', { minimum: -512, maximum: 512 }),
+    y: boundedNumber(samples?.requestedDelta?.y, 'requested drag y', { minimum: -512, maximum: 512 }),
+  };
+  if (requestedDelta.x === 0 || requestedDelta.y !== 0) throw new Error('The UX-01 independent movement contract requires one bounded horizontal drag.');
+  if (Math.abs(requestedDelta.x) < minimumDistance) throw new Error('The UX-01 requested drag is shorter than its independent movement floor.');
+  const nativeBefore = parsedWindowRecord(samples?.nativeBefore, 'previous');
+  const nativeAfter = parsedWindowRecord(samples?.nativeAfter, 'current');
+  const rendererBefore = parsedBounds(samples?.rendererBefore);
+  const rendererAfter = parsedBounds(samples?.rendererAfter);
+  sameWindowIdentity(nativeBefore, nativeAfter);
+  const deltas = {
+    native: boundsDelta(nativeBefore.bounds, nativeAfter.bounds),
+    renderer: boundsDelta(rendererBefore, rendererAfter),
+  };
+  const direction = Math.sign(requestedDelta.x);
+  for (const [coordinateSpace, delta] of Object.entries(deltas)) {
+    if (Math.sign(delta.x) !== direction
+      || Math.abs(delta.x) < minimumDistance
+      || Math.abs(delta.x) > Math.abs(requestedDelta.x) + tolerance
+      || Math.abs(delta.y) > tolerance) {
+      throw new Error(`The intended app-region drag did not move independently in ${coordinateSpace} coordinate space.`);
+    }
+    if (Math.abs(delta.width) > tolerance || Math.abs(delta.height) > tolerance) {
+      throw new Error(`The intended app-region drag resized the window in ${coordinateSpace} coordinate space.`);
+    }
+  }
+  return deltas;
+}
+
 export function assertUx01WindowInsideWorkArea(measurement, tolerance = 2) {
-  if (!Number.isFinite(tolerance) || tolerance < 0 || tolerance > 4) throw new Error('The UX-01 native-window tolerance must remain bounded.');
+  const boundedTolerance = boundedWindowTolerance(tolerance);
   const outer = parsedBounds(measurement?.outer);
   const screen = measurement?.screen;
   if (!screen || typeof screen !== 'object' || Array.isArray(screen)) {
@@ -237,10 +346,10 @@ export function assertUx01WindowInsideWorkArea(measurement, tolerance = 2) {
     width: boundedNumber(screen.availWidth, 'work-area width', { minimum: 1, maximum: 32_768 }),
     height: boundedNumber(screen.availHeight, 'work-area height', { minimum: 1, maximum: 32_768 }),
   };
-  if (outer.x < workArea.x - tolerance
-    || outer.y < workArea.y - tolerance
-    || outer.x + outer.width > workArea.x + workArea.width + tolerance
-    || outer.y + outer.height > workArea.y + workArea.height + tolerance) {
+  if (outer.x < workArea.x - boundedTolerance
+    || outer.y < workArea.y - boundedTolerance
+    || outer.x + outer.width > workArea.x + workArea.width + boundedTolerance
+    || outer.y + outer.height > workArea.y + workArea.height + boundedTolerance) {
     throw new Error('The native standard-zoom result moved required window chrome outside the renderer-reported work area.');
   }
   return true;

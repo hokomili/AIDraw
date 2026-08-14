@@ -34,7 +34,7 @@ function environment(profile: string): NodeJS.ProcessEnv {
 }
 
 describe('UX-01 retained exact-package acceptance boundary', () => {
-  it('records the immutable r5 PASS as a narrow Working/P0 subclaim', async () => {
+  it('records density r5 and separate window-chrome r1 without widening Working/P0', async () => {
     const [changelog, tracker, testing] = await Promise.all([
       readFile(resolve('CHANGELOG.md'), 'utf8'),
       readFile(resolve('docs/FEATURE_TRACKER.md'), 'utf8'),
@@ -60,7 +60,14 @@ describe('UX-01 retained exact-package acceptance boundary', () => {
       'zero external renderer requests',
       'must never be reused',
     ]) expect(truth).toContain(claim);
-    expect(truth).toContain('native traffic-light/top-bar route is prepared but has not been packaged or executed');
+    for (const claim of [
+      'window-chrome r1 `20260814t092808z-7ff773c-r1`',
+      'failed **1/1 in 3.2 seconds** before native input',
+      'incorrectly compared Quartz absolute `x` with Blink `screenX`',
+      'immutable controller evidence',
+      'wholly fresh package and separate native authority remain required',
+    ]) expect(truth).toContain(claim);
+    expect(truth).not.toContain('prepared but has not been packaged or executed');
     const lowercaseTruth = truth.toLowerCase();
     for (const nonclaim of [
       'native window-chrome pass',

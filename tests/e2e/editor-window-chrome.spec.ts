@@ -14,8 +14,11 @@ import {
   redactUx01FailureText,
 } from '../../scripts/ux01-packaged-acceptance.mjs';
 import {
-  assertUx01WindowBoundsMatchRenderer,
   assertUx01WindowInsideWorkArea,
+  assertUx01WindowMovedWithinCoordinateSpaces,
+  assertUx01WindowSizeMatchesRenderer,
+  assertUx01WindowStationaryWithinCoordinateSpaces,
+  createUx01WindowGeometryDiagnostics,
   deriveUx01TrafficLightCenters,
   parseUx01WindowDriverAction,
   parseUx01WindowDriverInspection,
@@ -453,12 +456,14 @@ test(UX01_WINDOW_CHROME_SCENARIO, async ({ browserName }, testInfo) => {
     failureDiagnostics = { stage: 'native-window-identity', ownerPid, processShapeBefore };
     const initialMeasurement = await nativeMeasurement(page);
     const initialInspection = await inspectOwner(configured.driverExecutable, ownerPid);
+    const initialGeometry = createUx01WindowGeometryDiagnostics(initialInspection, initialMeasurement);
+    failureDiagnostics = { stage: 'native-window-identity', ownerPid, processShapeBefore, geometry: initialGeometry };
     if (!initialInspection.postEventAccess) throw new Error('CoreGraphics exact-PID event posting is not pre-authorized; the driver did not request access.');
     if (initialInspection.windows.length !== 1 || !initialInspection.windows[0].onScreen) {
       throw new Error('The exact UX-01 owner does not expose one on-screen native editor window.');
     }
     const initialWindow = initialInspection.windows[0];
-    assertUx01WindowBoundsMatchRenderer(initialWindow, initialMeasurement.outer);
+    assertUx01WindowSizeMatchesRenderer(initialWindow, initialMeasurement.outer);
     const trafficLights = deriveUx01TrafficLightCenters(initialInspection.buttonMetrics, {
       trafficLightPosition: MACOS_EDITOR_WINDOW_CHROME.trafficLightPosition,
       trafficLightReservedWidth: MACOS_EDITOR_WINDOW_CHROME.trafficLightReservedWidth,
@@ -468,23 +473,41 @@ test(UX01_WINDOW_CHROME_SCENARIO, async ({ browserName }, testInfo) => {
     expect(targets.topbarRegion).toBe('drag');
     expect(targets.buttonRegion).toBe('no-drag');
 
-    failureDiagnostics = { ...failureDiagnostics, stage: 'interactive-no-drag-click' };
+    failureDiagnostics = { stage: 'interactive-no-drag-click', ownerPid, processShapeBefore, before: initialGeometry };
     await postClick(configured.driverExecutable, ownerPid, initialWindow, targets.interactivePoint);
     await expect(page.getByRole('menu', { name: 'All open documents' })).toBeVisible();
     const afterInteractiveClick = await inspectOwner(configured.driverExecutable, ownerPid);
+    const afterInteractiveClickMeasurement = await nativeMeasurement(page);
+    const afterInteractiveClickGeometry = createUx01WindowGeometryDiagnostics(afterInteractiveClick, afterInteractiveClickMeasurement);
+    failureDiagnostics = { ...failureDiagnostics, after: afterInteractiveClickGeometry };
     if (afterInteractiveClick.windows.length !== 1) throw new Error('The no-drag click changed the exact native window count.');
-    expect(afterInteractiveClick.windows[0].bounds).toEqual(initialWindow.bounds);
+    assertUx01WindowSizeMatchesRenderer(afterInteractiveClick.windows[0], afterInteractiveClickMeasurement.outer);
+    const noDragClickDeltas = assertUx01WindowStationaryWithinCoordinateSpaces({
+      nativeBefore: initialWindow,
+      nativeAfter: afterInteractiveClick.windows[0],
+      rendererBefore: initialMeasurement.outer,
+      rendererAfter: afterInteractiveClickMeasurement.outer,
+    });
     await page.keyboard.press('Escape');
 
-    failureDiagnostics = { ...failureDiagnostics, stage: 'interactive-no-drag-gesture' };
+    failureDiagnostics = { stage: 'interactive-no-drag-gesture', ownerPid, processShapeBefore, before: afterInteractiveClickGeometry };
     const noDragEnd = {
-      x: targets.interactivePoint.x > initialWindow.bounds.width - 64 ? targets.interactivePoint.x - 48 : targets.interactivePoint.x + 48,
+      x: targets.interactivePoint.x > afterInteractiveClick.windows[0].bounds.width - 64 ? targets.interactivePoint.x - 48 : targets.interactivePoint.x + 48,
       y: targets.interactivePoint.y,
     };
-    await postDrag(configured.driverExecutable, ownerPid, initialWindow, targets.interactivePoint, noDragEnd);
+    await postDrag(configured.driverExecutable, ownerPid, afterInteractiveClick.windows[0], targets.interactivePoint, noDragEnd);
     const afterNoDrag = await inspectOwner(configured.driverExecutable, ownerPid);
+    const afterNoDragMeasurement = await nativeMeasurement(page);
+    const afterNoDragGeometry = createUx01WindowGeometryDiagnostics(afterNoDrag, afterNoDragMeasurement);
+    failureDiagnostics = { ...failureDiagnostics, after: afterNoDragGeometry };
     if (afterNoDrag.windows.length !== 1) throw new Error('The no-drag gesture changed the exact native window count.');
-    expect(afterNoDrag.windows[0].bounds).toEqual(initialWindow.bounds);
+    assertUx01WindowSizeMatchesRenderer(afterNoDrag.windows[0], afterNoDragMeasurement.outer);
+    const noDragGestureDeltas = assertUx01WindowStationaryWithinCoordinateSpaces({
+      nativeBefore: afterInteractiveClick.windows[0],
+      nativeAfter: afterNoDrag.windows[0],
+      rendererBefore: afterInteractiveClickMeasurement.outer,
+      rendererAfter: afterNoDragMeasurement.outer,
+    });
     const allDocuments = page.getByRole('button', { name: 'All open documents' });
     const documentsMenu = page.getByRole('menu', { name: 'All open documents' });
     if (await documentsMenu.isVisible()) await page.keyboard.press('Escape');
@@ -493,27 +516,41 @@ test(UX01_WINDOW_CHROME_SCENARIO, async ({ browserName }, testInfo) => {
     await expect(documentsMenu).toBeVisible();
     await page.keyboard.press('Escape');
 
-    failureDiagnostics = { ...failureDiagnostics, stage: 'intended-app-region-drag' };
-    const delta = dragDelta(initialMeasurement);
-    await postDrag(configured.driverExecutable, ownerPid, initialWindow, targets.dragPoint, {
+    failureDiagnostics = { stage: 'intended-app-region-drag', ownerPid, processShapeBefore, before: afterNoDragGeometry };
+    const delta = dragDelta(afterNoDragMeasurement);
+    await postDrag(configured.driverExecutable, ownerPid, afterNoDrag.windows[0], targets.dragPoint, {
       x: targets.dragPoint.x + delta.x,
       y: targets.dragPoint.y + delta.y,
     });
     const draggedMeasurement = await waitForMeasurement(
       page,
-      (value) => Math.abs(value.outer.x - initialMeasurement.outer.x) >= 40 && value.outer.y === initialMeasurement.outer.y,
+      (value) => Math.abs(value.outer.x - afterNoDragMeasurement.outer.x) >= 40
+        && Math.abs(value.outer.y - afterNoDragMeasurement.outer.y) <= 2,
       'The intended app-region drag did not move only the exact run-owned window',
     );
     const draggedInspection = await waitForWindowInspection(
       configured.driverExecutable,
       ownerPid,
-      (value) => value.windows.length === 1 && value.windows[0].windowId === initialWindow.windowId,
-      'The intended app-region drag changed native window identity',
+      (value) => value.windows.length === 1
+        && value.windows[0].windowId === initialWindow.windowId
+        && value.windows[0].onScreen
+        && Math.abs(value.windows[0].bounds.x - afterNoDrag.windows[0].bounds.x) >= 40
+        && Math.abs(value.windows[0].bounds.y - afterNoDrag.windows[0].bounds.y) <= 2,
+      'The intended app-region drag did not move the exact native window independently',
     );
-    assertUx01WindowBoundsMatchRenderer(draggedInspection.windows[0], draggedMeasurement.outer);
+    const draggedGeometry = createUx01WindowGeometryDiagnostics(draggedInspection, draggedMeasurement);
+    failureDiagnostics = { ...failureDiagnostics, after: draggedGeometry, requestedDelta: delta };
+    assertUx01WindowSizeMatchesRenderer(draggedInspection.windows[0], draggedMeasurement.outer);
+    const dragDeltas = assertUx01WindowMovedWithinCoordinateSpaces({
+      nativeBefore: afterNoDrag.windows[0],
+      nativeAfter: draggedInspection.windows[0],
+      rendererBefore: afterNoDragMeasurement.outer,
+      rendererAfter: draggedMeasurement.outer,
+      requestedDelta: delta,
+    });
     expect(draggedMeasurement.content).toEqual(initialMeasurement.content);
 
-    failureDiagnostics = { ...failureDiagnostics, stage: 'native-option-zoom-toggle' };
+    failureDiagnostics = { stage: 'native-option-zoom-toggle', ownerPid, processShapeBefore, before: draggedGeometry };
     await postOptionClick(configured.driverExecutable, ownerPid, draggedInspection.windows[0], trafficLights.zoom);
     const zoomedMeasurement = await waitForMeasurement(
       page,
@@ -526,7 +563,9 @@ test(UX01_WINDOW_CHROME_SCENARIO, async ({ browserName }, testInfo) => {
       (value) => value.windows.length === 1 && value.windows[0].windowId === initialWindow.windowId && value.windows[0].onScreen,
       'The native green-button Option-click changed exact window identity',
     );
-    assertUx01WindowBoundsMatchRenderer(zoomedInspection.windows[0], zoomedMeasurement.outer);
+    const zoomedGeometry = createUx01WindowGeometryDiagnostics(zoomedInspection, zoomedMeasurement);
+    failureDiagnostics = { ...failureDiagnostics, zoomed: zoomedGeometry };
+    assertUx01WindowSizeMatchesRenderer(zoomedInspection.windows[0], zoomedMeasurement.outer);
     assertUx01WindowInsideWorkArea(zoomedMeasurement);
     expect(child.exitCode).toBeNull();
     expect(browser.isConnected()).toBe(true);
@@ -536,10 +575,27 @@ test(UX01_WINDOW_CHROME_SCENARIO, async ({ browserName }, testInfo) => {
       (value) => sameBounds(value.outer, draggedMeasurement.outer),
       'The second native green-button Option-click did not restore the prior standard-zoom geometry',
     );
+    const restoredAfterZoomInspection = await waitForWindowInspection(
+      configured.driverExecutable,
+      ownerPid,
+      (value) => value.windows.length === 1 && value.windows[0].windowId === initialWindow.windowId && value.windows[0].onScreen,
+      'The second native green-button Option-click changed exact window identity',
+    );
+    const restoredAfterZoomGeometry = createUx01WindowGeometryDiagnostics(restoredAfterZoomInspection, restoredAfterZoom);
+    failureDiagnostics = { ...failureDiagnostics, restored: restoredAfterZoomGeometry };
+    assertUx01WindowSizeMatchesRenderer(restoredAfterZoomInspection.windows[0], restoredAfterZoom.outer);
+    const zoomRestoreDeltas = assertUx01WindowStationaryWithinCoordinateSpaces({
+      nativeBefore: draggedInspection.windows[0],
+      nativeAfter: restoredAfterZoomInspection.windows[0],
+      rendererBefore: draggedMeasurement.outer,
+      rendererAfter: restoredAfterZoom.outer,
+    });
 
-    failureDiagnostics = { ...failureDiagnostics, stage: 'native-minimize-and-show' };
     const beforeMinimizeInspection = await inspectOwner(configured.driverExecutable, ownerPid);
+    const beforeMinimizeGeometry = createUx01WindowGeometryDiagnostics(beforeMinimizeInspection, restoredAfterZoom);
+    failureDiagnostics = { stage: 'native-minimize-and-show', ownerPid, processShapeBefore, before: beforeMinimizeGeometry };
     if (beforeMinimizeInspection.windows.length !== 1) throw new Error('The exact native window disappeared before minimize.');
+    assertUx01WindowSizeMatchesRenderer(beforeMinimizeInspection.windows[0], restoredAfterZoom.outer);
     await postClick(configured.driverExecutable, ownerPid, beforeMinimizeInspection.windows[0], trafficLights.minimize);
     const minimizedInspection = await waitForWindowInspection(
       configured.driverExecutable,
@@ -547,6 +603,9 @@ test(UX01_WINDOW_CHROME_SCENARIO, async ({ browserName }, testInfo) => {
       (value) => value.windows.length === 1 && value.windows[0].windowId === initialWindow.windowId && !value.windows[0].onScreen,
       'The native minimize traffic light did not move the exact window off screen',
     );
+    const minimizedMeasurement = await nativeMeasurement(page);
+    const minimizedGeometry = createUx01WindowGeometryDiagnostics(minimizedInspection, minimizedMeasurement);
+    failureDiagnostics = { ...failureDiagnostics, minimized: minimizedGeometry };
     expect(child.exitCode).toBeNull();
     const minimizeShow = await signalOwner(configured.profile, '--show');
     const shownInspection = await waitForWindowInspection(
@@ -556,9 +615,17 @@ test(UX01_WINDOW_CHROME_SCENARIO, async ({ browserName }, testInfo) => {
       'The exact same-profile show did not restore the minimized window',
     );
     const shownMeasurement = await waitForMeasurement(page, (value) => sameBounds(value.outer, restoredAfterZoom.outer), 'The restored minimized window changed geometry');
-    assertUx01WindowBoundsMatchRenderer(shownInspection.windows[0], shownMeasurement.outer);
+    const shownGeometry = createUx01WindowGeometryDiagnostics(shownInspection, shownMeasurement);
+    failureDiagnostics = { ...failureDiagnostics, restored: shownGeometry };
+    assertUx01WindowSizeMatchesRenderer(shownInspection.windows[0], shownMeasurement.outer);
+    const minimizeRestoreDeltas = assertUx01WindowStationaryWithinCoordinateSpaces({
+      nativeBefore: beforeMinimizeInspection.windows[0],
+      nativeAfter: shownInspection.windows[0],
+      rendererBefore: restoredAfterZoom.outer,
+      rendererAfter: shownMeasurement.outer,
+    });
 
-    failureDiagnostics = { ...failureDiagnostics, stage: 'native-close-and-show' };
+    failureDiagnostics = { stage: 'native-close-and-show', ownerPid, processShapeBefore, before: shownGeometry };
     const closeEvent = page.waitForEvent('close');
     await postClick(configured.driverExecutable, ownerPid, shownInspection.windows[0], trafficLights.close);
     await closeEvent;
@@ -583,6 +650,10 @@ test(UX01_WINDOW_CHROME_SCENARIO, async ({ browserName }, testInfo) => {
       (value) => value.windows.length === 1 && value.windows[0].onScreen && value.windows[0].windowId !== initialWindow.windowId,
       'The exact same-profile show did not create one distinct native editor window',
     );
+    const reopenedMeasurement = await nativeMeasurement(page);
+    const reopenedGeometry = createUx01WindowGeometryDiagnostics(reopenedInspection, reopenedMeasurement);
+    failureDiagnostics = { ...failureDiagnostics, reopened: reopenedGeometry, processShapeAfter };
+    assertUx01WindowSizeMatchesRenderer(reopenedInspection.windows[0], reopenedMeasurement.outer);
     await expect(page.getByRole('button', { name: 'All open documents' })).toBeVisible();
     expect(externalRendererRequests).toEqual([]);
     for (const path of [configured.paths.providerCredentials, configured.paths.forbiddenNetwork]) {
@@ -630,20 +701,37 @@ test(UX01_WINDOW_CHROME_SCENARIO, async ({ browserName }, testInfo) => {
       },
       windowChrome: {
         contract: MACOS_EDITOR_WINDOW_CHROME,
+        coordinateModel: initialGeometry.coordinateModel,
         standardButtonMetrics: initialInspection.buttonMetrics,
         trafficLights,
         initial: { renderer: initialMeasurement, native: initialWindow },
-        noDrag: { nativeClickOpenedMenu: true, dragDidNotMoveWindow: true, keyboardStillUsable: true },
-        drag: { requestedDelta: delta, renderer: draggedMeasurement, native: draggedInspection.windows[0] },
+        noDrag: {
+          nativeClickOpenedMenu: true,
+          dragDidNotMoveWindow: true,
+          keyboardStillUsable: true,
+          clickDeltas: noDragClickDeltas,
+          gestureDeltas: noDragGestureDeltas,
+        },
+        drag: { requestedDelta: delta, independentDeltas: dragDeltas, renderer: draggedMeasurement, native: draggedInspection.windows[0] },
         standardZoom: {
           action: 'native green-button Option-click',
-          changed: zoomedMeasurement,
-          restored: restoredAfterZoom,
+          changed: { renderer: zoomedMeasurement, native: zoomedInspection.windows[0] },
+          restored: { renderer: restoredAfterZoom, native: restoredAfterZoomInspection.windows[0] },
+          restoreDeltas: zoomRestoreDeltas,
           workAreaContained: true,
           windowIdPreserved: true,
         },
-        minimize: { native: minimizedInspection.windows[0], showSignal: minimizeShow, restored: shownInspection.windows[0] },
-        close: { windowsAfterClose: closedInspection.windows.length, showSignal: closeShow, reopened: reopenedInspection.windows[0] },
+        minimize: {
+          native: minimizedInspection.windows[0],
+          showSignal: minimizeShow,
+          restored: { native: shownInspection.windows[0], renderer: shownMeasurement },
+          restoreDeltas: minimizeRestoreDeltas,
+        },
+        close: {
+          windowsAfterClose: closedInspection.windows.length,
+          showSignal: closeShow,
+          reopened: { native: reopenedInspection.windows[0], renderer: reopenedMeasurement },
+        },
       },
       privacy: {
         directlyObservedExternalRendererRequests: 0,
