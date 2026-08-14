@@ -167,6 +167,7 @@ const helpTopics: Record<AIDrawHelpTopic, AIDrawHelpResult> = {
       'Observe revisions and human occupancy before edits. Human gestures and locks win; do not bypass or synthesize approval decisions.',
       'File operations address exact paths. Trust is scoped; overwrites remain reviewed; generation is always separate and potentially paid.',
       'Terminate unused transport sessions with authenticated HTTP DELETE. session_manage leave removes presence only; it does not release one of the 32 transport slots.',
+      "Classify failures before retrying: HTTP 401 is authentication; review Activity's current access state, leave access revoked if it should remain disabled, and only otherwise rotate and re-enable if revoked before refreshing the intended profile through its Connect or Show settings path. HTTP 400 is initialization or protocol version, HTTP 404 unknown_session is a stale process-lifetime session, and tool Invalid arguments means the selected action schema was not satisfied.",
       'Use job summaries only for lifecycle state. Observe canonical documents/resources for final state; private raw job results remain server-internal.',
     ],
     invariants: sharedInvariants,
@@ -188,6 +189,7 @@ export const AIDRAW_SERVER_INSTRUCTIONS = [
   'tools/list exposes flat action-enum inputs for broad client discovery; the server strictly enforces each selected action’s required and forbidden fields. aidraw_help provides concise workflows and aidraw://guide provides the optional complete guide.',
   'Reuse clientOperationId only for the same logical transaction; honor expected revisions and human locks.',
   'AIDraw retains at most 32 transports. Terminate an unused session with authenticated HTTP DELETE; session_manage leave removes presence only.',
+  'Transport session IDs last only for this AIDraw process. After HTTP 404 unknown_session, discard the ID, initialize again, and rejoin.',
   'File and generation calls may return owner-scoped jobs. A human alone approves in AIDraw; follow returned next guidance with job_manage wait|inspect.',
   'Job summaries are privacy-redacted. Read canonical state with canvas_observe or document resources after completion.',
 ].join(' ');
@@ -210,7 +212,16 @@ AIDraw retains at most 32 authenticated transport sessions, counting initializat
 
 Each session may retain at most 128 distinct resource subscriptions. A duplicate subscribe is idempotent; resources/unsubscribe frees one slot.
 
-This endpoint uses the SDK's stateful legacy initialize/session profile and negotiates protocol version 2025-11-25. A legacy initialize carrying an unsupported or modern-only version receives the supported 2025-11-25 value in its initialize result; after initialization, requests must send that negotiated version and a mismatched MCP-Protocol-Version header is rejected with HTTP 400. This is not a claim that AIDraw exposes the separate modern server/discover profile or that any named installed client has passed runtime acceptance.
+This endpoint uses the SDK's stateful legacy initialize/session profile and negotiates protocol version 2025-11-25. A legacy initialize carrying an unsupported or modern-only version receives the supported 2025-11-25 value in its initialize result; after initialization, requests must send that negotiated version and a mismatched MCP-Protocol-Version header is rejected with HTTP 400. Transport session IDs exist only for the lifetime of the owning AIDraw process. After HTTP 404 unknown_session, discard the ID, initialize a fresh transport without it, and join again. This is a configuration profile, not a claim that AIDraw exposes the separate modern server/discover profile or that any named installed client has passed runtime acceptance.
+
+## Transport and tool failures
+
+- **HTTP 401 invalid_token** is authentication failure. The bearer may be absent, invalid, rotated, or revoked; the response never distinguishes credential state. Review Activity's current access state. Leave access revoked if it should remain disabled. Otherwise, if access is revoked, use **Rotate and re-enable**; then refresh the intended configuration profile through its applicable **Connect** or **Show settings** path before initializing a fresh transport and joining again. Do not retry a copied or stale bearer.
+- **HTTP 400** is initialization or protocol-version failure. Initialize without Mcp-Session-Id, retain the returned session ID and negotiated 2025-11-25 version, and send that version on later requests.
+- **HTTP 404 unknown_session** is a stale process-lifetime session. Discard the ID, initialize without it, then call session_manage with action=join again.
+- **Tool-level Invalid arguments** means transport authentication and session routing succeeded, but the selected action's strict schema rejected its fields. Re-read that tool's flat action schema and send only the chosen action's required and allowed fields.
+
+The direct 401, initialization-required 400, missing-or-unsupported-version 400, and unknown-session 404 responses name the stateful-legacy profile, exact supported version, failure class, and safe next action. They never reveal whether a particular bearer exists or remains valid. Configuration-profile availability remains separate from installed-client acceptance.
 
 ## Conditional action contracts
 

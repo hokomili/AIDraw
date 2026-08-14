@@ -2,7 +2,7 @@ import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from 'node:http';
 import { mkdir, open, readFile, realpath, rename, stat, unlink } from 'node:fs/promises';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
-import { McpServer, ResourceTemplate } from '@modelcontextprotocol/server';
+import { LATEST_PROTOCOL_VERSION, McpServer, ResourceTemplate } from '@modelcontextprotocol/server';
 import {
   NodeStreamableHTTPServerTransport,
   localhostHostValidation,
@@ -91,6 +91,41 @@ interface McpSession {
 interface PortSettings { version: 1; preferredPort: number }
 interface FolderTrustSettings { version: 1; folders: string[] }
 type ApprovalDecision = 'allow-once' | 'allow-session' | 'allow-always' | 'deny';
+type McpTransportDiagnosticCode = 'invalid_token' | 'initialization_required' | 'unsupported_protocol_version' | 'unknown_session';
+
+const MCP_TRANSPORT_DIAGNOSTICS: Record<McpTransportDiagnosticCode, { message: string; next: string }> = {
+  invalid_token: {
+    message: 'Authentication failed; the bearer is absent, invalid, rotated, or revoked.',
+    next: "Review Activity's current access state. Leave access revoked if it should remain disabled. Otherwise, if access is revoked, use Rotate and re-enable; then refresh the intended configuration profile through its Connect or Show settings path before initializing a fresh transport and joining again. Never retry a copied or stale bearer.",
+  },
+  initialization_required: {
+    message: 'This stateful legacy endpoint requires initialization before other requests.',
+    next: `Initialize without Mcp-Session-Id, retain the returned session ID and negotiated ${LATEST_PROTOCOL_VERSION} protocol version, then call session_manage with action=join.`,
+  },
+  unsupported_protocol_version: {
+    message: 'MCP-Protocol-Version is missing or unsupported for this initialized stateful legacy session.',
+    next: `Send the exact negotiated ${LATEST_PROTOCOL_VERSION} value. If it was not retained, discard Mcp-Session-Id and initialize a fresh transport.`,
+  },
+  unknown_session: {
+    message: 'The supplied process-lifetime MCP session is unknown or stale.',
+    next: 'Discard Mcp-Session-Id, initialize a fresh transport without it, then call session_manage with action=join again.',
+  },
+};
+
+function writeMcpTransportDiagnostic(
+  response: ServerResponse,
+  status: 400 | 401 | 404,
+  error: McpTransportDiagnosticCode,
+  headers: Record<string, string> = {},
+): void {
+  response.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store', ...headers });
+  response.end(JSON.stringify({
+    error,
+    profile: 'stateful-legacy',
+    protocolVersion: LATEST_PROTOCOL_VERSION,
+    ...MCP_TRANSPORT_DIAGNOSTICS[error],
+  }));
+}
 
 function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
   const actual = Object.keys(value);
@@ -1133,8 +1168,7 @@ export class McpHost {
     }
     const authorization = request.headers.authorization ?? '';
     if (!this.token || !authorization.startsWith('Bearer ') || !safeEqual(authorization.slice(7), this.token)) {
-      response.writeHead(401, { 'content-type': 'application/json', 'www-authenticate': 'Bearer realm="AIDraw MCP"', 'cache-control': 'no-store' });
-      response.end('{"error":"invalid_token"}');
+      writeMcpTransportDiagnostic(response, 401, 'invalid_token', { 'www-authenticate': 'Bearer realm="AIDraw MCP"' });
       return;
     }
     const requestCredentialGeneration = this.credentialGeneration;
@@ -1145,14 +1179,20 @@ export class McpHost {
     const sessionHeader = request.headers['mcp-session-id'];
     const sessionId = Array.isArray(sessionHeader) ? sessionHeader[0] : sessionHeader;
     let session = sessionId ? this.sessions.get(sessionId) : undefined;
+    const protocolHeader = request.headers['mcp-protocol-version'];
+    const protocolVersion = Array.isArray(protocolHeader) && protocolHeader.length === 1 ? protocolHeader[0] : protocolHeader;
+    if (session && protocolVersion !== LATEST_PROTOCOL_VERSION) {
+      writeMcpTransportDiagnostic(response, 400, 'unsupported_protocol_version');
+      return;
+    }
     let body: unknown;
     if (request.method === 'POST') body = await this.readBody(request);
 
     if (!session) {
       const method = body && typeof body === 'object' && 'method' in body ? (body as { method?: unknown }).method : undefined;
       if (request.method !== 'POST' || method !== 'initialize') {
-        response.writeHead(sessionId ? 404 : 400, { 'content-type': 'application/json' });
-        response.end(JSON.stringify({ error: sessionId ? 'unknown_session' : 'initialization_required' }));
+        if (sessionId) writeMcpTransportDiagnostic(response, 404, 'unknown_session');
+        else writeMcpTransportDiagnostic(response, 400, 'initialization_required');
         return;
       }
       if (this.stopping) {

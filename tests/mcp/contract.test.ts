@@ -69,6 +69,27 @@ function expectFlatActionSchema(schema: DiscoverySchema | undefined, actions: st
   expect(JSON.stringify(schema)).not.toMatch(/"(?:oneOf|anyOf|allOf)"/);
 }
 
+function expectTransportDiagnostic(
+  value: unknown,
+  error: 'invalid_token' | 'initialization_required' | 'unsupported_protocol_version' | 'unknown_session',
+  message: string,
+  next: string,
+): void {
+  expect(value).toEqual({
+    error,
+    profile: 'stateful-legacy',
+    protocolVersion: LATEST_PROTOCOL_VERSION,
+    message: expect.stringContaining(message),
+    next: expect.stringContaining(next),
+  });
+  if (error === 'invalid_token') {
+    expect(value).toMatchObject({ next: expect.stringContaining('Leave access revoked if it should remain disabled') });
+    expect(value).toMatchObject({ next: expect.stringContaining('Otherwise, if access is revoked') });
+    expect(value).toMatchObject({ next: expect.stringContaining('Rotate and re-enable') });
+    expect(value).toMatchObject({ next: expect.stringContaining('Connect or Show settings') });
+  }
+}
+
 async function readSseUntil(response: Response, pattern: RegExp, timeoutMs = 4_000): Promise<string> {
   if (!response.body) throw new Error('MCP event stream has no response body.');
   const reader = response.body.getReader(); const decoder = new TextDecoder(); let text = ''; const deadline = Date.now() + timeoutMs;
@@ -91,7 +112,13 @@ describe('authenticated stateful MCP contract', () => {
     hosts.push(host);
     const started = await host.start('test-secret-token');
 
-    expect((await fetch(started.url, { method: 'POST' })).status).toBe(401);
+    const unauthenticated = await fetch(started.url, { method: 'POST' });
+    expect(unauthenticated.status).toBe(401);
+    expect(unauthenticated.headers.get('cache-control')).toBe('no-store');
+    expect(unauthenticated.headers.get('www-authenticate')).toBe('Bearer realm="AIDraw MCP"');
+    const unauthenticatedDiagnostic = await unauthenticated.json();
+    expectTransportDiagnostic(unauthenticatedDiagnostic, 'invalid_token', 'bearer is absent, invalid, rotated, or revoked', 'configuration profile');
+    expect(JSON.stringify(unauthenticatedDiagnostic)).not.toContain('test-secret-token');
     const initialize = await fetch(started.url, {
       method: 'POST',
       headers: { authorization: 'Bearer test-secret-token', accept: 'application/json, text/event-stream', 'content-type': 'application/json' },
@@ -104,6 +131,7 @@ describe('authenticated stateful MCP contract', () => {
     expect(initialized.result?.instructions).toEqual(expect.stringContaining('aidraw_help'));
     expect(initialized.result?.instructions).toEqual(expect.stringContaining('human alone approves'));
     expect(initialized.result?.instructions).toEqual(expect.stringContaining('canvas_observe'));
+    expect(initialized.result?.instructions).toEqual(expect.stringContaining('404 unknown_session'));
     const sessionId = initialize.headers.get('mcp-session-id');
     expect(sessionId).toBeTruthy();
 
@@ -179,7 +207,9 @@ describe('authenticated stateful MCP contract', () => {
       body: JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/list', params: {} }),
     });
     expect(rejectedOld.status).toBe(401);
-    expect(await rejectedOld.json()).toEqual({ error: 'invalid_token' });
+    const rejectedOldDiagnostic = await rejectedOld.json();
+    expectTransportDiagnostic(rejectedOldDiagnostic, 'invalid_token', 'bearer is absent, invalid, rotated, or revoked', 'configuration profile');
+    expect(JSON.stringify(rejectedOldDiagnostic)).not.toContain(firstToken);
 
     const replacementClient = await initializeClient(started.url, secondToken, 'credential-lifecycle-second');
     await callTool(started.url, replacementClient.headers, 4, 'session_manage', { action: 'join', name: 'Replacement lifecycle agent', color: '#456789' });
@@ -193,7 +223,10 @@ describe('authenticated stateful MCP contract', () => {
         body: JSON.stringify({ jsonrpc: '2.0', id: 5, method: 'initialize', params: { protocolVersion: LATEST_PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: 'revoked-client', version: '1.0.0' } } }),
       });
       expect(rejected.status).toBe(401);
-      expect(await rejected.json()).toEqual({ error: 'invalid_token' });
+      const rejectedDiagnostic = await rejected.json();
+      expectTransportDiagnostic(rejectedDiagnostic, 'invalid_token', 'bearer is absent, invalid, rotated, or revoked', 'configuration profile');
+      expect(JSON.stringify(rejectedDiagnostic)).not.toContain(firstToken);
+      expect(JSON.stringify(rejectedDiagnostic)).not.toContain(secondToken);
     }
     expect((await fetch(`http://127.0.0.1:${started.port}/health`)).status).toBe(200);
     expect(documents.snapshot().activeDocument?.revision).toBe(revision);
@@ -238,6 +271,14 @@ describe('authenticated stateful MCP contract', () => {
     const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0'); documents.initialize();
     const host = new McpHost(documents, '1.0.0', join(root, 'port.json')); hosts.push(host);
     const started = await host.start('protocol-token');
+    const initializationRequired = await fetch(started.url, {
+      method: 'POST',
+      headers: { authorization: 'Bearer protocol-token', accept: 'application/json, text/event-stream', 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 0, method: 'tools/list', params: {} }),
+    });
+    expect(initializationRequired.status).toBe(400);
+    expect(initializationRequired.headers.get('cache-control')).toBe('no-store');
+    expectTransportDiagnostic(await initializationRequired.json(), 'initialization_required', 'requires initialization', `negotiated ${LATEST_PROTOCOL_VERSION}`);
     const initialize = await fetch(started.url, {
       method: 'POST',
       headers: { authorization: 'Bearer protocol-token', accept: 'application/json, text/event-stream', 'content-type': 'application/json' },
@@ -248,13 +289,21 @@ describe('authenticated stateful MCP contract', () => {
     expect(initialized.result?.protocolVersion).toBe(LATEST_PROTOCOL_VERSION);
     const sessionId = initialize.headers.get('mcp-session-id');
     expect(sessionId).toBeTruthy();
+    const missingVersion = await fetch(started.url, {
+      method: 'POST',
+      headers: { authorization: 'Bearer protocol-token', accept: 'application/json, text/event-stream', 'content-type': 'application/json', 'mcp-session-id': sessionId! },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }),
+    });
+    expect(missingVersion.status).toBe(400);
+    expectTransportDiagnostic(await missingVersion.json(), 'unsupported_protocol_version', 'missing or unsupported', `exact negotiated ${LATEST_PROTOCOL_VERSION}`);
     const unsupported = await fetch(started.url, {
       method: 'POST',
       headers: { authorization: 'Bearer protocol-token', accept: 'application/json, text/event-stream', 'content-type': 'application/json', 'mcp-session-id': sessionId!, 'mcp-protocol-version': '2026-07-28' },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }),
+      body: JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/list', params: {} }),
     });
     expect(unsupported.status).toBe(400);
-    expect(await unsupported.text()).toContain('Unsupported protocol version');
+    expect(unsupported.headers.get('cache-control')).toBe('no-store');
+    expectTransportDiagnostic(await unsupported.json(), 'unsupported_protocol_version', 'missing or unsupported', `exact negotiated ${LATEST_PROTOCOL_VERSION}`);
   });
 
   it('teaches a cold tools-only client to join, observe, mutate, and follow a human approval job without private leakage', async () => {
@@ -311,6 +360,23 @@ describe('authenticated stateful MCP contract', () => {
     expect(guide).toContain('Conditional action contracts');
     expect(guide).toContain('Strict server validation rejects fields from other actions');
     expect(guide).toContain('Only a human can approve');
+    expect(guide).toContain('Transport and tool failures');
+    expect(guide).toContain('HTTP 401 invalid_token');
+    expect(guide).toContain('Leave access revoked if it should remain disabled');
+    expect(guide).toContain('Rotate and re-enable');
+    expect(guide).toContain('applicable **Connect** or **Show settings** path');
+    expect(guide).toContain('HTTP 404 unknown_session');
+    expect(guide).toContain('Tool-level Invalid arguments');
+    expect(guide).toContain('Configuration-profile availability remains separate from installed-client acceptance');
+    const safetyHelp = await callTool(started.url, client.headers, 13, 'aidraw_help', { topic: 'safety' });
+    expect(safetyHelp.steps).toEqual(expect.arrayContaining([
+      expect.stringContaining('HTTP 401 is authentication'),
+      expect.stringContaining('leave access revoked if it should remain disabled'),
+      expect.stringContaining('rotate and re-enable if revoked'),
+      expect.stringContaining('Connect or Show settings'),
+      expect.stringContaining('HTTP 404 unknown_session is a stale process-lifetime session'),
+      expect.stringContaining('tool Invalid arguments'),
+    ]));
   });
 
   it('initializes the same raw Streamable HTTP profile under each configured client name', async () => {
@@ -347,7 +413,10 @@ describe('authenticated stateful MCP contract', () => {
     const joined = await callTool(started.url, first.headers, 6, 'session_manage', { action: 'join', name: 'Capacity probe' }); const retiredActorId = String((joined.actor as { id: string }).id);
     const terminated = await fetch(started.url, { method: 'DELETE', headers: first.headers }); expect(terminated.status).toBe(200);
     expect(documents.getMcpInfo().sessions.map((entry) => entry.actor.id)).not.toContain(retiredActorId);
-    const stale = await fetch(started.url, { method: 'POST', headers: first.headers, body: JSON.stringify({ jsonrpc: '2.0', id: 7, method: 'tools/list', params: {} }) }); expect(stale.status).toBe(404); expect(await stale.json()).toEqual({ error: 'unknown_session' });
+    const stale = await fetch(started.url, { method: 'POST', headers: first.headers, body: JSON.stringify({ jsonrpc: '2.0', id: 7, method: 'tools/list', params: {} }) });
+    expect(stale.status).toBe(404);
+    expect(stale.headers.get('cache-control')).toBe('no-store');
+    expectTransportDiagnostic(await stale.json(), 'unknown_session', 'process-lifetime MCP session is unknown or stale', 'Discard Mcp-Session-Id');
     const replacement = await initializeClient(started.url, 'parallel-token', 'replacement-client'); expect(replacement.sessionId).not.toBe(first.sessionId);
   });
 
