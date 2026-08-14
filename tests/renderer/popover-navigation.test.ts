@@ -13,11 +13,20 @@ describe('renderer popover keyboard navigation', () => {
     expect(menuFocusIndex('ArrowDown', -1, 0)).toBeUndefined();
   });
 
+  it('routes the active map through Home then ArrowDown to the first created illustration', () => {
+    const activeMapIndex = 3;
+    const totalDocumentAndBatchItems = 16;
+    const homeIndex = menuFocusIndex('Home', activeMapIndex, totalDocumentAndBatchItems);
+    expect(homeIndex).toBe(0);
+    expect(menuFocusIndex('ArrowDown', homeIndex!, totalDocumentAndBatchItems)).toBe(1);
+  });
+
   it('binds owned focus, Escape restoration, and outside dismissal to both popovers', async () => {
     const app = await readFile(new URL('../../src/renderer/App.tsx', import.meta.url), 'utf8');
     expect(app).toContain('aria-haspopup="menu"');
     expect(app).toContain('onKeyDown={handleAllTabsMenuKeys}');
     expect(app).toContain('menuFocusIndex(event.key, currentIndex, items.length)');
+    expect(app).toContain('items?.[resolvedAllTabsFocusIndex]?.focus()');
     expect(app).toContain('tabIndex={resolvedAllTabsFocusIndex === index ? 0 : -1}');
     expect(app).toContain('role="group" aria-label="All-document actions"');
     expect((app.match(/role="menuitem"/gu) ?? []).length).toBeGreaterThanOrEqual(4);

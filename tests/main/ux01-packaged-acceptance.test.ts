@@ -160,6 +160,16 @@ describe('UX-01 retained exact-package acceptance boundary', () => {
     expect(source).toContain('expectNoRootViewportOverflow(defaultWindow)');
     expect(source).toContain('expectOuterInsideWorkArea(defaultWindow)');
     expect(source).toContain('diagnostics: failureDiagnostics');
+    expect(source).toContain("stage: 'long-document-menu-pointer-navigation'");
+    expect(source).toContain("stage: 'long-document-menu-keyboard-navigation'");
+    const openingFocusWait = source.indexOf('await expect(mapMenuItem).toBeFocused()');
+    const homeKey = source.indexOf("await page.keyboard.press('Home')");
+    const homeFocusWait = source.indexOf('await expect(firstMenuItem).toBeFocused()');
+    const arrowDownKey = source.indexOf("await page.keyboard.press('ArrowDown')");
+    const targetFocusWait = source.indexOf('await expect(illustrationMenuItem).toBeFocused()');
+    expect([openingFocusWait, homeKey, homeFocusWait, arrowDownKey, targetFocusWait].every((index) => index >= 0)).toBe(true);
+    expect([openingFocusWait, homeKey, homeFocusWait, arrowDownKey, targetFocusWait])
+      .toEqual([...[openingFocusWait, homeKey, homeFocusWait, arrowDownKey, targetFocusWait]].sort((left, right) => left - right));
     expect(source).toContain('parseUx01WindowMeasurement');
     expect(source).not.toContain('Browser.getWindowForTarget');
     expect(source).not.toContain('Browser.setWindowBounds');

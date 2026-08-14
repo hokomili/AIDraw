@@ -478,20 +478,38 @@ test(UX01_PACKAGED_SCENARIO, async () => {
     screenshots.push(await screenshotRecord(page, configured.screenshots[0]));
 
     const tabsViewport = page.locator('.document-tab-viewport');
+    failureDiagnostics = {
+      ...failureDiagnostics,
+      stage: 'long-document-menu-pointer-navigation',
+      activeDocumentId: documents.illustration.id,
+      targetDocumentId: documents.map.id,
+    };
     await expect.poll(() => tabsViewport.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true);
     const pointerActions: string[] = [];
     const keyboardActions: string[] = [];
     const controls: ControlGeometry[] = [];
     const allDocuments = page.getByRole('button', { name: 'All open documents' });
+    const allDocumentsMenu = page.getByRole('menu', { name: 'All open documents' });
+    const mapMenuItem = allDocumentsMenu.getByRole('menuitem', { name: documents.map.name, exact: true });
     controls.push(await controlGeometry(allDocuments, 'All open documents', 32, 32));
     await allDocuments.click();
-    await page.getByRole('menu', { name: 'All open documents' }).getByRole('menuitem', { name: documents.map.name, exact: true }).click();
+    await mapMenuItem.click();
     await expect(page).toHaveTitle(`${documents.map.name} — AIDraw`);
     pointerActions.push('long-tab map selection through All open documents');
+    failureDiagnostics = {
+      ...failureDiagnostics,
+      stage: 'long-document-menu-keyboard-navigation',
+      activeDocumentId: documents.map.id,
+      targetDocumentId: documents.illustration.id,
+      keyboardRoute: ['Home', 'ArrowDown', 'Enter'],
+    };
     await allDocuments.click();
+    await expect(mapMenuItem).toBeFocused();
+    const firstMenuItem = allDocumentsMenu.getByRole('menuitem').first();
     await page.keyboard.press('Home');
+    await expect(firstMenuItem).toBeFocused();
     await page.keyboard.press('ArrowDown');
-    const illustrationMenuItem = page.getByRole('menu', { name: 'All open documents' }).getByRole('menuitem', { name: documents.illustration.name, exact: true });
+    const illustrationMenuItem = allDocumentsMenu.getByRole('menuitem', { name: documents.illustration.name, exact: true });
     await expect(illustrationMenuItem).toBeFocused();
     await page.keyboard.press('Enter');
     await expect(page).toHaveTitle(`${documents.illustration.name} — AIDraw`);
