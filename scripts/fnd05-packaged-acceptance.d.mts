@@ -44,8 +44,25 @@ export const FND05_UNRESPONSIVE_PROFILE_PREFIX: 'aidraw-e2e-fnd05-unresponsive-r
 export const FND05_UNRESPONSIVE_FAILURE_PREFIX: 'fnd05-unresponsive-renderer-native-';
 export const FND05_UNRESPONSIVE_POLICY_GRACE_MS: 10000;
 export const FND05_UNRESPONSIVE_OBSERVATION_MS: 2000;
-export const FND05_UNRESPONSIVE_STALL_MS: 30000;
+export const FND05_UNRESPONSIVE_INPUT_ACK_BUDGET_MS: 15000;
+export const FND05_UNRESPONSIVE_INPUT_ADMISSION_WAIT_MS: 1000;
+export const FND05_UNRESPONSIVE_CONFIRMATION_MARGIN_MS: 10000;
+export const FND05_UNRESPONSIVE_CONFIRMATION_WAIT_MS: 35000;
+export const FND05_UNRESPONSIVE_REPLACEMENT_WAIT_MS: 15000;
+export const FND05_UNRESPONSIVE_POST_REPLACEMENT_MARGIN_MS: 10000;
+export const FND05_UNRESPONSIVE_STALL_MS: 62000;
 export const FND05_UNRESPONSIVE_STALL_EXPRESSION: string;
+export const FND05_UNRESPONSIVE_INPUT_EVENT: Readonly<{
+  type: 'rawKeyDown';
+  key: 'F24';
+  code: 'F24';
+  modifiers: 0;
+  windowsVirtualKeyCode: 135;
+  nativeVirtualKeyCode: 0;
+  autoRepeat: false;
+  isKeypad: false;
+}>;
+export const FND05_UNRESPONSIVE_CONFIRMATION_MARKER: string;
 export const FND05_UNRESPONSIVE_UNSAFE_REPORT_ENVIRONMENTS: readonly string[];
 export const FND05_UNRESPONSIVE_FILES: Readonly<{
   ownerConnection: string;
@@ -75,6 +92,16 @@ export interface Fnd05UnresponsiveAcceptance {
 export function resolveFnd05UnresponsiveAcceptance(options?: { workspacePath?: string; environment?: NodeJS.ProcessEnv }): Fnd05UnresponsiveAcceptance;
 export function assertFnd05UnresponsiveSafeReporterEnvironment(environment?: NodeJS.ProcessEnv): true;
 export function inspectFnd05EncryptedToken(value: unknown, liveToken: string): { version: 1; encryption: 'electron-safe-storage'; encryptedValuePresent: true };
+export function classifyFnd05UnresponsiveFailureStage(progress?: {
+  inputAdmission?: 'not-attempted' | 'admitted' | 'ack-pending' | 'rejected';
+  productUnresponsiveConfirmationObserved?: boolean;
+  replacementAdmitted?: boolean;
+}): 'pre-input-stimulus' | 'input-stimulus-not-admitted' | 'input-stimulus-admission-unconfirmed' | 'product-unresponsive-confirmation-not-observed' | 'replacement-not-admitted' | 'post-replacement-assertion';
+export function classifyFnd05InputStimulusSettlement(
+  settlement: { status: 'resolved' } | { status: 'rejected'; reason: unknown } | { status: 'timeout' },
+  admission: 'admitted' | 'ack-pending' | 'not-attempted' | 'rejected',
+  replacementAdmitted: boolean,
+): { inputCommand: 'resolved-after-browser-admission' | 'rejected-after-confirmed-replacement' };
 export function assertFnd05OwnedProcessShape(
   rows: Array<{ pid: number; ppid: number; type: string }>,
   expectedOwnerPid: number,

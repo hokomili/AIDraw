@@ -12,10 +12,18 @@ import {
   assertFnd05EvidenceRedacted,
   assertFnd05UnresponsiveSafeReporterEnvironment,
   classifyFnd05BoundedStallSettlement,
+  classifyFnd05InputStimulusSettlement,
+  classifyFnd05UnresponsiveFailureStage,
   FND05_PACKAGED_SCENARIO,
+  FND05_UNRESPONSIVE_CONFIRMATION_MARKER,
+  FND05_UNRESPONSIVE_CONFIRMATION_WAIT_MS,
+  FND05_UNRESPONSIVE_INPUT_ADMISSION_WAIT_MS,
+  FND05_UNRESPONSIVE_INPUT_EVENT,
   FND05_UNRESPONSIVE_OBSERVATION_MS,
   FND05_UNRESPONSIVE_PACKAGED_SCENARIO,
   FND05_UNRESPONSIVE_POLICY_GRACE_MS,
+  FND05_UNRESPONSIVE_POST_REPLACEMENT_MARGIN_MS,
+  FND05_UNRESPONSIVE_REPLACEMENT_WAIT_MS,
   FND05_UNRESPONSIVE_STALL_EXPRESSION,
   FND05_UNRESPONSIVE_STALL_MS,
   inspectFnd05EncryptedToken,
@@ -74,6 +82,19 @@ interface CleanupRecord {
   ownedSurvivors: Array<{ pid: number; ppid: number; type: string }>;
   graceful: boolean;
   error?: string;
+}
+
+interface UnresponsiveProgress {
+  stallPendingAtObservation: boolean;
+  inputMethod: 'Input.dispatchKeyEvent';
+  inputKey: 'F24';
+  inputTargetId?: string;
+  inputAdmission: 'not-attempted' | 'admitted' | 'ack-pending' | 'rejected';
+  inputCommandSettlement: 'not-started' | 'pending' | 'resolved' | 'rejected';
+  productUnresponsiveConfirmationObserved: boolean;
+  productUnresponsiveConfirmationElapsedMs?: number;
+  replacementAdmitted: boolean;
+  replacementElapsedMs?: number;
 }
 
 async function sha256(path: string): Promise<string> {
@@ -215,6 +236,15 @@ async function waitForSingleRendererPage(context: BrowserContext, previous?: Pag
     await new Promise((resolveWait) => setTimeout(resolveWait, 100));
   }
   throw new Error('The retained FND-05 owner did not expose exactly one trusted renderer page.');
+}
+
+async function waitForStderrMarker(run: OwnerRun, marker: string, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (Buffer.concat(run.stderr).includes(Buffer.from(marker))) return;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+  }
+  throw new Error(`The retained FND-05 owner did not report the expected product unresponsive confirmation within ${timeoutMs} ms.`);
 }
 
 async function processRows(profile: string): Promise<Array<{ pid: number; ppid: number; type: string }>> {
@@ -612,7 +642,7 @@ test(FND05_PACKAGED_SCENARIO, async () => {
 
 test(FND05_UNRESPONSIVE_PACKAGED_SCENARIO, async ({ browserName }, testInfo) => {
   test.skip(process.platform !== 'darwin', 'This prepared checkpoint is the exact current macOS/arm64 acceptance only.');
-  test.setTimeout(150_000);
+  test.setTimeout(180_000);
   expect(browserName).toBe('chromium');
   if (process.env.AIDRAW_E2E_FND05_UNRESPONSIVE_WRAPPER !== '1' || process.env.PLAYWRIGHT_NO_COPY_PROMPT !== '1') {
     throw new Error('FND-05 unresponsive-renderer acceptance must run through its credential-safe wrapper.');
@@ -640,6 +670,15 @@ test(FND05_UNRESPONSIVE_PACKAGED_SCENARIO, async ({ browserName }, testInfo) => 
   let active: OwnerRun | undefined;
   let acceptanceFailure: Error | undefined;
   let evidence: Record<string, unknown> | undefined;
+  const unresponsiveProgress: UnresponsiveProgress = {
+    stallPendingAtObservation: false,
+    inputMethod: 'Input.dispatchKeyEvent',
+    inputKey: 'F24',
+    inputAdmission: 'not-attempted',
+    inputCommandSettlement: 'not-started',
+    productUnresponsiveConfirmationObserved: false,
+    replacementAdmitted: false,
+  };
 
   try {
     const owner: OwnerRun = { phase: 'unresponsive-owner', connectionPath: configured.paths.ownerConnection, stderr: [], externalRendererRequests: [] };
@@ -727,14 +766,50 @@ test(FND05_UNRESPONSIVE_PACKAGED_SCENARIO, async ({ browserName }, testInfo) => 
 
     await new Promise((resolveWait) => setTimeout(resolveWait, FND05_UNRESPONSIVE_OBSERVATION_MS));
     expect(stallCommandState).toBe('pending');
+    unresponsiveProgress.stallPendingAtObservation = true;
     const duringProcess = await waitForProcessShape(configured.profile, ownerPid);
     expect(duringProcess.rendererPid).toBe(beforeProcess.rendererPid);
     expect(owner.context!.pages().filter((candidate) => !candidate.isClosed() && candidate.url().startsWith('aidraw://app/'))).toEqual([owner.page]);
     const occupiedDuringStall = await callMcpTool(ownerConnection.url, client.headers, requestId++, 'session_manage', { action: 'inspect', documentId: canonicalBefore.documentId });
     expect(occupiedDuringStall).toMatchObject({ workspace: { humanOccupancy: { active: true, locks: [{ objectIds: [canonicalBefore.object.id] }] }, editorAdvisory: { attached: true, documentId: canonicalBefore.documentId } } });
 
-    const replacementPage = await waitForSingleRendererPage(owner.context!, owner.page, 50_000);
+    unresponsiveProgress.inputTargetId = beforeTarget.targetId;
+    unresponsiveProgress.inputCommandSettlement = 'pending';
+    const inputSettlement: Promise<{ status: 'resolved' } | { status: 'rejected'; reason: unknown }> = beforeTarget.session.send(
+      'Input.dispatchKeyEvent',
+      FND05_UNRESPONSIVE_INPUT_EVENT,
+    ).then(
+      () => {
+        unresponsiveProgress.inputCommandSettlement = 'resolved';
+        return { status: 'resolved' as const };
+      },
+      (reason: unknown) => {
+        unresponsiveProgress.inputCommandSettlement = 'rejected';
+        return { status: 'rejected' as const, reason };
+      },
+    );
+    const inputAdmission = await Promise.race([
+      inputSettlement,
+      new Promise<{ status: 'pending' }>((resolvePending) => setTimeout(
+        () => resolvePending({ status: 'pending' }),
+        FND05_UNRESPONSIVE_INPUT_ADMISSION_WAIT_MS,
+      )),
+    ]);
+    if (inputAdmission.status === 'rejected') {
+      unresponsiveProgress.inputAdmission = 'rejected';
+      const message = inputAdmission.reason instanceof Error ? inputAdmission.reason.message : String(inputAdmission.reason);
+      throw new Error(`The benign FND-05 Input.dispatchKeyEvent stimulus was not admitted on the exact stalled renderer: ${message}`);
+    }
+    unresponsiveProgress.inputAdmission = inputAdmission.status === 'resolved' ? 'admitted' : 'ack-pending';
+
+    await waitForStderrMarker(owner, FND05_UNRESPONSIVE_CONFIRMATION_MARKER, FND05_UNRESPONSIVE_CONFIRMATION_WAIT_MS);
+    unresponsiveProgress.productUnresponsiveConfirmationObserved = true;
+    unresponsiveProgress.productUnresponsiveConfirmationElapsedMs = performance.now() - stallStartedAt;
+
+    const replacementPage = await waitForSingleRendererPage(owner.context!, owner.page, FND05_UNRESPONSIVE_REPLACEMENT_WAIT_MS);
     const replacementElapsedMs = performance.now() - stallStartedAt;
+    unresponsiveProgress.replacementAdmitted = true;
+    unresponsiveProgress.replacementElapsedMs = replacementElapsedMs;
     owner.page = replacementPage;
     await new Promise((resolveWait) => setTimeout(resolveWait, 750));
     owner.context!.off('page', onReplacement);
@@ -748,6 +823,19 @@ test(FND05_UNRESPONSIVE_PACKAGED_SCENARIO, async ({ browserName }, testInfo) => 
     expect(afterProcess.rendererPid).not.toBe(beforeProcess.rendererPid);
     expect(owner.child!.pid).toBe(ownerConnection.pid);
     expect((JSON.parse(await readFile(configured.paths.ownerConnection, 'utf8')) as McpConnection).pid).toBe(ownerPid);
+
+    const boundedInputSettlement = await Promise.race([
+      inputSettlement,
+      new Promise<{ status: 'timeout' }>((resolveTimeout) => setTimeout(
+        () => resolveTimeout({ status: 'timeout' }),
+        FND05_UNRESPONSIVE_POST_REPLACEMENT_MARGIN_MS,
+      )),
+    ]);
+    const inputProof = classifyFnd05InputStimulusSettlement(
+      boundedInputSettlement,
+      unresponsiveProgress.inputAdmission,
+      unresponsiveProgress.replacementAdmitted,
+    );
 
     const boundedSettlement = await Promise.race([
       stallSettlement,
@@ -855,13 +943,26 @@ test(FND05_UNRESPONSIVE_PACKAGED_SCENARIO, async ({ browserName }, testInfo) => 
         productionHookAdded: false,
       },
       rendererStall: {
-        mechanism: `bounded ${FND05_UNRESPONSIVE_STALL_MS} ms synchronous Runtime.evaluate in the exact isolated renderer`,
+        mechanism: `bounded ${FND05_UNRESPONSIVE_STALL_MS} ms synchronous Runtime.evaluate followed by one target-local F24 raw-key input in the exact isolated renderer`,
         observationMs: FND05_UNRESPONSIVE_OBSERVATION_MS,
         declaredPolicyGraceMs: FND05_UNRESPONSIVE_POLICY_GRACE_MS,
+        inputAdmissionWaitMs: FND05_UNRESPONSIVE_INPUT_ADMISSION_WAIT_MS,
+        productConfirmationWaitMs: FND05_UNRESPONSIVE_CONFIRMATION_WAIT_MS,
+        replacementWaitMs: FND05_UNRESPONSIVE_REPLACEMENT_WAIT_MS,
         beforeTargetId: beforeTarget.targetId,
         replacementTargetId: replacementTarget.targetId,
         beforeRendererPid: beforeProcess.rendererPid,
         replacementRendererPid: afterProcess.rendererPid,
+        inputStimulus: {
+          method: unresponsiveProgress.inputMethod,
+          key: unresponsiveProgress.inputKey,
+          targetId: unresponsiveProgress.inputTargetId,
+          admission: unresponsiveProgress.inputAdmission,
+          settlement: inputProof.inputCommand,
+          physicalKeyboardStateChanged: false,
+        },
+        productUnresponsiveConfirmationObserved: true,
+        productUnresponsiveConfirmationElapsedMs: unresponsiveProgress.productUnresponsiveConfirmationElapsedMs,
         ...stallProof,
       },
       ownerContinuity: {
@@ -921,6 +1022,10 @@ test(FND05_UNRESPONSIVE_PACKAGED_SCENARIO, async ({ browserName }, testInfo) => 
         status: 'failed',
         failure: redactFnd05FailureText(acceptanceFailure.message, secrets),
         stderr: redactFnd05FailureText(stderr, secrets),
+        progress: {
+          ...unresponsiveProgress,
+          failureStage: classifyFnd05UnresponsiveFailureStage(unresponsiveProgress),
+        },
         cleanup,
       }, null, 2)}\n`;
       assertFnd05EvidenceRedacted(failureText, secrets);

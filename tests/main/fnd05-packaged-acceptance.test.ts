@@ -8,21 +8,31 @@ import {
   assertFnd05EvidenceRedacted,
   assertFnd05UnresponsiveSafeReporterEnvironment,
   classifyFnd05BoundedStallSettlement,
+  classifyFnd05InputStimulusSettlement,
+  classifyFnd05UnresponsiveFailureStage,
   FND05_PACKAGED_ASAR_HASH_ENV,
   FND05_PACKAGED_EXE_HASH_ENV,
   FND05_PACKAGED_FILES,
   FND05_PACKAGED_PROFILE_ENV,
   FND05_UNRESPONSIVE_ASAR_HASH_ENV,
+  FND05_UNRESPONSIVE_CONFIRMATION_MARGIN_MS,
+  FND05_UNRESPONSIVE_CONFIRMATION_MARKER,
+  FND05_UNRESPONSIVE_CONFIRMATION_WAIT_MS,
   FND05_UNRESPONSIVE_DISCOVERY_ENV,
   FND05_UNRESPONSIVE_EXE_HASH_ENV,
   FND05_UNRESPONSIVE_FAILURE_PREFIX,
   FND05_UNRESPONSIVE_FAILURE_ROOT_ENV,
+  FND05_UNRESPONSIVE_INPUT_ACK_BUDGET_MS,
+  FND05_UNRESPONSIVE_INPUT_ADMISSION_WAIT_MS,
+  FND05_UNRESPONSIVE_INPUT_EVENT,
   FND05_UNRESPONSIVE_OBSERVATION_MS,
   FND05_UNRESPONSIVE_PACKAGE_PREFIX,
   FND05_UNRESPONSIVE_PACKAGED_SCENARIO,
   FND05_UNRESPONSIVE_POLICY_GRACE_MS,
+  FND05_UNRESPONSIVE_POST_REPLACEMENT_MARGIN_MS,
   FND05_UNRESPONSIVE_PROFILE_ENV,
   FND05_UNRESPONSIVE_PROFILE_PREFIX,
+  FND05_UNRESPONSIVE_REPLACEMENT_WAIT_MS,
   FND05_UNRESPONSIVE_STALL_EXPRESSION,
   FND05_UNRESPONSIVE_STALL_MS,
   FND05_UNRESPONSIVE_UNSAFE_REPORT_ENVIRONMENTS,
@@ -202,7 +212,20 @@ describe('FND-05 retained exact-package acceptance boundary', () => {
   it('binds the bounded stall to the production grace and accepts only retirement of a proven post-policy target', () => {
     expect(FND05_UNRESPONSIVE_POLICY_GRACE_MS).toBe(EDITOR_RENDERER_UNRESPONSIVE_GRACE_MS);
     expect(FND05_UNRESPONSIVE_OBSERVATION_MS).toBeLessThan(FND05_UNRESPONSIVE_POLICY_GRACE_MS);
-    expect(FND05_UNRESPONSIVE_STALL_MS).toBeGreaterThan(FND05_UNRESPONSIVE_POLICY_GRACE_MS);
+    expect(FND05_UNRESPONSIVE_INPUT_ACK_BUDGET_MS).toBe(15_000);
+    expect(FND05_UNRESPONSIVE_INPUT_ADMISSION_WAIT_MS).toBeLessThan(FND05_UNRESPONSIVE_OBSERVATION_MS);
+    expect(FND05_UNRESPONSIVE_CONFIRMATION_WAIT_MS).toBe(
+      FND05_UNRESPONSIVE_INPUT_ACK_BUDGET_MS
+        + FND05_UNRESPONSIVE_POLICY_GRACE_MS
+        + FND05_UNRESPONSIVE_CONFIRMATION_MARGIN_MS,
+    );
+    expect(FND05_UNRESPONSIVE_STALL_MS).toBe(
+      FND05_UNRESPONSIVE_OBSERVATION_MS
+        + FND05_UNRESPONSIVE_CONFIRMATION_WAIT_MS
+        + FND05_UNRESPONSIVE_REPLACEMENT_WAIT_MS
+        + FND05_UNRESPONSIVE_POST_REPLACEMENT_MARGIN_MS,
+    );
+    expect(FND05_UNRESPONSIVE_STALL_MS).toBe(62_000);
     expect(FND05_UNRESPONSIVE_STALL_EXPRESSION).toContain('performance.now()');
     expect(FND05_UNRESPONSIVE_STALL_EXPRESSION).toContain(String(FND05_UNRESPONSIVE_STALL_MS));
     expect(FND05_UNRESPONSIVE_STALL_EXPRESSION).not.toMatch(/aidraw|ipc|preload|fetch|WebSocket|Page\.crash/);
@@ -239,6 +262,45 @@ describe('FND-05 retained exact-package acceptance boundary', () => {
     )).toThrow(/same-owner MCP continuity/);
   });
 
+  it('uses one exact-target benign input ACK stimulus and classifies private failure progress without overclaiming', () => {
+    expect(FND05_UNRESPONSIVE_INPUT_EVENT).toEqual({
+      type: 'rawKeyDown',
+      key: 'F24',
+      code: 'F24',
+      modifiers: 0,
+      windowsVirtualKeyCode: 135,
+      nativeVirtualKeyCode: 0,
+      autoRepeat: false,
+      isKeypad: false,
+    });
+    expect(Object.isFrozen(FND05_UNRESPONSIVE_INPUT_EVENT)).toBe(true);
+    expect(FND05_UNRESPONSIVE_CONFIRMATION_MARKER).toBe(
+      `AIDraw editor recovery: renderer remained unresponsive for ${EDITOR_RENDERER_UNRESPONSIVE_GRACE_MS} ms. The editor was detached without replacing canonical engine state.`,
+    );
+    expect(classifyFnd05UnresponsiveFailureStage()).toBe('pre-input-stimulus');
+    expect(classifyFnd05UnresponsiveFailureStage({ inputAdmission: 'rejected' })).toBe('input-stimulus-not-admitted');
+    expect(classifyFnd05UnresponsiveFailureStage({ inputAdmission: 'unexpected' as never })).toBe('input-stimulus-admission-unconfirmed');
+    expect(classifyFnd05UnresponsiveFailureStage({ inputAdmission: 'ack-pending' })).toBe('product-unresponsive-confirmation-not-observed');
+    expect(classifyFnd05UnresponsiveFailureStage({ inputAdmission: 'admitted' })).toBe('product-unresponsive-confirmation-not-observed');
+    expect(classifyFnd05UnresponsiveFailureStage({ inputAdmission: 'admitted', productUnresponsiveConfirmationObserved: true })).toBe('replacement-not-admitted');
+    expect(classifyFnd05UnresponsiveFailureStage({ inputAdmission: 'ack-pending', productUnresponsiveConfirmationObserved: true, replacementAdmitted: true })).toBe('post-replacement-assertion');
+
+    expect(classifyFnd05InputStimulusSettlement({ status: 'resolved' }, 'admitted', true)).toEqual({ inputCommand: 'resolved-after-browser-admission' });
+    expect(classifyFnd05InputStimulusSettlement(
+      { status: 'rejected', reason: new Error('cdpSession.send: Protocol error (Input.dispatchKeyEvent): Target closed') },
+      'ack-pending',
+      true,
+    )).toEqual({ inputCommand: 'rejected-after-confirmed-replacement' });
+    expect(() => classifyFnd05InputStimulusSettlement(
+      { status: 'rejected', reason: new Error('cdpSession.send: Protocol error (Input.dispatchKeyEvent): Permission denied') },
+      'admitted',
+      true,
+    )).toThrow(/unrelated reason/);
+    expect(() => classifyFnd05InputStimulusSettlement({ status: 'timeout' }, 'ack-pending', true)).toThrow(/bounded post-replacement wait/);
+    expect(() => classifyFnd05InputStimulusSettlement({ status: 'resolved' }, 'not-attempted', true)).toThrow(/not admitted or observed pending/);
+    expect(() => classifyFnd05InputStimulusSettlement({ status: 'resolved' }, 'admitted', false)).toThrow(/before one replacement/);
+  });
+
   it('keeps token/ciphertext values out of reporter surfaces and rejects credential-capable reporters', () => {
     const liveToken = 'synthetic-live-token-that-must-not-reach-playwright';
     expect(inspectFnd05EncryptedToken({ version: 1, encryption: 'electron-safe-storage', value: 'encrypted-ciphertext' }, liveToken)).toEqual({
@@ -260,14 +322,17 @@ describe('FND-05 retained exact-package acceptance boundary', () => {
     }
   });
 
-  it('uses only the exact renderer Runtime.evaluate stimulus and a secure private graceful-only wrapper', async () => {
-    const [source, wrapper, config, mainSource, preloadSource, electronTypes, playwrightArtifacts] = await Promise.all([
+  it('orders the exact-target stall and benign input before product confirmation and keeps the wrapper private and graceful-only', async () => {
+    const [source, wrapper, config, mainSource, preloadSource, rendererAppSource, rendererShortcutSource, electronTypes, electronPackageText, playwrightArtifacts] = await Promise.all([
       readFile(resolve('tests/e2e/stale-renderer-recovery.spec.ts'), 'utf8'),
       readFile(resolve('scripts/run-fnd05-unresponsive-acceptance.mjs'), 'utf8'),
       readFile(resolve('playwright.fnd05-unresponsive.config.ts'), 'utf8'),
       readFile(resolve('src/main/main.ts'), 'utf8'),
       readFile(resolve('src/preload/preload.ts'), 'utf8'),
+      readFile(resolve('src/renderer/App.tsx'), 'utf8'),
+      readFile(resolve('src/renderer/shortcuts.ts'), 'utf8'),
       readFile(resolve('node_modules/electron/electron.d.ts'), 'utf8'),
+      readFile(resolve('node_modules/electron/package.json'), 'utf8'),
       readFile(resolve('node_modules/playwright/lib/index.js'), 'utf8'),
     ]);
     const start = source.indexOf('test(FND05_UNRESPONSIVE_PACKAGED_SCENARIO');
@@ -275,6 +340,20 @@ describe('FND-05 retained exact-package acceptance boundary', () => {
     const acceptance = source.slice(start);
     expect(acceptance).toContain("beforeTarget.session.send('Runtime.evaluate'");
     expect(acceptance).toContain('FND05_UNRESPONSIVE_STALL_EXPRESSION');
+    expect(acceptance).toContain("'Input.dispatchKeyEvent'");
+    expect(acceptance).toContain('FND05_UNRESPONSIVE_INPUT_EVENT');
+    expect(acceptance).toContain('FND05_UNRESPONSIVE_CONFIRMATION_MARKER');
+    expect(acceptance).toContain('classifyFnd05UnresponsiveFailureStage(unresponsiveProgress)');
+    const stallIndex = acceptance.indexOf("beforeTarget.session.send('Runtime.evaluate'");
+    const observationIndex = acceptance.indexOf('await new Promise((resolveWait) => setTimeout(resolveWait, FND05_UNRESPONSIVE_OBSERVATION_MS))');
+    const inputIndex = acceptance.indexOf("'Input.dispatchKeyEvent'", observationIndex);
+    const confirmationIndex = acceptance.indexOf('waitForStderrMarker(owner, FND05_UNRESPONSIVE_CONFIRMATION_MARKER');
+    const replacementIndex = acceptance.indexOf('waitForSingleRendererPage(owner.context!, owner.page, FND05_UNRESPONSIVE_REPLACEMENT_WAIT_MS)');
+    expect(stallIndex).toBeGreaterThanOrEqual(0);
+    expect(observationIndex).toBeGreaterThan(stallIndex);
+    expect(inputIndex).toBeGreaterThan(observationIndex);
+    expect(confirmationIndex).toBeGreaterThan(inputIndex);
+    expect(replacementIndex).toBeGreaterThan(confirmationIndex);
     expect(acceptance).toContain('replacementElapsedMs');
     expect(acceptance).toContain("AIDRAW_E2E_FND05_UNRESPONSIVE_WRAPPER !== '1'");
     expect(acceptance).toContain('assertFnd05UnresponsiveSafeReporterEnvironment()');
@@ -288,9 +367,13 @@ describe('FND-05 retained exact-package acceptance boundary', () => {
     expect(acceptance).not.toMatch(/\.kill\s*\(/);
     expect(acceptance).not.toMatch(/\brm\s*\(/);
     expect(mainSource).not.toContain('FND05_UNRESPONSIVE_STALL_EXPRESSION');
+    expect(mainSource).not.toContain('FND05_UNRESPONSIVE_INPUT_EVENT');
     expect(preloadSource).not.toContain('FND05_UNRESPONSIVE_STALL_EXPRESSION');
+    expect(preloadSource).not.toContain('FND05_UNRESPONSIVE_INPUT_EVENT');
+    expect(`${rendererAppSource}\n${rendererShortcutSource}`).not.toContain('F24');
     expect(electronTypes).toContain("on(event: 'unresponsive', listener: () => void): this;");
     expect(electronTypes).toContain("on(event: 'responsive', listener: () => void): this;");
+    expect(JSON.parse(electronPackageText)).toMatchObject({ version: '43.4.0' });
 
     expect(wrapper).toContain('process.umask(0o077)');
     expect(wrapper).toContain('inspectPackagedSecurity');
@@ -344,7 +427,7 @@ describe('FND-05 retained exact-package acceptance boundary', () => {
     for (const path of roots) expect(await access(path).then(() => true, () => false), `${path} must remain absent`).toBe(false);
   });
 
-  it('records consumed alive-hang r1 and corrected discovery while keeping Working/P0 nonclaims', async () => {
+  it('records consumed alive-hang r1/r2 and the input-ACK controller correction while keeping Working/P0 nonclaims', async () => {
     const [changelog, tracker, testing] = await Promise.all([
       readFile(resolve('CHANGELOG.md'), 'utf8'),
       readFile(resolve('docs/FEATURE_TRACKER.md'), 'utf8'),
@@ -358,28 +441,36 @@ describe('FND-05 retained exact-package acceptance boundary', () => {
     for (const claim of [
       '20260814t023118z-eab3063-r1',
       'exited 1 during pinned Playwright discovery',
-      '30,000 ms renderer-only CDP stall',
+      '20260814t030554z-d082ab7-r2',
+      '1/1 failed in 54.8 seconds',
+      '62,000 ms renderer-only CDP stall',
+      'F24',
+      'input-event ACK',
       '10,000 ms floor',
       'real launch-free dedicated Playwright `--list` regression',
-      'no packaged alive-hang PASS exists',
+      'No packaged alive-hang PASS exists',
       'Renderer-local work never submitted to the canonical engine is not promised',
     ]) expect(truth).toContain(claim);
-    expect(truth).toContain('native packaged alive-hang PASS, and broader platforms remain open');
+    expect(truth).toContain('fresh native packaged alive-hang PASS, and broader platforms remain open');
 
     const changelogEntry = changelog.split(/\r?\n/u).find((line) => line.startsWith('- Prepare a separate retained exact-package acceptance')) ?? '';
-    expect(changelogEntry).toContain('immutable consumed pre-launch controller failure');
-    expect(changelogEntry).toContain('object-destructured `browserName` fixture');
-    expect(changelogEntry).toContain('real launch-free dedicated Playwright `--list` regression');
+    expect(changelogEntry).toContain('Consumed r1 remains the immutable pre-launch Playwright callback-discovery failure');
+    expect(changelogEntry).toContain('no distinct trusted renderer appeared within 50 seconds');
+    expect(changelogEntry).toContain('input-event ACK');
+    expect(changelogEntry).toContain('F24');
     expect(changelogEntry).toContain('renderer-local work never submitted to the canonical engine');
     expect(testing).toContain('Thirteen exact-checkpoint cases');
-    expect(testing).toContain('### FND-05 alive-but-unresponsive controller, consumed r1, and corrected discovery');
+    expect(testing).toContain('### FND-05 alive-but-unresponsive controller, consumed r1/r2, and input-ACK correction');
     expect(testing).toContain('exited 1 before any application/helper launch, stall, or product assertion');
     expect(testing).toContain('object-destructures the built-in `browserName` fixture');
     expect(testing).toContain('spawns the pinned local Playwright CLI');
     expect(testing).toContain('These are naming templates, not reserved or runnable identities');
     expect(testing).toContain('Consumed r1 remains immutable and non-reusable');
+    expect(testing).toContain('Consumed r2 remains immutable and non-reusable');
+    expect(testing).toContain('Chromium 150.0.7871.224');
+    expect(testing).toContain('`StartInputEventAckTimeout`');
+    expect(testing).toContain('product-unresponsive-confirmation-not-observed');
     expect(testing).toContain('renderer-local work never submitted before a confirmed hang may be lost');
-    expect(testing).toContain('exact **eight-path** controller/truth correction');
-    expect(testing).toContain('**193 files / 1,185 tests**');
+    expect(testing).toContain('source/headless controller correction');
   });
 });

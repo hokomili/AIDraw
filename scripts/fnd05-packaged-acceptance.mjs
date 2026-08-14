@@ -28,12 +28,38 @@ export const FND05_UNRESPONSIVE_PROFILE_PREFIX = 'aidraw-e2e-fnd05-unresponsive-
 export const FND05_UNRESPONSIVE_FAILURE_PREFIX = 'fnd05-unresponsive-renderer-native-';
 export const FND05_UNRESPONSIVE_POLICY_GRACE_MS = 10_000;
 export const FND05_UNRESPONSIVE_OBSERVATION_MS = 2_000;
-export const FND05_UNRESPONSIVE_STALL_MS = 30_000;
+// Electron 43.4.0 bundles Chromium 150.0.7871.224. Its compiled input route
+// contains the input-event ACK timeout that feeds renderer-unresponsive state.
+// Keep this as a conservative source-derived budget rather than claiming a
+// runtime-observed threshold; the exact package must still prove the event.
+export const FND05_UNRESPONSIVE_INPUT_ACK_BUDGET_MS = 15_000;
+export const FND05_UNRESPONSIVE_INPUT_ADMISSION_WAIT_MS = 1_000;
+export const FND05_UNRESPONSIVE_CONFIRMATION_MARGIN_MS = 10_000;
+export const FND05_UNRESPONSIVE_CONFIRMATION_WAIT_MS = FND05_UNRESPONSIVE_INPUT_ACK_BUDGET_MS
+  + FND05_UNRESPONSIVE_POLICY_GRACE_MS
+  + FND05_UNRESPONSIVE_CONFIRMATION_MARGIN_MS;
+export const FND05_UNRESPONSIVE_REPLACEMENT_WAIT_MS = 15_000;
+export const FND05_UNRESPONSIVE_POST_REPLACEMENT_MARGIN_MS = 10_000;
+export const FND05_UNRESPONSIVE_STALL_MS = FND05_UNRESPONSIVE_OBSERVATION_MS
+  + FND05_UNRESPONSIVE_CONFIRMATION_WAIT_MS
+  + FND05_UNRESPONSIVE_REPLACEMENT_WAIT_MS
+  + FND05_UNRESPONSIVE_POST_REPLACEMENT_MARGIN_MS;
 export const FND05_UNRESPONSIVE_STALL_EXPRESSION = `(() => {
   const deadline = performance.now() + ${FND05_UNRESPONSIVE_STALL_MS};
   while (performance.now() < deadline) { /* bounded test-only renderer main-thread stall */ }
   return 'fnd05-bounded-stall-finished';
 })()`;
+export const FND05_UNRESPONSIVE_INPUT_EVENT = Object.freeze({
+  type: 'rawKeyDown',
+  key: 'F24',
+  code: 'F24',
+  modifiers: 0,
+  windowsVirtualKeyCode: 135,
+  nativeVirtualKeyCode: 0,
+  autoRepeat: false,
+  isKeypad: false,
+});
+export const FND05_UNRESPONSIVE_CONFIRMATION_MARKER = `AIDraw editor recovery: renderer remained unresponsive for ${FND05_UNRESPONSIVE_POLICY_GRACE_MS} ms. The editor was detached without replacing canonical engine state.`;
 export const FND05_UNRESPONSIVE_UNSAFE_REPORT_ENVIRONMENTS = Object.freeze([
   'PLAYWRIGHT_HTML_OUTPUT_DIR',
   'PLAYWRIGHT_HTML_OPEN',
@@ -236,6 +262,37 @@ export async function observeFnd05DeliberatePageCrash(crashEvent, crashCommand) 
 }
 
 const EXPECTED_BOUNDED_STALL_RETIREMENT_ERROR = /^(?:cdpSession\.send:\s*)?(?:Protocol error \(Runtime\.evaluate\):\s*)?(?:Target closed|Session closed(?:\. Most likely the page has been closed\.)?|Target page, context or browser has been closed|Execution context was destroyed, most likely because of a navigation\.?|Inspected target navigated or closed)\.?\s*$/i;
+const EXPECTED_INPUT_STIMULUS_RETIREMENT_ERROR = /^(?:cdpSession\.send:\s*)?(?:Protocol error \(Input\.dispatchKeyEvent\):\s*)?(?:Target closed|Session closed(?:\. Most likely the page has been closed\.)?|Target page, context or browser has been closed|Inspected target navigated or closed)\.?\s*$/i;
+
+export function classifyFnd05UnresponsiveFailureStage(progress) {
+  if (!progress || progress.inputAdmission === 'not-attempted') return 'pre-input-stimulus';
+  if (progress.inputAdmission === 'rejected') return 'input-stimulus-not-admitted';
+  if (progress.inputAdmission === 'ack-pending') return progress.productUnresponsiveConfirmationObserved === true
+    ? (progress.replacementAdmitted === true ? 'post-replacement-assertion' : 'replacement-not-admitted')
+    : 'product-unresponsive-confirmation-not-observed';
+  if (progress.inputAdmission !== 'admitted') return 'input-stimulus-admission-unconfirmed';
+  if (progress.productUnresponsiveConfirmationObserved !== true) return 'product-unresponsive-confirmation-not-observed';
+  if (progress.replacementAdmitted !== true) return 'replacement-not-admitted';
+  return 'post-replacement-assertion';
+}
+
+export function classifyFnd05InputStimulusSettlement(settlement, admission, replacementAdmitted) {
+  if (!['admitted', 'ack-pending'].includes(admission)) {
+    throw new Error('The FND-05 benign input stimulus was not admitted or observed pending on the exact renderer target.');
+  }
+  if (replacementAdmitted !== true) {
+    throw new Error('The FND-05 benign input stimulus cannot be settled as recovery evidence before one replacement is admitted.');
+  }
+  if (!settlement || settlement.status === 'timeout') {
+    throw new Error('The FND-05 benign input stimulus did not settle within the bounded post-replacement wait.');
+  }
+  if (settlement.status === 'resolved') return { inputCommand: 'resolved-after-browser-admission' };
+  const message = crashErrorMessage(settlement.reason);
+  if (!EXPECTED_INPUT_STIMULUS_RETIREMENT_ERROR.test(message)) {
+    throw new Error(`The FND-05 Input.dispatchKeyEvent stimulus failed for an unrelated reason: ${message}`, { cause: settlement.reason });
+  }
+  return { inputCommand: 'rejected-after-confirmed-replacement' };
+}
 
 export function classifyFnd05BoundedStallSettlement(settlement, proof) {
   if (!proof
