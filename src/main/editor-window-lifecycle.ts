@@ -73,6 +73,7 @@ export class EditorWindowLifecycle<Window> {
   private active?: WindowEntry<Window>;
   private creationPromise?: Promise<boolean>;
   private recoveryPromise?: Promise<void>;
+  private replacementPromise?: Promise<boolean>;
   private automaticRecoveryPending = false;
   private attached = false;
 
@@ -93,6 +94,48 @@ export class EditorWindowLifecycle<Window> {
     const recovery = this.recoveryPromise;
     if (recovery) await recovery;
     return this.attached;
+  }
+
+  /**
+   * Replace only the editor shell after an explicit user confirmation. The
+   * controlled detach is not reported as a renderer failure; the subsequent
+   * explicit show retains the existing single automatic-retry allowance.
+   */
+  replaceEditor(expectedWindow: Window | undefined): Promise<boolean> {
+    if (this.replacementPromise) return this.replacementPromise;
+    const operation = this.replaceEditorOnce(expectedWindow)
+      .finally(() => {
+        if (this.replacementPromise === operation) this.replacementPromise = undefined;
+      });
+    this.replacementPromise = operation;
+    return operation;
+  }
+
+  private async replaceEditorOnce(expectedWindow: Window | undefined): Promise<boolean> {
+    if (!this.dependencies.canOpenWindow()) return false;
+    if (this.active?.window !== expectedWindow) return this.show();
+    this.automaticRecoveryPending = false;
+
+    const existing = this.active;
+    if (existing) {
+      existing.recoverWhenRetired = false;
+      if (!existing.retiring) {
+        this.cancelUnresponsiveConfirmation(existing);
+        existing.retiring = true;
+        existing.failureDuringClose = undefined;
+        existing.closeRequested = false;
+        this.settleClose(existing);
+        this.settleTerminal(existing);
+        this.dependencies.setCurrentWindow(undefined);
+        this.detach(existing);
+      }
+      if (!this.retire(existing)) return false;
+    }
+
+    if (this.creationPromise) await this.creationPromise;
+    if (this.recoveryPromise) await this.recoveryPromise;
+    if (!this.dependencies.canOpenWindow()) return false;
+    return this.show();
   }
 
   /** Resume a retained retry after a failed graceful-shutdown attempt. */

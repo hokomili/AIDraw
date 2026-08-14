@@ -141,6 +141,96 @@ describe('editor window lifecycle', () => {
     expect(harness.revealWindow).toHaveBeenCalledTimes(2);
   });
 
+  it('explicitly replaces an opaque unusable shell without fabricating a renderer failure', async () => {
+    const harness = createHarness();
+    await harness.lifecycle.show();
+    const opaqueShell = harness.windows[0];
+
+    await expect(harness.lifecycle.replaceEditor(opaqueShell)).resolves.toBe(true);
+
+    expect(opaqueShell.destroyed).toBe(true);
+    expect(harness.windows).toHaveLength(2);
+    expect(harness.current()).toBe(harness.windows[1]);
+    expect(harness.lifecycle.isAttached()).toBe(true);
+    expect(harness.attachments).toEqual([true, false, true]);
+    expect(harness.failures).toEqual([]);
+  });
+
+  it('coalesces repeated explicit replacements while one fresh shell is loading', async () => {
+    let releaseReplacement!: () => void;
+    const replacementRelease = new Promise<void>((resolve) => { releaseReplacement = resolve; });
+    const harness = createHarness({ loadWindow: async (window) => {
+      if (window.id === 2) await replacementRelease;
+      window.events.ready();
+    } });
+    await harness.lifecycle.show();
+
+    const confirmedShell = harness.current();
+    const firstReplacement = harness.lifecycle.replaceEditor(confirmedShell);
+    const secondReplacement = harness.lifecycle.replaceEditor(confirmedShell);
+    expect(secondReplacement).toBe(firstReplacement);
+    await vi.waitFor(() => { expect(harness.windows).toHaveLength(2); });
+    expect(harness.windows[0].destroyed).toBe(true);
+
+    releaseReplacement();
+    await expect(Promise.all([firstReplacement, secondReplacement])).resolves.toEqual([true, true]);
+    expect(harness.windows).toHaveLength(2);
+    expect(harness.current()).toBe(harness.windows[1]);
+    expect(harness.attachments).toEqual([true, false, true]);
+  });
+
+  it('does not admit a replacement until explicit shell retirement is confirmed', async () => {
+    const harness = createHarness({ destroyFailures: 1 });
+    await harness.lifecycle.show();
+    const opaqueShell = harness.windows[0];
+
+    await expect(harness.lifecycle.replaceEditor(opaqueShell)).resolves.toBe(false);
+    expect(opaqueShell.destroyed).toBe(false);
+    expect(harness.windows).toEqual([opaqueShell]);
+    expect(harness.current()).toBeUndefined();
+    expect(harness.lifecycle.isAttached()).toBe(false);
+
+    await expect(harness.lifecycle.replaceEditor(opaqueShell)).resolves.toBe(true);
+    expect(opaqueShell.destroyed).toBe(true);
+    expect(harness.windows).toHaveLength(2);
+    expect(harness.current()).toBe(harness.windows[1]);
+  });
+
+  it('gives an explicit replacement one retry and stays headless after consecutive failures', async () => {
+    const harness = createHarness({ loadWindow: async (window) => {
+      if (window.id === 2 || window.id === 3) throw new Error(`simulated replacement load failure ${window.id}`);
+      window.events.ready();
+    } });
+    await harness.lifecycle.show();
+
+    await expect(harness.lifecycle.replaceEditor(harness.current())).resolves.toBe(false);
+    expect(harness.windows).toHaveLength(3);
+    expect(harness.current()).toBeUndefined();
+    expect(harness.lifecycle.isAttached()).toBe(false);
+    expect(harness.failures.map((failure) => failure.kind)).toEqual(['load-rejected', 'load-rejected']);
+
+    await expect(harness.lifecycle.show()).resolves.toBe(true);
+    expect(harness.windows).toHaveLength(4);
+    expect(harness.current()).toBe(harness.windows[3]);
+  });
+
+  it('does not replace a successor that attached while a stale confirmation was open', async () => {
+    const harness = createHarness();
+    await harness.lifecycle.show();
+    const confirmedShell = harness.windows[0];
+
+    confirmedShell.rendererCrashed = true;
+    confirmedShell.events.rendererGone('crashed-during-confirmation', 71);
+    await vi.waitFor(() => { expect(harness.windows).toHaveLength(2); });
+    const automaticReplacement = harness.windows[1];
+
+    await expect(harness.lifecycle.replaceEditor(confirmedShell)).resolves.toBe(true);
+    expect(harness.windows).toHaveLength(2);
+    expect(harness.current()).toBe(automaticReplacement);
+    expect(automaticReplacement.destroyed).toBe(false);
+    expect(harness.revealWindow).toHaveBeenCalledTimes(3);
+  });
+
   it('keeps one transiently stalled shell when Electron reports it responsive inside the fixed grace', async () => {
     const harness = createHarness();
     await harness.lifecycle.show();
@@ -682,5 +772,15 @@ describe('editor window lifecycle', () => {
     expect(source).toContain('if (event.defaultPrevented) events.closeCancelled();');
     expect(source).toContain('!gracefulShutdown.isQuitPending()');
     expect(source).toContain('resumeEditorRecovery = () => { editorWindowLifecycle.resumeRecovery(); };');
+    expect(source).toContain("{ label: 'Recover Editor Window…', click: () => void requestEditorWindowRecovery() }");
+    const confirmation = source.indexOf("message: 'Replace the editor window and reconnect to the current AIDraw engine?'");
+    const cancellation = source.indexOf('if (decision.response !== 1) return;', confirmation);
+    const replacement = source.indexOf('await editorWindowLifecycle.replaceEditor(confirmedWindow);', cancellation);
+    expect(confirmation).toBeGreaterThan(-1);
+    expect(cancellation).toBeGreaterThan(confirmation);
+    expect(replacement).toBeGreaterThan(cancellation);
+    expect(source.slice(confirmation, replacement)).toContain('defaultId: 0');
+    expect(source.slice(confirmation, replacement)).toContain('cancelId: 0');
+    expect(source).toContain('Any pointer, text, or other input still only inside the current editor cannot be recovered.');
   });
 });

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, net, protocol, safeStorage, session, shell, type IpcMainInvokeEvent } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, net, protocol, safeStorage, session, shell, type IpcMainInvokeEvent, type MessageBoxOptions } from 'electron';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { link, mkdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
@@ -864,6 +864,35 @@ async function configureAgentClient(value: unknown): Promise<AgentClientSetupRes
   });
 }
 
+async function requestEditorWindowRecovery(): Promise<void> {
+  const confirmation: MessageBoxOptions = {
+    type: 'warning',
+    title: 'Recover editor window',
+    message: 'Replace the editor window and reconnect to the current AIDraw engine?',
+    detail: 'Documents, history, and agent work already accepted by the canonical engine stay in place. Any pointer, text, or other input still only inside the current editor cannot be recovered.',
+    buttons: ['Cancel', 'Recover Editor'],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+  };
+  const confirmedWindow = mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined;
+  const decision = confirmedWindow
+    ? await dialog.showMessageBox(confirmedWindow, confirmation)
+    : await dialog.showMessageBox(confirmation);
+  if (decision.response !== 1) return;
+
+  const recovered = await editorWindowLifecycle.replaceEditor(confirmedWindow);
+  if (recovered || gracefulShutdown.isQuitPending() || gracefulShutdown.isComplete()) return;
+  await dialog.showMessageBox({
+    type: 'error',
+    title: 'Editor recovery stopped',
+    message: 'AIDraw could not open a replacement editor window.',
+    detail: 'The canonical engine remains available. Choose Recover Editor Window again to make one new bounded attempt.',
+    buttons: ['OK'],
+    noLink: true,
+  });
+}
+
 function createMenu(): void {
   const template: Electron.MenuItemConstructorOptions[] = [
     {
@@ -894,7 +923,17 @@ function createMenu(): void {
     },
     {
       label: 'View',
-      submenu: [{ role: 'reload' }, { role: 'toggleDevTools' }, { type: 'separator' }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }, { role: 'togglefullscreen' }],
+      submenu: [
+        { label: 'Recover Editor Window…', click: () => void requestEditorWindowRecovery() },
+        { type: 'separator' },
+        { role: 'reload' },
+        { role: 'toggleDevTools' },
+        { type: 'separator' },
+        { role: 'resetZoom' },
+        { role: 'zoomIn' },
+        { role: 'zoomOut' },
+        { role: 'togglefullscreen' },
+      ],
     },
     {
       label: 'Help',
