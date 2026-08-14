@@ -18,6 +18,7 @@ import {
   UX01_PACKAGED_PROFILE_ENV,
   UX01_PACKAGED_SCREENSHOTS,
 } from '../../scripts/ux01-packaged-acceptance.mjs';
+import { parseFeatureTracker } from '../../scripts/check-rc-readiness.mjs';
 
 const digest = 'A'.repeat(64);
 
@@ -33,6 +34,68 @@ function environment(profile: string): NodeJS.ProcessEnv {
 }
 
 describe('UX-01 retained exact-package acceptance boundary', () => {
+  it('records the immutable r5 PASS as a narrow Working/P0 subclaim', async () => {
+    const [changelog, tracker, testing] = await Promise.all([
+      readFile(resolve('CHANGELOG.md'), 'utf8'),
+      readFile(resolve('docs/FEATURE_TRACKER.md'), 'utf8'),
+      readFile(resolve('docs/TESTING.md'), 'utf8'),
+    ]);
+    const parsed = parseFeatureTracker(tracker);
+    expect(parsed.errors).toEqual([]);
+    const ux01 = parsed.items.find((item) => item.id === 'UX-01');
+    expect(ux01).toMatchObject({ status: '🟢 Working', priority: 'P0' });
+    const truth = ux01?.truth ?? '';
+    for (const claim of [
+      'exactly one wrapper invocation',
+      '1/1 in 5.5 seconds',
+      '1,520×940',
+      '980×640',
+      '860×550',
+      '62/632/286',
+      '12 pointer and 12 keyboard workflows',
+      '11 sampled control floors',
+      '138 px timeline',
+      'revision 9→10',
+      'four distinct screenshots',
+      'zero external renderer requests',
+      'must never be reused',
+    ]) expect(truth).toContain(claim);
+    const lowercaseTruth = truth.toLowerCase();
+    for (const nonclaim of [
+      'native traffic-light clicks',
+      'drag/no-drag interaction',
+      'customizable workspace persistence',
+      'progressive-disclosure completion',
+      '200% text',
+      'assistive technology',
+      'tablet/touchpad',
+      'high-DPI/mixed-display',
+      'smaller work areas',
+      'broad polish',
+      'rc',
+      'stable-v1',
+    ].map((value) => value.toLowerCase())) expect(lowercaseTruth).toContain(nonclaim);
+
+    const changelogEntry = changelog.split(/\r?\n/u).find((line) => line.startsWith('- Complete one isolated retained UX-01 exact-package acceptance')) ?? '';
+    expect(changelogEntry).toContain('R4 was consumed before output');
+    expect(changelogEntry).toContain('r5 package from synchronized `c726d27` then ran exactly once and passed **1/1 in 5.5 seconds**');
+    expect(changelogEntry).toContain('UX-01 remains Working/P0');
+    expect(changelogEntry).toContain('not RC or stable-v1 evidence');
+
+    const sectionStart = testing.indexOf('### UX-01 exact-package acceptance: immutable r1/r2/r3 failures, consumed r4, and narrow r5 PASS');
+    const sectionEnd = testing.indexOf('\n## ', sectionStart + 1);
+    expect(sectionStart).toBeGreaterThanOrEqual(0);
+    const acceptance = testing.slice(sectionStart, sectionEnd < 0 ? undefined : sectionEnd);
+    expect(acceptance).toContain('exactly **one** wrapper invocation');
+    expect(acceptance).toContain('Evidence SHA-256 is `6ac62913c5028d56f3f705f331c1b597264d62eae40a77b429cb75a96fde1f09`');
+    expect(acceptance).toContain('UX-01 therefore remains **Working/P0**');
+    expect(acceptance).toContain('Never rerun, reuse, relaunch, rewrite, or delete r5');
+
+    expect(changelog).not.toContain('A fresh secure package/profile/output is required for complete native acceptance');
+    expect(truth).not.toContain('Still required before Verified: a fresh exact-package run');
+    expect(acceptance).not.toContain('Any later run requires a freshly built secure package');
+  });
+
   it('requires one immutable direct-child retained profile and exact package hashes', () => {
     const workspace = resolve('synthetic-workspace');
     const profile = join(workspace, 'test-results', 'retained', 'aidraw-e2e-ux01-density-20260814t120000z');
