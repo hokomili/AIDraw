@@ -34,13 +34,17 @@ export const FND05_UNRESPONSIVE_OBSERVATION_MS = 2_000;
 // runtime-observed threshold; the exact package must still prove the event.
 export const FND05_UNRESPONSIVE_INPUT_ACK_BUDGET_MS = 15_000;
 export const FND05_UNRESPONSIVE_INPUT_ADMISSION_WAIT_MS = 1_000;
+export const FND05_UNRESPONSIVE_DEBUGGER_DETACH_TIMEOUT_MS = 2_000;
+export const FND05_UNRESPONSIVE_DEBUGGER_DETACH_DEADLINE_MS = FND05_UNRESPONSIVE_OBSERVATION_MS
+  + FND05_UNRESPONSIVE_INPUT_ADMISSION_WAIT_MS
+  + FND05_UNRESPONSIVE_DEBUGGER_DETACH_TIMEOUT_MS;
 export const FND05_UNRESPONSIVE_CONFIRMATION_MARGIN_MS = 10_000;
 export const FND05_UNRESPONSIVE_CONFIRMATION_WAIT_MS = FND05_UNRESPONSIVE_INPUT_ACK_BUDGET_MS
   + FND05_UNRESPONSIVE_POLICY_GRACE_MS
   + FND05_UNRESPONSIVE_CONFIRMATION_MARGIN_MS;
 export const FND05_UNRESPONSIVE_REPLACEMENT_WAIT_MS = 15_000;
 export const FND05_UNRESPONSIVE_POST_REPLACEMENT_MARGIN_MS = 10_000;
-export const FND05_UNRESPONSIVE_STALL_MS = FND05_UNRESPONSIVE_OBSERVATION_MS
+export const FND05_UNRESPONSIVE_STALL_MS = FND05_UNRESPONSIVE_DEBUGGER_DETACH_DEADLINE_MS
   + FND05_UNRESPONSIVE_CONFIRMATION_WAIT_MS
   + FND05_UNRESPONSIVE_REPLACEMENT_WAIT_MS
   + FND05_UNRESPONSIVE_POST_REPLACEMENT_MARGIN_MS;
@@ -261,65 +265,65 @@ export async function observeFnd05DeliberatePageCrash(crashEvent, crashCommand) 
   return { crashObserved: true, command: 'resolved' };
 }
 
-const EXPECTED_BOUNDED_STALL_RETIREMENT_ERROR = /^(?:cdpSession\.send:\s*)?(?:Protocol error \(Runtime\.evaluate\):\s*)?(?:Target closed|Session closed(?:\. Most likely the page has been closed\.)?|Target page, context or browser has been closed|Execution context was destroyed, most likely because of a navigation\.?|Inspected target navigated or closed)\.?\s*$/i;
-const EXPECTED_INPUT_STIMULUS_RETIREMENT_ERROR = /^(?:cdpSession\.send:\s*)?(?:Protocol error \(Input\.dispatchKeyEvent\):\s*)?(?:Target closed|Session closed(?:\. Most likely the page has been closed\.)?|Target page, context or browser has been closed|Inspected target navigated or closed)\.?\s*$/i;
+const EXPECTED_DEBUGGER_DETACH_ERROR = /^(?:cdpSession\.send:\s*)?(?:Protocol error \((?:Runtime\.evaluate|Input\.dispatchKeyEvent)\):\s*)?(?:Target closed|Session closed(?:\. Most likely the page has been closed\.)?|Target page, context or browser has been closed|Execution context was destroyed, most likely because of a navigation\.?|Inspected target navigated or closed)\.?\s*$/i;
 
 export function classifyFnd05UnresponsiveFailureStage(progress) {
   if (!progress || progress.inputAdmission === 'not-attempted') return 'pre-input-stimulus';
   if (progress.inputAdmission === 'rejected') return 'input-stimulus-not-admitted';
-  if (progress.inputAdmission === 'ack-pending') return progress.productUnresponsiveConfirmationObserved === true
-    ? (progress.replacementAdmitted === true ? 'post-replacement-assertion' : 'replacement-not-admitted')
-    : 'product-unresponsive-confirmation-not-observed';
-  if (progress.inputAdmission !== 'admitted') return 'input-stimulus-admission-unconfirmed';
+  if (!['admitted', 'ack-pending'].includes(progress.inputAdmission)) return 'input-stimulus-admission-unconfirmed';
+  if (progress.allDebuggerAttachmentsDetached !== true) return 'debugger-detach-not-completed';
   if (progress.productUnresponsiveConfirmationObserved !== true) return 'product-unresponsive-confirmation-not-observed';
+  if (progress.replacementProcessAdmitted !== true) return 'replacement-not-admitted';
+  if (progress.debuggerTransportReconnected !== true) return 'debugger-transport-reconnect-not-completed';
   if (progress.replacementAdmitted !== true) return 'replacement-not-admitted';
   return 'post-replacement-assertion';
 }
 
-export function classifyFnd05InputStimulusSettlement(settlement, admission, replacementAdmitted) {
-  if (!['admitted', 'ack-pending'].includes(admission)) {
-    throw new Error('The FND-05 benign input stimulus was not admitted or observed pending on the exact renderer target.');
-  }
-  if (replacementAdmitted !== true) {
-    throw new Error('The FND-05 benign input stimulus cannot be settled as recovery evidence before one replacement is admitted.');
-  }
-  if (!settlement || settlement.status === 'timeout') {
-    throw new Error('The FND-05 benign input stimulus did not settle within the bounded post-replacement wait.');
-  }
-  if (settlement.status === 'resolved') return { inputCommand: 'resolved-after-browser-admission' };
-  const message = crashErrorMessage(settlement.reason);
-  if (!EXPECTED_INPUT_STIMULUS_RETIREMENT_ERROR.test(message)) {
-    throw new Error(`The FND-05 Input.dispatchKeyEvent stimulus failed for an unrelated reason: ${message}`, { cause: settlement.reason });
-  }
-  return { inputCommand: 'rejected-after-confirmed-replacement' };
-}
-
-export function classifyFnd05BoundedStallSettlement(settlement, proof) {
+export function assertFnd05DebuggerDetachProof(proof) {
   if (!proof
     || proof.originalRendererAliveBeforeStall !== true
     || proof.originalRendererResponsiveBeforeStall !== true
     || proof.commandPendingDuringObservation !== true
     || proof.originalRendererAliveDuringObservation !== true
     || proof.sameOwnerMcpResponsiveDuringObservation !== true
-    || proof.replacementCount !== 1
-    || !Number.isFinite(proof.replacementElapsedMs)
-    || proof.replacementElapsedMs < FND05_UNRESPONSIVE_POLICY_GRACE_MS) {
-    throw new Error('The bounded FND-05 stall did not prove a live original renderer, a pending stall, same-owner MCP continuity, and one post-policy replacement.');
-  }
-  if (!settlement || settlement.status !== 'rejected') {
-    throw new Error('The bounded FND-05 renderer stall did not settle by retirement of the confirmed original target.');
-  }
-  const message = crashErrorMessage(settlement.reason);
-  if (!EXPECTED_BOUNDED_STALL_RETIREMENT_ERROR.test(message)) {
-    throw new Error(`The FND-05 Runtime.evaluate stall failed for an unrelated reason: ${message}`, { cause: settlement.reason });
+    || !['admitted', 'ack-pending'].includes(proof.inputAdmission)
+    || proof.productConfirmationAbsentThroughDebuggerDetach !== true
+    || proof.allDebuggerAttachmentsDetached !== true
+    || proof.ownerAliveAfterDebuggerDetach !== true
+    || proof.sameOwnerMcpResponsiveAfterDebuggerDetach !== true
+    || !Number.isFinite(proof.debuggerDetachedElapsedMs)
+    || proof.debuggerDetachedElapsedMs < FND05_UNRESPONSIVE_OBSERVATION_MS
+    || proof.debuggerDetachedElapsedMs > FND05_UNRESPONSIVE_DEBUGGER_DETACH_DEADLINE_MS) {
+    throw new Error('The FND-05 controller did not prove exact-target admission, complete debugger detach before the ACK deadline, and same-owner continuity.');
   }
   return {
-    originalRendererAliveBeforeStall: true,
-    commandPendingDuringObservation: true,
-    originalRendererAliveDuringObservation: true,
-    sameOwnerMcpResponsiveDuringObservation: true,
-    replacementCount: 1,
-    replacementElapsedMs: proof.replacementElapsedMs,
-    command: 'rejected-after-confirmed-replacement',
+    allDebuggerAttachmentsDetached: true,
+    debuggerDetachedElapsedMs: proof.debuggerDetachedElapsedMs,
+    ownerAliveAfterDebuggerDetach: true,
+    sameOwnerMcpResponsiveAfterDebuggerDetach: true,
+  };
+}
+
+export function classifyFnd05DebuggerDetachCommandSettlement(settlement, method, proof) {
+  assertFnd05DebuggerDetachProof(proof);
+  if (!['Runtime.evaluate', 'Input.dispatchKeyEvent'].includes(method)) {
+    throw new Error(`The FND-05 debugger-detach settlement method is unsupported: ${String(method)}.`);
+  }
+  if (!settlement || settlement.status === 'timeout') {
+    throw new Error(`The FND-05 ${method} command did not settle after the bounded debugger transport disconnect.`);
+  }
+  if (settlement.status === 'resolved') {
+    if (method !== 'Input.dispatchKeyEvent' || proof.inputAdmission !== 'admitted') {
+      throw new Error(`The FND-05 ${method} command resolved unexpectedly before debugger detach.`);
+    }
+    return { method, command: 'resolved-after-browser-admission' };
+  }
+  const message = crashErrorMessage(settlement.reason);
+  if (!EXPECTED_DEBUGGER_DETACH_ERROR.test(message)) {
+    throw new Error(`The FND-05 ${method} command failed for an unrelated reason: ${message}`, { cause: settlement.reason });
+  }
+  return {
+    method,
+    command: 'rejected-after-debugger-detach',
   };
 }

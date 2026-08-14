@@ -10,19 +10,20 @@ import { HUMAN_ACTOR, type Actor, type IllustrationDocument, type IllustrationOb
 import {
   assertFnd05OwnedProcessShape,
   assertFnd05EvidenceRedacted,
+  assertFnd05DebuggerDetachProof,
   assertFnd05UnresponsiveSafeReporterEnvironment,
-  classifyFnd05BoundedStallSettlement,
-  classifyFnd05InputStimulusSettlement,
+  classifyFnd05DebuggerDetachCommandSettlement,
   classifyFnd05UnresponsiveFailureStage,
   FND05_PACKAGED_SCENARIO,
   FND05_UNRESPONSIVE_CONFIRMATION_MARKER,
   FND05_UNRESPONSIVE_CONFIRMATION_WAIT_MS,
+  FND05_UNRESPONSIVE_DEBUGGER_DETACH_DEADLINE_MS,
+  FND05_UNRESPONSIVE_DEBUGGER_DETACH_TIMEOUT_MS,
   FND05_UNRESPONSIVE_INPUT_ADMISSION_WAIT_MS,
   FND05_UNRESPONSIVE_INPUT_EVENT,
   FND05_UNRESPONSIVE_OBSERVATION_MS,
   FND05_UNRESPONSIVE_PACKAGED_SCENARIO,
   FND05_UNRESPONSIVE_POLICY_GRACE_MS,
-  FND05_UNRESPONSIVE_POST_REPLACEMENT_MARGIN_MS,
   FND05_UNRESPONSIVE_REPLACEMENT_WAIT_MS,
   FND05_UNRESPONSIVE_STALL_EXPRESSION,
   FND05_UNRESPONSIVE_STALL_MS,
@@ -68,6 +69,7 @@ interface OwnerRun {
   context?: BrowserContext;
   page?: Page;
   connection?: McpConnection;
+  debuggerEndpoint?: string;
   stderr: Buffer[];
   externalRendererRequests: string[];
 }
@@ -91,8 +93,18 @@ interface UnresponsiveProgress {
   inputTargetId?: string;
   inputAdmission: 'not-attempted' | 'admitted' | 'ack-pending' | 'rejected';
   inputCommandSettlement: 'not-started' | 'pending' | 'resolved' | 'rejected';
+  productConfirmationAbsentThroughDebuggerDetach: boolean;
+  debuggerDetachRequested: boolean;
+  allDebuggerAttachmentsDetached: boolean;
+  debuggerDetachedElapsedMs?: number;
+  ownerAliveAfterDebuggerDetach: boolean;
+  sameOwnerMcpResponsiveAfterDebuggerDetach: boolean;
   productUnresponsiveConfirmationObserved: boolean;
   productUnresponsiveConfirmationElapsedMs?: number;
+  replacementProcessAdmitted: boolean;
+  debuggerTransportReconnectAttempted: boolean;
+  debuggerTransportReconnected: boolean;
+  debuggerTransportReconnectedElapsedMs?: number;
   replacementAdmitted: boolean;
   replacementElapsedMs?: number;
 }
@@ -206,22 +218,59 @@ async function startOwner(run: OwnerRun, profile: string, stripProviderEnvironme
   if (!run.child.pid || run.connection.pid !== run.child.pid) throw new Error('The retained connection PID does not match the exact spawned owner.');
   if (run.connection.trustedFolders.length !== 0) throw new Error('The retained FND-05 owner unexpectedly received filesystem trust.');
 
-  const endpoint = `http://127.0.0.1:${port}`;
+  run.debuggerEndpoint = `http://127.0.0.1:${port}`;
+  await connectOwnerDebugger(run);
+}
+
+async function connectOwnerDebugger(run: OwnerRun, timeoutMs = 20_000): Promise<void> {
+  if (!run.child || !run.debuggerEndpoint || new URL(run.debuggerEndpoint).hostname !== '127.0.0.1') {
+    throw new Error('The retained FND-05 debugger reconnect is not bound to the exact loopback owner endpoint.');
+  }
+  const startedAt = Date.now();
   run.browser = await waitForPackagedE2eReady({
     child: run.child,
     label: 'The retained FND-05 DevTools endpoint',
     stderr: () => Buffer.concat(run.stderr).toString('utf8'),
     attempt: async () => {
-      try { return await chromium.connectOverCDP(endpoint); }
+      try { return await chromium.connectOverCDP(run.debuggerEndpoint!); }
       catch { return undefined; }
     },
+    timeoutMs,
   });
   run.context = run.browser.contexts()[0];
   if (!run.context) throw new Error('The retained FND-05 owner has no default browser context.');
   run.context.on('request', (request) => {
     if (!isPermittedRendererUrl(request.url())) run.externalRendererRequests.push(request.url());
   });
-  run.page = await waitForSingleRendererPage(run.context);
+  const pageTimeoutMs = timeoutMs - (Date.now() - startedAt);
+  if (pageTimeoutMs <= 0) throw new Error('The retained FND-05 debugger transport connected after its bounded page-admission deadline.');
+  run.page = await waitForSingleRendererPage(run.context, undefined, pageTimeoutMs);
+}
+
+async function disconnectOwnerDebugger(run: OwnerRun, stallStartedAt: number): Promise<number> {
+  const browser = run.browser;
+  if (!browser?.isConnected() || !run.child || run.child.exitCode !== null) {
+    throw new Error('The retained FND-05 debugger transport cannot detach from a disconnected or stopped owner.');
+  }
+  const detached = await Promise.race([
+    browser.close().then(() => true),
+    new Promise<false>((resolveTimeout) => setTimeout(
+      () => resolveTimeout(false),
+      FND05_UNRESPONSIVE_DEBUGGER_DETACH_TIMEOUT_MS,
+    )),
+  ]);
+  if (!detached || browser.isConnected()) {
+    throw new Error(`The retained FND-05 debugger transport did not fully detach within ${FND05_UNRESPONSIVE_DEBUGGER_DETACH_TIMEOUT_MS} ms.`);
+  }
+  if (run.child.exitCode !== null) throw new Error('The retained FND-05 owner exited while its debugger transport detached.');
+  run.browser = undefined;
+  run.context = undefined;
+  run.page = undefined;
+  const elapsedMs = performance.now() - stallStartedAt;
+  if (elapsedMs > FND05_UNRESPONSIVE_DEBUGGER_DETACH_DEADLINE_MS) {
+    throw new Error(`The retained FND-05 debugger transport detached after the ${FND05_UNRESPONSIVE_DEBUGGER_DETACH_DEADLINE_MS} ms ACK-deadline budget.`);
+  }
+  return elapsedMs;
 }
 
 async function waitForSingleRendererPage(context: BrowserContext, previous?: Page, timeoutMs = 20_000): Promise<Page> {
@@ -252,14 +301,25 @@ async function processRows(profile: string): Promise<Array<{ pid: number; ppid: 
   return parseFnd05OwnedProcesses(stdout, profile);
 }
 
-async function waitForProcessShape(profile: string, expectedOwnerPid: number, previousRendererPid?: number) {
-  const deadline = Date.now() + 20_000;
+async function waitForProcessShape(profile: string, expectedOwnerPid: number, previousRendererPid?: number, timeoutMs = 20_000) {
+  const deadline = Date.now() + timeoutMs;
   let last: Array<{ pid: number; ppid: number; type: string }> = [];
+  const observedReplacementRendererPids = new Set<number>();
   while (Date.now() < deadline) {
     last = await processRows(profile);
+    if (previousRendererPid !== undefined) {
+      for (const entry of last) {
+        if (entry.type === 'renderer' && entry.ppid === expectedOwnerPid && entry.pid !== previousRendererPid) {
+          observedReplacementRendererPids.add(entry.pid);
+        }
+      }
+      if (observedReplacementRendererPids.size > 1) {
+        throw new Error(`The retained FND-05 owner admitted multiple replacement renderer processes: ${JSON.stringify([...observedReplacementRendererPids])}.`);
+      }
+    }
     try {
       const shape = assertFnd05OwnedProcessShape(last, expectedOwnerPid, previousRendererPid);
-      return { rows: last, rendererPid: shape.rendererPid };
+      return { rows: last, rendererPid: shape.rendererPid, observedReplacementRendererPids: [...observedReplacementRendererPids] };
     } catch { /* continue until the exact owner/renderer shape settles */ }
     await new Promise((resolveWait) => setTimeout(resolveWait, 100));
   }
@@ -367,8 +427,9 @@ async function stopOwner(run: OwnerRun, profile: string, secrets: string[]): Pro
     }
   }
   const ownerStopped = Boolean(run.child && run.child.exitCode !== null);
-  // A CDP Browser.close against a live owner is process control, not cleanup.
-  // Disconnect only after the exact owner has already exited on its own.
+  // Normal cleanup waits for the exact owner to exit before closing any remaining
+  // Playwright transport. The unresponsive route's earlier public close is a
+  // separately audited connectOverCDP transport disconnect, never Browser.close.
   if (ownerStopped && run.browser?.isConnected()) await run.browser.close().catch(() => undefined);
   const redacted = ownerStopped ? await redactConnection(run.connectionPath) : { status: 'live-owner-not-stopped' as const };
   if ('secret' in redacted && redacted.secret) secrets.push(redacted.secret);
@@ -676,7 +737,15 @@ test(FND05_UNRESPONSIVE_PACKAGED_SCENARIO, async ({ browserName }, testInfo) => 
     inputKey: 'F24',
     inputAdmission: 'not-attempted',
     inputCommandSettlement: 'not-started',
+    productConfirmationAbsentThroughDebuggerDetach: false,
+    debuggerDetachRequested: false,
+    allDebuggerAttachmentsDetached: false,
+    ownerAliveAfterDebuggerDetach: false,
+    sameOwnerMcpResponsiveAfterDebuggerDetach: false,
     productUnresponsiveConfirmationObserved: false,
+    replacementProcessAdmitted: false,
+    debuggerTransportReconnectAttempted: false,
+    debuggerTransportReconnected: false,
     replacementAdmitted: false,
   };
 
@@ -748,12 +817,6 @@ test(FND05_UNRESPONSIVE_PACKAGED_SCENARIO, async ({ browserName }, testInfo) => 
     });
     expect(locked).toMatchObject({ status: 'locked', conflict: { retryable: true } });
 
-    const replacementEvents: Page[] = [];
-    const onReplacement = (candidate: Page) => {
-      if (candidate.url().startsWith('aidraw://app/')) replacementEvents.push(candidate);
-      else candidate.once('domcontentloaded', () => { if (candidate.url().startsWith('aidraw://app/')) replacementEvents.push(candidate); });
-    };
-    owner.context!.on('page', onReplacement);
     let stallCommandState: 'pending' | 'resolved' | 'rejected' = 'pending';
     const stallStartedAt = performance.now();
     const stallSettlement: Promise<{ status: 'resolved' } | { status: 'rejected'; reason: unknown }> = beforeTarget.session.send('Runtime.evaluate', {
@@ -802,55 +865,97 @@ test(FND05_UNRESPONSIVE_PACKAGED_SCENARIO, async ({ browserName }, testInfo) => 
     }
     unresponsiveProgress.inputAdmission = inputAdmission.status === 'resolved' ? 'admitted' : 'ack-pending';
 
-    await waitForStderrMarker(owner, FND05_UNRESPONSIVE_CONFIRMATION_MARKER, FND05_UNRESPONSIVE_CONFIRMATION_WAIT_MS);
-    unresponsiveProgress.productUnresponsiveConfirmationObserved = true;
-    unresponsiveProgress.productUnresponsiveConfirmationElapsedMs = performance.now() - stallStartedAt;
-
-    const replacementPage = await waitForSingleRendererPage(owner.context!, owner.page, FND05_UNRESPONSIVE_REPLACEMENT_WAIT_MS);
-    const replacementElapsedMs = performance.now() - stallStartedAt;
-    unresponsiveProgress.replacementAdmitted = true;
-    unresponsiveProgress.replacementElapsedMs = replacementElapsedMs;
-    owner.page = replacementPage;
-    await new Promise((resolveWait) => setTimeout(resolveWait, 750));
-    owner.context!.off('page', onReplacement);
-    expect(replacementElapsedMs).toBeGreaterThanOrEqual(FND05_UNRESPONSIVE_POLICY_GRACE_MS);
-    expect(replacementEvents).toHaveLength(1);
-    expect(replacementEvents[0]).toBe(replacementPage);
-    expect(owner.context!.pages().filter((candidate) => !candidate.isClosed() && candidate.url().startsWith('aidraw://app/'))).toEqual([replacementPage]);
-    const replacementTarget = await rendererTarget(replacementPage);
-    const afterProcess = await waitForProcessShape(configured.profile, ownerPid, beforeProcess.rendererPid);
-    expect(replacementTarget.targetId).not.toBe(beforeTarget.targetId);
-    expect(afterProcess.rendererPid).not.toBe(beforeProcess.rendererPid);
-    expect(owner.child!.pid).toBe(ownerConnection.pid);
-    expect((JSON.parse(await readFile(configured.paths.ownerConnection, 'utf8')) as McpConnection).pid).toBe(ownerPid);
-
-    const boundedInputSettlement = await Promise.race([
-      inputSettlement,
-      new Promise<{ status: 'timeout' }>((resolveTimeout) => setTimeout(
-        () => resolveTimeout({ status: 'timeout' }),
-        FND05_UNRESPONSIVE_POST_REPLACEMENT_MARGIN_MS,
-      )),
-    ]);
-    const inputProof = classifyFnd05InputStimulusSettlement(
-      boundedInputSettlement,
-      unresponsiveProgress.inputAdmission,
-      unresponsiveProgress.replacementAdmitted,
-    );
-
-    const boundedSettlement = await Promise.race([
-      stallSettlement,
-      new Promise<{ status: 'timeout' }>((resolveTimeout) => setTimeout(() => resolveTimeout({ status: 'timeout' }), 5_000)),
-    ]);
-    const stallProof = classifyFnd05BoundedStallSettlement(boundedSettlement, {
+    if (Buffer.concat(owner.stderr).includes(Buffer.from(FND05_UNRESPONSIVE_CONFIRMATION_MARKER))) {
+      throw new Error('The retained FND-05 product confirmation appeared before every debugger attachment was detached.');
+    }
+    unresponsiveProgress.debuggerDetachRequested = true;
+    const debuggerDetachedElapsedMs = await disconnectOwnerDebugger(owner, stallStartedAt);
+    if (Buffer.concat(owner.stderr).includes(Buffer.from(FND05_UNRESPONSIVE_CONFIRMATION_MARKER))) {
+      throw new Error('The retained FND-05 product confirmation appeared before the debugger-free boundary was proven.');
+    }
+    unresponsiveProgress.productConfirmationAbsentThroughDebuggerDetach = true;
+    unresponsiveProgress.allDebuggerAttachmentsDetached = true;
+    unresponsiveProgress.debuggerDetachedElapsedMs = debuggerDetachedElapsedMs;
+    unresponsiveProgress.ownerAliveAfterDebuggerDetach = owner.child!.exitCode === null;
+    const occupiedAfterDebuggerDetach = await callMcpTool(ownerConnection.url, client.headers, requestId++, 'session_manage', { action: 'inspect', documentId: canonicalBefore.documentId });
+    expect(occupiedAfterDebuggerDetach).toMatchObject({ workspace: { humanOccupancy: { active: true, locks: [{ objectIds: [canonicalBefore.object.id] }] }, editorAdvisory: { attached: true, documentId: canonicalBefore.documentId } } });
+    unresponsiveProgress.sameOwnerMcpResponsiveAfterDebuggerDetach = true;
+    const debuggerProof = {
       originalRendererAliveBeforeStall: true,
       originalRendererResponsiveBeforeStall: true,
       commandPendingDuringObservation: true,
       originalRendererAliveDuringObservation: duringProcess.rendererPid === beforeProcess.rendererPid,
       sameOwnerMcpResponsiveDuringObservation: true,
-      replacementCount: replacementEvents.length,
-      replacementElapsedMs,
-    });
-    expect(stallProof.command).toBe('rejected-after-confirmed-replacement');
+      inputAdmission: unresponsiveProgress.inputAdmission,
+      productConfirmationAbsentThroughDebuggerDetach: unresponsiveProgress.productConfirmationAbsentThroughDebuggerDetach,
+      allDebuggerAttachmentsDetached: unresponsiveProgress.allDebuggerAttachmentsDetached,
+      debuggerDetachedElapsedMs,
+      ownerAliveAfterDebuggerDetach: unresponsiveProgress.ownerAliveAfterDebuggerDetach,
+      sameOwnerMcpResponsiveAfterDebuggerDetach: unresponsiveProgress.sameOwnerMcpResponsiveAfterDebuggerDetach,
+    };
+    const detachProof = assertFnd05DebuggerDetachProof(debuggerProof);
+    const detachedInputSettlement = await Promise.race([
+      inputSettlement,
+      new Promise<{ status: 'timeout' }>((resolveTimeout) => setTimeout(
+        () => resolveTimeout({ status: 'timeout' }),
+        FND05_UNRESPONSIVE_DEBUGGER_DETACH_TIMEOUT_MS,
+      )),
+    ]);
+    const inputProof = classifyFnd05DebuggerDetachCommandSettlement(
+      detachedInputSettlement,
+      'Input.dispatchKeyEvent',
+      debuggerProof,
+    );
+    const detachedStallSettlement = await Promise.race([
+      stallSettlement,
+      new Promise<{ status: 'timeout' }>((resolveTimeout) => setTimeout(
+        () => resolveTimeout({ status: 'timeout' }),
+        FND05_UNRESPONSIVE_DEBUGGER_DETACH_TIMEOUT_MS,
+      )),
+    ]);
+    const stallProof = classifyFnd05DebuggerDetachCommandSettlement(
+      detachedStallSettlement,
+      'Runtime.evaluate',
+      debuggerProof,
+    );
+
+    const untilPolicyFloorMs = FND05_UNRESPONSIVE_POLICY_GRACE_MS - (performance.now() - stallStartedAt);
+    if (untilPolicyFloorMs > 0) await new Promise((resolveWait) => setTimeout(resolveWait, untilPolicyFloorMs));
+    const beforePolicyProcess = await waitForProcessShape(configured.profile, ownerPid);
+    expect(beforePolicyProcess.rendererPid).toBe(beforeProcess.rendererPid);
+
+    const confirmationDeadline = stallStartedAt
+      + FND05_UNRESPONSIVE_DEBUGGER_DETACH_DEADLINE_MS
+      + FND05_UNRESPONSIVE_CONFIRMATION_WAIT_MS;
+    const confirmationBudgetMs = Math.floor(confirmationDeadline - performance.now());
+    if (confirmationBudgetMs <= 0) throw new Error('The retained FND-05 debugger-free product-confirmation deadline elapsed before observation.');
+    await waitForStderrMarker(owner, FND05_UNRESPONSIVE_CONFIRMATION_MARKER, confirmationBudgetMs);
+    unresponsiveProgress.productUnresponsiveConfirmationObserved = true;
+    unresponsiveProgress.productUnresponsiveConfirmationElapsedMs = performance.now() - stallStartedAt;
+
+    const replacementDeadline = performance.now() + FND05_UNRESPONSIVE_REPLACEMENT_WAIT_MS;
+    const afterProcess = await waitForProcessShape(configured.profile, ownerPid, beforeProcess.rendererPid, FND05_UNRESPONSIVE_REPLACEMENT_WAIT_MS);
+    unresponsiveProgress.replacementProcessAdmitted = true;
+    const reconnectBudgetMs = Math.floor(replacementDeadline - performance.now());
+    if (reconnectBudgetMs <= 0) throw new Error('The retained FND-05 replacement process left no bounded debugger reconnect budget.');
+    unresponsiveProgress.debuggerTransportReconnectAttempted = true;
+    await connectOwnerDebugger(owner, reconnectBudgetMs);
+    unresponsiveProgress.debuggerTransportReconnected = true;
+    unresponsiveProgress.debuggerTransportReconnectedElapsedMs = performance.now() - stallStartedAt;
+    const replacementPage = owner.page!;
+    const replacementElapsedMs = performance.now() - stallStartedAt;
+    unresponsiveProgress.replacementAdmitted = true;
+    unresponsiveProgress.replacementElapsedMs = replacementElapsedMs;
+    expect(replacementElapsedMs).toBeGreaterThanOrEqual(FND05_UNRESPONSIVE_POLICY_GRACE_MS);
+    expect(owner.context!.pages().filter((candidate) => !candidate.isClosed() && candidate.url().startsWith('aidraw://app/'))).toEqual([replacementPage]);
+    const replacementTarget = await rendererTarget(replacementPage);
+    expect(replacementTarget.targetId).not.toBe(beforeTarget.targetId);
+    expect(afterProcess.rendererPid).not.toBe(beforeProcess.rendererPid);
+    expect(afterProcess.observedReplacementRendererPids).toEqual([afterProcess.rendererPid]);
+    expect(owner.child!.pid).toBe(ownerConnection.pid);
+    expect((JSON.parse(await readFile(configured.paths.ownerConnection, 'utf8')) as McpConnection).pid).toBe(ownerPid);
+
+    expect(stallProof.command).toBe('rejected-after-debugger-detach');
 
     const inspectedAfterDetach = await callMcpTool(ownerConnection.url, client.headers, requestId++, 'session_manage', { action: 'inspect', documentId: canonicalBefore.documentId });
     expect(inspectedAfterDetach).toMatchObject({ workspace: { humanOccupancy: { active: false, locks: [] }, editorAdvisory: { attached: true, documentId: canonicalBefore.documentId } } });
@@ -943,10 +1048,11 @@ test(FND05_UNRESPONSIVE_PACKAGED_SCENARIO, async ({ browserName }, testInfo) => 
         productionHookAdded: false,
       },
       rendererStall: {
-        mechanism: `bounded ${FND05_UNRESPONSIVE_STALL_MS} ms synchronous Runtime.evaluate followed by one target-local F24 raw-key input in the exact isolated renderer`,
+        mechanism: `bounded ${FND05_UNRESPONSIVE_STALL_MS} ms synchronous Runtime.evaluate followed by one target-local F24 raw-key input, complete public connectOverCDP transport detach before the ACK deadline, then bounded reconnect after the exact product confirmation`,
         observationMs: FND05_UNRESPONSIVE_OBSERVATION_MS,
         declaredPolicyGraceMs: FND05_UNRESPONSIVE_POLICY_GRACE_MS,
         inputAdmissionWaitMs: FND05_UNRESPONSIVE_INPUT_ADMISSION_WAIT_MS,
+        debuggerDetachDeadlineMs: FND05_UNRESPONSIVE_DEBUGGER_DETACH_DEADLINE_MS,
         productConfirmationWaitMs: FND05_UNRESPONSIVE_CONFIRMATION_WAIT_MS,
         replacementWaitMs: FND05_UNRESPONSIVE_REPLACEMENT_WAIT_MS,
         beforeTargetId: beforeTarget.targetId,
@@ -958,12 +1064,28 @@ test(FND05_UNRESPONSIVE_PACKAGED_SCENARIO, async ({ browserName }, testInfo) => 
           key: unresponsiveProgress.inputKey,
           targetId: unresponsiveProgress.inputTargetId,
           admission: unresponsiveProgress.inputAdmission,
-          settlement: inputProof.inputCommand,
+          settlement: inputProof.command,
           physicalKeyboardStateChanged: false,
+        },
+        debuggerTransport: {
+          method: 'public Playwright connectOverCDP Browser.close transport disconnect',
+          allAttachmentsDetached: detachProof.allDebuggerAttachmentsDetached,
+          detachedElapsedMs: detachProof.debuggerDetachedElapsedMs,
+          ownerAliveAfterDetach: detachProof.ownerAliveAfterDebuggerDetach,
+          sameOwnerMcpResponsiveAfterDetach: detachProof.sameOwnerMcpResponsiveAfterDebuggerDetach,
+          productConfirmationAbsentThroughDetach: unresponsiveProgress.productConfirmationAbsentThroughDebuggerDetach,
+          productConfirmationObservedBeforeReconnect: true,
+          reconnectAttempted: unresponsiveProgress.debuggerTransportReconnectAttempted,
+          reconnected: unresponsiveProgress.debuggerTransportReconnected,
+          reconnectedElapsedMs: unresponsiveProgress.debuggerTransportReconnectedElapsedMs,
+          browserCloseProtocolSent: false,
         },
         productUnresponsiveConfirmationObserved: true,
         productUnresponsiveConfirmationElapsedMs: unresponsiveProgress.productUnresponsiveConfirmationElapsedMs,
-        ...stallProof,
+        stallCommand: stallProof.command,
+        replacementCount: 1,
+        replacementElapsedMs,
+        oldTargetAbsentAfterReconnect: true,
       },
       ownerContinuity: {
         ownerPid,

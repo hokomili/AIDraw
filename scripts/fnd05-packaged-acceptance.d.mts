@@ -46,11 +46,13 @@ export const FND05_UNRESPONSIVE_POLICY_GRACE_MS: 10000;
 export const FND05_UNRESPONSIVE_OBSERVATION_MS: 2000;
 export const FND05_UNRESPONSIVE_INPUT_ACK_BUDGET_MS: 15000;
 export const FND05_UNRESPONSIVE_INPUT_ADMISSION_WAIT_MS: 1000;
+export const FND05_UNRESPONSIVE_DEBUGGER_DETACH_TIMEOUT_MS: 2000;
+export const FND05_UNRESPONSIVE_DEBUGGER_DETACH_DEADLINE_MS: 5000;
 export const FND05_UNRESPONSIVE_CONFIRMATION_MARGIN_MS: 10000;
 export const FND05_UNRESPONSIVE_CONFIRMATION_WAIT_MS: 35000;
 export const FND05_UNRESPONSIVE_REPLACEMENT_WAIT_MS: 15000;
 export const FND05_UNRESPONSIVE_POST_REPLACEMENT_MARGIN_MS: 10000;
-export const FND05_UNRESPONSIVE_STALL_MS: 62000;
+export const FND05_UNRESPONSIVE_STALL_MS: 65000;
 export const FND05_UNRESPONSIVE_STALL_EXPRESSION: string;
 export const FND05_UNRESPONSIVE_INPUT_EVENT: Readonly<{
   type: 'rawKeyDown';
@@ -94,36 +96,41 @@ export function assertFnd05UnresponsiveSafeReporterEnvironment(environment?: Nod
 export function inspectFnd05EncryptedToken(value: unknown, liveToken: string): { version: 1; encryption: 'electron-safe-storage'; encryptedValuePresent: true };
 export function classifyFnd05UnresponsiveFailureStage(progress?: {
   inputAdmission?: 'not-attempted' | 'admitted' | 'ack-pending' | 'rejected';
+  allDebuggerAttachmentsDetached?: boolean;
   productUnresponsiveConfirmationObserved?: boolean;
+  replacementProcessAdmitted?: boolean;
+  debuggerTransportReconnected?: boolean;
   replacementAdmitted?: boolean;
-}): 'pre-input-stimulus' | 'input-stimulus-not-admitted' | 'input-stimulus-admission-unconfirmed' | 'product-unresponsive-confirmation-not-observed' | 'replacement-not-admitted' | 'post-replacement-assertion';
-export function classifyFnd05InputStimulusSettlement(
-  settlement: { status: 'resolved' } | { status: 'rejected'; reason: unknown } | { status: 'timeout' },
-  admission: 'admitted' | 'ack-pending' | 'not-attempted' | 'rejected',
-  replacementAdmitted: boolean,
-): { inputCommand: 'resolved-after-browser-admission' | 'rejected-after-confirmed-replacement' };
+}): 'pre-input-stimulus' | 'input-stimulus-not-admitted' | 'input-stimulus-admission-unconfirmed' | 'debugger-detach-not-completed' | 'product-unresponsive-confirmation-not-observed' | 'replacement-not-admitted' | 'debugger-transport-reconnect-not-completed' | 'post-replacement-assertion';
 export function assertFnd05OwnedProcessShape(
   rows: Array<{ pid: number; ppid: number; type: string }>,
   expectedOwnerPid: number,
   previousRendererPid?: number,
 ): { ownerPid: number; rendererPid: number };
-export function classifyFnd05BoundedStallSettlement(
+export interface Fnd05DebuggerDetachProof {
+  originalRendererAliveBeforeStall: boolean;
+  originalRendererResponsiveBeforeStall: boolean;
+  commandPendingDuringObservation: boolean;
+  originalRendererAliveDuringObservation: boolean;
+  sameOwnerMcpResponsiveDuringObservation: boolean;
+  inputAdmission: 'admitted' | 'ack-pending' | 'not-attempted' | 'rejected';
+  productConfirmationAbsentThroughDebuggerDetach: boolean;
+  allDebuggerAttachmentsDetached: boolean;
+  debuggerDetachedElapsedMs: number;
+  ownerAliveAfterDebuggerDetach: boolean;
+  sameOwnerMcpResponsiveAfterDebuggerDetach: boolean;
+}
+export function assertFnd05DebuggerDetachProof(proof: Fnd05DebuggerDetachProof): {
+  allDebuggerAttachmentsDetached: true;
+  debuggerDetachedElapsedMs: number;
+  ownerAliveAfterDebuggerDetach: true;
+  sameOwnerMcpResponsiveAfterDebuggerDetach: true;
+};
+export function classifyFnd05DebuggerDetachCommandSettlement(
   settlement: { status: 'resolved' } | { status: 'rejected'; reason: unknown } | { status: 'timeout' },
-  proof: {
-    originalRendererAliveBeforeStall: boolean;
-    originalRendererResponsiveBeforeStall: boolean;
-    commandPendingDuringObservation: boolean;
-    originalRendererAliveDuringObservation: boolean;
-    sameOwnerMcpResponsiveDuringObservation: boolean;
-    replacementCount: number;
-    replacementElapsedMs: number;
-  },
+  method: 'Runtime.evaluate' | 'Input.dispatchKeyEvent',
+  proof: Fnd05DebuggerDetachProof,
 ): {
-  originalRendererAliveBeforeStall: true;
-  commandPendingDuringObservation: true;
-  originalRendererAliveDuringObservation: true;
-  sameOwnerMcpResponsiveDuringObservation: true;
-  replacementCount: 1;
-  replacementElapsedMs: number;
-  command: 'rejected-after-confirmed-replacement';
+  method: 'Runtime.evaluate' | 'Input.dispatchKeyEvent';
+  command: 'resolved-after-browser-admission' | 'rejected-after-debugger-detach';
 };

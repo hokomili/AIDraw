@@ -6,9 +6,9 @@ import { promisify } from 'node:util';
 import {
   assertFnd05OwnedProcessShape,
   assertFnd05EvidenceRedacted,
+  assertFnd05DebuggerDetachProof,
   assertFnd05UnresponsiveSafeReporterEnvironment,
-  classifyFnd05BoundedStallSettlement,
-  classifyFnd05InputStimulusSettlement,
+  classifyFnd05DebuggerDetachCommandSettlement,
   classifyFnd05UnresponsiveFailureStage,
   FND05_PACKAGED_ASAR_HASH_ENV,
   FND05_PACKAGED_EXE_HASH_ENV,
@@ -18,6 +18,8 @@ import {
   FND05_UNRESPONSIVE_CONFIRMATION_MARGIN_MS,
   FND05_UNRESPONSIVE_CONFIRMATION_MARKER,
   FND05_UNRESPONSIVE_CONFIRMATION_WAIT_MS,
+  FND05_UNRESPONSIVE_DEBUGGER_DETACH_DEADLINE_MS,
+  FND05_UNRESPONSIVE_DEBUGGER_DETACH_TIMEOUT_MS,
   FND05_UNRESPONSIVE_DISCOVERY_ENV,
   FND05_UNRESPONSIVE_EXE_HASH_ENV,
   FND05_UNRESPONSIVE_FAILURE_PREFIX,
@@ -209,23 +211,30 @@ describe('FND-05 retained exact-package acceptance boundary', () => {
     expect(() => assertFnd05OwnedProcessShape(rows, 999)).toThrow(/one expected owner/);
   });
 
-  it('binds the bounded stall to the production grace and accepts only retirement of a proven post-policy target', () => {
+  it('binds the bounded stall to a complete pre-ACK debugger detach and rejects unrelated command settlements', () => {
     expect(FND05_UNRESPONSIVE_POLICY_GRACE_MS).toBe(EDITOR_RENDERER_UNRESPONSIVE_GRACE_MS);
     expect(FND05_UNRESPONSIVE_OBSERVATION_MS).toBeLessThan(FND05_UNRESPONSIVE_POLICY_GRACE_MS);
     expect(FND05_UNRESPONSIVE_INPUT_ACK_BUDGET_MS).toBe(15_000);
     expect(FND05_UNRESPONSIVE_INPUT_ADMISSION_WAIT_MS).toBeLessThan(FND05_UNRESPONSIVE_OBSERVATION_MS);
+    expect(FND05_UNRESPONSIVE_DEBUGGER_DETACH_TIMEOUT_MS).toBe(2_000);
+    expect(FND05_UNRESPONSIVE_DEBUGGER_DETACH_DEADLINE_MS).toBe(
+      FND05_UNRESPONSIVE_OBSERVATION_MS
+        + FND05_UNRESPONSIVE_INPUT_ADMISSION_WAIT_MS
+        + FND05_UNRESPONSIVE_DEBUGGER_DETACH_TIMEOUT_MS,
+    );
+    expect(FND05_UNRESPONSIVE_DEBUGGER_DETACH_DEADLINE_MS).toBeLessThan(FND05_UNRESPONSIVE_INPUT_ACK_BUDGET_MS);
     expect(FND05_UNRESPONSIVE_CONFIRMATION_WAIT_MS).toBe(
       FND05_UNRESPONSIVE_INPUT_ACK_BUDGET_MS
         + FND05_UNRESPONSIVE_POLICY_GRACE_MS
         + FND05_UNRESPONSIVE_CONFIRMATION_MARGIN_MS,
     );
     expect(FND05_UNRESPONSIVE_STALL_MS).toBe(
-      FND05_UNRESPONSIVE_OBSERVATION_MS
+      FND05_UNRESPONSIVE_DEBUGGER_DETACH_DEADLINE_MS
         + FND05_UNRESPONSIVE_CONFIRMATION_WAIT_MS
         + FND05_UNRESPONSIVE_REPLACEMENT_WAIT_MS
         + FND05_UNRESPONSIVE_POST_REPLACEMENT_MARGIN_MS,
     );
-    expect(FND05_UNRESPONSIVE_STALL_MS).toBe(62_000);
+    expect(FND05_UNRESPONSIVE_STALL_MS).toBe(65_000);
     expect(FND05_UNRESPONSIVE_STALL_EXPRESSION).toContain('performance.now()');
     expect(FND05_UNRESPONSIVE_STALL_EXPRESSION).toContain(String(FND05_UNRESPONSIVE_STALL_MS));
     expect(FND05_UNRESPONSIVE_STALL_EXPRESSION).not.toMatch(/aidraw|ipc|preload|fetch|WebSocket|Page\.crash/);
@@ -235,31 +244,42 @@ describe('FND-05 retained exact-package acceptance boundary', () => {
       commandPendingDuringObservation: true,
       originalRendererAliveDuringObservation: true,
       sameOwnerMcpResponsiveDuringObservation: true,
-      replacementCount: 1,
-      replacementElapsedMs: FND05_UNRESPONSIVE_POLICY_GRACE_MS + 1,
+      inputAdmission: 'ack-pending' as const,
+      productConfirmationAbsentThroughDebuggerDetach: true,
+      allDebuggerAttachmentsDetached: true,
+      debuggerDetachedElapsedMs: FND05_UNRESPONSIVE_DEBUGGER_DETACH_DEADLINE_MS - 1,
+      ownerAliveAfterDebuggerDetach: true,
+      sameOwnerMcpResponsiveAfterDebuggerDetach: true,
     };
-    expect(classifyFnd05BoundedStallSettlement(
+    expect(assertFnd05DebuggerDetachProof(proof)).toMatchObject({
+      allDebuggerAttachmentsDetached: true,
+      ownerAliveAfterDebuggerDetach: true,
+    });
+    expect(classifyFnd05DebuggerDetachCommandSettlement(
       { status: 'rejected', reason: new Error('cdpSession.send: Protocol error (Runtime.evaluate): Target closed') },
+      'Runtime.evaluate',
       proof,
-    )).toMatchObject({ command: 'rejected-after-confirmed-replacement', replacementCount: 1 });
-    expect(classifyFnd05BoundedStallSettlement(
+    )).toEqual({ method: 'Runtime.evaluate', command: 'rejected-after-debugger-detach' });
+    expect(classifyFnd05DebuggerDetachCommandSettlement(
+      { status: 'resolved' },
+      'Input.dispatchKeyEvent',
+      { ...proof, inputAdmission: 'admitted' },
+    )).toEqual({ method: 'Input.dispatchKeyEvent', command: 'resolved-after-browser-admission' });
+    expect(classifyFnd05DebuggerDetachCommandSettlement(
       { status: 'rejected', reason: new Error('cdpSession.send: Target page, context or browser has been closed') },
+      'Input.dispatchKeyEvent',
       proof,
-    )).toMatchObject({ command: 'rejected-after-confirmed-replacement' });
-    expect(() => classifyFnd05BoundedStallSettlement({ status: 'resolved' }, proof)).toThrow(/did not settle by retirement/);
-    expect(() => classifyFnd05BoundedStallSettlement({ status: 'timeout' }, proof)).toThrow(/did not settle by retirement/);
-    expect(() => classifyFnd05BoundedStallSettlement(
+    )).toEqual({ method: 'Input.dispatchKeyEvent', command: 'rejected-after-debugger-detach' });
+    expect(() => classifyFnd05DebuggerDetachCommandSettlement({ status: 'resolved' }, 'Runtime.evaluate', proof)).toThrow(/resolved unexpectedly/);
+    expect(() => classifyFnd05DebuggerDetachCommandSettlement({ status: 'timeout' }, 'Runtime.evaluate', proof)).toThrow(/did not settle/);
+    expect(() => classifyFnd05DebuggerDetachCommandSettlement(
       { status: 'rejected', reason: new Error('cdpSession.send: Protocol error (Runtime.evaluate): Permission denied: Target closed') },
+      'Runtime.evaluate',
       proof,
     )).toThrow(/unrelated reason/);
-    expect(() => classifyFnd05BoundedStallSettlement(
-      { status: 'rejected', reason: new Error('cdpSession.send: Protocol error (Runtime.evaluate): Target closed') },
-      { ...proof, replacementElapsedMs: FND05_UNRESPONSIVE_POLICY_GRACE_MS - 1 },
-    )).toThrow(/post-policy replacement/);
-    expect(() => classifyFnd05BoundedStallSettlement(
-      { status: 'rejected', reason: new Error('cdpSession.send: Protocol error (Runtime.evaluate): Target closed') },
-      { ...proof, sameOwnerMcpResponsiveDuringObservation: false },
-    )).toThrow(/same-owner MCP continuity/);
+    expect(() => assertFnd05DebuggerDetachProof({ ...proof, debuggerDetachedElapsedMs: FND05_UNRESPONSIVE_DEBUGGER_DETACH_DEADLINE_MS + 1 })).toThrow(/before the ACK deadline/);
+    expect(() => assertFnd05DebuggerDetachProof({ ...proof, productConfirmationAbsentThroughDebuggerDetach: false })).toThrow(/complete debugger detach/);
+    expect(() => assertFnd05DebuggerDetachProof({ ...proof, sameOwnerMcpResponsiveAfterDebuggerDetach: false })).toThrow(/same-owner continuity/);
   });
 
   it('uses one exact-target benign input ACK stimulus and classifies private failure progress without overclaiming', () => {
@@ -280,25 +300,11 @@ describe('FND-05 retained exact-package acceptance boundary', () => {
     expect(classifyFnd05UnresponsiveFailureStage()).toBe('pre-input-stimulus');
     expect(classifyFnd05UnresponsiveFailureStage({ inputAdmission: 'rejected' })).toBe('input-stimulus-not-admitted');
     expect(classifyFnd05UnresponsiveFailureStage({ inputAdmission: 'unexpected' as never })).toBe('input-stimulus-admission-unconfirmed');
-    expect(classifyFnd05UnresponsiveFailureStage({ inputAdmission: 'ack-pending' })).toBe('product-unresponsive-confirmation-not-observed');
-    expect(classifyFnd05UnresponsiveFailureStage({ inputAdmission: 'admitted' })).toBe('product-unresponsive-confirmation-not-observed');
-    expect(classifyFnd05UnresponsiveFailureStage({ inputAdmission: 'admitted', productUnresponsiveConfirmationObserved: true })).toBe('replacement-not-admitted');
-    expect(classifyFnd05UnresponsiveFailureStage({ inputAdmission: 'ack-pending', productUnresponsiveConfirmationObserved: true, replacementAdmitted: true })).toBe('post-replacement-assertion');
-
-    expect(classifyFnd05InputStimulusSettlement({ status: 'resolved' }, 'admitted', true)).toEqual({ inputCommand: 'resolved-after-browser-admission' });
-    expect(classifyFnd05InputStimulusSettlement(
-      { status: 'rejected', reason: new Error('cdpSession.send: Protocol error (Input.dispatchKeyEvent): Target closed') },
-      'ack-pending',
-      true,
-    )).toEqual({ inputCommand: 'rejected-after-confirmed-replacement' });
-    expect(() => classifyFnd05InputStimulusSettlement(
-      { status: 'rejected', reason: new Error('cdpSession.send: Protocol error (Input.dispatchKeyEvent): Permission denied') },
-      'admitted',
-      true,
-    )).toThrow(/unrelated reason/);
-    expect(() => classifyFnd05InputStimulusSettlement({ status: 'timeout' }, 'ack-pending', true)).toThrow(/bounded post-replacement wait/);
-    expect(() => classifyFnd05InputStimulusSettlement({ status: 'resolved' }, 'not-attempted', true)).toThrow(/not admitted or observed pending/);
-    expect(() => classifyFnd05InputStimulusSettlement({ status: 'resolved' }, 'admitted', false)).toThrow(/before one replacement/);
+    expect(classifyFnd05UnresponsiveFailureStage({ inputAdmission: 'ack-pending' })).toBe('debugger-detach-not-completed');
+    expect(classifyFnd05UnresponsiveFailureStage({ inputAdmission: 'admitted', allDebuggerAttachmentsDetached: true })).toBe('product-unresponsive-confirmation-not-observed');
+    expect(classifyFnd05UnresponsiveFailureStage({ inputAdmission: 'admitted', allDebuggerAttachmentsDetached: true, productUnresponsiveConfirmationObserved: true })).toBe('replacement-not-admitted');
+    expect(classifyFnd05UnresponsiveFailureStage({ inputAdmission: 'admitted', allDebuggerAttachmentsDetached: true, productUnresponsiveConfirmationObserved: true, replacementProcessAdmitted: true })).toBe('debugger-transport-reconnect-not-completed');
+    expect(classifyFnd05UnresponsiveFailureStage({ inputAdmission: 'ack-pending', allDebuggerAttachmentsDetached: true, productUnresponsiveConfirmationObserved: true, replacementProcessAdmitted: true, debuggerTransportReconnected: true, replacementAdmitted: true })).toBe('post-replacement-assertion');
   });
 
   it('keeps token/ciphertext values out of reporter surfaces and rejects credential-capable reporters', () => {
@@ -323,7 +329,7 @@ describe('FND-05 retained exact-package acceptance boundary', () => {
   });
 
   it('orders the exact-target stall and benign input before product confirmation and keeps the wrapper private and graceful-only', async () => {
-    const [source, wrapper, config, mainSource, preloadSource, rendererAppSource, rendererShortcutSource, electronTypes, electronPackageText, playwrightArtifacts] = await Promise.all([
+    const [source, wrapper, config, mainSource, preloadSource, rendererAppSource, rendererShortcutSource, electronTypes, electronPackageText, playwrightArtifacts, playwrightCore] = await Promise.all([
       readFile(resolve('tests/e2e/stale-renderer-recovery.spec.ts'), 'utf8'),
       readFile(resolve('scripts/run-fnd05-unresponsive-acceptance.mjs'), 'utf8'),
       readFile(resolve('playwright.fnd05-unresponsive.config.ts'), 'utf8'),
@@ -334,6 +340,7 @@ describe('FND-05 retained exact-package acceptance boundary', () => {
       readFile(resolve('node_modules/electron/electron.d.ts'), 'utf8'),
       readFile(resolve('node_modules/electron/package.json'), 'utf8'),
       readFile(resolve('node_modules/playwright/lib/index.js'), 'utf8'),
+      readFile(resolve('node_modules/playwright-core/lib/coreBundle.js'), 'utf8'),
     ]);
     const start = source.indexOf('test(FND05_UNRESPONSIVE_PACKAGED_SCENARIO');
     expect(start).toBeGreaterThan(0);
@@ -347,14 +354,24 @@ describe('FND-05 retained exact-package acceptance boundary', () => {
     const stallIndex = acceptance.indexOf("beforeTarget.session.send('Runtime.evaluate'");
     const observationIndex = acceptance.indexOf('await new Promise((resolveWait) => setTimeout(resolveWait, FND05_UNRESPONSIVE_OBSERVATION_MS))');
     const inputIndex = acceptance.indexOf("'Input.dispatchKeyEvent'", observationIndex);
+    const prematureConfirmationGuardIndex = acceptance.indexOf('product confirmation appeared before every debugger attachment was detached', inputIndex);
+    const detachIndex = acceptance.indexOf('disconnectOwnerDebugger(owner, stallStartedAt)', inputIndex);
+    const debuggerFreeConfirmationGuardIndex = acceptance.indexOf('product confirmation appeared before the debugger-free boundary was proven', detachIndex);
     const confirmationIndex = acceptance.indexOf('waitForStderrMarker(owner, FND05_UNRESPONSIVE_CONFIRMATION_MARKER');
-    const replacementIndex = acceptance.indexOf('waitForSingleRendererPage(owner.context!, owner.page, FND05_UNRESPONSIVE_REPLACEMENT_WAIT_MS)');
+    const reconnectIndex = acceptance.indexOf('connectOwnerDebugger(owner, reconnectBudgetMs)', confirmationIndex);
+    const replacementIndex = acceptance.indexOf('const replacementPage = owner.page!', reconnectIndex);
     expect(stallIndex).toBeGreaterThanOrEqual(0);
     expect(observationIndex).toBeGreaterThan(stallIndex);
     expect(inputIndex).toBeGreaterThan(observationIndex);
-    expect(confirmationIndex).toBeGreaterThan(inputIndex);
-    expect(replacementIndex).toBeGreaterThan(confirmationIndex);
+    expect(prematureConfirmationGuardIndex).toBeGreaterThan(inputIndex);
+    expect(detachIndex).toBeGreaterThan(prematureConfirmationGuardIndex);
+    expect(debuggerFreeConfirmationGuardIndex).toBeGreaterThan(detachIndex);
+    expect(confirmationIndex).toBeGreaterThan(debuggerFreeConfirmationGuardIndex);
+    expect(reconnectIndex).toBeGreaterThan(confirmationIndex);
+    expect(replacementIndex).toBeGreaterThan(reconnectIndex);
     expect(acceptance).toContain('replacementElapsedMs');
+    expect(acceptance).toContain('allDebuggerAttachmentsDetached');
+    expect(acceptance).toContain('debuggerTransportReconnected');
     expect(acceptance).toContain("AIDRAW_E2E_FND05_UNRESPONSIVE_WRAPPER !== '1'");
     expect(acceptance).toContain('assertFnd05UnresponsiveSafeReporterEnvironment()');
     expect(acceptance).toContain("testInfo.project.metadata.suite !== 'retained-fnd05-unresponsive-renderer'");
@@ -364,6 +381,9 @@ describe('FND-05 retained exact-package acceptance boundary', () => {
     expect(acceptance).not.toContain('Page.crash');
     expect(acceptance).not.toContain('injectRendererRecoveryTestEvent');
     expect(acceptance).not.toContain('renderer-recovery:test-event');
+    expect(acceptance).not.toContain("session.send('Browser.close'");
+    expect(acceptance).not.toContain('Target.detachFromTarget');
+    expect(acceptance).not.toMatch(/\._(?:channel|connection|transport)\b/);
     expect(acceptance).not.toMatch(/\.kill\s*\(/);
     expect(acceptance).not.toMatch(/\brm\s*\(/);
     expect(mainSource).not.toContain('FND05_UNRESPONSIVE_STALL_EXPRESSION');
@@ -389,6 +409,18 @@ describe('FND-05 retained exact-package acceptance boundary', () => {
     expect(config).toContain("AIDRAW_E2E_FND05_UNRESPONSIVE_WRAPPER !== '1'");
     expect(config).not.toContain("['html'");
     expect(playwrightArtifacts).toMatch(/if \(process\.env\.PLAYWRIGHT_NO_COPY_PROMPT\)\s+return;/);
+
+    const cdpConnectStart = playwrightCore.indexOf('async _connectOverCDPInternal(progress2, endpointURL, options, onClose)');
+    const cdpConnectEnd = playwrightCore.indexOf('async connectToTransport', cdpConnectStart);
+    expect(cdpConnectStart).toBeGreaterThan(0);
+    expect(cdpConnectEnd).toBeGreaterThan(cdpConnectStart);
+    const cdpConnectImplementation = playwrightCore.slice(cdpConnectStart, cdpConnectEnd);
+    expect(cdpConnectImplementation).toContain('const closeAndWait = async () => await chromeTransport.closeAndWait()');
+    expect(cdpConnectImplementation).toContain('const browserProcess = { close: doClose, kill: doClose }');
+    expect(cdpConnectImplementation).not.toContain('method: "Browser.close"');
+    expect(playwrightCore).toContain('Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }');
+    expect(playwrightCore).toContain('attemptToGracefullyCloseBrowser(transport)');
+    expect(playwrightCore).toContain('const message = { method: "Browser.close"');
   });
 
   it('discovers exactly the dedicated alive-hang selector through real Playwright without creating run roots', async () => {
@@ -427,7 +459,7 @@ describe('FND-05 retained exact-package acceptance boundary', () => {
     for (const path of roots) expect(await access(path).then(() => true, () => false), `${path} must remain absent`).toBe(false);
   });
 
-  it('records consumed alive-hang r1/r2 and the input-ACK controller correction while keeping Working/P0 nonclaims', async () => {
+  it('records consumed alive-hang r1/r2/r3 and the debugger-detach correction while keeping Working/P0 nonclaims', async () => {
     const [changelog, tracker, testing] = await Promise.all([
       readFile(resolve('CHANGELOG.md'), 'utf8'),
       readFile(resolve('docs/FEATURE_TRACKER.md'), 'utf8'),
@@ -440,37 +472,45 @@ describe('FND-05 retained exact-package acceptance boundary', () => {
     const truth = fnd05?.truth ?? '';
     for (const claim of [
       '20260814t023118z-eab3063-r1',
-      'exited 1 during pinned Playwright discovery',
+      'failed before launch during Playwright callback discovery',
       '20260814t030554z-d082ab7-r2',
-      '1/1 failed in 54.8 seconds',
-      '62,000 ms renderer-only CDP stall',
+      '20260814t040447z-b111d9b-r3',
+      '1/1 failed in 40.7 seconds',
+      '5,000 ms',
+      '65,000 ms',
       'F24',
-      'input-event ACK',
-      '10,000 ms floor',
-      'real launch-free dedicated Playwright `--list` regression',
-      'No packaged alive-hang PASS exists',
+      'DevToolsAgentHost',
+      'closeAndWait',
+      '**10,000 ms** no-replacement floor',
+      'alive-hang route has no PASS',
       'Renderer-local work never submitted to the canonical engine is not promised',
     ]) expect(truth).toContain(claim);
-    expect(truth).toContain('fresh native packaged alive-hang PASS, and broader platforms remain open');
+    expect(truth).toContain('fresh packaged alive-hang PASS, broader platforms');
 
     const changelogEntry = changelog.split(/\r?\n/u).find((line) => line.startsWith('- Prepare a separate retained exact-package acceptance')) ?? '';
     expect(changelogEntry).toContain('Consumed r1 remains the immutable pre-launch Playwright callback-discovery failure');
-    expect(changelogEntry).toContain('no distinct trusted renderer appeared within 50 seconds');
-    expect(changelogEntry).toContain('input-event ACK');
+    expect(changelogEntry).toContain('Consumed r3');
+    expect(changelogEntry).toContain('no exact AIDraw unresponsive-confirmation marker appeared within 35,000 ms');
+    expect(changelogEntry).toContain('ShouldIgnoreUnresponsiveRenderer');
+    expect(changelogEntry).toContain('public `connectOverCDP`');
+    expect(changelogEntry).toContain('rather than protocol `Browser.close`');
     expect(changelogEntry).toContain('F24');
     expect(changelogEntry).toContain('renderer-local work never submitted to the canonical engine');
     expect(testing).toContain('Thirteen exact-checkpoint cases');
-    expect(testing).toContain('### FND-05 alive-but-unresponsive controller, consumed r1/r2, and input-ACK correction');
+    expect(testing).toContain('### FND-05 alive-but-unresponsive controller, consumed r1/r2/r3, and debugger-detach correction');
     expect(testing).toContain('exited 1 before any application/helper launch, stall, or product assertion');
     expect(testing).toContain('object-destructures the built-in `browserName` fixture');
     expect(testing).toContain('spawns the pinned local Playwright CLI');
     expect(testing).toContain('These are naming templates, not reserved or runnable identities');
-    expect(testing).toContain('Consumed r1 remains immutable and non-reusable');
-    expect(testing).toContain('Consumed r2 remains immutable and non-reusable');
-    expect(testing).toContain('Chromium 150.0.7871.224');
-    expect(testing).toContain('`StartInputEventAckTimeout`');
+    expect(testing).toContain('Consumed r1/r2/r3 remain immutable and non-reusable');
+    expect(testing).toContain('Chromium **150.0.7871.224**');
+    expect(testing).toContain('`ShouldIgnoreUnresponsiveRenderer()`');
+    expect(testing).toContain('one-shot in-flight input-event ACK timer');
+    expect(testing).toContain('public `browser.close()` is wired to the WebSocket transport');
+    expect(testing).toContain('**5,000 ms** deadline');
     expect(testing).toContain('product-unresponsive-confirmation-not-observed');
+    expect(testing).toContain('debugger-transport-reconnect-not-completed');
     expect(testing).toContain('renderer-local work never submitted before a confirmed hang may be lost');
-    expect(testing).toContain('source/headless controller correction');
+    expect(testing).toContain('source/headless evidence only');
   });
 });
