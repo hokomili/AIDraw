@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { readFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { access, readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
+import { promisify } from 'node:util';
 import {
   assertFnd05OwnedProcessShape,
   assertFnd05EvidenceRedacted,
@@ -11,6 +13,7 @@ import {
   FND05_PACKAGED_FILES,
   FND05_PACKAGED_PROFILE_ENV,
   FND05_UNRESPONSIVE_ASAR_HASH_ENV,
+  FND05_UNRESPONSIVE_DISCOVERY_ENV,
   FND05_UNRESPONSIVE_EXE_HASH_ENV,
   FND05_UNRESPONSIVE_FAILURE_PREFIX,
   FND05_UNRESPONSIVE_FAILURE_ROOT_ENV,
@@ -22,6 +25,7 @@ import {
   FND05_UNRESPONSIVE_PROFILE_PREFIX,
   FND05_UNRESPONSIVE_STALL_EXPRESSION,
   FND05_UNRESPONSIVE_STALL_MS,
+  FND05_UNRESPONSIVE_UNSAFE_REPORT_ENVIRONMENTS,
   inspectFnd05EncryptedToken,
   observeFnd05DeliberatePageCrash,
   parseFnd05OwnedProcesses,
@@ -33,6 +37,7 @@ import { EDITOR_RENDERER_UNRESPONSIVE_GRACE_MS } from '../../src/main/editor-win
 import { parseFeatureTracker } from '../../scripts/check-rc-readiness.mjs';
 
 const digest = 'A'.repeat(64);
+const execute = promisify(execFile);
 
 function environment(profile: string): NodeJS.ProcessEnv {
   return {
@@ -303,7 +308,43 @@ describe('FND-05 retained exact-package acceptance boundary', () => {
     expect(playwrightArtifacts).toMatch(/if \(process\.env\.PLAYWRIGHT_NO_COPY_PROMPT\)\s+return;/);
   });
 
-  it('records the alive-hang route as unexecuted Working/P0 preparation with exact nonclaims', async () => {
+  it('discovers exactly the dedicated alive-hang selector through real Playwright without creating run roots', async () => {
+    const workspace = process.cwd();
+    const runId = 'source-list-discovery-fixture';
+    const configuredEnvironment = unresponsiveEnvironment(workspace, runId);
+    const packageRoot = configuredEnvironment.AIDRAW_E2E_OUT_DIR!;
+    const profile = configuredEnvironment[FND05_UNRESPONSIVE_PROFILE_ENV]!;
+    const failureRoot = configuredEnvironment[FND05_UNRESPONSIVE_FAILURE_ROOT_ENV]!;
+    const roots = [packageRoot, profile, failureRoot];
+    for (const path of roots) expect(await access(path).then(() => true, () => false), `${path} must start absent`).toBe(false);
+
+    const childEnvironment: NodeJS.ProcessEnv = {
+      ...process.env,
+      ...configuredEnvironment,
+      [FND05_UNRESPONSIVE_DISCOVERY_ENV]: '1',
+      PLAYWRIGHT_NO_COPY_PROMPT: '1',
+    };
+    delete childEnvironment.AIDRAW_E2E_FND05_UNRESPONSIVE_WRAPPER;
+    delete childEnvironment.AIDRAW_E2E_LAUNCH_CONTEXT;
+    for (const name of FND05_UNRESPONSIVE_UNSAFE_REPORT_ENVIRONMENTS) delete childEnvironment[name];
+
+    const playwrightCli = resolve('node_modules', '@playwright', 'test', 'cli.js');
+    const { stdout, stderr } = await execute(process.execPath, [
+      playwrightCli,
+      'test',
+      '--config=playwright.fnd05-unresponsive.config.ts',
+      '--list',
+      '--grep',
+      FND05_UNRESPONSIVE_PACKAGED_SCENARIO,
+    ], { cwd: workspace, env: childEnvironment, maxBuffer: 4 * 1024 * 1024 });
+    const listing = `${stdout}\n${stderr}`;
+    expect(listing).not.toContain('First argument must use the object destructuring pattern');
+    expect(listing.split(FND05_UNRESPONSIVE_PACKAGED_SCENARIO)).toHaveLength(2);
+    expect(listing).toContain('Total: 1 test in 1 file');
+    for (const path of roots) expect(await access(path).then(() => true, () => false), `${path} must remain absent`).toBe(false);
+  });
+
+  it('records consumed alive-hang r1 and corrected discovery while keeping Working/P0 nonclaims', async () => {
     const [changelog, tracker, testing] = await Promise.all([
       readFile(resolve('CHANGELOG.md'), 'utf8'),
       readFile(resolve('docs/FEATURE_TRACKER.md'), 'utf8'),
@@ -315,23 +356,30 @@ describe('FND-05 retained exact-package acceptance boundary', () => {
     expect(fnd05).toMatchObject({ status: '🟢 Working', priority: 'P0' });
     const truth = fnd05?.truth ?? '';
     for (const claim of [
-      'unexecuted, test/controller-only exact-package route',
+      '20260814t023118z-eab3063-r1',
+      'exited 1 during pinned Playwright discovery',
       '30,000 ms renderer-only CDP stall',
       '10,000 ms floor',
-      'no identity or native result exists yet',
+      'real launch-free dedicated Playwright `--list` regression',
+      'no packaged alive-hang PASS exists',
       'Renderer-local work never submitted to the canonical engine is not promised',
     ]) expect(truth).toContain(claim);
     expect(truth).toContain('native packaged alive-hang PASS, and broader platforms remain open');
 
     const changelogEntry = changelog.split(/\r?\n/u).find((line) => line.startsWith('- Prepare a separate retained exact-package acceptance')) ?? '';
-    expect(changelogEntry).toContain('unexecuted test/controller preparation only');
+    expect(changelogEntry).toContain('immutable consumed pre-launch controller failure');
+    expect(changelogEntry).toContain('object-destructured `browserName` fixture');
+    expect(changelogEntry).toContain('real launch-free dedicated Playwright `--list` regression');
     expect(changelogEntry).toContain('renderer-local work never submitted to the canonical engine');
     expect(testing).toContain('Thirteen exact-checkpoint cases');
-    expect(testing).toContain('### Prepared FND-05 alive-but-unresponsive exact-package acceptance (not executed)');
+    expect(testing).toContain('### FND-05 alive-but-unresponsive controller, consumed r1, and corrected discovery');
+    expect(testing).toContain('exited 1 before any application/helper launch, stall, or product assertion');
+    expect(testing).toContain('object-destructures the built-in `browserName` fixture');
+    expect(testing).toContain('spawns the pinned local Playwright CLI');
     expect(testing).toContain('These are naming templates, not reserved or runnable identities');
-    expect(testing).toContain('No package was built, no Electron/helper/native process was launched');
+    expect(testing).toContain('Consumed r1 remains immutable and non-reusable');
     expect(testing).toContain('renderer-local work never submitted before a confirmed hang may be lost');
-    expect(testing).toContain('exact **12-path** controller/truth candidate');
-    expect(testing).toContain('**193 files / 1,184 tests**');
+    expect(testing).toContain('exact **eight-path** controller/truth correction');
+    expect(testing).toContain('**193 files / 1,185 tests**');
   });
 });

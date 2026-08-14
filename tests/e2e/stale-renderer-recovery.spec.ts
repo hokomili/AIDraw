@@ -610,9 +610,10 @@ test(FND05_PACKAGED_SCENARIO, async () => {
   await writeFile(configured.paths.evidence, evidenceText, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
 });
 
-test(FND05_UNRESPONSIVE_PACKAGED_SCENARIO, async (_fixtures, testInfo) => {
+test(FND05_UNRESPONSIVE_PACKAGED_SCENARIO, async ({ browserName }, testInfo) => {
   test.skip(process.platform !== 'darwin', 'This prepared checkpoint is the exact current macOS/arm64 acceptance only.');
   test.setTimeout(150_000);
+  expect(browserName).toBe('chromium');
   if (process.env.AIDRAW_E2E_FND05_UNRESPONSIVE_WRAPPER !== '1' || process.env.PLAYWRIGHT_NO_COPY_PROMPT !== '1') {
     throw new Error('FND-05 unresponsive-renderer acceptance must run through its credential-safe wrapper.');
   }
