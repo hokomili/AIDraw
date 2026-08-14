@@ -308,6 +308,25 @@ describe('UX-01 exact-package native window-chrome preparation', () => {
     expect(() => assertUx01DecoratedFrameRelationStable(beforeRelation, driftedRelation)).toThrow(/left inset changed/);
   });
 
+  it('rejects a stale pre-target snapshot even when the moved window still has a valid decorated-frame relation', () => {
+    const nativeBefore = inspection().windows[0];
+    const nativeAfter = { ...nativeBefore, bounds: { ...nativeBefore.bounds, x: nativeBefore.bounds.x + 8 } };
+    const rendererBefore = rendererMeasurement();
+    const rendererAfter = rendererMeasurement({
+      outer: { ...rendererBefore.outer, x: rendererBefore.outer.x + 8 },
+    });
+    const relationBefore = deriveUx01DecoratedFrameRelation(nativeBefore, rendererBefore);
+    const relationAfter = deriveUx01DecoratedFrameRelation(nativeAfter, rendererAfter);
+    expect(assertUx01DecoratedFrameRelationStable(relationBefore, relationAfter))
+      .toEqual({ left: 0, top: 0, right: 0, bottom: 0 });
+    expect(() => assertUx01WindowStationaryWithinCoordinateSpaces({
+      nativeBefore,
+      nativeAfter,
+      rendererBefore: rendererBefore.outer,
+      rendererAfter: rendererAfter.outer,
+    })).toThrow(/moved in native coordinate space/);
+  });
+
   it('rejects ambient reporter outputs that could retain local credentials', () => {
     expect(assertUx01WindowChromeSafeReporterEnvironment({})).toBe(true);
     for (const name of ['PLAYWRIGHT_HTML_OUTPUT_DIR', 'PLAYWRIGHT_JSON_OUTPUT_FILE', 'PLAYWRIGHT_JUNIT_OUTPUT_FILE', 'PLAYWRIGHT_BLOB_OUTPUT_DIR']) {
@@ -365,6 +384,8 @@ describe('UX-01 exact-package native window-chrome preparation', () => {
     expect(driver).not.toContain('CGEventPost(');
     expect(driver).not.toMatch(/\bkill\s*\(/);
     expect(driver).not.toMatch(/\bsignal\s*\(/);
+    expect(driver).toContain('const double tolerance = 2.0;');
+    expect(driver).toContain('The exact owner/window bounds changed before input admission: expected %.3f,%.3f %.3fx%.3f; actual %.3f,%.3f %.3fx%.3f.');
 
     expect(wrapper).toContain("spawn('/usr/bin/xcrun'");
     expect(wrapper).toContain("'ApplicationServices'");
@@ -414,7 +435,7 @@ describe('UX-01 exact-package native window-chrome preparation', () => {
     expect(spec).toContain('verifyRect(interactiveSafeRect');
     expect(spec).toContain("verifyRect(safeRect");
     expect(spec).toContain('const step = 0.5');
-    expect(spec).toContain('initialInspection.postEventAccess');
+    expect(spec).toContain('if (!inspection.postEventAccess)');
     expect(spec).toContain("'option-click'");
     expect(spec).toContain('assertUx01WindowInsideWorkArea(zoomedMeasurement)');
     expect(spec).toContain("action: 'native green-button Option-click'");
@@ -428,7 +449,24 @@ describe('UX-01 exact-package native window-chrome preparation', () => {
     expect(spec).toContain('assertUx01WindowStationaryWithinCoordinateSpaces');
     expect(spec).toContain('createUx01WindowGeometryDiagnostics');
     expect(spec).not.toContain('assertUx01WindowBoundsMatchRenderer');
-    expect(spec.indexOf('geometry: initialGeometry')).toBeLessThan(spec.indexOf('deriveUx01DecoratedFrameRelation(initialWindow'));
+    expect(spec).toContain('const WINDOW_STABILITY_OBSERVATIONS = 3;');
+    expect(spec).toContain('const WINDOW_STABILITY_INTERVAL_MS = 100;');
+    expect(spec).toContain('const WINDOW_STABILITY_TIMEOUT_MS = 5_000;');
+    expect(spec).toContain('waitForStableWindowGeometry(page, configured.driverExecutable, ownerPid)');
+    expect(spec.match(/await captureActionReadySnapshot\(/g)).toHaveLength(7);
+    const initialTargetObservation = spec.indexOf('const initialTargets = await chromeHitTargets(page);');
+    const initialActionAdmission = spec.indexOf('const initialClickAdmission = await captureActionReadySnapshot(');
+    const initialTargetMapping = spec.indexOf('const initialInteractiveClick = mapUx01RendererHitTargetToQuartzLocal(');
+    const initialNativePost = spec.indexOf('configured.driverExecutable, ownerPid, initialClickAdmission.snapshot.window');
+    expect([initialTargetObservation, initialActionAdmission, initialTargetMapping, initialNativePost].every((index) => index >= 0)).toBe(true);
+    expect([initialTargetObservation, initialActionAdmission, initialTargetMapping, initialNativePost])
+      .toEqual([...new Set([initialTargetObservation, initialActionAdmission, initialTargetMapping, initialNativePost])].sort((left, right) => left - right));
+    for (const admission of [
+      'initialClickAdmission', 'noDragAdmission', 'dragAdmission', 'zoomAdmission',
+      'zoomRestoreAdmission', 'minimizeAdmission', 'closeAdmission',
+    ]) expect(spec).toContain(`${admission}.snapshot.window`);
+    expect(spec).toContain('before=${JSON.stringify(baseline.geometry)}; current=${JSON.stringify(snapshot.geometry)}.');
+    expect(spec).not.toContain('postClick(configured.driverExecutable, ownerPid, shownInspection.windows[0], closePoint)');
     expect(spec).not.toContain('newCDPSession');
     expect(spec).not.toContain('Browser.getWindowForTarget');
     expect(spec).not.toContain('Browser.setWindowBounds');
@@ -481,7 +519,7 @@ describe('UX-01 exact-package native window-chrome preparation', () => {
     for (const path of roots) expect(await access(path).then(() => true, () => false), `${path} must remain absent`).toBe(false);
   });
 
-  it('keeps UX-01 Working/P0 and records consumed r1/r2 without promoting a native claim', async () => {
+  it('keeps UX-01 Working/P0 and records consumed r1/r2/r3 without promoting a native claim', async () => {
     const [changelog, tracker, testing] = await Promise.all([
       readFile(resolve('CHANGELOG.md'), 'utf8'),
       readFile(resolve('docs/FEATURE_TRACKER.md'), 'utf8'),
@@ -497,8 +535,12 @@ describe('UX-01 exact-package native window-chrome preparation', () => {
       'failed **1/1 in 2.6 seconds** before input',
       'Quartz `203,32 1514×936`',
       'Blink `200,30 1520×940`',
+      'Fresh r3 `20260814t112230z-ff44905-r3`',
+      'controller TOCTOU/evidence failure',
+      'three bounded paired stability observations',
+      'fresh paired action-ready snapshot',
       'dynamic decorated-frame containment relation',
-      'exact-PID/current-native-bounds action admission',
+      'exact-PID/window/current-native-bounds reinspection',
       'Accessibility API',
       'separate native authority',
     ]) expect(truth).toContain(claim);
@@ -506,10 +548,15 @@ describe('UX-01 exact-package native window-chrome preparation', () => {
     expect(truth).toContain('passed **1/1 in 5.5 seconds**');
     expect(truth).not.toContain('native traffic-light/top-bar PASS');
 
-    const section = testing.slice(testing.indexOf('### UX-01 native window-chrome preparation, consumed r1/r2 coordinate-controller failures, and corrected source model'));
+    const section = testing.slice(testing.indexOf('### UX-01 native window-chrome preparation, consumed r1/r2/r3 controller failures, and corrected source model'));
     expect(section).toContain(UX01_WINDOW_CHROME_SCENARIO);
     expect(section).toContain('R1 `20260814t092808z-7ff773c-r1`');
     expect(section).toContain('Fresh r2 `20260814t102354z-f7e6d0c-r2`');
+    expect(section).toContain('Fresh r3 `20260814t112230z-ff44905-r3`');
+    expect(section).toContain('owner PID 22702');
+    expect(section).toContain('window ID 7030');
+    expect(section).toContain('controller TOCTOU/evidence defect');
+    expect(section).toContain('cannot distinguish first-show settling from another native move');
     expect(section).toContain('Quartz reported `203,32 1514×936`');
     expect(section).toContain('trusted Blink reported `200,30 1520×940`');
     expect(section).toContain('No CoreGraphics input was posted');
@@ -520,6 +567,9 @@ describe('UX-01 exact-package native window-chrome preparation', () => {
     expect(section).toContain('invalidate both direct origin and size equality');
     expect(section).toContain('dynamically requires the on-screen Quartz visible rectangle');
     expect(section).toContain('complete 0.5-CSS-px hit-test neighborhood');
+    expect(section).toContain('three consecutive paired native/renderer observations');
+    expect(section).toContain('fresh paired action-ready snapshot');
+    expect(section).toContain('expected and actual bounds');
     expect(section).toContain('stationary independently in Quartz and Blink');
     expect(section).toContain('Raw native and renderer records are retained before every assertion');
     expect(section).toContain('before the test can create its profile');
@@ -532,9 +582,13 @@ describe('UX-01 exact-package native window-chrome preparation', () => {
     expect(section).toContain('no Accessibility API');
     expect(changelog).toContain('Prepare a separate one-shot UX-01 native window-chrome acceptance');
     expect(changelog).toContain('R2 then failed **1/1 in 2.6 seconds**');
+    expect(changelog).toContain('Fresh r3 `20260814t112230z-ff44905-r3`');
+    expect(changelog).toContain('controller time-of-check/time-of-use and evidence gap');
+    expect(changelog).toContain('three bounded paired native/renderer stability observations');
+    expect(changelog).toContain('fresh paired action-ready snapshot');
     expect(changelog).toContain('1514×936');
     expect(changelog).toContain("dynamically requires Quartz's visible window-server rectangle");
-    expect(changelog).toContain('Both runs cleaned up gracefully with zero survivors and are immutable, non-reusable controller failures');
+    expect(changelog).toContain('All three runs cleaned up gracefully with zero survivors and are immutable, non-reusable controller failures');
     expect(changelog).toContain('before the packaged app launches or its profile is created');
     expect(changelog).not.toContain('This checkpoint is source/headless preparation only: it has not been packaged or executed');
     expect(truth).not.toContain('prepared but has not been packaged or executed');

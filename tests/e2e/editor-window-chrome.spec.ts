@@ -64,6 +64,21 @@ interface NativeMeasurement {
   };
 }
 
+type NativeInspection = ReturnType<typeof parseUx01WindowDriverInspection>;
+type NativeWindowRecord = NativeInspection['windows'][number];
+
+interface WindowGeometrySnapshot {
+  measurement: NativeMeasurement;
+  inspection: NativeInspection;
+  geometry: ReturnType<typeof createUx01WindowGeometryDiagnostics>;
+  window: NativeWindowRecord;
+  relation: ReturnType<typeof deriveUx01DecoratedFrameRelation>;
+}
+
+const WINDOW_STABILITY_OBSERVATIONS = 3;
+const WINDOW_STABILITY_INTERVAL_MS = 100;
+const WINDOW_STABILITY_TIMEOUT_MS = 5_000;
+
 interface CleanupRecord {
   ownerPid?: number;
   ownerExitCode?: number | null;
@@ -284,6 +299,108 @@ async function runDriver(driver: string, arguments_: string[]): Promise<unknown>
 
 async function inspectOwner(driver: string, pid: number) {
   return parseUx01WindowDriverInspection(await runDriver(driver, ['inspect', String(pid)]));
+}
+
+function windowGeometrySnapshot(
+  inspection: NativeInspection,
+  measurement: NativeMeasurement,
+  expectedWindowId?: number,
+): WindowGeometrySnapshot {
+  const geometry = createUx01WindowGeometryDiagnostics(inspection, measurement);
+  if (!inspection.postEventAccess) {
+    throw new Error('CoreGraphics exact-PID event posting is not pre-authorized; the driver did not request access.');
+  }
+  if (inspection.windows.length !== 1 || !inspection.windows[0].onScreen) {
+    throw new Error('The exact UX-01 owner does not expose one on-screen native editor window.');
+  }
+  const window = inspection.windows[0];
+  if (expectedWindowId !== undefined && window.windowId !== expectedWindowId) {
+    throw new Error(`The exact UX-01 native window identity changed from ${expectedWindowId} to ${window.windowId}.`);
+  }
+  return {
+    measurement,
+    inspection,
+    geometry,
+    window,
+    relation: deriveUx01DecoratedFrameRelation(window, measurement),
+  };
+}
+
+async function captureWindowGeometrySnapshot(
+  page: Page,
+  driver: string,
+  pid: number,
+  expectedWindowId?: number,
+): Promise<WindowGeometrySnapshot> {
+  const measurement = await nativeMeasurement(page);
+  const inspection = await inspectOwner(driver, pid);
+  return windowGeometrySnapshot(inspection, measurement, expectedWindowId);
+}
+
+function stationarySnapshotDeltas(before: WindowGeometrySnapshot, after: WindowGeometrySnapshot) {
+  return {
+    coordinateSpaces: assertUx01WindowStationaryWithinCoordinateSpaces({
+      nativeBefore: before.window,
+      nativeAfter: after.window,
+      rendererBefore: before.measurement.outer,
+      rendererAfter: after.measurement.outer,
+    }),
+    decoratedFrame: assertUx01DecoratedFrameRelationStable(before.relation, after.relation),
+  };
+}
+
+async function waitForStableWindowGeometry(
+  page: Page,
+  driver: string,
+  pid: number,
+): Promise<{
+  first: WindowGeometrySnapshot;
+  snapshot: WindowGeometrySnapshot;
+  observations: number;
+  deltas: ReturnType<typeof stationarySnapshotDeltas>;
+}> {
+  const deadline = Date.now() + WINDOW_STABILITY_TIMEOUT_MS;
+  const first = await captureWindowGeometrySnapshot(page, driver, pid);
+  let anchor = first;
+  let stableObservations = 1;
+  let lastError: Error | undefined;
+  while (Date.now() < deadline) {
+    await new Promise((resolveWait) => setTimeout(resolveWait, WINDOW_STABILITY_INTERVAL_MS));
+    const current = await captureWindowGeometrySnapshot(page, driver, pid, first.window.windowId);
+    try {
+      const deltas = stationarySnapshotDeltas(anchor, current);
+      stableObservations += 1;
+      if (stableObservations >= WINDOW_STABILITY_OBSERVATIONS) {
+        return { first, snapshot: current, observations: stableObservations, deltas };
+      }
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      anchor = current;
+      stableObservations = 1;
+    }
+  }
+  throw new Error(
+    `The exact UX-01 native/renderer window did not reach ${WINDOW_STABILITY_OBSERVATIONS} bounded stable observations: ${lastError?.message ?? 'no stable observation'}.`,
+  );
+}
+
+async function captureActionReadySnapshot(
+  page: Page,
+  driver: string,
+  pid: number,
+  baseline: WindowGeometrySnapshot,
+  label: string,
+): Promise<{ snapshot: WindowGeometrySnapshot; deltas: ReturnType<typeof stationarySnapshotDeltas> }> {
+  const snapshot = await captureWindowGeometrySnapshot(page, driver, pid, baseline.window.windowId);
+  try {
+    return { snapshot, deltas: stationarySnapshotDeltas(baseline, snapshot) };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `The exact UX-01 ${label} action-ready snapshot changed after target observation: ${message}; `
+        + `before=${JSON.stringify(baseline.geometry)}; current=${JSON.stringify(snapshot.geometry)}.`,
+    );
+  }
 }
 
 function boundsArguments(windowRecord: { bounds: { x: number; y: number; width: number; height: number } }): string[] {
@@ -508,18 +625,20 @@ test(UX01_WINDOW_CHROME_SCENARIO, async ({ browserName }, testInfo) => {
     const originalRendererPid = processShapeBefore.find((entry) => entry.type === 'renderer')?.pid;
     if (!originalRendererPid) throw new Error('The exact UX-01 owner has no original renderer PID.');
 
-    failureDiagnostics = { stage: 'native-window-identity', ownerPid, processShapeBefore };
-    const initialMeasurement = await nativeMeasurement(page);
-    const initialInspection = await inspectOwner(configured.driverExecutable, ownerPid);
-    const initialGeometry = createUx01WindowGeometryDiagnostics(initialInspection, initialMeasurement);
-    failureDiagnostics = { stage: 'native-window-identity', ownerPid, processShapeBefore, geometry: initialGeometry };
-    if (!initialInspection.postEventAccess) throw new Error('CoreGraphics exact-PID event posting is not pre-authorized; the driver did not request access.');
-    if (initialInspection.windows.length !== 1 || !initialInspection.windows[0].onScreen) {
-      throw new Error('The exact UX-01 owner does not expose one on-screen native editor window.');
-    }
-    const initialWindow = initialInspection.windows[0];
-    const initialRelation = deriveUx01DecoratedFrameRelation(initialWindow, initialMeasurement);
-    failureDiagnostics = { ...failureDiagnostics, relation: initialRelation };
+    failureDiagnostics = { stage: 'native-window-stability', ownerPid, processShapeBefore };
+    const initialStability = await waitForStableWindowGeometry(page, configured.driverExecutable, ownerPid);
+    const initialSnapshot = initialStability.snapshot;
+    const initialMeasurement = initialSnapshot.measurement;
+    const initialInspection = initialSnapshot.inspection;
+    const initialGeometry = initialSnapshot.geometry;
+    const initialWindow = initialSnapshot.window;
+    const initialRelation = initialSnapshot.relation;
+    failureDiagnostics = {
+      stage: 'native-window-stability', ownerPid, processShapeBefore,
+      first: initialStability.first.geometry, stable: initialGeometry,
+      observations: initialStability.observations, deltas: initialStability.deltas,
+      relation: initialRelation,
+    };
     const nominalTrafficLights = deriveUx01TrafficLightCenters(initialInspection.buttonMetrics, {
       trafficLightPosition: MACOS_EDITOR_WINDOW_CHROME.trafficLightPosition,
       trafficLightReservedWidth: MACOS_EDITOR_WINDOW_CHROME.trafficLightReservedWidth,
@@ -529,13 +648,22 @@ test(UX01_WINDOW_CHROME_SCENARIO, async ({ browserName }, testInfo) => {
     expect(initialTargets.topbarRegion).toBe('drag');
     expect(initialTargets.buttonRegion).toBe('no-drag');
     expect(initialTargets.verificationStep).toBe(0.5);
-    const initialInteractiveClick = mapUx01RendererHitTargetToQuartzLocal(initialRelation, initialTargets.interactiveClick);
+    const initialClickAdmission = await captureActionReadySnapshot(
+      page, configured.driverExecutable, ownerPid, initialSnapshot, 'interactive no-drag click',
+    );
+    const initialInteractiveClick = mapUx01RendererHitTargetToQuartzLocal(
+      initialClickAdmission.snapshot.relation, initialTargets.interactiveClick,
+    );
 
     failureDiagnostics = {
       stage: 'interactive-no-drag-click', ownerPid, processShapeBefore,
-      before: initialGeometry, relation: initialRelation, target: initialInteractiveClick,
+      stable: initialGeometry, before: initialClickAdmission.snapshot.geometry,
+      relation: initialClickAdmission.snapshot.relation,
+      admissionDeltas: initialClickAdmission.deltas, target: initialInteractiveClick,
     };
-    await postClick(configured.driverExecutable, ownerPid, initialWindow, initialInteractiveClick.point);
+    await postClick(
+      configured.driverExecutable, ownerPid, initialClickAdmission.snapshot.window, initialInteractiveClick.point,
+    );
     await expect(page.getByRole('menu', { name: 'All open documents' })).toBeVisible();
     const afterInteractiveClick = await inspectOwner(configured.driverExecutable, ownerPid);
     const afterInteractiveClickMeasurement = await nativeMeasurement(page);
@@ -543,39 +671,57 @@ test(UX01_WINDOW_CHROME_SCENARIO, async ({ browserName }, testInfo) => {
     failureDiagnostics = { ...failureDiagnostics, after: afterInteractiveClickGeometry };
     if (afterInteractiveClick.windows.length !== 1) throw new Error('The no-drag click changed the exact native window count.');
     const afterInteractiveClickRelation = deriveUx01DecoratedFrameRelation(afterInteractiveClick.windows[0], afterInteractiveClickMeasurement);
+    const afterInteractiveClickSnapshot = windowGeometrySnapshot(
+      afterInteractiveClick, afterInteractiveClickMeasurement, initialWindow.windowId,
+    );
     failureDiagnostics = { ...failureDiagnostics, afterRelation: afterInteractiveClickRelation };
     const noDragClickDeltas = assertUx01WindowStationaryWithinCoordinateSpaces({
-      nativeBefore: initialWindow,
+      nativeBefore: initialClickAdmission.snapshot.window,
       nativeAfter: afterInteractiveClick.windows[0],
-      rendererBefore: initialMeasurement.outer,
+      rendererBefore: initialClickAdmission.snapshot.measurement.outer,
       rendererAfter: afterInteractiveClickMeasurement.outer,
     });
-    const noDragClickRelationDeltas = assertUx01DecoratedFrameRelationStable(initialRelation, afterInteractiveClickRelation);
+    const noDragClickRelationDeltas = assertUx01DecoratedFrameRelationStable(
+      initialClickAdmission.snapshot.relation, afterInteractiveClickRelation,
+    );
     await page.keyboard.press('Escape');
 
     const noDragTargets = await chromeHitTargets(page);
-    const noDragStart = mapUx01RendererHitTargetToQuartzLocal(afterInteractiveClickRelation, noDragTargets.interactiveGesture.start);
-    const noDragEnd = mapUx01RendererHitTargetToQuartzLocal(afterInteractiveClickRelation, noDragTargets.interactiveGesture.end);
+    const noDragAdmission = await captureActionReadySnapshot(
+      page, configured.driverExecutable, ownerPid, afterInteractiveClickSnapshot, 'interactive no-drag gesture',
+    );
+    const noDragStart = mapUx01RendererHitTargetToQuartzLocal(
+      noDragAdmission.snapshot.relation, noDragTargets.interactiveGesture.start,
+    );
+    const noDragEnd = mapUx01RendererHitTargetToQuartzLocal(
+      noDragAdmission.snapshot.relation, noDragTargets.interactiveGesture.end,
+    );
     failureDiagnostics = {
       stage: 'interactive-no-drag-gesture', ownerPid, processShapeBefore,
-      before: afterInteractiveClickGeometry, relation: afterInteractiveClickRelation,
+      stable: afterInteractiveClickGeometry, before: noDragAdmission.snapshot.geometry,
+      relation: noDragAdmission.snapshot.relation, admissionDeltas: noDragAdmission.deltas,
       targets: { start: noDragStart, end: noDragEnd },
     };
-    await postDrag(configured.driverExecutable, ownerPid, afterInteractiveClick.windows[0], noDragStart.point, noDragEnd.point);
+    await postDrag(
+      configured.driverExecutable, ownerPid, noDragAdmission.snapshot.window, noDragStart.point, noDragEnd.point,
+    );
     const afterNoDrag = await inspectOwner(configured.driverExecutable, ownerPid);
     const afterNoDragMeasurement = await nativeMeasurement(page);
     const afterNoDragGeometry = createUx01WindowGeometryDiagnostics(afterNoDrag, afterNoDragMeasurement);
     failureDiagnostics = { ...failureDiagnostics, after: afterNoDragGeometry };
     if (afterNoDrag.windows.length !== 1) throw new Error('The no-drag gesture changed the exact native window count.');
     const afterNoDragRelation = deriveUx01DecoratedFrameRelation(afterNoDrag.windows[0], afterNoDragMeasurement);
+    const afterNoDragSnapshot = windowGeometrySnapshot(afterNoDrag, afterNoDragMeasurement, initialWindow.windowId);
     failureDiagnostics = { ...failureDiagnostics, afterRelation: afterNoDragRelation };
     const noDragGestureDeltas = assertUx01WindowStationaryWithinCoordinateSpaces({
-      nativeBefore: afterInteractiveClick.windows[0],
+      nativeBefore: noDragAdmission.snapshot.window,
       nativeAfter: afterNoDrag.windows[0],
-      rendererBefore: afterInteractiveClickMeasurement.outer,
+      rendererBefore: noDragAdmission.snapshot.measurement.outer,
       rendererAfter: afterNoDragMeasurement.outer,
     });
-    const noDragGestureRelationDeltas = assertUx01DecoratedFrameRelationStable(afterInteractiveClickRelation, afterNoDragRelation);
+    const noDragGestureRelationDeltas = assertUx01DecoratedFrameRelationStable(
+      noDragAdmission.snapshot.relation, afterNoDragRelation,
+    );
     const allDocuments = page.getByRole('button', { name: 'All open documents' });
     const documentsMenu = page.getByRole('menu', { name: 'All open documents' });
     if (await documentsMenu.isVisible()) await page.keyboard.press('Escape');
@@ -585,22 +731,26 @@ test(UX01_WINDOW_CHROME_SCENARIO, async ({ browserName }, testInfo) => {
     await page.keyboard.press('Escape');
 
     const dragTargets = await chromeHitTargets(page);
-    const dragStart = mapUx01RendererHitTargetToQuartzLocal(afterNoDragRelation, dragTargets.drag);
-    const delta = dragDelta(afterNoDragMeasurement);
-    const dragEnd = mapUx01FramePointToQuartzLocal(afterNoDragRelation, {
+    const dragAdmission = await captureActionReadySnapshot(
+      page, configured.driverExecutable, ownerPid, afterNoDragSnapshot, 'intended app-region drag',
+    );
+    const dragStart = mapUx01RendererHitTargetToQuartzLocal(dragAdmission.snapshot.relation, dragTargets.drag);
+    const delta = dragDelta(dragAdmission.snapshot.measurement);
+    const dragEnd = mapUx01FramePointToQuartzLocal(dragAdmission.snapshot.relation, {
       x: dragTargets.drag.point.x + delta.x,
       y: dragTargets.drag.point.y + delta.y,
     });
     failureDiagnostics = {
       stage: 'intended-app-region-drag', ownerPid, processShapeBefore,
-      before: afterNoDragGeometry, relation: afterNoDragRelation,
+      stable: afterNoDragGeometry, before: dragAdmission.snapshot.geometry,
+      relation: dragAdmission.snapshot.relation, admissionDeltas: dragAdmission.deltas,
       targets: { start: dragStart, end: dragEnd }, requestedDelta: delta,
     };
-    await postDrag(configured.driverExecutable, ownerPid, afterNoDrag.windows[0], dragStart.point, dragEnd);
+    await postDrag(configured.driverExecutable, ownerPid, dragAdmission.snapshot.window, dragStart.point, dragEnd);
     const draggedMeasurement = await waitForMeasurement(
       page,
-      (value) => Math.abs(value.outer.x - afterNoDragMeasurement.outer.x) >= 40
-        && Math.abs(value.outer.y - afterNoDragMeasurement.outer.y) <= 2,
+      (value) => Math.abs(value.outer.x - dragAdmission.snapshot.measurement.outer.x) >= 40
+        && Math.abs(value.outer.y - dragAdmission.snapshot.measurement.outer.y) <= 2,
       'The intended app-region drag did not move only the exact run-owned window',
     );
     const draggedInspection = await waitForWindowInspection(
@@ -609,33 +759,41 @@ test(UX01_WINDOW_CHROME_SCENARIO, async ({ browserName }, testInfo) => {
       (value) => value.windows.length === 1
         && value.windows[0].windowId === initialWindow.windowId
         && value.windows[0].onScreen
-        && Math.abs(value.windows[0].bounds.x - afterNoDrag.windows[0].bounds.x) >= 40
-        && Math.abs(value.windows[0].bounds.y - afterNoDrag.windows[0].bounds.y) <= 2,
+        && Math.abs(value.windows[0].bounds.x - dragAdmission.snapshot.window.bounds.x) >= 40
+        && Math.abs(value.windows[0].bounds.y - dragAdmission.snapshot.window.bounds.y) <= 2,
       'The intended app-region drag did not move the exact native window independently',
     );
     const draggedGeometry = createUx01WindowGeometryDiagnostics(draggedInspection, draggedMeasurement);
     failureDiagnostics = { ...failureDiagnostics, after: draggedGeometry, requestedDelta: delta };
     const draggedRelation = deriveUx01DecoratedFrameRelation(draggedInspection.windows[0], draggedMeasurement);
+    const draggedSnapshot = windowGeometrySnapshot(draggedInspection, draggedMeasurement, initialWindow.windowId);
     failureDiagnostics = { ...failureDiagnostics, afterRelation: draggedRelation };
     const dragDeltas = assertUx01WindowMovedWithinCoordinateSpaces({
-      nativeBefore: afterNoDrag.windows[0],
+      nativeBefore: dragAdmission.snapshot.window,
       nativeAfter: draggedInspection.windows[0],
-      rendererBefore: afterNoDragMeasurement.outer,
+      rendererBefore: dragAdmission.snapshot.measurement.outer,
       rendererAfter: draggedMeasurement.outer,
       requestedDelta: delta,
     });
-    const dragRelationDeltas = assertUx01DecoratedFrameRelationStable(afterNoDragRelation, draggedRelation);
+    const dragRelationDeltas = assertUx01DecoratedFrameRelationStable(dragAdmission.snapshot.relation, draggedRelation);
     expect(draggedMeasurement.content).toEqual(initialMeasurement.content);
 
-    const draggedZoomPoint = mapUx01FramePointToQuartzLocal(draggedRelation, nominalTrafficLights.zoom);
+    const zoomAdmission = await captureActionReadySnapshot(
+      page, configured.driverExecutable, ownerPid, draggedSnapshot, 'native Option-click standard zoom',
+    );
+    const draggedZoomPoint = mapUx01FramePointToQuartzLocal(zoomAdmission.snapshot.relation, nominalTrafficLights.zoom);
     failureDiagnostics = {
       stage: 'native-option-zoom-toggle', ownerPid, processShapeBefore,
-      before: draggedGeometry, relation: draggedRelation, nativeTarget: draggedZoomPoint,
+      stable: draggedGeometry, before: zoomAdmission.snapshot.geometry,
+      relation: zoomAdmission.snapshot.relation, admissionDeltas: zoomAdmission.deltas,
+      nativeTarget: draggedZoomPoint,
     };
-    await postOptionClick(configured.driverExecutable, ownerPid, draggedInspection.windows[0], draggedZoomPoint);
+    await postOptionClick(
+      configured.driverExecutable, ownerPid, zoomAdmission.snapshot.window, draggedZoomPoint,
+    );
     const zoomedMeasurement = await waitForMeasurement(
       page,
-      (value) => !sameBounds(value.outer, draggedMeasurement.outer),
+      (value) => !sameBounds(value.outer, zoomAdmission.snapshot.measurement.outer),
       'The native green-button Option-click did not produce a distinct standard-zoom geometry state',
     );
     const zoomedInspection = await waitForWindowInspection(
@@ -647,15 +805,28 @@ test(UX01_WINDOW_CHROME_SCENARIO, async ({ browserName }, testInfo) => {
     const zoomedGeometry = createUx01WindowGeometryDiagnostics(zoomedInspection, zoomedMeasurement);
     failureDiagnostics = { ...failureDiagnostics, zoomed: zoomedGeometry };
     const zoomedRelation = deriveUx01DecoratedFrameRelation(zoomedInspection.windows[0], zoomedMeasurement);
+    const zoomedSnapshot = windowGeometrySnapshot(zoomedInspection, zoomedMeasurement, initialWindow.windowId);
     failureDiagnostics = { ...failureDiagnostics, zoomedRelation };
     assertUx01WindowInsideWorkArea(zoomedMeasurement);
     expect(child.exitCode).toBeNull();
     expect(browser.isConnected()).toBe(true);
-    const zoomedZoomPoint = mapUx01FramePointToQuartzLocal(zoomedRelation, nominalTrafficLights.zoom);
-    await postOptionClick(configured.driverExecutable, ownerPid, zoomedInspection.windows[0], zoomedZoomPoint);
+    const zoomRestoreAdmission = await captureActionReadySnapshot(
+      page, configured.driverExecutable, ownerPid, zoomedSnapshot, 'native Option-click standard-zoom restore',
+    );
+    const zoomedZoomPoint = mapUx01FramePointToQuartzLocal(
+      zoomRestoreAdmission.snapshot.relation, nominalTrafficLights.zoom,
+    );
+    failureDiagnostics = {
+      ...failureDiagnostics, restoreBefore: zoomRestoreAdmission.snapshot.geometry,
+      restoreRelation: zoomRestoreAdmission.snapshot.relation,
+      restoreAdmissionDeltas: zoomRestoreAdmission.deltas,
+    };
+    await postOptionClick(
+      configured.driverExecutable, ownerPid, zoomRestoreAdmission.snapshot.window, zoomedZoomPoint,
+    );
     const restoredAfterZoom = await waitForMeasurement(
       page,
-      (value) => sameBounds(value.outer, draggedMeasurement.outer),
+      (value) => sameBounds(value.outer, zoomAdmission.snapshot.measurement.outer),
       'The second native green-button Option-click did not restore the prior standard-zoom geometry',
     );
     const restoredAfterZoomInspection = await waitForWindowInspection(
@@ -667,23 +838,33 @@ test(UX01_WINDOW_CHROME_SCENARIO, async ({ browserName }, testInfo) => {
     const restoredAfterZoomGeometry = createUx01WindowGeometryDiagnostics(restoredAfterZoomInspection, restoredAfterZoom);
     failureDiagnostics = { ...failureDiagnostics, restored: restoredAfterZoomGeometry };
     const restoredAfterZoomRelation = deriveUx01DecoratedFrameRelation(restoredAfterZoomInspection.windows[0], restoredAfterZoom);
+    const restoredAfterZoomSnapshot = windowGeometrySnapshot(
+      restoredAfterZoomInspection, restoredAfterZoom, initialWindow.windowId,
+    );
     failureDiagnostics = { ...failureDiagnostics, restoredRelation: restoredAfterZoomRelation };
     const zoomRestoreDeltas = assertUx01WindowStationaryWithinCoordinateSpaces({
-      nativeBefore: draggedInspection.windows[0],
+      nativeBefore: zoomAdmission.snapshot.window,
       nativeAfter: restoredAfterZoomInspection.windows[0],
-      rendererBefore: draggedMeasurement.outer,
+      rendererBefore: zoomAdmission.snapshot.measurement.outer,
       rendererAfter: restoredAfterZoom.outer,
     });
-    const zoomRestoreRelationDeltas = assertUx01DecoratedFrameRelationStable(draggedRelation, restoredAfterZoomRelation);
+    const zoomRestoreRelationDeltas = assertUx01DecoratedFrameRelationStable(
+      zoomAdmission.snapshot.relation, restoredAfterZoomRelation,
+    );
 
-    const beforeMinimizeInspection = await inspectOwner(configured.driverExecutable, ownerPid);
-    const beforeMinimizeGeometry = createUx01WindowGeometryDiagnostics(beforeMinimizeInspection, restoredAfterZoom);
-    failureDiagnostics = { stage: 'native-minimize-and-show', ownerPid, processShapeBefore, before: beforeMinimizeGeometry };
-    if (beforeMinimizeInspection.windows.length !== 1) throw new Error('The exact native window disappeared before minimize.');
-    const beforeMinimizeRelation = deriveUx01DecoratedFrameRelation(beforeMinimizeInspection.windows[0], restoredAfterZoom);
+    const minimizeAdmission = await captureActionReadySnapshot(
+      page, configured.driverExecutable, ownerPid, restoredAfterZoomSnapshot, 'native minimize',
+    );
+    const beforeMinimizeGeometry = minimizeAdmission.snapshot.geometry;
+    const beforeMinimizeRelation = minimizeAdmission.snapshot.relation;
     const minimizePoint = mapUx01FramePointToQuartzLocal(beforeMinimizeRelation, nominalTrafficLights.minimize);
-    failureDiagnostics = { ...failureDiagnostics, relation: beforeMinimizeRelation, nativeTarget: minimizePoint };
-    await postClick(configured.driverExecutable, ownerPid, beforeMinimizeInspection.windows[0], minimizePoint);
+    failureDiagnostics = {
+      stage: 'native-minimize-and-show', ownerPid, processShapeBefore,
+      stable: restoredAfterZoomGeometry, before: beforeMinimizeGeometry,
+      relation: beforeMinimizeRelation, admissionDeltas: minimizeAdmission.deltas,
+      nativeTarget: minimizePoint,
+    };
+    await postClick(configured.driverExecutable, ownerPid, minimizeAdmission.snapshot.window, minimizePoint);
     const minimizedInspection = await waitForWindowInspection(
       configured.driverExecutable,
       ownerPid,
@@ -707,20 +888,26 @@ test(UX01_WINDOW_CHROME_SCENARIO, async ({ browserName }, testInfo) => {
     const shownRelation = deriveUx01DecoratedFrameRelation(shownInspection.windows[0], shownMeasurement);
     failureDiagnostics = { ...failureDiagnostics, restoredRelation: shownRelation };
     const minimizeRestoreDeltas = assertUx01WindowStationaryWithinCoordinateSpaces({
-      nativeBefore: beforeMinimizeInspection.windows[0],
+      nativeBefore: minimizeAdmission.snapshot.window,
       nativeAfter: shownInspection.windows[0],
-      rendererBefore: restoredAfterZoom.outer,
+      rendererBefore: minimizeAdmission.snapshot.measurement.outer,
       rendererAfter: shownMeasurement.outer,
     });
     const minimizeRestoreRelationDeltas = assertUx01DecoratedFrameRelationStable(beforeMinimizeRelation, shownRelation);
 
-    const closePoint = mapUx01FramePointToQuartzLocal(shownRelation, nominalTrafficLights.close);
+    const shownSnapshot = windowGeometrySnapshot(shownInspection, shownMeasurement, initialWindow.windowId);
+    const closeAdmission = await captureActionReadySnapshot(
+      page, configured.driverExecutable, ownerPid, shownSnapshot, 'native close',
+    );
+    const closePoint = mapUx01FramePointToQuartzLocal(closeAdmission.snapshot.relation, nominalTrafficLights.close);
     failureDiagnostics = {
       stage: 'native-close-and-show', ownerPid, processShapeBefore,
-      before: shownGeometry, relation: shownRelation, nativeTarget: closePoint,
+      stable: shownGeometry, before: closeAdmission.snapshot.geometry,
+      relation: closeAdmission.snapshot.relation, admissionDeltas: closeAdmission.deltas,
+      nativeTarget: closePoint,
     };
     const closeEvent = page.waitForEvent('close');
-    await postClick(configured.driverExecutable, ownerPid, shownInspection.windows[0], closePoint);
+    await postClick(configured.driverExecutable, ownerPid, closeAdmission.snapshot.window, closePoint);
     await closeEvent;
     const closedInspection = await waitForWindowInspection(
       configured.driverExecutable,
@@ -797,6 +984,24 @@ test(UX01_WINDOW_CHROME_SCENARIO, async ({ browserName }, testInfo) => {
         contract: MACOS_EDITOR_WINDOW_CHROME,
         coordinateModel: initialGeometry.coordinateModel,
         standardButtonMetrics: initialInspection.buttonMetrics,
+        stability: {
+          requiredObservations: WINDOW_STABILITY_OBSERVATIONS,
+          intervalMs: WINDOW_STABILITY_INTERVAL_MS,
+          timeoutMs: WINDOW_STABILITY_TIMEOUT_MS,
+          observations: initialStability.observations,
+          first: initialStability.first.geometry,
+          stable: initialGeometry,
+          deltas: initialStability.deltas,
+        },
+        actionAdmissions: {
+          interactiveClick: initialClickAdmission.deltas,
+          interactiveGesture: noDragAdmission.deltas,
+          intendedDrag: dragAdmission.deltas,
+          standardZoom: zoomAdmission.deltas,
+          standardZoomRestore: zoomRestoreAdmission.deltas,
+          minimize: minimizeAdmission.deltas,
+          close: closeAdmission.deltas,
+        },
         trafficLights: {
           nominalFrame: nominalTrafficLights,
           mappedZoomBeforeChange: draggedZoomPoint,

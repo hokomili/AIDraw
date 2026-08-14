@@ -140,7 +140,12 @@ static NSDictionary *ExactVisibleWindow(
     || fabs(actual.origin.y - expectedBounds.origin.y) > tolerance
     || fabs(actual.size.width - expectedBounds.size.width) > tolerance
     || fabs(actual.size.height - expectedBounds.size.height) > tolerance) {
-    Fail(@"The exact owner/window bounds changed before input admission.");
+    Fail([NSString stringWithFormat:
+      @"The exact owner/window bounds changed before input admission: expected %.3f,%.3f %.3fx%.3f; actual %.3f,%.3f %.3fx%.3f.",
+      expectedBounds.origin.x, expectedBounds.origin.y,
+      expectedBounds.size.width, expectedBounds.size.height,
+      actual.origin.x, actual.origin.y,
+      actual.size.width, actual.size.height]);
   }
   return window;
 }
