@@ -150,6 +150,79 @@ static NSDictionary *ExactVisibleWindow(
   return window;
 }
 
+static NSDictionary *ApplicationReadiness(pid_t pid) {
+  NSRunningApplication *application = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
+  if (application == nil || application.processIdentifier != pid) {
+    Fail(@"The exact owner PID is not one AppKit running application.");
+  }
+  NSRunningApplication *frontmost = NSWorkspace.sharedWorkspace.frontmostApplication;
+  pid_t frontmostPid = frontmost == nil ? -1 : frontmost.processIdentifier;
+  BOOL ready = !application.terminated
+    && application.finishedLaunching
+    && application.activationPolicy == NSApplicationActivationPolicyRegular
+    && application.active
+    && frontmostPid == pid;
+  return @{
+    @"pid": @(pid),
+    @"terminated": @(application.terminated),
+    @"finishedLaunching": @(application.finishedLaunching),
+    @"activationPolicy": @(application.activationPolicy),
+    @"active": @(application.active),
+    @"frontmostPid": @(frontmostPid),
+    @"readyForInput": @(ready),
+  };
+}
+
+static NSDictionary *RefreshedApplicationReadiness(pid_t pid) {
+  // NSRunningApplication documents its time-varying properties as advancing on
+  // a common-mode run-loop turn. Give this short-lived helper one bounded turn
+  // before admitting frontmost state instead of trusting a cached observation.
+  [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+  return ApplicationReadiness(pid);
+}
+
+static NSDictionary *ActivateExactApplication(
+  pid_t pid,
+  CGWindowID windowId,
+  CGRect expectedBounds
+) {
+  NSDictionary *windowBefore = ExactVisibleWindow(pid, windowId, expectedBounds);
+  NSDictionary *before = RefreshedApplicationReadiness(pid);
+  NSRunningApplication *application = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
+  if (application == nil || application.terminated
+    || application.activationPolicy != NSApplicationActivationPolicyRegular) {
+    Fail(@"The exact owner is not one activatable regular AppKit application.");
+  }
+  BOOL requested = ![before[@"readyForInput"] boolValue];
+  BOOL requestAccepted = !requested || [application activateWithOptions:0];
+  if (!requestAccepted) Fail(@"AppKit refused the exact owner's bounded activation request.");
+
+  NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:3.0];
+  NSDictionary *after = ApplicationReadiness(pid);
+  while (![after[@"readyForInput"] boolValue] && deadline.timeIntervalSinceNow > 0) {
+    [[NSRunLoop currentRunLoop]
+      runMode:NSDefaultRunLoopMode
+      beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+    after = ApplicationReadiness(pid);
+  }
+  if (![after[@"readyForInput"] boolValue]) {
+    Fail(@"The exact owner did not become the frontmost ready application within 3000 ms.");
+  }
+  NSDictionary *windowAfter = ExactVisibleWindow(pid, windowId, expectedBounds);
+  return @{
+    @"version": @1,
+    @"activated": @YES,
+    @"activationRequested": @(requested),
+    @"requestAccepted": @(requestAccepted),
+    @"pid": @(pid),
+    @"windowId": @(windowId),
+    @"before": before,
+    @"after": after,
+    @"windowBefore": windowBefore,
+    @"windowAfter": windowAfter,
+  };
+}
+
 static void PostMouseEvent(
   pid_t pid,
   CGEventSourceRef source,
@@ -173,7 +246,7 @@ static void ValidateLocalPoint(CGPoint point, CGRect bounds, NSString *label) {
 
 int main(int argc, const char *argv[]) {
   @autoreleasepool {
-    if (argc < 2) Fail(@"Usage: macos-window-chrome-driver preflight|inspect|click|option-click|drag <exact arguments>.");
+    if (argc < 2) Fail(@"Usage: macos-window-chrome-driver preflight|inspect|activate|click|option-click|drag <exact arguments>.");
     NSString *command = [NSString stringWithUTF8String:argv[1]];
     if ([command isEqualToString:@"preflight"]) {
       if (argc != 2) Fail(@"The preflight command accepts no owner or action arguments.");
@@ -191,9 +264,25 @@ int main(int argc, const char *argv[]) {
         @"version": @1,
         @"pid": @(pid),
         @"postEventAccess": @(CGPreflightPostEventAccess()),
+        @"applicationReadiness": RefreshedApplicationReadiness(pid),
         @"windows": WindowsForPid(pid),
         @"buttonMetrics": StandardButtonMetrics(),
       });
+      return 0;
+    }
+
+    if ([command isEqualToString:@"activate"]) {
+      if (argc != 8) Fail(@"The activate command requires one exact owner/window/current-bounds shape.");
+      if (!CGPreflightPostEventAccess()) Fail(@"CoreGraphics event-posting access is not pre-authorized; no prompt was requested.");
+      CGWindowID windowId = (CGWindowID)ParseInteger(argv[3], @"window ID", 1, UINT_MAX);
+      CGRect expectedBounds = CGRectMake(
+        ParseNumber(argv[4], @"expected x"),
+        ParseNumber(argv[5], @"expected y"),
+        ParseNumber(argv[6], @"expected width"),
+        ParseNumber(argv[7], @"expected height")
+      );
+      if (expectedBounds.size.width <= 0 || expectedBounds.size.height <= 0) Fail(@"The expected window bounds are empty.");
+      WriteJson(ActivateExactApplication(pid, windowId, expectedBounds));
       return 0;
     }
 
@@ -211,7 +300,15 @@ int main(int argc, const char *argv[]) {
       ParseNumber(argv[7], @"expected height")
     );
     if (expectedBounds.size.width <= 0 || expectedBounds.size.height <= 0) Fail(@"The expected window bounds are empty.");
+    NSDictionary *applicationReadiness = RefreshedApplicationReadiness(pid);
+    if (![applicationReadiness[@"readyForInput"] boolValue]) {
+      Fail(@"The exact owner is not frontmost and input-ready immediately before event posting.");
+    }
     NSDictionary *window = ExactVisibleWindow(pid, windowId, expectedBounds);
+    applicationReadiness = ApplicationReadiness(pid);
+    if (![applicationReadiness[@"readyForInput"] boolValue]) {
+      Fail(@"The exact owner lost frontmost readiness during window admission.");
+    }
     NSDictionary *boundsValue = window[@"bounds"];
     CGRect currentBounds = CGRectMake(
       [boundsValue[@"x"] doubleValue],
@@ -255,8 +352,12 @@ int main(int argc, const char *argv[]) {
       @"version": @1,
       @"action": dragging ? @"drag" : (optionClick ? @"option-click" : @"click"),
       @"posted": @YES,
+      @"postCallCompleted": @YES,
+      @"deliveryAcknowledged": @NO,
       @"pid": @(pid),
       @"windowId": @(windowId),
+      @"applicationReadiness": applicationReadiness,
+      @"nativeBounds": BoundsRecord(currentBounds),
     });
   }
   return 0;

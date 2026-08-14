@@ -51,6 +51,16 @@ export interface Ux01StandardButtonMetrics {
   zoom: { width: number; height: number; offsetX: number };
 }
 
+export interface Ux01ApplicationReadiness {
+  pid: number;
+  terminated: boolean;
+  finishedLaunching: boolean;
+  activationPolicy: 0 | 1 | 2;
+  active: boolean;
+  frontmostPid: number;
+  readyForInput: boolean;
+}
+
 export function resolveUx01WindowChromeAcceptance(options?: { workspacePath?: string; environment?: NodeJS.ProcessEnv }): Ux01WindowChromeAcceptance;
 export function assertUx01WindowChromeSafeReporterEnvironment(environment?: NodeJS.ProcessEnv): true;
 export function buildUx01WindowChromeChildEnvironment(environment?: NodeJS.ProcessEnv): NodeJS.ProcessEnv;
@@ -62,15 +72,49 @@ export function parseUx01WindowDriverInspection(value: unknown): {
   version: 1;
   pid: number;
   postEventAccess: boolean;
+  applicationReadiness: Ux01ApplicationReadiness;
   windows: Ux01WindowRecord[];
   buttonMetrics: Ux01StandardButtonMetrics;
+};
+export function parseUx01WindowDriverActivation(value: unknown): {
+  version: 1;
+  activated: true;
+  activationRequested: boolean;
+  requestAccepted: true;
+  pid: number;
+  windowId: number;
+  before: Ux01ApplicationReadiness;
+  after: Ux01ApplicationReadiness;
+  windowBefore: Ux01WindowRecord;
+  windowAfter: Ux01WindowRecord;
 };
 export function parseUx01WindowDriverAction(value: unknown): {
   version: 1;
   action: 'click' | 'option-click' | 'drag';
   posted: true;
+  postCallCompleted: true;
+  deliveryAcknowledged: false;
   pid: number;
   windowId: number;
+  applicationReadiness: Ux01ApplicationReadiness;
+  nativeBounds: { x: number; y: number; width: number; height: number };
+};
+export function parseUx01NativeClickDelivery(
+  value: unknown,
+  expected: { selector: string; safeRect: { x: number; y: number; width: number; height: number } },
+): {
+  version: 1;
+  armed: true;
+  completed: true;
+  selector: string;
+  events: Array<{
+    type: 'pointerdown' | 'mousedown' | 'pointerup' | 'mouseup' | 'click';
+    isTrusted: true;
+    targetMatched: true;
+    button: 0;
+    clientX: number;
+    clientY: number;
+  }>;
 };
 export function deriveUx01TrafficLightCenters(
   metrics: Ux01StandardButtonMetrics,

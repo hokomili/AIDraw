@@ -148,6 +148,34 @@ export function parseUx01WindowDriverPreflight(value) {
   return { version: 1, postEventAccess: value.postEventAccess };
 }
 
+function parsedApplicationReadiness(value, label, expectedPid) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || typeof value.terminated !== 'boolean'
+    || typeof value.finishedLaunching !== 'boolean'
+    || typeof value.active !== 'boolean'
+    || typeof value.readyForInput !== 'boolean') {
+    throw new Error(`The macOS window driver returned invalid ${label} application readiness.`);
+  }
+  const readiness = {
+    pid: boundedNumber(value.pid, `${label} application PID`, { integer: true, minimum: 1, maximum: 2_147_483_647 }),
+    terminated: value.terminated,
+    finishedLaunching: value.finishedLaunching,
+    activationPolicy: boundedNumber(value.activationPolicy, `${label} activation policy`, { integer: true, minimum: 0, maximum: 2 }),
+    active: value.active,
+    frontmostPid: boundedNumber(value.frontmostPid, `${label} frontmost PID`, { integer: true, minimum: -1, maximum: 2_147_483_647 }),
+    readyForInput: value.readyForInput,
+  };
+  if (expectedPid !== undefined && readiness.pid !== expectedPid) {
+    throw new Error(`The macOS window driver changed the ${label} application PID.`);
+  }
+  const computedReady = !readiness.terminated && readiness.finishedLaunching
+    && readiness.activationPolicy === 0 && readiness.active && readiness.frontmostPid === readiness.pid;
+  if (computedReady !== readiness.readyForInput) {
+    throw new Error(`The macOS window driver returned inconsistent ${label} application readiness.`);
+  }
+  return readiness;
+}
+
 export function parseUx01WindowDriverInspection(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || value.version !== 1) {
     throw new Error('The macOS window driver did not return its version-one inspection contract.');
@@ -174,6 +202,7 @@ export function parseUx01WindowDriverInspection(value) {
     version: 1,
     pid,
     postEventAccess: value.postEventAccess,
+    applicationReadiness: parsedApplicationReadiness(value.applicationReadiness, 'inspection', pid),
     windows,
     buttonMetrics: {
       close: parsedButton(metrics.close, 'close', false),
@@ -183,17 +212,103 @@ export function parseUx01WindowDriverInspection(value) {
   };
 }
 
+export function parseUx01WindowDriverActivation(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || value.version !== 1
+    || value.activated !== true || typeof value.activationRequested !== 'boolean'
+    || value.requestAccepted !== true) {
+    throw new Error('The macOS window driver did not confirm one bounded exact-owner activation.');
+  }
+  const pid = boundedNumber(value.pid, 'activation owner PID', { integer: true, minimum: 1, maximum: 2_147_483_647 });
+  const windowId = boundedNumber(value.windowId, 'activation window ID', { integer: true, minimum: 1, maximum: 4_294_967_295 });
+  const before = parsedApplicationReadiness(value.before, 'pre-activation', pid);
+  const after = parsedApplicationReadiness(value.after, 'post-activation', pid);
+  const windowBefore = parsedWindowRecord(value.windowBefore, 'pre-activation');
+  const windowAfter = parsedWindowRecord(value.windowAfter, 'post-activation');
+  if (!after.readyForInput || windowBefore.windowId !== windowId || windowAfter.windowId !== windowId) {
+    throw new Error('The macOS window driver activation did not preserve one frontmost exact owner/window.');
+  }
+  sameWindowIdentity(windowBefore, windowAfter);
+  if (Object.values(boundsDelta(windowBefore.bounds, windowAfter.bounds)).some((delta) => Math.abs(delta) > 2)) {
+    throw new Error('The macOS window driver activation changed the exact window outside the bounded admission tolerance.');
+  }
+  return {
+    version: 1,
+    activated: true,
+    activationRequested: value.activationRequested,
+    requestAccepted: true,
+    pid,
+    windowId,
+    before,
+    after,
+    windowBefore,
+    windowAfter,
+  };
+}
+
 export function parseUx01WindowDriverAction(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || value.version !== 1
-    || !['click', 'option-click', 'drag'].includes(value.action) || value.posted !== true) {
+    || !['click', 'option-click', 'drag'].includes(value.action) || value.posted !== true
+    || value.postCallCompleted !== true || value.deliveryAcknowledged !== false) {
     throw new Error('The macOS window driver did not confirm one bounded exact-owner action.');
+  }
+  const pid = boundedNumber(value.pid, 'action owner PID', { integer: true, minimum: 1, maximum: 2_147_483_647 });
+  const applicationReadiness = parsedApplicationReadiness(value.applicationReadiness, 'action-time', pid);
+  if (!applicationReadiness.readyForInput) {
+    throw new Error('The macOS window driver action did not preserve exact-owner frontmost readiness.');
   }
   return {
     version: 1,
     action: value.action,
     posted: true,
-    pid: boundedNumber(value.pid, 'action owner PID', { integer: true, minimum: 1, maximum: 2_147_483_647 }),
+    postCallCompleted: true,
+    deliveryAcknowledged: false,
+    pid,
     windowId: boundedNumber(value.windowId, 'action window ID', { integer: true, minimum: 1, maximum: 4_294_967_295 }),
+    applicationReadiness,
+    nativeBounds: parsedBounds(value.nativeBounds),
+  };
+}
+
+export function parseUx01NativeClickDelivery(value, expected) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || value.version !== 1
+    || value.armed !== true || value.completed !== true || typeof value.selector !== 'string') {
+    throw new Error('The UX-01 renderer did not return one completed native-click delivery record.');
+  }
+  if (!expected || typeof expected !== 'object' || Array.isArray(expected)
+    || value.selector !== expected.selector) {
+    throw new Error('The UX-01 renderer delivery record changed its exact target selector.');
+  }
+  const safeRect = parsedBounds(expected.safeRect);
+  if (!Array.isArray(value.events) || value.events.length !== 5) {
+    throw new Error('The UX-01 renderer did not observe the complete bounded native-click event sequence.');
+  }
+  const requiredTypes = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
+  const events = value.events.map((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)
+      || entry.type !== requiredTypes[index] || entry.isTrusted !== true
+      || entry.targetMatched !== true || entry.button !== 0) {
+      throw new Error('The UX-01 renderer native-click delivery sequence was untrusted, mistargeted, or out of order.');
+    }
+    const event = {
+      type: entry.type,
+      isTrusted: true,
+      targetMatched: true,
+      button: 0,
+      clientX: boundedNumber(entry.clientX, 'native-click client x'),
+      clientY: boundedNumber(entry.clientY, 'native-click client y'),
+    };
+    if (event.clientX < safeRect.x || event.clientX > safeRect.x + safeRect.width
+      || event.clientY < safeRect.y || event.clientY > safeRect.y + safeRect.height) {
+      throw new Error('The UX-01 renderer native-click delivery left the complete safe hit-test rectangle.');
+    }
+    return event;
+  });
+  return {
+    version: 1,
+    armed: true,
+    completed: true,
+    selector: value.selector,
+    events,
   };
 }
 

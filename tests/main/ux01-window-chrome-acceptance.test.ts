@@ -16,7 +16,9 @@ import {
   deriveUx01TrafficLightCenters,
   mapUx01FramePointToQuartzLocal,
   mapUx01RendererHitTargetToQuartzLocal,
+  parseUx01NativeClickDelivery,
   parseUx01WindowDriverAction,
+  parseUx01WindowDriverActivation,
   parseUx01WindowDriverInspection,
   parseUx01WindowDriverPreflight,
   resolveUx01WindowChromeAcceptance,
@@ -37,6 +39,19 @@ import { parseFeatureTracker } from '../../scripts/check-rc-readiness.mjs';
 const execute = promisify(execFile);
 const digest = 'A'.repeat(64);
 
+function applicationReadiness(overrides: Record<string, unknown> = {}) {
+  return {
+    pid: 100,
+    terminated: false,
+    finishedLaunching: true,
+    activationPolicy: 0,
+    active: true,
+    frontmostPid: 100,
+    readyForInput: true,
+    ...overrides,
+  };
+}
+
 function environment(workspace: string, runId: string): NodeJS.ProcessEnv {
   return {
     AIDRAW_E2E_OUT_DIR: join(workspace, 'test-results', 'prepared-packages', `${UX01_WINDOW_CHROME_PACKAGE_PREFIX}${runId}`),
@@ -52,12 +67,46 @@ function inspection(overrides: Record<string, unknown> = {}) {
     version: 1,
     pid: 100,
     postEventAccess: true,
+    applicationReadiness: applicationReadiness(),
     windows: [{ windowId: 200, onScreen: true, bounds: { x: 203, y: 32, width: 1_514, height: 936 } }],
     buttonMetrics: {
       close: { width: 14, height: 14 },
       minimize: { offsetX: 20, width: 14, height: 14 },
       zoom: { offsetX: 40, width: 14, height: 14 },
     },
+    ...overrides,
+  };
+}
+
+function driverAction(action: 'click' | 'option-click' | 'drag') {
+  return {
+    version: 1,
+    action,
+    posted: true,
+    postCallCompleted: true,
+    deliveryAcknowledged: false,
+    pid: 100,
+    windowId: 200,
+    applicationReadiness: applicationReadiness(),
+    nativeBounds: { x: 203, y: 32, width: 1_514, height: 936 },
+  };
+}
+
+function nativeClickDelivery(overrides: Record<string, unknown> = {}) {
+  const event = (type: string) => ({
+    type,
+    isTrusted: true,
+    targetMatched: true,
+    button: 0,
+    clientX: 1_400,
+    clientY: 28,
+  });
+  return {
+    version: 1,
+    armed: true,
+    completed: true,
+    selector: 'button[aria-label="All open documents"]',
+    events: ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].map(event),
     ...overrides,
   };
 }
@@ -161,23 +210,78 @@ describe('UX-01 exact-package native window-chrome preparation', () => {
       outer: { x: 30, y: 40, width: 1_520, height: 940 },
       screen: { availLeft: 0, availTop: 0, availWidth: 1_920, availHeight: 1_080 },
     })).toBe(true);
-    expect(parseUx01WindowDriverAction({ version: 1, action: 'drag', posted: true, pid: 100, windowId: 200 })).toEqual({
-      version: 1, action: 'drag', posted: true, pid: 100, windowId: 200,
+    expect(parseUx01WindowDriverAction(driverAction('drag'))).toEqual(driverAction('drag'));
+    expect(parseUx01WindowDriverAction(driverAction('option-click'))).toEqual(driverAction('option-click'));
+    expect(parseUx01WindowDriverActivation({
+      version: 1,
+      activated: true,
+      activationRequested: true,
+      requestAccepted: true,
+      pid: 100,
+      windowId: 200,
+      before: applicationReadiness({ active: false, frontmostPid: 90, readyForInput: false }),
+      after: applicationReadiness(),
+      windowBefore: inspection().windows[0],
+      windowAfter: inspection().windows[0],
+    })).toMatchObject({
+      activated: true,
+      activationRequested: true,
+      pid: 100,
+      windowId: 200,
+      after: { readyForInput: true },
     });
-    expect(parseUx01WindowDriverAction({ version: 1, action: 'option-click', posted: true, pid: 100, windowId: 200 })).toEqual({
-      version: 1, action: 'option-click', posted: true, pid: 100, windowId: 200,
-    });
+    expect(parseUx01NativeClickDelivery(nativeClickDelivery(), {
+      selector: 'button[aria-label="All open documents"]',
+      safeRect: { x: 1_396, y: 24, width: 8, height: 8 },
+    })).toEqual(nativeClickDelivery());
   });
 
   it('rejects ambiguous windows, malformed metrics/actions, and unsafe decorated-frame mappings', () => {
     expect(() => parseUx01WindowDriverPreflight({ version: 1, postEventAccess: 'yes' })).toThrow(/preflight contract/);
     expect(() => parseUx01WindowDriverInspection(inspection({ windows: [inspection().windows[0], { ...inspection().windows[0], windowId: 201 }] }))).toThrow(/ambiguous/);
+    expect(() => parseUx01WindowDriverInspection(inspection({
+      applicationReadiness: applicationReadiness({ active: false, readyForInput: true }),
+    }))).toThrow(/inconsistent/);
     expect(() => parseUx01WindowDriverInspection(inspection({ buttonMetrics: { ...inspection().buttonMetrics, zoom: { offsetX: 100, width: 14, height: 14 } } }))).toThrow(/zoom button offset/);
     expect(() => deriveUx01TrafficLightCenters(inspection().buttonMetrics, {
       trafficLightPosition: { x: 60, y: 13 }, trafficLightReservedWidth: 84, topbarHeight: 56,
     })).toThrow(/do not fit/);
-    expect(() => parseUx01WindowDriverAction({ version: 1, action: 'click', posted: false, pid: 100, windowId: 200 })).toThrow(/did not confirm/);
-    expect(() => parseUx01WindowDriverAction({ version: 1, action: 'fullscreen-click', posted: true, pid: 100, windowId: 200 })).toThrow(/did not confirm/);
+    expect(() => parseUx01WindowDriverAction({ ...driverAction('click'), posted: false })).toThrow(/did not confirm/);
+    expect(() => parseUx01WindowDriverAction({ ...driverAction('click'), action: 'fullscreen-click' })).toThrow(/did not confirm/);
+    expect(() => parseUx01WindowDriverAction({
+      ...driverAction('click'),
+      applicationReadiness: applicationReadiness({ active: false, readyForInput: false }),
+    })).toThrow(/frontmost readiness/);
+    expect(() => parseUx01WindowDriverActivation({
+      version: 1,
+      activated: true,
+      activationRequested: true,
+      requestAccepted: true,
+      pid: 100,
+      windowId: 200,
+      before: applicationReadiness({ active: false, readyForInput: false }),
+      after: applicationReadiness({ active: false, readyForInput: false }),
+      windowBefore: inspection().windows[0],
+      windowAfter: inspection().windows[0],
+    })).toThrow(/frontmost exact owner/);
+    expect(() => parseUx01NativeClickDelivery(nativeClickDelivery({
+      events: nativeClickDelivery().events.map((event: Record<string, unknown>, index: number) => index === 4 ? { ...event, isTrusted: false } : event),
+    }), {
+      selector: 'button[aria-label="All open documents"]',
+      safeRect: { x: 1_396, y: 24, width: 8, height: 8 },
+    })).toThrow(/untrusted/);
+    expect(() => parseUx01NativeClickDelivery(nativeClickDelivery({
+      events: [...nativeClickDelivery().events].reverse(),
+    }), {
+      selector: 'button[aria-label="All open documents"]',
+      safeRect: { x: 1_396, y: 24, width: 8, height: 8 },
+    })).toThrow(/out of order/);
+    expect(() => parseUx01NativeClickDelivery(nativeClickDelivery({
+      events: nativeClickDelivery().events.map((event: Record<string, unknown>) => ({ ...event, clientX: 1_500 })),
+    }), {
+      selector: 'button[aria-label="All open documents"]',
+      safeRect: { x: 1_396, y: 24, width: 8, height: 8 },
+    })).toThrow(/safe hit-test rectangle/);
     const parsed = parseUx01WindowDriverInspection(inspection());
     expect(() => deriveUx01DecoratedFrameRelation(parsed.windows[0], rendererMeasurement({
       content: { width: 1_520, height: 940, devicePixelRatio: 2 },
@@ -361,19 +465,21 @@ describe('UX-01 exact-package native window-chrome preparation', () => {
   });
 
   it('uses only public exact-PID macOS input/window APIs and no production testing backdoor', async () => {
-    const [driver, wrapper, config, spec, main, preload, styles, electronTypes] = await Promise.all([
+    const [driver, wrapper, config, spec, main, preload, rendererApp, styles, electronTypes] = await Promise.all([
       readFile(resolve('scripts/macos-window-chrome-driver.m'), 'utf8'),
       readFile(resolve('scripts/run-ux01-window-chrome-acceptance.mjs'), 'utf8'),
       readFile(resolve('playwright.ux01-window-chrome.config.ts'), 'utf8'),
       readFile(resolve('tests/e2e/editor-window-chrome.spec.ts'), 'utf8'),
       readFile(resolve('src/main/main.ts'), 'utf8'),
       readFile(resolve('src/preload/preload.ts'), 'utf8'),
+      readFile(resolve('src/renderer/App.tsx'), 'utf8'),
       readFile(resolve('src/renderer/styles.css'), 'utf8'),
       readFile(resolve('node_modules/electron/electron.d.ts'), 'utf8'),
     ]);
     for (const marker of [
       'CGWindowListCopyWindowInfo', 'kCGWindowOwnerPID', 'kCGWindowNumber', 'CGPreflightPostEventAccess',
       'CGEventCreateMouseEvent', 'CGEventSetFlags', 'kCGEventFlagMaskAlternate', 'CGEventPostToPid',
+      'NSRunningApplication', 'frontmostApplication', 'activateWithOptions:0', 'runUntilDate:',
       'standardWindowButton:NSWindowCloseButton',
       'standardWindowButton:NSWindowMiniaturizeButton', 'standardWindowButton:NSWindowZoomButton',
     ]) expect(driver).toContain(marker);
@@ -382,10 +488,14 @@ describe('UX-01 exact-package native window-chrome preparation', () => {
     expect(driver).not.toContain('CGRequestPostEventAccess');
     expect(driver).not.toContain('AXUIElement');
     expect(driver).not.toContain('CGEventPost(');
+    expect(driver).not.toContain('NSApplicationActivateIgnoringOtherApps');
+    expect(driver).not.toContain('activateFromApplication');
     expect(driver).not.toMatch(/\bkill\s*\(/);
     expect(driver).not.toMatch(/\bsignal\s*\(/);
     expect(driver).toContain('const double tolerance = 2.0;');
     expect(driver).toContain('The exact owner/window bounds changed before input admission: expected %.3f,%.3f %.3fx%.3f; actual %.3f,%.3f %.3fx%.3f.');
+    expect(driver).toContain('@"postCallCompleted": @YES');
+    expect(driver).toContain('@"deliveryAcknowledged": @NO');
 
     expect(wrapper).toContain("spawn('/usr/bin/xcrun'");
     expect(wrapper).toContain("'ApplicationServices'");
@@ -418,7 +528,9 @@ describe('UX-01 exact-package native window-chrome preparation', () => {
     expect(config).not.toContain("['html'");
 
     const orderedMarkers = [
-      "stage: 'interactive-no-drag-click'",
+      "stage: 'native-window-activation'",
+      "stage: 'interactive-no-drag-delivery'",
+      "stage: 'interactive-no-drag-menu-outcome'",
       "stage: 'interactive-no-drag-gesture'",
       "stage: 'intended-app-region-drag'",
       "stage: 'native-option-zoom-toggle'",
@@ -452,15 +564,29 @@ describe('UX-01 exact-package native window-chrome preparation', () => {
     expect(spec).toContain('const WINDOW_STABILITY_OBSERVATIONS = 3;');
     expect(spec).toContain('const WINDOW_STABILITY_INTERVAL_MS = 100;');
     expect(spec).toContain('const WINDOW_STABILITY_TIMEOUT_MS = 5_000;');
-    expect(spec).toContain('waitForStableWindowGeometry(page, configured.driverExecutable, ownerPid)');
+    expect(spec).toContain('const APPLICATION_READINESS_TIMEOUT_MS = 3_000;');
+    expect(spec).toContain('const NATIVE_CLICK_DELIVERY_TIMEOUT_MS = 5_000;');
+    expect(spec).toContain('await waitForStableWindowGeometry(');
+    expect(spec).toContain('const activation = await activateOwner(');
+    expect(spec).toContain('const initialRendererInputReadiness = await waitForRendererInputReadiness(page);');
+    expect(spec).toContain('const actionRendererInputReadiness = await rendererInputReadiness(page);');
+    expect(spec).toContain("document.visibilityState === 'visible' && document.hasFocus()");
+    expect(spec).toContain('const initialDeliveryArm = await armNativeClickDelivery(page);');
+    expect(spec).toContain('const observedDelivery = await observeNativeClickDelivery(page);');
+    expect(spec).toContain('parseUx01NativeClickDelivery(observedDelivery.record');
+    expect(spec).toContain("stage: 'interactive-no-drag-menu-outcome'");
+    expect(spec).toContain("await expect(page.getByRole('menu', { name: 'All open documents' })).toBeVisible()");
     expect(spec.match(/await captureActionReadySnapshot\(/g)).toHaveLength(7);
     const initialTargetObservation = spec.indexOf('const initialTargets = await chromeHitTargets(page);');
+    const initialDeliveryArm = spec.indexOf('const initialDeliveryArm = await armNativeClickDelivery(page);');
     const initialActionAdmission = spec.indexOf('const initialClickAdmission = await captureActionReadySnapshot(');
     const initialTargetMapping = spec.indexOf('const initialInteractiveClick = mapUx01RendererHitTargetToQuartzLocal(');
     const initialNativePost = spec.indexOf('configured.driverExecutable, ownerPid, initialClickAdmission.snapshot.window');
-    expect([initialTargetObservation, initialActionAdmission, initialTargetMapping, initialNativePost].every((index) => index >= 0)).toBe(true);
-    expect([initialTargetObservation, initialActionAdmission, initialTargetMapping, initialNativePost])
-      .toEqual([...new Set([initialTargetObservation, initialActionAdmission, initialTargetMapping, initialNativePost])].sort((left, right) => left - right));
+    expect([initialTargetObservation, initialDeliveryArm, initialActionAdmission, initialTargetMapping, initialNativePost]
+      .every((index) => index >= 0)).toBe(true);
+    expect([initialTargetObservation, initialDeliveryArm, initialActionAdmission, initialTargetMapping, initialNativePost])
+      .toEqual([...new Set([initialTargetObservation, initialDeliveryArm, initialActionAdmission, initialTargetMapping, initialNativePost])]
+        .sort((left, right) => left - right));
     for (const admission of [
       'initialClickAdmission', 'noDragAdmission', 'dragAdmission', 'zoomAdmission',
       'zoomRestoreAdmission', 'minimizeAdmission', 'closeAdmission',
@@ -478,8 +604,11 @@ describe('UX-01 exact-package native window-chrome preparation', () => {
     expect(spec).not.toMatch(/\brm\s*\(/);
 
     expect(main).toContain('trafficLightPosition: MACOS_EDITOR_WINDOW_CHROME.trafficLightPosition');
+    expect(main).not.toContain('acceptFirstMouse');
     expect(main).not.toContain('UX01_WINDOW_CHROME_SCENARIO');
     expect(preload).not.toContain('UX01_WINDOW_CHROME_SCENARIO');
+    expect(rendererApp).toContain('aria-label="All open documents"');
+    expect(rendererApp).toContain('onClick={toggleAllTabs}');
     expect(styles).toContain('html[data-native-titlebar="hidden-inset"] .topbar { -webkit-app-region: drag; }');
     expect(styles).toContain('-webkit-app-region: no-drag;');
     expect(electronTypes).toContain('trafficLightPosition?: Point;');
@@ -519,7 +648,7 @@ describe('UX-01 exact-package native window-chrome preparation', () => {
     for (const path of roots) expect(await access(path).then(() => true, () => false), `${path} must remain absent`).toBe(false);
   });
 
-  it('keeps UX-01 Working/P0 and records consumed r1/r2/r3 without promoting a native claim', async () => {
+  it('keeps UX-01 Working/P0 and records consumed r1/r2/r3/r4 without promoting a native claim', async () => {
     const [changelog, tracker, testing] = await Promise.all([
       readFile(resolve('CHANGELOG.md'), 'utf8'),
       readFile(resolve('docs/FEATURE_TRACKER.md'), 'utf8'),
@@ -537,29 +666,40 @@ describe('UX-01 exact-package native window-chrome preparation', () => {
       'Blink `200,30 1520×940`',
       'Fresh r3 `20260814t112230z-ff44905-r3`',
       'controller TOCTOU/evidence failure',
-      'three bounded paired stability observations',
-      'fresh paired action-ready snapshot',
-      'dynamic decorated-frame containment relation',
-      'exact-PID/window/current-native-bounds reinspection',
-      'Accessibility API',
+      'paired stability/action-ready snapshots',
+      'dynamic decorated-frame containment',
+      'exact current-bounds admission',
+      'Fresh r4 `20260814t121343z-0f42b22-r4`',
+      'owner 30153, renderer 30168, and layer-zero window 7031',
+      'Quartz and Blink both `200,30 1520×940`',
+      'posted-input evidence only',
+      'frontmost/focus readiness',
+      'ordered trusted primary pointer/mouse/click sequence',
+      'Accessibility/private API',
       'separate native authority',
     ]) expect(truth).toContain(claim);
     expect(truth).toContain('Secure r5');
     expect(truth).toContain('passed **1/1 in 5.5 seconds**');
     expect(truth).not.toContain('native traffic-light/top-bar PASS');
 
-    const section = testing.slice(testing.indexOf('### UX-01 native window-chrome preparation, consumed r1/r2/r3 controller failures, and corrected source model'));
+    const section = testing.slice(testing.indexOf('### UX-01 native window-chrome preparation, consumed r1/r2/r3/r4 controller failures, and corrected source model'));
     expect(section).toContain(UX01_WINDOW_CHROME_SCENARIO);
     expect(section).toContain('R1 `20260814t092808z-7ff773c-r1`');
     expect(section).toContain('Fresh r2 `20260814t102354z-f7e6d0c-r2`');
     expect(section).toContain('Fresh r3 `20260814t112230z-ff44905-r3`');
+    expect(section).toContain('Fresh r4 `20260814t121343z-0f42b22-r4`');
+    expect(section).toContain('owner PID 30153, renderer PID 30168');
+    expect(section).toContain('layer-zero Quartz window ID 7031');
+    expect(section).toContain('mapped point `1287.484375,27.5`');
+    expect(section).toContain('menu remained absent for 10 seconds');
+    expect(section).toContain('not a product-defect finding');
     expect(section).toContain('owner PID 22702');
     expect(section).toContain('window ID 7030');
     expect(section).toContain('controller TOCTOU/evidence defect');
     expect(section).toContain('cannot distinguish first-show settling from another native move');
     expect(section).toContain('Quartz reported `203,32 1514×936`');
     expect(section).toContain('trusted Blink reported `200,30 1520×940`');
-    expect(section).toContain('No CoreGraphics input was posted');
+    expect(section).toContain('R1–r3 posted no CoreGraphics input; r4 earns only exact post-call evidence');
     expect(section).toContain('not product traffic-light/drag behavior, privacy completion');
     expect(section).toContain('Apple documents `kCGWindowBounds` in Quartz screen space');
     expect(section).toContain('`NativeWindowMac::GetBounds` reads `NSWindow.frame`');
@@ -569,12 +709,20 @@ describe('UX-01 exact-package native window-chrome preparation', () => {
     expect(section).toContain('complete 0.5-CSS-px hit-test neighborhood');
     expect(section).toContain('three consecutive paired native/renderer observations');
     expect(section).toContain('fresh paired action-ready snapshot');
+    expect(section).toContain('treats activation, delivery, and product outcome as three independent gates');
+    expect(section).toContain('`acceptFirstMouse` as false by default');
+    expect(section).toContain('`activateWithOptions:0` only when needed');
+    expect(section).toContain('`NSWorkspace.frontmostApplication.processIdentifier == ownerPid`');
+    expect(section).toContain('visible and report `document.hasFocus()`');
+    expect(section).toContain('`postCallCompleted: true` with `deliveryAcknowledged: false`');
+    expect(section).toContain('`pointerdown`, `mousedown`, `pointerup`, `mouseup`, and `click`');
+    expect(section).toContain('separate `interactive-no-drag-menu-outcome` gate');
     expect(section).toContain('expected and actual bounds');
     expect(section).toContain('stationary independently in Quartz and Blink');
     expect(section).toContain('Raw native and renderer records are retained before every assertion');
     expect(section).toContain('before the test can create its profile');
     expect(section).toContain('fails closed unless it returns true');
-    expect(section).toContain('rechecks that permission immediately before every exact-PID action');
+    expect(section).toContain('rechecks that permission before exact activation and immediately before every exact-PID action');
     expect(section).toContain('12×11 px');
     expect(section).toContain('without moving the user-visible controls');
     expect(section).toContain('Option-click');
@@ -583,12 +731,18 @@ describe('UX-01 exact-package native window-chrome preparation', () => {
     expect(changelog).toContain('Prepare a separate one-shot UX-01 native window-chrome acceptance');
     expect(changelog).toContain('R2 then failed **1/1 in 2.6 seconds**');
     expect(changelog).toContain('Fresh r3 `20260814t112230z-ff44905-r3`');
+    expect(changelog).toContain('window-chrome r4 `20260814t121343z-0f42b22-r4`');
+    expect(changelog).toContain('exact owner 30153, renderer 30168');
+    expect(changelog).toContain('menu remained absent for 10 seconds');
+    expect(changelog).toContain('without treating a posted input as a product failure');
+    expect(changelog).toContain('waits at most 3,000 ms');
+    expect(changelog).toContain('`deliveryAcknowledged: false`');
     expect(changelog).toContain('controller time-of-check/time-of-use and evidence gap');
     expect(changelog).toContain('three bounded paired native/renderer stability observations');
     expect(changelog).toContain('fresh paired action-ready snapshot');
     expect(changelog).toContain('1514×936');
     expect(changelog).toContain("dynamically requires Quartz's visible window-server rectangle");
-    expect(changelog).toContain('All three runs cleaned up gracefully with zero survivors and are immutable, non-reusable controller failures');
+    expect(changelog).toContain('R1–r3 cleaned up gracefully with zero survivors and are immutable, non-reusable controller failures');
     expect(changelog).toContain('before the packaged app launches or its profile is created');
     expect(changelog).not.toContain('This checkpoint is source/headless preparation only: it has not been packaged or executed');
     expect(truth).not.toContain('prepared but has not been packaged or executed');

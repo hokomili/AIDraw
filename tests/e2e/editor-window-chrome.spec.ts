@@ -23,7 +23,9 @@ import {
   deriveUx01TrafficLightCenters,
   mapUx01FramePointToQuartzLocal,
   mapUx01RendererHitTargetToQuartzLocal,
+  parseUx01NativeClickDelivery,
   parseUx01WindowDriverAction,
+  parseUx01WindowDriverActivation,
   parseUx01WindowDriverInspection,
   resolveUx01WindowChromeAcceptance,
   UX01_WINDOW_ACTION_MAPPING_UNCERTAINTY,
@@ -78,6 +80,9 @@ interface WindowGeometrySnapshot {
 const WINDOW_STABILITY_OBSERVATIONS = 3;
 const WINDOW_STABILITY_INTERVAL_MS = 100;
 const WINDOW_STABILITY_TIMEOUT_MS = 5_000;
+const APPLICATION_READINESS_TIMEOUT_MS = 3_000;
+const NATIVE_CLICK_DELIVERY_TIMEOUT_MS = 5_000;
+const NATIVE_CLICK_SELECTOR = 'button[aria-label="All open documents"]';
 
 interface CleanupRecord {
   ownerPid?: number;
@@ -301,6 +306,41 @@ async function inspectOwner(driver: string, pid: number) {
   return parseUx01WindowDriverInspection(await runDriver(driver, ['inspect', String(pid)]));
 }
 
+async function activateOwner(
+  driver: string,
+  pid: number,
+  windowRecord: { windowId: number; bounds: { x: number; y: number; width: number; height: number } },
+) {
+  const result = parseUx01WindowDriverActivation(await runDriver(driver, [
+    'activate', String(pid), String(windowRecord.windowId), ...boundsArguments(windowRecord),
+  ]));
+  if (result.pid !== pid || result.windowId !== windowRecord.windowId || !result.after.readyForInput) {
+    throw new Error('The macOS driver did not activate the exact run-owned application/window.');
+  }
+  return result;
+}
+
+async function rendererInputReadiness(page: Page) {
+  return page.evaluate(() => ({
+    visibilityState: document.visibilityState,
+    documentHasFocus: document.hasFocus(),
+    activeElementTag: document.activeElement?.tagName.toLowerCase() ?? null,
+  }));
+}
+
+async function waitForRendererInputReadiness(page: Page) {
+  await page.waitForFunction(
+    () => document.visibilityState === 'visible' && document.hasFocus(),
+    undefined,
+    { timeout: APPLICATION_READINESS_TIMEOUT_MS },
+  );
+  const readiness = await rendererInputReadiness(page);
+  if (!readiness.documentHasFocus || readiness.visibilityState !== 'visible') {
+    throw new Error('The trusted renderer did not retain focus after its bounded readiness wait.');
+  }
+  return readiness;
+}
+
 function windowGeometrySnapshot(
   inspection: NativeInspection,
   measurement: NativeMeasurement,
@@ -353,6 +393,7 @@ async function waitForStableWindowGeometry(
   page: Page,
   driver: string,
   pid: number,
+  expectedWindowId?: number,
 ): Promise<{
   first: WindowGeometrySnapshot;
   snapshot: WindowGeometrySnapshot;
@@ -360,7 +401,7 @@ async function waitForStableWindowGeometry(
   deltas: ReturnType<typeof stationarySnapshotDeltas>;
 }> {
   const deadline = Date.now() + WINDOW_STABILITY_TIMEOUT_MS;
-  const first = await captureWindowGeometrySnapshot(page, driver, pid);
+  const first = await captureWindowGeometrySnapshot(page, driver, pid, expectedWindowId);
   let anchor = first;
   let stableObservations = 1;
   let lastError: Error | undefined;
@@ -382,6 +423,105 @@ async function waitForStableWindowGeometry(
   throw new Error(
     `The exact UX-01 native/renderer window did not reach ${WINDOW_STABILITY_OBSERVATIONS} bounded stable observations: ${lastError?.message ?? 'no stable observation'}.`,
   );
+}
+
+async function armNativeClickDelivery(page: Page) {
+  return page.evaluate(({ selector, requiredTypes }) => {
+    const key = '__aidrawUx01NativeClickDelivery';
+    const deliveryWindow = window as unknown as Record<string, unknown>;
+    if (deliveryWindow[key]) throw new Error('The renderer already has a native-click delivery observer.');
+    const target = document.querySelector<HTMLElement>(selector);
+    if (!target) throw new Error('The exact renderer native-click target is absent.');
+    const state: {
+      version: 1;
+      armed: true;
+      completed: boolean;
+      selector: string;
+      events: Array<{
+        type: string;
+        isTrusted: boolean;
+        targetMatched: boolean;
+        button: number;
+        clientX: number;
+        clientY: number;
+      }>;
+      listener: EventListener;
+    } = {
+      version: 1,
+      armed: true,
+      completed: false,
+      selector,
+      events: [],
+      listener: () => undefined,
+    };
+    state.listener = (event: Event) => {
+      if (!(event instanceof MouseEvent) || !requiredTypes.includes(event.type)) return;
+      state.events.push({
+        type: event.type,
+        isTrusted: event.isTrusted,
+        targetMatched: event.composedPath().includes(target),
+        button: event.button,
+        clientX: event.clientX,
+        clientY: event.clientY,
+      });
+      if (event.type === 'click') state.completed = true;
+    };
+    for (const type of requiredTypes) document.addEventListener(type, state.listener, true);
+    deliveryWindow[key] = state;
+    return {
+      version: state.version,
+      armed: state.armed,
+      selector: state.selector,
+      documentHasFocus: document.hasFocus(),
+      visibilityState: document.visibilityState,
+    };
+  }, {
+    selector: NATIVE_CLICK_SELECTOR,
+    requiredTypes: ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'],
+  });
+}
+
+async function collectNativeClickDelivery(page: Page): Promise<unknown> {
+  const key = '__aidrawUx01NativeClickDelivery';
+  return page.evaluate(({ deliveryKey, requiredTypes }) => {
+    const deliveryWindow = window as unknown as Record<string, {
+        version: 1;
+        armed: true;
+        completed: boolean;
+        selector: string;
+        events: unknown[];
+        listener: EventListener;
+      } | undefined>;
+    const state = deliveryWindow[deliveryKey];
+    if (!state) throw new Error('The renderer native-click delivery observer disappeared.');
+    for (const type of requiredTypes) document.removeEventListener(type, state.listener, true);
+    delete deliveryWindow[deliveryKey];
+    return {
+      version: state.version,
+      armed: state.armed,
+      completed: state.completed,
+      selector: state.selector,
+      events: state.events,
+    };
+  }, {
+    deliveryKey: key,
+    requiredTypes: ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'],
+  });
+}
+
+async function observeNativeClickDelivery(page: Page): Promise<{ record: unknown; timeoutError?: string }> {
+  const key = '__aidrawUx01NativeClickDelivery';
+  let timeoutError: string | undefined;
+  try {
+    await page.waitForFunction(
+      (deliveryKey) => Boolean((window as unknown as Record<string, { completed?: boolean }>)[deliveryKey]?.completed),
+      key,
+      { timeout: NATIVE_CLICK_DELIVERY_TIMEOUT_MS },
+    );
+  } catch (error) {
+    timeoutError = error instanceof Error ? error.message : String(error);
+  }
+  return { record: await collectNativeClickDelivery(page), ...(timeoutError ? { timeoutError } : {}) };
 }
 
 async function captureActionReadySnapshot(
@@ -416,7 +556,8 @@ async function postClick(
   const result = parseUx01WindowDriverAction(await runDriver(driver, [
     'click', String(pid), String(windowRecord.windowId), ...boundsArguments(windowRecord), String(point.x), String(point.y),
   ]));
-  if (result.pid !== pid || result.windowId !== windowRecord.windowId || result.action !== 'click') {
+  if (result.pid !== pid || result.windowId !== windowRecord.windowId || result.action !== 'click'
+    || !sameBounds(result.nativeBounds, windowRecord.bounds)) {
     throw new Error('The macOS driver did not bind its click to the exact owner/window.');
   }
   return result;
@@ -431,7 +572,8 @@ async function postOptionClick(
   const result = parseUx01WindowDriverAction(await runDriver(driver, [
     'option-click', String(pid), String(windowRecord.windowId), ...boundsArguments(windowRecord), String(point.x), String(point.y),
   ]));
-  if (result.pid !== pid || result.windowId !== windowRecord.windowId || result.action !== 'option-click') {
+  if (result.pid !== pid || result.windowId !== windowRecord.windowId || result.action !== 'option-click'
+    || !sameBounds(result.nativeBounds, windowRecord.bounds)) {
     throw new Error('The macOS driver did not bind its Option-click to the exact owner/window.');
   }
   return result;
@@ -448,7 +590,8 @@ async function postDrag(
     'drag', String(pid), String(windowRecord.windowId), ...boundsArguments(windowRecord),
     String(start.x), String(start.y), String(end.x), String(end.y),
   ]));
-  if (result.pid !== pid || result.windowId !== windowRecord.windowId || result.action !== 'drag') {
+  if (result.pid !== pid || result.windowId !== windowRecord.windowId || result.action !== 'drag'
+    || !sameBounds(result.nativeBounds, windowRecord.bounds)) {
     throw new Error('The macOS driver did not bind its drag to the exact owner/window.');
   }
   return result;
@@ -625,8 +768,19 @@ test(UX01_WINDOW_CHROME_SCENARIO, async ({ browserName }, testInfo) => {
     const originalRendererPid = processShapeBefore.find((entry) => entry.type === 'renderer')?.pid;
     if (!originalRendererPid) throw new Error('The exact UX-01 owner has no original renderer PID.');
 
-    failureDiagnostics = { stage: 'native-window-stability', ownerPid, processShapeBefore };
-    const initialStability = await waitForStableWindowGeometry(page, configured.driverExecutable, ownerPid);
+    failureDiagnostics = { stage: 'native-window-activation', ownerPid, processShapeBefore };
+    const preActivationSnapshot = await captureWindowGeometrySnapshot(page, configured.driverExecutable, ownerPid);
+    const activation = await activateOwner(
+      configured.driverExecutable, ownerPid, preActivationSnapshot.window,
+    );
+    const initialRendererInputReadiness = await waitForRendererInputReadiness(page);
+    failureDiagnostics = {
+      stage: 'native-window-activation', ownerPid, processShapeBefore,
+      before: preActivationSnapshot.geometry, activation, rendererInputReadiness: initialRendererInputReadiness,
+    };
+    const initialStability = await waitForStableWindowGeometry(
+      page, configured.driverExecutable, ownerPid, preActivationSnapshot.window.windowId,
+    );
     const initialSnapshot = initialStability.snapshot;
     const initialMeasurement = initialSnapshot.measurement;
     const initialInspection = initialSnapshot.inspection;
@@ -635,6 +789,7 @@ test(UX01_WINDOW_CHROME_SCENARIO, async ({ browserName }, testInfo) => {
     const initialRelation = initialSnapshot.relation;
     failureDiagnostics = {
       stage: 'native-window-stability', ownerPid, processShapeBefore,
+      activation, rendererInputReadiness: initialRendererInputReadiness,
       first: initialStability.first.geometry, stable: initialGeometry,
       observations: initialStability.observations, deltas: initialStability.deltas,
       relation: initialRelation,
@@ -648,22 +803,49 @@ test(UX01_WINDOW_CHROME_SCENARIO, async ({ browserName }, testInfo) => {
     expect(initialTargets.topbarRegion).toBe('drag');
     expect(initialTargets.buttonRegion).toBe('no-drag');
     expect(initialTargets.verificationStep).toBe(0.5);
+    const initialDeliveryArm = await armNativeClickDelivery(page);
     const initialClickAdmission = await captureActionReadySnapshot(
       page, configured.driverExecutable, ownerPid, initialSnapshot, 'interactive no-drag click',
     );
     const initialInteractiveClick = mapUx01RendererHitTargetToQuartzLocal(
       initialClickAdmission.snapshot.relation, initialTargets.interactiveClick,
     );
+    const actionRendererInputReadiness = await rendererInputReadiness(page);
+    if (!actionRendererInputReadiness.documentHasFocus
+      || actionRendererInputReadiness.visibilityState !== 'visible') {
+      throw new Error('The trusted renderer lost focus/readiness before the exact UX click.');
+    }
 
     failureDiagnostics = {
-      stage: 'interactive-no-drag-click', ownerPid, processShapeBefore,
+      stage: 'interactive-no-drag-delivery', ownerPid, processShapeBefore,
+      activation, rendererInputReadiness: initialRendererInputReadiness,
+      actionRendererInputReadiness, deliveryArm: initialDeliveryArm,
       stable: initialGeometry, before: initialClickAdmission.snapshot.geometry,
       relation: initialClickAdmission.snapshot.relation,
       admissionDeltas: initialClickAdmission.deltas, target: initialInteractiveClick,
     };
-    await postClick(
+    const initialNativePost = await postClick(
       configured.driverExecutable, ownerPid, initialClickAdmission.snapshot.window, initialInteractiveClick.point,
     );
+    const observedDelivery = await observeNativeClickDelivery(page);
+    failureDiagnostics = {
+      ...failureDiagnostics,
+      nativePost: initialNativePost,
+      rendererDelivery: observedDelivery.record,
+      ...(observedDelivery.timeoutError ? { rendererDeliveryTimeout: observedDelivery.timeoutError } : {}),
+    };
+    if (observedDelivery.timeoutError) {
+      throw new Error('The exact native post was not acknowledged by a complete renderer click sequence within 5000 ms.');
+    }
+    const rendererDelivery = parseUx01NativeClickDelivery(observedDelivery.record, {
+      selector: NATIVE_CLICK_SELECTOR,
+      safeRect: initialTargets.interactiveClick.safeRect,
+    });
+    failureDiagnostics = {
+      ...failureDiagnostics,
+      stage: 'interactive-no-drag-menu-outcome',
+      rendererDelivery,
+    };
     await expect(page.getByRole('menu', { name: 'All open documents' })).toBeVisible();
     const afterInteractiveClick = await inspectOwner(configured.driverExecutable, ownerPid);
     const afterInteractiveClickMeasurement = await nativeMeasurement(page);
@@ -962,7 +1144,7 @@ test(UX01_WINDOW_CHROME_SCENARIO, async ({ browserName }, testInfo) => {
         executableSha256: await sha256(configured.driverExecutable),
         prelaunchPostEventAccessPreflight: true,
         actionTimePostEventAccessRechecks: true,
-        api: 'public CoreGraphics exact-PID event posting plus read-only exact-owner Quartz window metadata; no Accessibility API',
+        api: 'public exact-PID AppKit activation/readiness plus CoreGraphics event posting and read-only exact-owner Quartz window metadata; no Accessibility API',
       },
       isolation: {
         profile: configured.profile,
@@ -982,6 +1164,12 @@ test(UX01_WINDOW_CHROME_SCENARIO, async ({ browserName }, testInfo) => {
       },
       windowChrome: {
         contract: MACOS_EDITOR_WINDOW_CHROME,
+        activation: {
+          native: activation,
+          renderer: initialRendererInputReadiness,
+          rendererAtAction: actionRendererInputReadiness,
+          timeoutMs: APPLICATION_READINESS_TIMEOUT_MS,
+        },
         coordinateModel: initialGeometry.coordinateModel,
         standardButtonMetrics: initialInspection.buttonMetrics,
         stability: {
@@ -1016,6 +1204,8 @@ test(UX01_WINDOW_CHROME_SCENARIO, async ({ browserName }, testInfo) => {
           interactiveTarget: initialInteractiveClick,
         },
         noDrag: {
+          nativePost: initialNativePost,
+          rendererTrustedClickDelivery: rendererDelivery,
           nativeClickOpenedMenu: true,
           dragDidNotMoveWindow: true,
           keyboardStillUsable: true,

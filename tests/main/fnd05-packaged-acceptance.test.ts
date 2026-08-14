@@ -550,8 +550,8 @@ describe('FND-05 retained exact-package acceptance boundary', () => {
     expect(truth).toContain('The initiating renderer-loss trigger');
     expect(truth).toContain('customer updater/restart semantics');
     expect(truth).not.toContain('alive-hang route has no PASS');
-    expect(tracker).toContain('synchronized through base `ff44905110bbd1441b417f37675361f2aea4c045`');
-    expect(tracker).toContain('This bounded **eight-path** source/headless UX-01 correction');
+    expect(tracker).toContain('synchronized through base `0f42b227e6fe88c27e7bd1cdaccf3f4456f62984`');
+    expect(tracker).toContain('This bounded **ten-path** source/headless UX-01 correction');
     expect(tracker).toContain("clean synchronized base's non-certifying audit remains Level 3 blocked **1** / stable v1 blocked **4**");
     expect(tracker).toContain('producing **2 / 5** until ordinary review and commit');
 
