@@ -22,6 +22,7 @@ export const EDITOR_DENSITY = {
   bodyType: 12,
   labelType: 11,
   captionType: 10,
+  secondaryIcon: 18,
   primaryHitTarget: 38,
   secondaryHitTarget: 32,
   topbarHeight: 56,

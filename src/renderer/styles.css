@@ -22,6 +22,7 @@
   --ui-type-body: 12px;
   --ui-type-label: 11px;
   --ui-type-caption: 10px;
+  --ui-icon-secondary: 18px;
   --ui-hit-primary: 38px;
   --ui-hit-secondary: 32px;
   --shell-topbar-height: 56px;
@@ -420,6 +421,35 @@ html[data-native-titlebar="hidden-inset"] .brand { width: calc(118px + var(--mac
 .frame-strip > button.add-frame { width: var(--ui-hit-primary); height: 62px; }
 .cel-exposure-panel { bottom: calc(var(--timeline-height) + 10px); max-height: min(360px, calc(100% - var(--timeline-height) - 48px)); }
 .onion-settings-panel { bottom: calc(var(--timeline-height) + 10px); max-height: min(330px, calc(100% - var(--timeline-height) - 48px)); }
+
+/* Sprite-animation companion panels share the secondary target/type tier. */
+.cel-exposure-panel { grid-template-rows: auto minmax(0, 1fr) auto auto; gap: 8px; padding: 10px; }
+.cel-exposure-panel > header { grid-template-columns: minmax(0, 1fr) auto var(--ui-hit-secondary); gap: 7px; }
+.cel-exposure-panel > header strong, .cel-exposure-panel > footer strong { font-size: var(--ui-type-label); }
+.cel-exposure-panel > header small, .cel-exposure-panel > footer small, .cel-exposure-note { font-size: var(--ui-type-caption); line-height: 1.35; }
+.cel-exposure-paging { gap: 4px; }
+.cel-exposure-paging button, .cel-exposure-close { width: var(--ui-hit-secondary); height: var(--ui-hit-secondary); border-radius: 8px; }
+.cel-exposure-paging svg, .cel-exposure-close svg, .cel-exposure-panel > footer svg { width: var(--ui-icon-secondary); height: var(--ui-icon-secondary); }
+.cel-exposure-paging small { min-width: 60px; }
+.cel-exposure-grid { min-height: 0; overflow: auto; overscroll-behavior: contain; }
+.cel-exposure-row > button, .cel-exposure-row > span, .cel-exposure-head > button, .cel-exposure-head > span { height: var(--ui-hit-secondary); font-size: var(--ui-type-caption); }
+.cel-exposure-row > button:first-child small { font-size: var(--ui-type-caption); }
+.cel-exposure-panel > footer > button { min-height: var(--ui-hit-secondary); font-size: var(--ui-type-caption); }
+.onion-settings-panel { gap: 10px; padding: 12px; }
+.onion-settings-panel > header strong { font-size: var(--ui-type-label); }
+.onion-settings-panel > header small, .onion-settings-panel > footer small { font-size: var(--ui-type-caption); }
+.onion-settings-panel > header button { width: var(--ui-hit-secondary); height: var(--ui-hit-secondary); border-radius: 8px; }
+.onion-settings-panel > header svg, .onion-settings-panel > footer svg { width: var(--ui-icon-secondary); height: var(--ui-icon-secondary); }
+.onion-settings-columns { gap: 10px; }
+.onion-settings-columns fieldset { padding: 9px; gap: 8px; }
+.onion-settings-columns legend { font-size: var(--ui-type-caption); }
+.onion-settings-columns label { grid-template-columns: 58px minmax(0, 1fr); font-size: var(--ui-type-caption); }
+.onion-settings-columns select, .onion-settings-columns input[type="color"] { height: var(--ui-hit-secondary); }
+.onion-settings-columns select { font-size: var(--ui-type-label); }
+.onion-settings-columns .onion-opacity { grid-template-columns: 58px minmax(36px, 1fr) 34px; }
+.onion-opacity input { height: var(--ui-hit-secondary); }
+.onion-opacity output { font-size: var(--ui-type-caption); }
+.onion-settings-panel > footer button { min-height: var(--ui-hit-secondary); font-size: var(--ui-type-caption); }
 
 /* Media-query width is the renderer content viewport; native frame insets are excluded. */
 @media (max-width: 1120px) {

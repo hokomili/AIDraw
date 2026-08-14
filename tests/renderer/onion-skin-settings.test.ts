@@ -2,6 +2,7 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
+import { EDITOR_DENSITY } from '../../src/common/editor-layout';
 import { DEFAULT_ONION_SKIN_SETTINGS, MAX_ONION_SKIN_FRAMES_PER_SIDE } from '../../src/common/onion-skin';
 import { OnionSkinSettingsPanel } from '../../src/renderer/components/OnionSkinSettingsPanel';
 
@@ -21,6 +22,8 @@ describe('onion skin settings', () => {
     expect(markup.match(/<option/g)).toHaveLength((MAX_ONION_SKIN_FRAMES_PER_SIDE + 1) * 2);
     expect(markup).toContain('Farther frames fade as base opacity ÷ distance and render behind nearer frames.');
     expect(markup).toContain('Reset');
+    expect(markup.match(new RegExp(`width="${EDITOR_DENSITY.secondaryIcon}"`, 'g'))).toHaveLength(2);
+    expect(markup).not.toMatch(/width="(?:11|13)"/);
   });
 
   it('wires the bounded planner and session panel without the former hard-coded neighbor draws', async () => {

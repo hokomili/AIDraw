@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { readFile } from 'node:fs/promises';
 import { createPixelDocument, type PixelCel, type PixelFrame, type PixelLayer, type PixelSprite } from '@aidraw/core';
 import { describe, expect, it } from 'vitest';
+import { EDITOR_DENSITY } from '../../src/common/editor-layout';
 import { CelExposureGrid } from '../../src/renderer/components/CelExposureGrid';
 import { flattenLayerTree } from '../../src/common/layer-tree';
 
@@ -42,6 +43,8 @@ describe('cel exposure grid', () => {
     expect(first).toContain('aria-label="Select frame 12"');
     expect(first).not.toContain('aria-label="Select frame 13"');
     expect(first).toContain('Layers 1–6');
+    expect(first.match(new RegExp(`width="${EDITOR_DENSITY.secondaryIcon}"`, 'g'))).toHaveLength(6);
+    expect(first).not.toMatch(/width="(?:11|13)"/);
     const last = renderGrid(sprite, sprite.frameIds[13], orderedLayers[7]);
     expect(last.match(/role="gridcell"/g)).toHaveLength(4);
     expect(last).toContain('aria-label="Select frame 13"');

@@ -77,6 +77,7 @@ describe('professional editor density contract', () => {
       ['ui-type-body', EDITOR_DENSITY.bodyType],
       ['ui-type-label', EDITOR_DENSITY.labelType],
       ['ui-type-caption', EDITOR_DENSITY.captionType],
+      ['ui-icon-secondary', EDITOR_DENSITY.secondaryIcon],
       ['ui-hit-primary', EDITOR_DENSITY.primaryHitTarget],
       ['ui-hit-secondary', EDITOR_DENSITY.secondaryHitTarget],
       ['shell-topbar-height', EDITOR_DENSITY.topbarHeight],
@@ -145,5 +146,21 @@ describe('professional editor density contract', () => {
     expect(styles).toMatch(/\.timeline-tags \{[^}]*overflow-x: auto/);
     expect(styles).toMatch(/\.frame-strip \{[^}]*overflow-x: auto/);
     expect(styles).toContain('.palette-grid, .tile-definition-grid { grid-template-columns: repeat(7, minmax(0, 1fr)); }');
+  });
+
+  it('brings sprite-animation companion panels onto the shared secondary tier', async () => {
+    const styles = await readFile(new URL('../../src/renderer/styles.css', import.meta.url), 'utf8');
+    expect(EDITOR_DENSITY.secondaryIcon).toBe(18);
+    expect(styles).toContain('.cel-exposure-paging button, .cel-exposure-close { width: var(--ui-hit-secondary); height: var(--ui-hit-secondary);');
+    expect(styles).toContain('.cel-exposure-paging svg, .cel-exposure-close svg, .cel-exposure-panel > footer svg { width: var(--ui-icon-secondary); height: var(--ui-icon-secondary); }');
+    expect(styles).toContain('.cel-exposure-row > button, .cel-exposure-row > span, .cel-exposure-head > button, .cel-exposure-head > span { height: var(--ui-hit-secondary); font-size: var(--ui-type-caption); }');
+    expect(styles).toContain('.cel-exposure-panel > footer > button { min-height: var(--ui-hit-secondary); font-size: var(--ui-type-caption); }');
+    expect(styles).toContain('.cel-exposure-grid { min-height: 0; overflow: auto; overscroll-behavior: contain; }');
+    expect(styles).toContain('.onion-settings-panel > header button { width: var(--ui-hit-secondary); height: var(--ui-hit-secondary);');
+    expect(styles).toContain('.onion-settings-columns select, .onion-settings-columns input[type="color"] { height: var(--ui-hit-secondary); }');
+    expect(styles).toContain('.onion-opacity input { height: var(--ui-hit-secondary); }');
+    expect(styles).toContain('.onion-settings-panel > footer button { min-height: var(--ui-hit-secondary); font-size: var(--ui-type-caption); }');
+    expect(styles).toMatch(/\.onion-settings-panel \{[^}]*max-height: min\(330px, calc\(100% - var\(--timeline-height\) - 48px\)\)/);
+    expect(styles).toMatch(/\.onion-settings-panel \{[^}]*overflow: auto/);
   });
 });

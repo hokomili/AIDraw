@@ -1,6 +1,7 @@
 import { useMemo, useState, type CSSProperties } from 'react';
 import { ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Link2, Unlink2, X } from 'lucide-react';
 import { pixelRawCelForFrame, type PixelSprite } from '@aidraw/core';
+import { EDITOR_DENSITY } from '../../common/editor-layout';
 import { flattenLayerTree } from '../../common/layer-tree';
 
 const MAX_VISIBLE_EXPOSURE_FRAMES = 12;
@@ -39,14 +40,14 @@ export function CelExposureGrid({ sprite, activeFrameId, activeLayerId, onSelect
     <header>
       <span><strong>Cel exposure</strong><small>{layers.length} pixel layer{layers.length === 1 ? '' : 's'} × {sprite.frameIds.length} frame{sprite.frameIds.length === 1 ? '' : 's'}</small></span>
       <span className="cel-exposure-paging">
-        <button aria-label="Previous layer page" disabled={boundedLayerPage === 0} onClick={() => setLayerPage((page) => Math.max(0, page - 1))}><ChevronUp size={11} /></button>
+        <button aria-label="Previous layer page" disabled={boundedLayerPage === 0} onClick={() => setLayerPage((page) => Math.max(0, page - 1))}><ChevronUp size={EDITOR_DENSITY.secondaryIcon} /></button>
         <small>Layers {layers.length ? layerStart + 1 : 0}–{Math.min(layers.length, layerStart + shownLayers.length)}</small>
-        <button aria-label="Next layer page" disabled={boundedLayerPage >= layerPageCount - 1} onClick={() => setLayerPage((page) => Math.min(layerPageCount - 1, page + 1))}><ChevronDown size={11} /></button>
-        <button aria-label="Previous frame page" disabled={boundedFramePage === 0} onClick={() => setFramePage((page) => Math.max(0, page - 1))}><ChevronLeft size={11} /></button>
+        <button aria-label="Next layer page" disabled={boundedLayerPage >= layerPageCount - 1} onClick={() => setLayerPage((page) => Math.min(layerPageCount - 1, page + 1))}><ChevronDown size={EDITOR_DENSITY.secondaryIcon} /></button>
+        <button aria-label="Previous frame page" disabled={boundedFramePage === 0} onClick={() => setFramePage((page) => Math.max(0, page - 1))}><ChevronLeft size={EDITOR_DENSITY.secondaryIcon} /></button>
         <small>Frames {frameStart + 1}–{Math.min(sprite.frameIds.length, frameStart + frames.length)}</small>
-        <button aria-label="Next frame page" disabled={boundedFramePage >= framePageCount - 1} onClick={() => setFramePage((page) => Math.min(framePageCount - 1, page + 1))}><ChevronRight size={11} /></button>
+        <button aria-label="Next frame page" disabled={boundedFramePage >= framePageCount - 1} onClick={() => setFramePage((page) => Math.min(framePageCount - 1, page + 1))}><ChevronRight size={EDITOR_DENSITY.secondaryIcon} /></button>
       </span>
-      <button className="cel-exposure-close" aria-label="Close cel exposure grid" onClick={onClose}><X size={13} /></button>
+      <button className="cel-exposure-close" aria-label="Close cel exposure grid" onClick={onClose}><X size={EDITOR_DENSITY.secondaryIcon} /></button>
     </header>
     <div className="cel-exposure-grid" role="grid" aria-label="Layer and frame cel exposures">
       <div className="cel-exposure-row cel-exposure-head" role="row" style={gridStyle}>
@@ -65,7 +66,7 @@ export function CelExposureGrid({ sprite, activeFrameId, activeLayerId, onSelect
     </div>
     <footer>
       <span><strong>{activeLayer?.name ?? 'No pixel layer'} · frame {activeFrameIndex + 1}</strong><small>{activeRawCel?.linkedToCelId ? 'Linked to the previous resolved cel.' : activeRawCel ? 'Independent cel.' : 'Missing cel exposure.'}</small></span>
-      <button disabled={!activeCanLink} onClick={() => activeLayer && onToggleLink(activeLayer.id, activeFrameId)}>{activeRawCel?.linkedToCelId ? <><Unlink2 size={11} /> Unlink copy</> : <><Link2 size={11} /> Link previous</>}</button>
+      <button disabled={!activeCanLink} onClick={() => activeLayer && onToggleLink(activeLayer.id, activeFrameId)}>{activeRawCel?.linkedToCelId ? <><Unlink2 size={EDITOR_DENSITY.secondaryIcon} /> Unlink copy</> : <><Link2 size={EDITOR_DENSITY.secondaryIcon} /> Link previous</>}</button>
     </footer>
     <small className="cel-exposure-note">Linking clears this exposure's own pixels and follows the previous resolved cel. Unlinking snapshots the currently resolved pixels. Locked layers are read-only here.</small>
   </section>;
