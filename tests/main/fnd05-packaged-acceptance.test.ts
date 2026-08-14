@@ -8,7 +8,7 @@ import {
   assertFnd05EvidenceRedacted,
   assertFnd05DebuggerDetachProof,
   assertFnd05UnresponsiveSafeReporterEnvironment,
-  classifyFnd05DebuggerDetachCommandSettlement,
+  classifyFnd05DebuggerDetachCommandObservation,
   classifyFnd05UnresponsiveFailureStage,
   FND05_PACKAGED_ASAR_HASH_ENV,
   FND05_PACKAGED_EXE_HASH_ENV,
@@ -30,6 +30,7 @@ import {
   FND05_UNRESPONSIVE_OBSERVATION_MS,
   FND05_UNRESPONSIVE_PACKAGE_PREFIX,
   FND05_UNRESPONSIVE_PACKAGED_SCENARIO,
+  FND05_UNRESPONSIVE_POST_DETACH_COMMAND_OBSERVATION_MS,
   FND05_UNRESPONSIVE_POLICY_GRACE_MS,
   FND05_UNRESPONSIVE_POST_REPLACEMENT_MARGIN_MS,
   FND05_UNRESPONSIVE_PROFILE_ENV,
@@ -211,12 +212,14 @@ describe('FND-05 retained exact-package acceptance boundary', () => {
     expect(() => assertFnd05OwnedProcessShape(rows, 999)).toThrow(/one expected owner/);
   });
 
-  it('binds the bounded stall to a complete pre-ACK debugger detach and rejects unrelated command settlements', () => {
+  it('binds the bounded stall to a complete pre-ACK debugger detach and classifies bounded post-detach command observations', () => {
     expect(FND05_UNRESPONSIVE_POLICY_GRACE_MS).toBe(EDITOR_RENDERER_UNRESPONSIVE_GRACE_MS);
     expect(FND05_UNRESPONSIVE_OBSERVATION_MS).toBeLessThan(FND05_UNRESPONSIVE_POLICY_GRACE_MS);
     expect(FND05_UNRESPONSIVE_INPUT_ACK_BUDGET_MS).toBe(15_000);
     expect(FND05_UNRESPONSIVE_INPUT_ADMISSION_WAIT_MS).toBeLessThan(FND05_UNRESPONSIVE_OBSERVATION_MS);
     expect(FND05_UNRESPONSIVE_DEBUGGER_DETACH_TIMEOUT_MS).toBe(2_000);
+    expect(FND05_UNRESPONSIVE_POST_DETACH_COMMAND_OBSERVATION_MS).toBe(2_000);
+    expect(FND05_UNRESPONSIVE_POST_DETACH_COMMAND_OBSERVATION_MS).toBeLessThan(FND05_UNRESPONSIVE_POLICY_GRACE_MS);
     expect(FND05_UNRESPONSIVE_DEBUGGER_DETACH_DEADLINE_MS).toBe(
       FND05_UNRESPONSIVE_OBSERVATION_MS
         + FND05_UNRESPONSIVE_INPUT_ADMISSION_WAIT_MS
@@ -255,24 +258,46 @@ describe('FND-05 retained exact-package acceptance boundary', () => {
       allDebuggerAttachmentsDetached: true,
       ownerAliveAfterDebuggerDetach: true,
     });
-    expect(classifyFnd05DebuggerDetachCommandSettlement(
+    expect(classifyFnd05DebuggerDetachCommandObservation(
       { status: 'rejected', reason: new Error('cdpSession.send: Protocol error (Runtime.evaluate): Target closed') },
       'Runtime.evaluate',
       proof,
     )).toEqual({ method: 'Runtime.evaluate', command: 'rejected-after-debugger-detach' });
-    expect(classifyFnd05DebuggerDetachCommandSettlement(
+    expect(classifyFnd05DebuggerDetachCommandObservation(
+      { status: 'pending', observedForMs: FND05_UNRESPONSIVE_POST_DETACH_COMMAND_OBSERVATION_MS },
+      'Runtime.evaluate',
+      proof,
+    )).toEqual({
+      method: 'Runtime.evaluate',
+      command: 'pending-after-debugger-detach',
+      observedForMs: FND05_UNRESPONSIVE_POST_DETACH_COMMAND_OBSERVATION_MS,
+    });
+    expect(classifyFnd05DebuggerDetachCommandObservation(
       { status: 'resolved' },
       'Input.dispatchKeyEvent',
       { ...proof, inputAdmission: 'admitted' },
     )).toEqual({ method: 'Input.dispatchKeyEvent', command: 'resolved-after-browser-admission' });
-    expect(classifyFnd05DebuggerDetachCommandSettlement(
+    expect(classifyFnd05DebuggerDetachCommandObservation(
       { status: 'rejected', reason: new Error('cdpSession.send: Target page, context or browser has been closed') },
       'Input.dispatchKeyEvent',
       proof,
     )).toEqual({ method: 'Input.dispatchKeyEvent', command: 'rejected-after-debugger-detach' });
-    expect(() => classifyFnd05DebuggerDetachCommandSettlement({ status: 'resolved' }, 'Runtime.evaluate', proof)).toThrow(/resolved unexpectedly/);
-    expect(() => classifyFnd05DebuggerDetachCommandSettlement({ status: 'timeout' }, 'Runtime.evaluate', proof)).toThrow(/did not settle/);
-    expect(() => classifyFnd05DebuggerDetachCommandSettlement(
+    expect(classifyFnd05DebuggerDetachCommandObservation(
+      { status: 'pending', observedForMs: FND05_UNRESPONSIVE_POST_DETACH_COMMAND_OBSERVATION_MS },
+      'Input.dispatchKeyEvent',
+      proof,
+    )).toEqual({
+      method: 'Input.dispatchKeyEvent',
+      command: 'pending-after-debugger-detach',
+      observedForMs: FND05_UNRESPONSIVE_POST_DETACH_COMMAND_OBSERVATION_MS,
+    });
+    expect(() => classifyFnd05DebuggerDetachCommandObservation({ status: 'resolved' }, 'Runtime.evaluate', proof)).toThrow(/resolved unexpectedly/);
+    expect(() => classifyFnd05DebuggerDetachCommandObservation(
+      { status: 'pending', observedForMs: FND05_UNRESPONSIVE_POST_DETACH_COMMAND_OBSERVATION_MS - 1 },
+      'Runtime.evaluate',
+      proof,
+    )).toThrow(/exact bounded post-detach interval/);
+    expect(() => classifyFnd05DebuggerDetachCommandObservation(
       { status: 'rejected', reason: new Error('cdpSession.send: Protocol error (Runtime.evaluate): Permission denied: Target closed') },
       'Runtime.evaluate',
       proof,
@@ -357,6 +382,9 @@ describe('FND-05 retained exact-package acceptance boundary', () => {
     const prematureConfirmationGuardIndex = acceptance.indexOf('product confirmation appeared before every debugger attachment was detached', inputIndex);
     const detachIndex = acceptance.indexOf('disconnectOwnerDebugger(owner, stallStartedAt)', inputIndex);
     const debuggerFreeConfirmationGuardIndex = acceptance.indexOf('product confirmation appeared before the debugger-free boundary was proven', detachIndex);
+    const postDetachObservationIndex = acceptance.indexOf('const [detachedInputObservation, detachedStallObservation]', debuggerFreeConfirmationGuardIndex);
+    const policyFloorIndex = acceptance.indexOf('const untilPolicyFloorMs', postDetachObservationIndex);
+    const policyFloorConfirmationGuardIndex = acceptance.indexOf('product confirmation appeared before the debugger-free policy floor elapsed', policyFloorIndex);
     const confirmationIndex = acceptance.indexOf('waitForStderrMarker(owner, FND05_UNRESPONSIVE_CONFIRMATION_MARKER');
     const reconnectIndex = acceptance.indexOf('connectOwnerDebugger(owner, reconnectBudgetMs)', confirmationIndex);
     const replacementIndex = acceptance.indexOf('const replacementPage = owner.page!', reconnectIndex);
@@ -366,12 +394,18 @@ describe('FND-05 retained exact-package acceptance boundary', () => {
     expect(prematureConfirmationGuardIndex).toBeGreaterThan(inputIndex);
     expect(detachIndex).toBeGreaterThan(prematureConfirmationGuardIndex);
     expect(debuggerFreeConfirmationGuardIndex).toBeGreaterThan(detachIndex);
-    expect(confirmationIndex).toBeGreaterThan(debuggerFreeConfirmationGuardIndex);
+    expect(postDetachObservationIndex).toBeGreaterThan(debuggerFreeConfirmationGuardIndex);
+    expect(policyFloorIndex).toBeGreaterThan(postDetachObservationIndex);
+    expect(policyFloorConfirmationGuardIndex).toBeGreaterThan(policyFloorIndex);
+    expect(confirmationIndex).toBeGreaterThan(policyFloorConfirmationGuardIndex);
     expect(reconnectIndex).toBeGreaterThan(confirmationIndex);
     expect(replacementIndex).toBeGreaterThan(reconnectIndex);
     expect(acceptance).toContain('replacementElapsedMs');
     expect(acceptance).toContain('allDebuggerAttachmentsDetached');
     expect(acceptance).toContain('debuggerTransportReconnected');
+    expect(acceptance).toContain('productConfirmationAbsentThroughPolicyFloor');
+    expect(acceptance).toContain('observedForMs: FND05_UNRESPONSIVE_POST_DETACH_COMMAND_OBSERVATION_MS');
+    expect(acceptance.slice(postDetachObservationIndex, policyFloorIndex)).toContain('await Promise.all([');
     expect(acceptance).toContain("AIDRAW_E2E_FND05_UNRESPONSIVE_WRAPPER !== '1'");
     expect(acceptance).toContain('assertFnd05UnresponsiveSafeReporterEnvironment()');
     expect(acceptance).toContain("testInfo.project.metadata.suite !== 'retained-fnd05-unresponsive-renderer'");
@@ -421,6 +455,21 @@ describe('FND-05 retained exact-package acceptance boundary', () => {
     expect(playwrightCore).toContain('Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }');
     expect(playwrightCore).toContain('attemptToGracefullyCloseBrowser(transport)');
     expect(playwrightCore).toContain('const message = { method: "Browser.close"');
+
+    const crConnectionStart = playwrightCore.indexOf('CRConnection = class extends SdkObject');
+    const crSessionStart = playwrightCore.indexOf('CRSession = class _CRSession extends SdkObject', crConnectionStart);
+    const cdpSessionStart = playwrightCore.indexOf('CDPSession = class _CDPSession extends SdkObject', crSessionStart);
+    const crConnectionImplementation = playwrightCore.slice(crConnectionStart, crSessionStart);
+    const crSessionImplementation = playwrightCore.slice(crSessionStart, cdpSessionStart);
+    const cdpSessionImplementation = playwrightCore.slice(cdpSessionStart, playwrightCore.indexOf('// packages/playwright-core/src/server/chromium/crCoverage.ts', cdpSessionStart));
+    expect(crConnectionImplementation).toContain('this.rootSession.dispose()');
+    expect(crConnectionImplementation).not.toContain('this._sessions.values()');
+    expect(crSessionImplementation).toContain('this._callbacks.set(id');
+    expect(crSessionImplementation).toContain('this._rejectPendingCallbacks(`Internal server error, session closed.`)');
+    expect(cdpSessionImplementation).toContain('parentSession.createChildSession(sessionId');
+    expect(cdpSessionImplementation).toContain('return await this._session.send(method, params2)');
+    expect(playwrightCore).toContain('return { result: await this._object.send(progress2, params2.method, params2.params) }');
+    expect(playwrightCore).toContain('const result2 = await this._channel.send({ method, params: params2 }, kNoTimeout)');
   });
 
   it('discovers exactly the dedicated alive-hang selector through real Playwright without creating run roots', async () => {
@@ -459,7 +508,7 @@ describe('FND-05 retained exact-package acceptance boundary', () => {
     for (const path of roots) expect(await access(path).then(() => true, () => false), `${path} must remain absent`).toBe(false);
   });
 
-  it('records consumed alive-hang r1/r2/r3 and the debugger-detach correction while keeping Working/P0 nonclaims', async () => {
+  it('records consumed alive-hang r1/r2/r3/r4 and the bounded post-detach correction while keeping Working/P0 nonclaims', async () => {
     const [changelog, tracker, testing] = await Promise.all([
       readFile(resolve('CHANGELOG.md'), 'utf8'),
       readFile(resolve('docs/FEATURE_TRACKER.md'), 'utf8'),
@@ -476,11 +525,16 @@ describe('FND-05 retained exact-package acceptance boundary', () => {
       '20260814t030554z-d082ab7-r2',
       '20260814t040447z-b111d9b-r3',
       '1/1 failed in 40.7 seconds',
+      '20260814t051235z-6d7a896-r4',
+      '1/1 failed in 7.7 seconds',
+      '3,030.6915 ms',
       '5,000 ms',
+      '2,000 ms',
       '65,000 ms',
       'F24',
       'DevToolsAgentHost',
       'closeAndWait',
+      'pending-after-debugger-detach',
       '**10,000 ms** no-replacement floor',
       'alive-hang route has no PASS',
       'Renderer-local work never submitted to the canonical engine is not promised',
@@ -490,23 +544,30 @@ describe('FND-05 retained exact-package acceptance boundary', () => {
     const changelogEntry = changelog.split(/\r?\n/u).find((line) => line.startsWith('- Prepare a separate retained exact-package acceptance')) ?? '';
     expect(changelogEntry).toContain('Consumed r1 remains the immutable pre-launch Playwright callback-discovery failure');
     expect(changelogEntry).toContain('Consumed r3');
+    expect(changelogEntry).toContain('Consumed r4');
+    expect(changelogEntry).toContain('child `CDPSession.send` promise remained pending after detach');
     expect(changelogEntry).toContain('no exact AIDraw unresponsive-confirmation marker appeared within 35,000 ms');
     expect(changelogEntry).toContain('ShouldIgnoreUnresponsiveRenderer');
     expect(changelogEntry).toContain('public `connectOverCDP`');
     expect(changelogEntry).toContain('rather than protocol `Browser.close`');
+    expect(changelogEntry).toContain('root-versus-child callback behavior');
+    expect(changelogEntry).toContain('`pending-after-debugger-detach`');
     expect(changelogEntry).toContain('F24');
     expect(changelogEntry).toContain('renderer-local work never submitted to the canonical engine');
     expect(testing).toContain('Thirteen exact-checkpoint cases');
-    expect(testing).toContain('### FND-05 alive-but-unresponsive controller, consumed r1/r2/r3, and debugger-detach correction');
+    expect(testing).toContain('### FND-05 alive-but-unresponsive controller, consumed r1/r2/r3/r4, and bounded post-detach correction');
     expect(testing).toContain('exited 1 before any application/helper launch, stall, or product assertion');
     expect(testing).toContain('object-destructures the built-in `browserName` fixture');
     expect(testing).toContain('spawns the pinned local Playwright CLI');
     expect(testing).toContain('These are naming templates, not reserved or runnable identities');
-    expect(testing).toContain('Consumed r1/r2/r3 remain immutable and non-reusable');
+    expect(testing).toContain('Consumed r1/r2/r3/r4 remain immutable and non-reusable');
     expect(testing).toContain('Chromium **150.0.7871.224**');
     expect(testing).toContain('`ShouldIgnoreUnresponsiveRenderer()`');
     expect(testing).toContain('one-shot in-flight input-event ACK timer');
     expect(testing).toContain('public `browser.close()` is wired to the WebSocket transport');
+    expect(testing).toContain('calls only `rootSession.dispose()`');
+    expect(testing).toContain('one bounded **2,000 ms** post-detach interval');
+    expect(testing).toContain('neither child promise can hang the controller');
     expect(testing).toContain('**5,000 ms** deadline');
     expect(testing).toContain('product-unresponsive-confirmation-not-observed');
     expect(testing).toContain('debugger-transport-reconnect-not-completed');

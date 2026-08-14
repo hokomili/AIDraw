@@ -12,7 +12,7 @@ import {
   assertFnd05EvidenceRedacted,
   assertFnd05DebuggerDetachProof,
   assertFnd05UnresponsiveSafeReporterEnvironment,
-  classifyFnd05DebuggerDetachCommandSettlement,
+  classifyFnd05DebuggerDetachCommandObservation,
   classifyFnd05UnresponsiveFailureStage,
   FND05_PACKAGED_SCENARIO,
   FND05_UNRESPONSIVE_CONFIRMATION_MARKER,
@@ -23,6 +23,7 @@ import {
   FND05_UNRESPONSIVE_INPUT_EVENT,
   FND05_UNRESPONSIVE_OBSERVATION_MS,
   FND05_UNRESPONSIVE_PACKAGED_SCENARIO,
+  FND05_UNRESPONSIVE_POST_DETACH_COMMAND_OBSERVATION_MS,
   FND05_UNRESPONSIVE_POLICY_GRACE_MS,
   FND05_UNRESPONSIVE_REPLACEMENT_WAIT_MS,
   FND05_UNRESPONSIVE_STALL_EXPRESSION,
@@ -93,7 +94,10 @@ interface UnresponsiveProgress {
   inputTargetId?: string;
   inputAdmission: 'not-attempted' | 'admitted' | 'ack-pending' | 'rejected';
   inputCommandSettlement: 'not-started' | 'pending' | 'resolved' | 'rejected';
+  inputCommandPostDetachDisposition: 'not-observed' | 'resolved-after-browser-admission' | 'rejected-after-debugger-detach' | 'pending-after-debugger-detach';
+  stallCommandPostDetachDisposition: 'not-observed' | 'rejected-after-debugger-detach' | 'pending-after-debugger-detach';
   productConfirmationAbsentThroughDebuggerDetach: boolean;
+  productConfirmationAbsentThroughPolicyFloor: boolean;
   debuggerDetachRequested: boolean;
   allDebuggerAttachmentsDetached: boolean;
   debuggerDetachedElapsedMs?: number;
@@ -737,7 +741,10 @@ test(FND05_UNRESPONSIVE_PACKAGED_SCENARIO, async ({ browserName }, testInfo) => 
     inputKey: 'F24',
     inputAdmission: 'not-attempted',
     inputCommandSettlement: 'not-started',
+    inputCommandPostDetachDisposition: 'not-observed',
+    stallCommandPostDetachDisposition: 'not-observed',
     productConfirmationAbsentThroughDebuggerDetach: false,
+    productConfirmationAbsentThroughPolicyFloor: false,
     debuggerDetachRequested: false,
     allDebuggerAttachmentsDetached: false,
     ownerAliveAfterDebuggerDetach: false,
@@ -894,33 +901,33 @@ test(FND05_UNRESPONSIVE_PACKAGED_SCENARIO, async ({ browserName }, testInfo) => 
       sameOwnerMcpResponsiveAfterDebuggerDetach: unresponsiveProgress.sameOwnerMcpResponsiveAfterDebuggerDetach,
     };
     const detachProof = assertFnd05DebuggerDetachProof(debuggerProof);
-    const detachedInputSettlement = await Promise.race([
-      inputSettlement,
-      new Promise<{ status: 'timeout' }>((resolveTimeout) => setTimeout(
-        () => resolveTimeout({ status: 'timeout' }),
-        FND05_UNRESPONSIVE_DEBUGGER_DETACH_TIMEOUT_MS,
-      )),
+    const boundedPendingObservation = () => new Promise<{ status: 'pending'; observedForMs: number }>((resolvePending) => setTimeout(
+      () => resolvePending({ status: 'pending', observedForMs: FND05_UNRESPONSIVE_POST_DETACH_COMMAND_OBSERVATION_MS }),
+      FND05_UNRESPONSIVE_POST_DETACH_COMMAND_OBSERVATION_MS,
+    ));
+    const [detachedInputObservation, detachedStallObservation] = await Promise.all([
+      Promise.race([inputSettlement, boundedPendingObservation()]),
+      Promise.race([stallSettlement, boundedPendingObservation()]),
     ]);
-    const inputProof = classifyFnd05DebuggerDetachCommandSettlement(
-      detachedInputSettlement,
+    const inputProof = classifyFnd05DebuggerDetachCommandObservation(
+      detachedInputObservation,
       'Input.dispatchKeyEvent',
       debuggerProof,
     );
-    const detachedStallSettlement = await Promise.race([
-      stallSettlement,
-      new Promise<{ status: 'timeout' }>((resolveTimeout) => setTimeout(
-        () => resolveTimeout({ status: 'timeout' }),
-        FND05_UNRESPONSIVE_DEBUGGER_DETACH_TIMEOUT_MS,
-      )),
-    ]);
-    const stallProof = classifyFnd05DebuggerDetachCommandSettlement(
-      detachedStallSettlement,
+    unresponsiveProgress.inputCommandPostDetachDisposition = inputProof.command;
+    const stallProof = classifyFnd05DebuggerDetachCommandObservation(
+      detachedStallObservation,
       'Runtime.evaluate',
       debuggerProof,
     );
+    unresponsiveProgress.stallCommandPostDetachDisposition = stallProof.command;
 
     const untilPolicyFloorMs = FND05_UNRESPONSIVE_POLICY_GRACE_MS - (performance.now() - stallStartedAt);
     if (untilPolicyFloorMs > 0) await new Promise((resolveWait) => setTimeout(resolveWait, untilPolicyFloorMs));
+    if (Buffer.concat(owner.stderr).includes(Buffer.from(FND05_UNRESPONSIVE_CONFIRMATION_MARKER))) {
+      throw new Error('The retained FND-05 product confirmation appeared before the debugger-free policy floor elapsed.');
+    }
+    unresponsiveProgress.productConfirmationAbsentThroughPolicyFloor = true;
     const beforePolicyProcess = await waitForProcessShape(configured.profile, ownerPid);
     expect(beforePolicyProcess.rendererPid).toBe(beforeProcess.rendererPid);
 
@@ -955,7 +962,7 @@ test(FND05_UNRESPONSIVE_PACKAGED_SCENARIO, async ({ browserName }, testInfo) => 
     expect(owner.child!.pid).toBe(ownerConnection.pid);
     expect((JSON.parse(await readFile(configured.paths.ownerConnection, 'utf8')) as McpConnection).pid).toBe(ownerPid);
 
-    expect(stallProof.command).toBe('rejected-after-debugger-detach');
+    expect(['rejected-after-debugger-detach', 'pending-after-debugger-detach']).toContain(stallProof.command);
 
     const inspectedAfterDetach = await callMcpTool(ownerConnection.url, client.headers, requestId++, 'session_manage', { action: 'inspect', documentId: canonicalBefore.documentId });
     expect(inspectedAfterDetach).toMatchObject({ workspace: { humanOccupancy: { active: false, locks: [] }, editorAdvisory: { attached: true, documentId: canonicalBefore.documentId } } });
@@ -1064,7 +1071,7 @@ test(FND05_UNRESPONSIVE_PACKAGED_SCENARIO, async ({ browserName }, testInfo) => 
           key: unresponsiveProgress.inputKey,
           targetId: unresponsiveProgress.inputTargetId,
           admission: unresponsiveProgress.inputAdmission,
-          settlement: inputProof.command,
+          postDetachDisposition: inputProof.command,
           physicalKeyboardStateChanged: false,
         },
         debuggerTransport: {
@@ -1074,6 +1081,7 @@ test(FND05_UNRESPONSIVE_PACKAGED_SCENARIO, async ({ browserName }, testInfo) => 
           ownerAliveAfterDetach: detachProof.ownerAliveAfterDebuggerDetach,
           sameOwnerMcpResponsiveAfterDetach: detachProof.sameOwnerMcpResponsiveAfterDebuggerDetach,
           productConfirmationAbsentThroughDetach: unresponsiveProgress.productConfirmationAbsentThroughDebuggerDetach,
+          productConfirmationAbsentThroughPolicyFloor: unresponsiveProgress.productConfirmationAbsentThroughPolicyFloor,
           productConfirmationObservedBeforeReconnect: true,
           reconnectAttempted: unresponsiveProgress.debuggerTransportReconnectAttempted,
           reconnected: unresponsiveProgress.debuggerTransportReconnected,
@@ -1082,7 +1090,7 @@ test(FND05_UNRESPONSIVE_PACKAGED_SCENARIO, async ({ browserName }, testInfo) => 
         },
         productUnresponsiveConfirmationObserved: true,
         productUnresponsiveConfirmationElapsedMs: unresponsiveProgress.productUnresponsiveConfirmationElapsedMs,
-        stallCommand: stallProof.command,
+        stallCommandPostDetachDisposition: stallProof.command,
         replacementCount: 1,
         replacementElapsedMs,
         oldTargetAbsentAfterReconnect: true,

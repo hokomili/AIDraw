@@ -47,6 +47,7 @@ export const FND05_UNRESPONSIVE_OBSERVATION_MS: 2000;
 export const FND05_UNRESPONSIVE_INPUT_ACK_BUDGET_MS: 15000;
 export const FND05_UNRESPONSIVE_INPUT_ADMISSION_WAIT_MS: 1000;
 export const FND05_UNRESPONSIVE_DEBUGGER_DETACH_TIMEOUT_MS: 2000;
+export const FND05_UNRESPONSIVE_POST_DETACH_COMMAND_OBSERVATION_MS: 2000;
 export const FND05_UNRESPONSIVE_DEBUGGER_DETACH_DEADLINE_MS: 5000;
 export const FND05_UNRESPONSIVE_CONFIRMATION_MARGIN_MS: 10000;
 export const FND05_UNRESPONSIVE_CONFIRMATION_WAIT_MS: 35000;
@@ -126,11 +127,25 @@ export function assertFnd05DebuggerDetachProof(proof: Fnd05DebuggerDetachProof):
   ownerAliveAfterDebuggerDetach: true;
   sameOwnerMcpResponsiveAfterDebuggerDetach: true;
 };
-export function classifyFnd05DebuggerDetachCommandSettlement(
-  settlement: { status: 'resolved' } | { status: 'rejected'; reason: unknown } | { status: 'timeout' },
-  method: 'Runtime.evaluate' | 'Input.dispatchKeyEvent',
+export type Fnd05DebuggerDetachCommandObservation =
+  | { status: 'resolved' }
+  | { status: 'rejected'; reason: unknown }
+  | { status: 'pending'; observedForMs: number };
+export function classifyFnd05DebuggerDetachCommandObservation(
+  observation: Fnd05DebuggerDetachCommandObservation,
+  method: 'Runtime.evaluate',
   proof: Fnd05DebuggerDetachProof,
 ): {
-  method: 'Runtime.evaluate' | 'Input.dispatchKeyEvent';
-  command: 'resolved-after-browser-admission' | 'rejected-after-debugger-detach';
+  method: 'Runtime.evaluate';
+  command: 'rejected-after-debugger-detach' | 'pending-after-debugger-detach';
+  observedForMs?: number;
+};
+export function classifyFnd05DebuggerDetachCommandObservation(
+  observation: Fnd05DebuggerDetachCommandObservation,
+  method: 'Input.dispatchKeyEvent',
+  proof: Fnd05DebuggerDetachProof,
+): {
+  method: 'Input.dispatchKeyEvent';
+  command: 'resolved-after-browser-admission' | 'rejected-after-debugger-detach' | 'pending-after-debugger-detach';
+  observedForMs?: number;
 };

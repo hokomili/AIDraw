@@ -35,6 +35,7 @@ export const FND05_UNRESPONSIVE_OBSERVATION_MS = 2_000;
 export const FND05_UNRESPONSIVE_INPUT_ACK_BUDGET_MS = 15_000;
 export const FND05_UNRESPONSIVE_INPUT_ADMISSION_WAIT_MS = 1_000;
 export const FND05_UNRESPONSIVE_DEBUGGER_DETACH_TIMEOUT_MS = 2_000;
+export const FND05_UNRESPONSIVE_POST_DETACH_COMMAND_OBSERVATION_MS = 2_000;
 export const FND05_UNRESPONSIVE_DEBUGGER_DETACH_DEADLINE_MS = FND05_UNRESPONSIVE_OBSERVATION_MS
   + FND05_UNRESPONSIVE_INPUT_ADMISSION_WAIT_MS
   + FND05_UNRESPONSIVE_DEBUGGER_DETACH_TIMEOUT_MS;
@@ -304,23 +305,39 @@ export function assertFnd05DebuggerDetachProof(proof) {
   };
 }
 
-export function classifyFnd05DebuggerDetachCommandSettlement(settlement, method, proof) {
+export function classifyFnd05DebuggerDetachCommandObservation(observation, method, proof) {
   assertFnd05DebuggerDetachProof(proof);
   if (!['Runtime.evaluate', 'Input.dispatchKeyEvent'].includes(method)) {
-    throw new Error(`The FND-05 debugger-detach settlement method is unsupported: ${String(method)}.`);
+    throw new Error(`The FND-05 debugger-detach command method is unsupported: ${String(method)}.`);
   }
-  if (!settlement || settlement.status === 'timeout') {
-    throw new Error(`The FND-05 ${method} command did not settle after the bounded debugger transport disconnect.`);
+  if (!observation) {
+    throw new Error(`The FND-05 ${method} command has no bounded post-detach observation.`);
   }
-  if (settlement.status === 'resolved') {
+  if (observation.status === 'pending') {
+    // Playwright 1.62.1 transport close disposes its root Chromium session but
+    // can leave an admitted target-child callback pending. Independent detach
+    // proof plus one exact observation bound makes that state finite and explicit.
+    if (observation.observedForMs !== FND05_UNRESPONSIVE_POST_DETACH_COMMAND_OBSERVATION_MS) {
+      throw new Error(`The FND-05 ${method} pending command was not observed for the exact bounded post-detach interval.`);
+    }
+    return {
+      method,
+      command: 'pending-after-debugger-detach',
+      observedForMs: observation.observedForMs,
+    };
+  }
+  if (observation.status === 'resolved') {
     if (method !== 'Input.dispatchKeyEvent' || proof.inputAdmission !== 'admitted') {
       throw new Error(`The FND-05 ${method} command resolved unexpectedly before debugger detach.`);
     }
     return { method, command: 'resolved-after-browser-admission' };
   }
-  const message = crashErrorMessage(settlement.reason);
+  if (observation.status !== 'rejected') {
+    throw new Error(`The FND-05 ${method} command has an unsupported post-detach observation.`);
+  }
+  const message = crashErrorMessage(observation.reason);
   if (!EXPECTED_DEBUGGER_DETACH_ERROR.test(message)) {
-    throw new Error(`The FND-05 ${method} command failed for an unrelated reason: ${message}`, { cause: settlement.reason });
+    throw new Error(`The FND-05 ${method} command failed for an unrelated reason: ${message}`, { cause: observation.reason });
   }
   return {
     method,
