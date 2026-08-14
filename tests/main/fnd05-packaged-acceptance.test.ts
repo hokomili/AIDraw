@@ -334,19 +334,21 @@ describe('FND-05 retained exact-package acceptance boundary', () => {
 
   it('keeps token/ciphertext values out of reporter surfaces and rejects credential-capable reporters', () => {
     const liveToken = 'synthetic-live-token-that-must-not-reach-playwright';
-    expect(inspectFnd05EncryptedToken({ version: 1, encryption: 'electron-safe-storage', value: 'encrypted-ciphertext' }, liveToken)).toEqual({
-      version: 1,
+    expect(inspectFnd05EncryptedToken({ version: 2, status: 'active', encryption: 'electron-safe-storage', value: 'encrypted-ciphertext' }, liveToken)).toEqual({
+      version: 2,
+      status: 'active',
       encryption: 'electron-safe-storage',
       encryptedValuePresent: true,
     });
     let message = '';
     try {
-      inspectFnd05EncryptedToken({ version: 1, encryption: 'electron-safe-storage', value: liveToken }, liveToken);
+      inspectFnd05EncryptedToken({ version: 2, status: 'active', encryption: 'electron-safe-storage', value: liveToken }, liveToken);
     } catch (error) {
       message = error instanceof Error ? error.message : String(error);
     }
     expect(message).toMatch(/expected encrypted safe-storage record/);
     expect(message).not.toContain(liveToken);
+    expect(() => inspectFnd05EncryptedToken({ version: 1, encryption: 'electron-safe-storage', value: 'legacy-ciphertext' }, liveToken)).toThrow(/expected encrypted safe-storage record/);
     expect(assertFnd05UnresponsiveSafeReporterEnvironment({})).toBe(true);
     for (const name of ['PLAYWRIGHT_HTML_OUTPUT_DIR', 'PLAYWRIGHT_JSON_OUTPUT_FILE', 'PLAYWRIGHT_JUNIT_OUTPUT_FILE', 'PLAYWRIGHT_BLOB_OUTPUT_DIR']) {
       expect(() => assertFnd05UnresponsiveSafeReporterEnvironment({ [name]: '/tmp/unsafe' })).toThrow(new RegExp(name));

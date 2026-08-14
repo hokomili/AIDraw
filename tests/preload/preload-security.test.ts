@@ -50,6 +50,8 @@ const invokeChannels = {
   releaseHumanLock: IPC.releaseHumanLock,
   getMcpConnectionInfo: IPC.mcpInfo,
   getMcpCredentials: IPC.mcpCredentials,
+  rotateMcpCredential: IPC.mcpCredentialRotate,
+  revokeMcpAccess: IPC.mcpAccessRevoke,
   getEngineStatus: IPC.engineStatus,
   setEngineStartAtLogin: IPC.engineStartAtLogin,
   configureAgentClient: IPC.configureAgentClient,
@@ -108,7 +110,7 @@ describe('preload window.aidraw security contract', () => {
 
   it('exposes one frozen, function-only, exact allowlist with no generic primitive', () => {
     const expectedKeys = [...Object.keys(invokeChannels), ...subscriptionMethods].sort();
-    expect(expectedKeys).toHaveLength(56);
+    expect(expectedKeys).toHaveLength(58);
     expect(Object.keys(bridge).sort()).toEqual(expectedKeys);
     expect(Object.getOwnPropertySymbols(bridge)).toEqual([]);
     expect(Object.isFrozen(bridge)).toBe(true);

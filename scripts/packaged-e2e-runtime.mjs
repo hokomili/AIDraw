@@ -11,6 +11,8 @@ export const PACKAGED_E2E_RETAINED_TITLE_PATTERN = /(?:MCP-COLD-DISCOVERY|FND-02
 export const PACKAGED_E2E_SELF_CONTAINED_CASES = 27;
 export const PACKAGED_E2E_RETAINED_CASES = 14;
 
+const PACKAGED_MCP_CREDENTIAL_ERROR = 'The packaged MCP credential is not the expected encrypted safe-storage record.';
+
 export const PACKAGED_E2E_RETAINED_PROFILE_ENVS = Object.freeze([
   'AIDRAW_E2E_MCP_DISCOVERY_PROFILE',
   'AIDRAW_E2E_FND02_SECURITY_PROFILE',
@@ -46,6 +48,30 @@ function nonEmpty(value) {
 function normalizeArch(arch) {
   if (arch === 'arm') return 'armv7l';
   return arch;
+}
+
+export function inspectPackagedMcpCredential(value, liveToken) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(PACKAGED_MCP_CREDENTIAL_ERROR);
+  }
+  const record = value;
+  if (Object.keys(record).sort().join(',') !== 'encryption,status,value,version'
+    || record.version !== 2
+    || record.status !== 'active'
+    || record.encryption !== 'electron-safe-storage'
+    || typeof record.value !== 'string'
+    || !record.value
+    || typeof liveToken !== 'string'
+    || !liveToken
+    || record.value === liveToken) {
+    throw new Error(PACKAGED_MCP_CREDENTIAL_ERROR);
+  }
+  return {
+    version: 2,
+    status: 'active',
+    encryption: 'electron-safe-storage',
+    encryptedValuePresent: true,
+  };
 }
 
 export function resolvePackagedE2eArtifact({

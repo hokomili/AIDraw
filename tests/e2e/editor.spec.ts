@@ -63,6 +63,7 @@ import {
   assertPackagedE2eProfile,
   canonicalPackagedE2ePath,
   createPackagedE2eProfile,
+  inspectPackagedMcpCredential,
   packagedE2ePrimaryModifier,
   packagedE2ePrimaryShortcut,
   resolvePackagedE2eArtifact,
@@ -5117,10 +5118,8 @@ test('FND-09-GENERATION-NORMALIZATION exact package preserves previews and accep
     expect(publicJobs.jobs).toEqual([expect.objectContaining({ id: jobId, kind: 'generation', status: 'completed', actor: client.actor })]);
     expect(JSON.stringify(publicJobs)).not.toMatch(/acceptedNormalization|sourceSha256|acceptedSha256|fnd09-normalizable-preview|fnd09-preview-only-preview/i);
     expect(JSON.stringify(publicJobs)).not.toContain(FND09_GENERATION_NORMALIZATION_E2E_REQUEST.prompt);
-    const tokenFile = JSON.parse(await readFile(tokenPath, 'utf8')) as Record<string, unknown>;
-    expect(Object.keys(tokenFile).sort()).toEqual(['encryption', 'value', 'version']);
-    expect(tokenFile.encryption).toBe('electron-safe-storage');
-    expect(tokenFile.value).not.toBe(credentials.token);
+    const tokenFile = JSON.parse(await readFile(tokenPath, 'utf8')) as unknown;
+    inspectPackagedMcpCredential(tokenFile, credentials.token);
     for (const sentinel of [trustSettingsPath, providerCredentialsPath, networkSentinelPath]) expect(await access(sentinel).then(() => true, () => false)).toBe(false);
     for (const screenshot of [approvalScreenshotPath, previewsScreenshotPath, previewOnlyScreenshotPath, successScreenshotPath, acceptedScreenshotPath]) expect(await access(screenshot).then(() => true, () => false)).toBe(true);
 

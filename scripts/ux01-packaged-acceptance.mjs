@@ -1,5 +1,6 @@
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import process from 'node:process';
+import { inspectPackagedMcpCredential } from './packaged-e2e-runtime.mjs';
 
 export const UX01_PACKAGED_SCENARIO = 'UX-01-DENSITY exact package preserves supported content viewports and reachable editor controls';
 export const UX01_PACKAGED_PROFILE_ENV = 'AIDRAW_E2E_UX01_DENSITY_PROFILE';
@@ -96,22 +97,11 @@ export function assertUx01SafeReporterEnvironment(environment = process.env) {
 }
 
 export function inspectUx01EncryptedToken(value, liveToken) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+  try {
+    return inspectPackagedMcpCredential(value, liveToken);
+  } catch {
     throw new Error('The UX-01 MCP credential is not the expected encrypted safe-storage record.');
   }
-  const record = value;
-  const keys = Object.keys(record).sort();
-  if (keys.join(',') !== 'encryption,value,version'
-    || record.version !== 1
-    || record.encryption !== 'electron-safe-storage'
-    || typeof record.value !== 'string'
-    || !record.value
-    || typeof liveToken !== 'string'
-    || !liveToken
-    || record.value === liveToken) {
-    throw new Error('The UX-01 MCP credential is not the expected encrypted safe-storage record.');
-  }
-  return { version: 1, encryption: 'electron-safe-storage', encryptedValuePresent: true };
 }
 
 export function parseUx01WindowMeasurement(value) {

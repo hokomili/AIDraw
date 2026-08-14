@@ -980,6 +980,7 @@ export class McpHost {
   private stopping = false;
   private httpServer?: HttpServer;
   private token = '';
+  private credentialGeneration = 0;
   private port?: number;
   private lastRevisions = new Map<string, number>();
   private readonly sessionTrustedFolders = new Map<string, Set<string>>();
@@ -1014,8 +1015,11 @@ export class McpHost {
   }
 
   async start(token: string): Promise<{ port: number; url: string; tokenHint: string }> {
+    if (this.httpServer) throw new Error('The AIDraw MCP server is already running.');
+    if (!token) throw new Error('The AIDraw MCP credential is unavailable.');
     this.stopping = false;
-    this.token = token;
+    this.port = undefined;
+    this.token = '';
     await this.batches.initialize();
     await this.readFolderTrust();
     const preferred = await this.readPreferredPort();
@@ -1025,18 +1029,42 @@ export class McpHost {
     for (const port of candidates) {
       try {
         await this.listen(port);
-        this.port = port;
-        await this.writePreferredPort(port);
-        return { port, url: `http://127.0.0.1:${port}/mcp`, tokenHint: `••••${token.slice(-6)}` };
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error));
+        continue;
       }
+      try {
+        await this.writePreferredPort(port);
+      } catch {
+        await this.closeFailedStartListener();
+        throw new Error('The AIDraw MCP endpoint bound a loopback port, but its private preferred-port record could not be persisted. The listener was closed and runtime authority was not enabled.');
+      }
+      this.port = port;
+      this.token = token;
+      this.credentialGeneration += 1;
+      return { port, url: `http://127.0.0.1:${port}/mcp`, tokenHint: 'Credential active' };
     }
+    this.port = undefined;
+    this.token = '';
     throw lastError ?? new Error('No AIDraw MCP port is available.');
   }
 
   credentials(): { url?: string; token: string } {
     return { url: this.port ? `http://127.0.0.1:${this.port}/mcp` : undefined, token: this.token };
+  }
+
+  async replaceCredential(token: string): Promise<number> {
+    if (!token) throw new Error('The replacement MCP credential is unavailable.');
+    if (!this.httpServer || !this.port) throw new Error('The AIDraw MCP server is not running.');
+    this.credentialGeneration += 1;
+    this.token = token;
+    return this.closeAuthenticatedSessions();
+  }
+
+  async revokeCredential(): Promise<number> {
+    this.credentialGeneration += 1;
+    this.token = '';
+    return this.closeAuthenticatedSessions();
   }
 
   /**
@@ -1051,11 +1079,11 @@ export class McpHost {
 
   async stop(): Promise<void> {
     this.stopping = true;
-    for (const session of this.sessions.values()) await session.mcp.close().catch(() => undefined);
-    this.sessions.clear();
-    this.sessionTrustedFolders.clear();
+    await this.closeAuthenticatedSessions();
     if (this.httpServer) await new Promise<void>((resolve) => this.httpServer!.close(() => resolve()));
     this.httpServer = undefined;
+    this.port = undefined;
+    this.token = '';
     await this.batches.flush();
     await this.persistentTrustWrite;
     await this.documents.flushRecovery();
@@ -1081,6 +1109,18 @@ export class McpHost {
     this.httpServer = server;
   }
 
+  private async closeFailedStartListener(): Promise<void> {
+    const server = this.httpServer;
+    if (server) {
+      const closed = new Promise<void>((resolve) => server.close(() => resolve()));
+      server.closeAllConnections();
+      await closed;
+    }
+    if (this.httpServer === server) this.httpServer = undefined;
+    this.port = undefined;
+    this.token = '';
+  }
+
   private async handleRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const url = new URL(request.url ?? '/', `http://127.0.0.1:${this.port ?? PORT_START}`);
     if (url.pathname === '/health' && request.method === 'GET') {
@@ -1092,11 +1132,12 @@ export class McpHost {
       response.writeHead(404, { 'content-type': 'application/json' }); response.end('{"error":"not_found"}'); return;
     }
     const authorization = request.headers.authorization ?? '';
-    if (!authorization.startsWith('Bearer ') || !safeEqual(authorization.slice(7), this.token)) {
+    if (!this.token || !authorization.startsWith('Bearer ') || !safeEqual(authorization.slice(7), this.token)) {
       response.writeHead(401, { 'content-type': 'application/json', 'www-authenticate': 'Bearer realm="AIDraw MCP"', 'cache-control': 'no-store' });
       response.end('{"error":"invalid_token"}');
       return;
     }
+    const requestCredentialGeneration = this.credentialGeneration;
     if (request.method === 'OPTIONS') {
       response.writeHead(204, { allow: 'GET, POST, DELETE, OPTIONS' }); response.end(); return;
     }
@@ -1130,7 +1171,7 @@ export class McpHost {
         session = await this.createSession();
         await session.transport.handleRequest(request, response, body);
         const assignedId = session.transport.sessionId;
-        if (assignedId && !session.closed && !this.stopping) {
+        if (assignedId && !session.closed && !this.stopping && requestCredentialGeneration === this.credentialGeneration) {
           this.sessions.set(assignedId, session);
           retained = true;
         }
@@ -1175,12 +1216,21 @@ export class McpHost {
   }
 
   private retireSession(session: McpSession): void {
-    if (session.closed) return;
-    session.closed = true;
-    for (const [id, active] of this.sessions) if (active === session) this.sessions.delete(id);
+    if (!session.closed) {
+      session.closed = true;
+      for (const [id, active] of this.sessions) if (active === session) this.sessions.delete(id);
+    }
     this.documents.removePresence(session.actor.id);
     this.sessionTrustedFolders.delete(session.actor.id);
     session.subscriptions.clear();
+  }
+
+  private async closeAuthenticatedSessions(): Promise<number> {
+    const sessions = [...new Set(this.sessions.values())];
+    for (const session of sessions) this.retireSession(session);
+    await Promise.all(sessions.map((session) => session.mcp.close().catch(() => undefined)));
+    for (const session of sessions) this.retireSession(session);
+    return sessions.length;
   }
 
   private hasActiveSession(actorId: string): boolean {

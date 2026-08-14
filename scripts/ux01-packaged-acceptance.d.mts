@@ -33,7 +33,7 @@ export interface Ux01PackagedAcceptance {
 
 export function resolveUx01PackagedAcceptance(options?: { workspacePath?: string; environment?: NodeJS.ProcessEnv }): Ux01PackagedAcceptance;
 export function assertUx01SafeReporterEnvironment(environment?: NodeJS.ProcessEnv): true;
-export function inspectUx01EncryptedToken(value: unknown, liveToken: string): { version: 1; encryption: 'electron-safe-storage'; encryptedValuePresent: true };
+export function inspectUx01EncryptedToken(value: unknown, liveToken: string): { version: 2; status: 'active'; encryption: 'electron-safe-storage'; encryptedValuePresent: true };
 export function parseUx01WindowMeasurement(value: unknown): {
   location: string;
   content: { width: number; height: number; devicePixelRatio: number };

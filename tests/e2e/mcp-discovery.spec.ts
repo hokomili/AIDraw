@@ -3,7 +3,7 @@ import type { ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { access, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
-import { resolvePackagedE2eArtifact, spawnPackagedE2e } from '../../scripts/packaged-e2e-runtime.mjs';
+import { inspectPackagedMcpCredential, resolvePackagedE2eArtifact, spawnPackagedE2e } from '../../scripts/packaged-e2e-runtime.mjs';
 
 const scenarioName = 'MCP-COLD-DISCOVERY exact package teaches a tools-only client without repository context';
 const profilePrefix = 'aidraw-e2e-mcp-discovery-';
@@ -237,10 +237,8 @@ test(scenarioName, async () => {
     expect(guideText).toContain('Only a human can approve');
 
     for (const sentinel of [trustSettingsPath, providerCredentialsPath, forbiddenNetworkPath]) expect(await access(sentinel).then(() => true, () => false)).toBe(false);
-    const tokenFile = JSON.parse(await readFile(tokenPath, 'utf8')) as Record<string, unknown>;
-    expect(Object.keys(tokenFile).sort()).toEqual(['encryption', 'value', 'version']);
-    expect(tokenFile.encryption).toBe('electron-safe-storage');
-    expect(tokenFile.value).not.toBe(connection.token);
+    const tokenFile = JSON.parse(await readFile(tokenPath, 'utf8')) as unknown;
+    inspectPackagedMcpCredential(tokenFile, connection.token);
 
     evidence = {
       scenario: scenarioName,

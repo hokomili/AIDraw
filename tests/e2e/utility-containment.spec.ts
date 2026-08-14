@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { access, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import {
+  inspectPackagedMcpCredential,
   resolvePackagedE2eArtifact,
   spawnPackagedE2e,
 } from '../../scripts/packaged-e2e-runtime.mjs';
@@ -467,10 +468,8 @@ test(scenarioName, async () => {
     expect(probe.crash?.queuedExport).toEqual(probe.cancellation?.queuedExport);
     expect(new Set([probe.crash?.workerPid, probe.crash?.restartPid, probe.cancellation?.restartPid]).size).toBe(3);
 
-    const tokenFile = JSON.parse(await readFile(tokenPath, 'utf8')) as Record<string, unknown>;
-    expect(Object.keys(tokenFile).sort()).toEqual(['encryption', 'value', 'version']);
-    expect(tokenFile.encryption).toBe('electron-safe-storage');
-    expect(tokenFile.value).not.toBe(connection.token);
+    const tokenFile = JSON.parse(await readFile(tokenPath, 'utf8')) as unknown;
+    inspectPackagedMcpCredential(tokenFile, connection.token);
 
     const headers = await connectMcp(connection);
     const joined = await callTool(connection.url, headers, 2, 'session_manage', { action: 'join', name: 'FND-09 utility observer', color: '#4f79b8' });
@@ -622,10 +621,8 @@ test(pressureScenarioName, async () => {
     expect(probe.admission?.activeWorkerPid).toBe(probe.drain?.workerPid);
     expect(probe.admission?.overflowError.message).toBe('Utility queue reached the 32-task waiting limit. Retry after current work completes.');
 
-    const tokenFile = JSON.parse(await readFile(tokenPath, 'utf8')) as Record<string, unknown>;
-    expect(Object.keys(tokenFile).sort()).toEqual(['encryption', 'value', 'version']);
-    expect(tokenFile.encryption).toBe('electron-safe-storage');
-    expect(tokenFile.value).not.toBe(connection.token);
+    const tokenFile = JSON.parse(await readFile(tokenPath, 'utf8')) as unknown;
+    inspectPackagedMcpCredential(tokenFile, connection.token);
 
     const headers = await connectMcp(connection);
     const joined = await callTool(connection.url, headers, 2, 'session_manage', { action: 'join', name: 'FND-09 pressure observer', color: '#7456a8' });
@@ -779,10 +776,8 @@ test(observationCodecScenarioName, async () => {
     });
     expect(probe.corrupt?.workerPid).not.toBe(probe.recovery?.workerPid);
 
-    const tokenFile = JSON.parse(await readFile(tokenPath, 'utf8')) as Record<string, unknown>;
-    expect(Object.keys(tokenFile).sort()).toEqual(['encryption', 'value', 'version']);
-    expect(tokenFile.encryption).toBe('electron-safe-storage');
-    expect(tokenFile.value).not.toBe(connection.token);
+    const tokenFile = JSON.parse(await readFile(tokenPath, 'utf8')) as unknown;
+    inspectPackagedMcpCredential(tokenFile, connection.token);
 
     const headers = await connectMcp(connection);
     const listed = await postMcp(connection.url, headers, 2, 'tools/list', {});
@@ -968,10 +963,8 @@ test(quantizationResultScenarioName, async () => {
     expect(probe.contradictory?.workerPid).not.toBe(probe.contradictory?.queuedRecovery.workerPid);
     expect(probe.overBudget?.queuedRecovery.sha256).toBe(probe.contradictory?.queuedRecovery.sha256);
 
-    const tokenFile = JSON.parse(await readFile(tokenPath, 'utf8')) as Record<string, unknown>;
-    expect(Object.keys(tokenFile).sort()).toEqual(['encryption', 'value', 'version']);
-    expect(tokenFile.encryption).toBe('electron-safe-storage');
-    expect(tokenFile.value).not.toBe(connection.token);
+    const tokenFile = JSON.parse(await readFile(tokenPath, 'utf8')) as unknown;
+    inspectPackagedMcpCredential(tokenFile, connection.token);
 
     const headers = await connectMcp(connection);
     const listed = await postMcp(connection.url, headers, 2, 'tools/list', {});
@@ -1159,10 +1152,8 @@ test(exportResultScenarioName, async () => {
     expect(probe.primary?.queuedRecovery.primary.sha256).toBe(probe.companion?.queuedRecovery.primary.sha256);
     expect(probe.primary?.queuedRecovery.companion.sha256).toBe(probe.companion?.queuedRecovery.companion.sha256);
 
-    const tokenFile = JSON.parse(await readFile(tokenPath, 'utf8')) as Record<string, unknown>;
-    expect(Object.keys(tokenFile).sort()).toEqual(['encryption', 'value', 'version']);
-    expect(tokenFile.encryption).toBe('electron-safe-storage');
-    expect(tokenFile.value).not.toBe(connection.token);
+    const tokenFile = JSON.parse(await readFile(tokenPath, 'utf8')) as unknown;
+    inspectPackagedMcpCredential(tokenFile, connection.token);
 
     const headers = await connectMcp(connection);
     const listed = await postMcp(connection.url, headers, 2, 'tools/list', {});
@@ -1351,10 +1342,8 @@ test(importResultScenarioName, async () => {
     expect(fixture.byteLength).toBe(probe.realImporter?.fixtureBytes);
     expect(createHash('sha256').update(fixture).digest('hex').toUpperCase()).toBe(probe.realImporter?.fixtureSha256);
 
-    const tokenFile = JSON.parse(await readFile(tokenPath, 'utf8')) as Record<string, unknown>;
-    expect(Object.keys(tokenFile).sort()).toEqual(['encryption', 'value', 'version']);
-    expect(tokenFile.encryption).toBe('electron-safe-storage');
-    expect(tokenFile.value).not.toBe(connection.token);
+    const tokenFile = JSON.parse(await readFile(tokenPath, 'utf8')) as unknown;
+    inspectPackagedMcpCredential(tokenFile, connection.token);
 
     const headers = await connectMcp(connection);
     const listed = await postMcp(connection.url, headers, 2, 'tools/list', {});
@@ -1549,10 +1538,8 @@ test(generationResultScenarioName, async () => {
     expect(new Set(workerPids).size).toBe(6);
     expect(new Set(faults.map((entry) => entry?.queuedRecovery.semanticSha256)).size).toBe(1);
 
-    const tokenFile = JSON.parse(await readFile(tokenPath, 'utf8')) as Record<string, unknown>;
-    expect(Object.keys(tokenFile).sort()).toEqual(['encryption', 'value', 'version']);
-    expect(tokenFile.encryption).toBe('electron-safe-storage');
-    expect(tokenFile.value).not.toBe(connection.token);
+    const tokenFile = JSON.parse(await readFile(tokenPath, 'utf8')) as unknown;
+    inspectPackagedMcpCredential(tokenFile, connection.token);
 
     const headers = await connectMcp(connection);
     const listed = await postMcp(connection.url, headers, 2, 'tools/list', {});

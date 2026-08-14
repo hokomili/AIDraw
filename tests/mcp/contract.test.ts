@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { access, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -152,6 +152,84 @@ describe('authenticated stateful MCP contract', () => {
     ]);
     expect(invalidActionInputs.every((message) => message.result?.isError === true)).toBe(true);
     expect(JSON.stringify(invalidActionInputs)).toContain('Invalid arguments');
+  });
+
+  it('invalidates the prior bearer, retires active transports, and fails closed after revocation', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-mcp-credential-lifecycle-'));
+    temporaryPaths.push(root);
+    const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0');
+    documents.initialize();
+    const host = new McpHost(documents, '1.0.0', join(root, 'port.json'));
+    hosts.push(host);
+    const firstToken = Buffer.alloc(32, 0x11).toString('base64url');
+    const secondToken = Buffer.alloc(32, 0x22).toString('base64url');
+    const started = await host.start(firstToken);
+    expect(started.tokenHint).toBe('Credential active');
+    expect(started.tokenHint).not.toContain(firstToken.slice(-6));
+    const firstClient = await initializeClient(started.url, firstToken, 'credential-lifecycle-first');
+    await callTool(started.url, firstClient.headers, 2, 'session_manage', { action: 'join', name: 'First lifecycle agent', color: '#345678' });
+    const revision = documents.snapshot().activeDocument?.revision;
+    expect(documents.getMcpInfo().sessions).toHaveLength(1);
+
+    await expect(host.replaceCredential(secondToken)).resolves.toBe(1);
+    expect(documents.getMcpInfo().sessions).toEqual([]);
+    const rejectedOld = await fetch(started.url, {
+      method: 'POST',
+      headers: firstClient.headers,
+      body: JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/list', params: {} }),
+    });
+    expect(rejectedOld.status).toBe(401);
+    expect(await rejectedOld.json()).toEqual({ error: 'invalid_token' });
+
+    const replacementClient = await initializeClient(started.url, secondToken, 'credential-lifecycle-second');
+    await callTool(started.url, replacementClient.headers, 4, 'session_manage', { action: 'join', name: 'Replacement lifecycle agent', color: '#456789' });
+    expect(documents.getMcpInfo().sessions).toHaveLength(1);
+    await expect(host.revokeCredential()).resolves.toBe(1);
+    expect(documents.getMcpInfo().sessions).toEqual([]);
+    for (const authorization of [`Bearer ${firstToken}`, `Bearer ${secondToken}`, 'Bearer ']) {
+      const rejected = await fetch(started.url, {
+        method: 'POST',
+        headers: { authorization, accept: 'application/json, text/event-stream', 'content-type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 5, method: 'initialize', params: { protocolVersion: LATEST_PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: 'revoked-client', version: '1.0.0' } } }),
+      });
+      expect(rejected.status).toBe(401);
+      expect(await rejected.json()).toEqual({ error: 'invalid_token' });
+    }
+    expect((await fetch(`http://127.0.0.1:${started.port}/health`)).status).toBe(200);
+    expect(documents.snapshot().activeDocument?.revision).toBe(revision);
+  });
+
+  it('closes a bound listener when private port publication fails and remains retryable', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-mcp-start-publication-failure-'));
+    temporaryPaths.push(root);
+    const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0');
+    documents.initialize();
+    const host = new McpHost(documents, '1.0.0', join(root, 'port.json'));
+    hosts.push(host);
+    const internals = host as unknown as { writePreferredPort(port: number): Promise<void> };
+    let failedPort: number | undefined;
+    const writePreferredPort = vi.spyOn(internals, 'writePreferredPort').mockImplementationOnce(async (port) => {
+      failedPort = port;
+      throw new Error('injected private publication detail');
+    });
+    const rejectedToken = Buffer.alloc(32, 0x33).toString('base64url');
+
+    await expect(host.start(rejectedToken)).rejects.toThrow('The listener was closed and runtime authority was not enabled.');
+    expect(host.credentials()).toEqual({ url: undefined, token: '' });
+    expect(failedPort).toBeTypeOf('number');
+    writePreferredPort.mockRestore();
+
+    const replacementToken = Buffer.alloc(32, 0x44).toString('base64url');
+    const started = await host.start(replacementToken);
+    expect(started.port).toBe(failedPort);
+    expect(host.credentials()).toEqual({ url: started.url, token: replacementToken });
+    const rejected = await fetch(started.url, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${rejectedToken}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: LATEST_PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: 'failed-start-token', version: '1.0.0' } } }),
+    });
+    expect(rejected.status).toBe(401);
+    await expect(initializeClient(started.url, replacementToken, 'retry-after-publication-failure')).resolves.toMatchObject({ sessionId: expect.any(String) });
   });
 
   it('negotiates the pinned legacy protocol and rejects an unsupported version header after initialize', async () => {

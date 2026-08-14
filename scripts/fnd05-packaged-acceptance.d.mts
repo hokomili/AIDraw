@@ -94,7 +94,7 @@ export interface Fnd05UnresponsiveAcceptance {
 
 export function resolveFnd05UnresponsiveAcceptance(options?: { workspacePath?: string; environment?: NodeJS.ProcessEnv }): Fnd05UnresponsiveAcceptance;
 export function assertFnd05UnresponsiveSafeReporterEnvironment(environment?: NodeJS.ProcessEnv): true;
-export function inspectFnd05EncryptedToken(value: unknown, liveToken: string): { version: 1; encryption: 'electron-safe-storage'; encryptedValuePresent: true };
+export function inspectFnd05EncryptedToken(value: unknown, liveToken: string): { version: 2; status: 'active'; encryption: 'electron-safe-storage'; encryptedValuePresent: true };
 export function classifyFnd05UnresponsiveFailureStage(progress?: {
   inputAdmission?: 'not-attempted' | 'admitted' | 'ack-pending' | 'rejected';
   allDebuggerAttachmentsDetached?: boolean;

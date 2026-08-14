@@ -1,5 +1,6 @@
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import process from 'node:process';
+import { inspectPackagedMcpCredential } from './packaged-e2e-runtime.mjs';
 
 export const FND05_PACKAGED_SCENARIO = 'FND-05-STALE-RENDERER exact package replaces one lost renderer without replacing its engine';
 export const FND05_PACKAGED_PROFILE_ENV = 'AIDRAW_E2E_FND05_STALE_RENDERER_PROFILE';
@@ -179,21 +180,11 @@ export function assertFnd05UnresponsiveSafeReporterEnvironment(environment = pro
 }
 
 export function inspectFnd05EncryptedToken(value, liveToken) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+  try {
+    return inspectPackagedMcpCredential(value, liveToken);
+  } catch {
     throw new Error('The FND-05 MCP credential is not the expected encrypted safe-storage record.');
   }
-  const keys = Object.keys(value).sort();
-  if (keys.join(',') !== 'encryption,value,version'
-    || value.version !== 1
-    || value.encryption !== 'electron-safe-storage'
-    || typeof value.value !== 'string'
-    || !value.value
-    || typeof liveToken !== 'string'
-    || !liveToken
-    || value.value === liveToken) {
-    throw new Error('The FND-05 MCP credential is not the expected encrypted safe-storage record.');
-  }
-  return { version: 1, encryption: 'electron-safe-storage', encryptedValuePresent: true };
 }
 
 export function parseFnd05OwnedProcesses(processTable, profilePath) {

@@ -6,6 +6,7 @@ import { access, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import {
+  inspectPackagedMcpCredential,
   resolvePackagedE2eArtifact,
   spawnPackagedE2e,
   waitForPackagedE2eReady,
@@ -22,6 +23,7 @@ const expectedBridgeKeys = [
   'listDocumentPresets', 'saveDocumentPreset', 'deleteDocumentPreset', 'listInterchangeReports', 'exportInterchangeReport',
   'openDocuments', 'saveDocument', 'saveDocumentAs', 'saveAllDocuments', 'batchExportDocuments', 'closeAllDocuments',
   'closeDocument', 'stopAgents', 'acquireHumanLock', 'releaseHumanLock', 'getMcpConnectionInfo', 'getMcpCredentials',
+  'rotateMcpCredential', 'revokeMcpAccess',
   'getEngineStatus', 'setEngineStartAtLogin', 'configureAgentClient', 'configureCodex', 'resolveJob',
   'setProviderCredential', 'getProviderStatus', 'generationStart', 'generationAccept', 'generationReject', 'jobCancel',
   'importFiles', 'importPalette', 'exportPalette', 'managePixelLink', 'selectSpriteSheet', 'importSpriteSheet',
@@ -172,10 +174,8 @@ test(scenarioName, async () => {
     expect(connectionUrl.hostname).toBe('127.0.0.1');
     expect(connectionUrl.pathname).toBe('/mcp');
 
-    const tokenFile = JSON.parse(await readFile(tokenPath, 'utf8')) as Record<string, unknown>;
-    expect(Object.keys(tokenFile).sort()).toEqual(['encryption', 'value', 'version']);
-    expect(tokenFile.encryption).toBe('electron-safe-storage');
-    expect(tokenFile.value).not.toBe(connection.token);
+    const tokenFile = JSON.parse(await readFile(tokenPath, 'utf8')) as unknown;
+    inspectPackagedMcpCredential(tokenFile, connection.token);
 
     const connected = await connectRenderer(debuggingPort, child, stderr);
     browser = connected.browser;

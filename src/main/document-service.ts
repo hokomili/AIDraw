@@ -111,7 +111,7 @@ export class DocumentService extends EventEmitter {
   private activeDocumentId?: Id;
   private workspaceRevision = 0;
   private recoveryWarnings: string[] = [];
-  private mcpInfo: Pick<McpConnectionInfo, 'running' | 'url' | 'port' | 'tokenHint'> = { running: false };
+  private mcpInfo: Pick<McpConnectionInfo, 'running' | 'access' | 'url' | 'port' | 'tokenHint'> = { running: false, access: 'unavailable' };
 
   constructor(
     private readonly journal: RecoveryJournal,
@@ -181,7 +181,7 @@ export class DocumentService extends EventEmitter {
     await this.journal.flush();
   }
 
-  setMcpInfo(info: Pick<McpConnectionInfo, 'running' | 'url' | 'port' | 'tokenHint'>): void {
+  setMcpInfo(info: Pick<McpConnectionInfo, 'running' | 'access' | 'url' | 'port' | 'tokenHint'>): void {
     this.mcpInfo = info;
     this.publish();
   }

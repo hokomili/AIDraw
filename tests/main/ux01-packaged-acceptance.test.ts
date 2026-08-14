@@ -160,19 +160,21 @@ describe('UX-01 retained exact-package acceptance boundary', () => {
 
   it('checks encrypted token shape without returning or reporting either token value', () => {
     const liveToken = 'synthetic-live-token-that-must-not-reach-playwright';
-    expect(inspectUx01EncryptedToken({ version: 1, encryption: 'electron-safe-storage', value: 'encrypted-ciphertext' }, liveToken)).toEqual({
-      version: 1,
+    expect(inspectUx01EncryptedToken({ version: 2, status: 'active', encryption: 'electron-safe-storage', value: 'encrypted-ciphertext' }, liveToken)).toEqual({
+      version: 2,
+      status: 'active',
       encryption: 'electron-safe-storage',
       encryptedValuePresent: true,
     });
     let message = '';
     try {
-      inspectUx01EncryptedToken({ version: 1, encryption: 'electron-safe-storage', value: liveToken }, liveToken);
+      inspectUx01EncryptedToken({ version: 2, status: 'active', encryption: 'electron-safe-storage', value: liveToken }, liveToken);
     } catch (error) {
       message = error instanceof Error ? error.message : String(error);
     }
     expect(message).toMatch(/expected encrypted safe-storage record/);
     expect(message).not.toContain(liveToken);
+    expect(() => inspectUx01EncryptedToken({ version: 1, encryption: 'electron-safe-storage', value: 'legacy-ciphertext' }, liveToken)).toThrow(/expected encrypted safe-storage record/);
   });
 
   it('parses only trusted bounded renderer window geometry and bounded content requests', () => {

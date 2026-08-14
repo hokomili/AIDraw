@@ -131,6 +131,7 @@ import type {
   DocumentPreset,
   EngineStatus,
   InterchangeReport,
+  McpCredentialLifecycleResult,
   NewDocumentKind,
   NewDocumentOptions,
   PixelLinkAction,
@@ -4332,6 +4333,8 @@ function ActivityPanel() {
   const [selectedClient, setSelectedClient] = useState<AgentClientId>("codex");
   const [setupResult, setSetupResult] = useState<AgentClientSetupResult>();
   const [configuring, setConfiguring] = useState(false);
+  const [credentialChanging, setCredentialChanging] = useState(false);
+  const [credentialResult, setCredentialResult] = useState<McpCredentialLifecycleResult>();
   const [engine, setEngine] = useState<EngineStatus>();
   const [checkpointName, setCheckpointName] = useState("");
   const [checkpointComparison, setCheckpointComparison] = useState<CheckpointComparisonResult>();
@@ -4346,7 +4349,33 @@ function ActivityPanel() {
     void window.aidraw.listInterchangeReports(document.id).then((reports) => { if (active) setInterchangeReports(reports); });
     return () => { active = false; };
   }, [document?.id, reportPulse]);
+  const changeMcpCredential = async (action: "rotate" | "revoke") => {
+    setCredentialChanging(true);
+    try {
+      const result = action === "rotate"
+        ? await window.aidraw.rotateMcpCredential()
+        : await window.aidraw.revokeMcpAccess();
+      if (result.status === "completed") {
+        setCredentials(undefined);
+        setSetupResult(undefined);
+        setCredentialResult(result);
+        setEngine(await window.aidraw.getEngineStatus());
+        notify(result.message, result.warning ? "warning" : "success");
+      } else {
+        notify(result.message, "info");
+      }
+    } catch (error) {
+      setCredentials(undefined);
+      setSetupResult(undefined);
+      setCredentialResult(undefined);
+      await window.aidraw.getEngineStatus().then(setEngine).catch(() => undefined);
+      notify(error instanceof Error ? error.message : "The MCP credential change failed.", "error");
+    } finally {
+      setCredentialChanging(false);
+    }
+  };
   if (!document) return null;
+  const mcpAccessRevoked = snapshot?.mcp.access === "revoked";
   const latestAgentActivity = new Map<string, string>();
   for (const entry of [...document.activity].reverse()) {
     if (entry.actor.kind === "agent" && !latestAgentActivity.has(entry.actor.id))
@@ -4369,7 +4398,9 @@ function ActivityPanel() {
           <small>
             {snapshot?.mcp.running
               ? `Listening at ${snapshot.mcp.url}`
-              : "Starting local MCP…"}
+              : snapshot?.mcp.access === "revoked"
+                ? "Agent access is revoked; the editor and canonical engine remain available."
+                : "Starting local MCP…"}
           </small>
         </div>
       </div>
@@ -4396,7 +4427,7 @@ function ActivityPanel() {
           {AGENT_CLIENTS.map((client) => <option key={client.id} value={client.id}>{client.name}</option>)}
         </select>
         <button
-          disabled={configuring}
+          disabled={configuring || snapshot?.mcp.access === "revoked"}
           onClick={async () => {
             setConfiguring(true);
             try {
@@ -4412,6 +4443,7 @@ function ActivityPanel() {
           <Bot size={13} /> {configuring ? "Connecting…" : selectedClient === "generic" ? "Show settings" : "Connect"}
         </button>
         <button
+          disabled={!snapshot?.mcp.running}
           onClick={async () =>
             setCredentials(
               credentials ? undefined : await window.aidraw.getMcpCredentials(),
@@ -4442,6 +4474,19 @@ function ActivityPanel() {
           </button>
         </div>
       )}
+      <section className="credential-lifecycle" aria-label="MCP credential security">
+        <div>
+          <strong>Credential security</strong>
+          <small>{mcpAccessRevoked
+            ? "Rotating now re-enables the local endpoint and agent access with a new credential. Persistent folder approvals and already admitted or pending approval work remain; client configurations stay unchanged."
+            : "Rotation invalidates every configured bearer and ends active sessions. Persistent folder approvals and already admitted or pending approval work remain. Revocation also stops MCP access; neither action edits client configuration files."}</small>
+        </div>
+        <div className="credential-lifecycle-actions">
+          <button disabled={credentialChanging} onClick={() => void changeMcpCredential("rotate")}>{mcpAccessRevoked ? "Rotate and re-enable" : "Rotate credential"}</button>
+          <button disabled={credentialChanging || snapshot?.mcp.access === "revoked"} onClick={() => void changeMcpCredential("revoke")}>Revoke access</button>
+        </div>
+        {credentialResult && <p role="status">{credentialResult.message}</p>}
+      </section>
       {(snapshot?.jobs ?? [])
         .filter((job) => job.status === "waiting-for-user")
         .map((job) => (

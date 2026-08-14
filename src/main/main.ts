@@ -5,7 +5,7 @@ import { link, mkdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, isAbsolute, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { CanvasTransactionSchema, HUMAN_ACTOR, createId, nowIso, type AsyncJob, type CanvasOperation } from '@aidraw/core';
-import { IPC, type BatchDocumentResult, type DocumentPresetInput, type EngineStatus, type ExportOptions, type HumanLockRequest, type InterchangeReportInput, type NewDocumentOptions, type PixelLinkAction, type PixelLinkActionResult } from '../common/contracts';
+import { IPC, type BatchDocumentResult, type DocumentPresetInput, type EngineStatus, type ExportOptions, type HumanLockRequest, type InterchangeReportInput, type McpCredentialLifecycleResult, type NewDocumentOptions, type PixelLinkAction, type PixelLinkActionResult } from '../common/contracts';
 import { EDITOR_CONTENT_VIEWPORT, MACOS_EDITOR_WINDOW_CHROME, editorOuterMinimumSize } from '../common/editor-layout';
 import { MAX_PALETTE_FILE_BYTES, applyPortablePalette, parsePaletteFile, serializePaletteFile, type PaletteFileFormat, type PaletteImportMode } from '../common/palette-interchange';
 import type { DocumentService } from './document-service';
@@ -480,6 +480,59 @@ function clipboardDependencies(): ClipboardWorkflowDependencies {
 const copySelection = (objectIds: string[]) => copySelectionToClipboard(clipboardDependencies(), objectIds);
 const pasteClipboard = () => pasteFromClipboard(clipboardDependencies());
 
+async function confirmMcpCredentialChange(action: 'rotate' | 'revoke'): Promise<McpCredentialLifecycleResult> {
+  const window = mainWindow;
+  if (!window || window.isDestroyed()) throw new Error('The editor window is unavailable.');
+  const rotating = action === 'rotate';
+  const reEnabling = rotating && service.getMcpInfo().access === 'revoked';
+  const decision = await dialog.showMessageBox(window, {
+    type: 'warning',
+    title: reEnabling ? 'Rotate credential and re-enable MCP?' : rotating ? 'Rotate MCP credential?' : 'Revoke MCP access?',
+    message: reEnabling
+      ? 'Create a new credential and re-enable the local MCP endpoint?'
+      : rotating
+        ? 'Replace the credential and disconnect every active MCP session?'
+        : 'Revoke the credential and stop the local MCP endpoint?',
+    detail: reEnabling
+      ? 'This starts local agent access again with a new bearer. Persistent folder approvals and already admitted or pending approval work remain; they are not rolled back or silently cancelled. Existing AIDraw entries in client configuration files stay invalid until you run Connect for each intended client again.'
+      : rotating
+        ? 'Existing AIDraw entries in client configuration files will keep the invalidated bearer until you run Connect for each client again. Persistent folder approvals and already admitted or pending approval work remain; they are not rolled back or silently cancelled.'
+        : 'The editor, canonical documents, history, recovery, start-at-login setting, and persistent folder approvals remain. Already admitted work and approval jobs are not rolled back or silently cancelled. Existing client configuration files are not edited; their AIDraw entries will no longer authenticate. Rotate the credential to re-enable access, then run Connect for each client again.',
+    buttons: [reEnabling ? 'Rotate and Re-enable' : rotating ? 'Rotate Credential' : 'Revoke Access', 'Cancel'],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true,
+  });
+  if (decision.response !== 0) {
+    return {
+      action,
+      status: 'cancelled',
+      access: service.getMcpInfo().access ?? 'unavailable',
+      sessionsTerminated: 0,
+      message: action === 'rotate' ? 'MCP credential rotation was cancelled.' : 'MCP access revocation was cancelled.',
+    };
+  }
+  const transition = rotating
+    ? await engineRuntime.rotateMcpCredential()
+    : await engineRuntime.revokeMcpAccess();
+  const sessionLabel = `${transition.sessionsTerminated} active MCP session${transition.sessionsTerminated === 1 ? '' : 's'}`;
+  return {
+    action,
+    status: 'completed',
+    access: transition.access,
+    sessionsTerminated: transition.sessionsTerminated,
+    clientConfigurationsStale: true,
+    ...(transition.cleanupWarning ? { warning: true as const } : {}),
+    message: transition.cleanupWarning
+      ? `${transition.cleanupWarning} ${sessionLabel} terminated. Existing client configuration files were left unchanged.`
+      : reEnabling
+        ? `MCP credential replaced and local access re-enabled; ${sessionLabel} terminated. Existing client configurations are stale. Run Connect for each intended client, then start a fresh session and join again.`
+        : rotating
+          ? `MCP credential replaced; ${sessionLabel} terminated. Existing client configurations are stale. Run Connect for each client, then start a fresh session and join again.`
+          : `MCP access revoked; ${sessionLabel} terminated. The local editor and canonical engine remain available. Existing client configuration files were left unchanged.`,
+  };
+}
+
 function registerIpc(): void {
   const handle = <T extends unknown[], R>(
     channel: string,
@@ -563,6 +616,8 @@ function registerIpc(): void {
   handle(IPC.releaseHumanLock, (_event, id: string) => service.releaseLock(id));
   handle(IPC.mcpInfo, () => service.getMcpInfo());
   handle(IPC.mcpCredentials, () => mcpHost.credentials());
+  handle(IPC.mcpCredentialRotate, () => confirmMcpCredentialChange('rotate'));
+  handle(IPC.mcpAccessRevoke, () => confirmMcpCredentialChange('revoke'));
   handle(IPC.engineStatus, () => engineStatus());
   handle(IPC.engineStartAtLogin, (_event, enabled: boolean) => setEngineStartAtLogin(enabled === true));
   handle(IPC.resolveJob, (_event, jobId: string, decision: 'allow-once' | 'allow-session' | 'allow-always' | 'deny') => {

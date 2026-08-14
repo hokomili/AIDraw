@@ -20,6 +20,13 @@ export interface EngineRuntimeOptions {
   approvalTimeoutMs?: number;
 }
 
+export interface McpCredentialTransition {
+  access: 'active' | 'revoked';
+  endpointRunning: boolean;
+  sessionsTerminated: number;
+  cleanupWarning?: string;
+}
+
 /**
  * Canonical AIDraw engine. It owns every mutable document concern and has no
  * BrowserWindow dependency, so it can run for an entire user session without
@@ -34,6 +41,8 @@ export class EngineRuntime {
   readonly generationUtilities: RasterUtilitySupervisor;
   readonly documentPresets: DocumentPresetStore;
   readonly interchangeReports: InterchangeReportStore;
+  private readonly mcpCredentials: LocalCredentialStore;
+  private mcpCredentialOperation: Promise<void> = Promise.resolve();
   private recoveryTimer?: NodeJS.Timeout;
   private started = false;
   private stopPromise?: Promise<void>;
@@ -61,6 +70,7 @@ export class EngineRuntime {
     );
     this.documentPresets = new DocumentPresetStore(join(userDataPath, 'settings', 'document-presets.json'));
     this.interchangeReports = new InterchangeReportStore(join(userDataPath, 'reports', 'interchange.json'));
+    this.mcpCredentials = new LocalCredentialStore(join(userDataPath, 'credentials', 'mcp-token.json'));
     this.mcpHost = new McpHost(
       this.service,
       appVersion,
@@ -82,11 +92,75 @@ export class EngineRuntime {
     this.recoveryTimer = setInterval(() => void this.service.compactRecovery(), 60_000);
     this.recoveryTimer.unref();
     try {
-      const token = await new LocalCredentialStore(join(this.options.userDataPath, 'credentials', 'mcp-token.json')).loadOrCreateToken();
-      this.service.setMcpInfo({ running: true, ...(await this.mcpHost.start(token)) });
+      const credential = await this.mcpCredentials.loadOrCreate();
+      if (credential.status === 'revoked') {
+        this.service.setMcpInfo({ running: false, access: 'revoked', tokenHint: 'Access revoked' });
+      } else {
+        this.service.setMcpInfo({ running: true, access: 'active', ...(await this.mcpHost.start(credential.token)) });
+      }
     } catch (error) {
-      this.service.setMcpInfo({ running: false, tokenHint: error instanceof Error ? error.message : 'MCP unavailable' });
+      this.service.setMcpInfo({ running: false, access: 'unavailable', tokenHint: error instanceof Error ? error.message : 'MCP unavailable' });
     }
+  }
+
+  rotateMcpCredential(): Promise<McpCredentialTransition> {
+    return this.exclusiveMcpCredentialOperation(async () => {
+      this.assertCredentialMutationAvailable();
+      const token = await this.mcpCredentials.rotate();
+      const current = this.mcpHost.credentials();
+      if (current.url) {
+        const sessionsTerminated = await this.mcpHost.replaceCredential(token);
+        this.service.setMcpInfo({
+          running: true,
+          access: 'active',
+          url: current.url,
+          port: Number(new URL(current.url).port),
+          tokenHint: 'Credential active',
+        });
+        return { access: 'active', endpointRunning: true, sessionsTerminated };
+      }
+      try {
+        const started = await this.mcpHost.start(token);
+        this.service.setMcpInfo({ running: true, access: 'active', ...started });
+        return { access: 'active', endpointRunning: true, sessionsTerminated: 0 };
+      } catch {
+        this.service.setMcpInfo({ running: false, access: 'unavailable', tokenHint: 'MCP unavailable' });
+        throw new Error('The MCP credential was replaced and every prior bearer is invalid, but the local endpoint could not be started. Existing client configurations are stale. Restart AIDraw or rotate again to retry.');
+      }
+    });
+  }
+
+  revokeMcpAccess(): Promise<McpCredentialTransition> {
+    return this.exclusiveMcpCredentialOperation(async () => {
+      this.assertCredentialMutationAvailable();
+      await this.mcpCredentials.revoke();
+      const sessionsTerminated = await this.mcpHost.revokeCredential();
+      let cleanupFailed = false;
+      try {
+        await this.mcpHost.stop();
+      } catch {
+        cleanupFailed = true;
+      }
+      const endpoint = this.mcpHost.credentials();
+      const endpointRunning = Boolean(endpoint.url);
+      this.service.setMcpInfo({
+        running: endpointRunning,
+        access: 'revoked',
+        url: endpoint.url,
+        port: endpoint.url ? Number(new URL(endpoint.url).port) : undefined,
+        tokenHint: 'Access revoked',
+      });
+      return {
+        access: 'revoked',
+        endpointRunning,
+        sessionsTerminated,
+        ...(cleanupFailed ? {
+          cleanupWarning: endpointRunning
+            ? 'MCP access was revoked and every bearer remains invalid, but the local endpoint could not be fully stopped. Restart AIDraw before re-enabling access.'
+            : 'MCP access was revoked and every bearer remains invalid, but final MCP cleanup did not complete. Restart AIDraw before re-enabling access.',
+        } : {}),
+      };
+    });
   }
 
   async stop(): Promise<void> {
@@ -102,6 +176,7 @@ export class EngineRuntime {
   }
 
   private async stopStartedRuntime(): Promise<void> {
+    await this.mcpCredentialOperation;
     if (this.recoveryTimer) clearInterval(this.recoveryTimer);
     this.recoveryTimer = undefined;
     await this.mcpHost.stop();
@@ -110,5 +185,15 @@ export class EngineRuntime {
     await this.service.compactRecovery();
     this.service.setMcpInfo({ running: false });
     this.started = false;
+  }
+
+  private assertCredentialMutationAvailable(): void {
+    if (!this.started || this.stopPromise) throw new Error('The AIDraw engine is stopping.');
+  }
+
+  private exclusiveMcpCredentialOperation<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.mcpCredentialOperation.then(operation, operation);
+    this.mcpCredentialOperation = result.then(() => undefined, () => undefined);
+    return result;
   }
 }

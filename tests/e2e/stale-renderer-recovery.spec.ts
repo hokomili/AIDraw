@@ -36,6 +36,7 @@ import {
   resolveFnd05UnresponsiveAcceptance,
 } from '../../scripts/fnd05-packaged-acceptance.mjs';
 import {
+  inspectPackagedMcpCredential,
   resolvePackagedE2eArtifact,
   spawnPackagedE2e,
   waitForPackagedE2eReady,
@@ -639,10 +640,9 @@ test(FND05_PACKAGED_SCENARIO, async () => {
       engine: { running: true, uiAttached: true, mode: 'interactive' },
     });
 
-    const encryptedCredential = JSON.parse(await readFile(configured.paths.tokenCredentials, 'utf8')) as Record<string, unknown>;
-    expect(encryptedCredential).toMatchObject({ encryption: 'electron-safe-storage' });
-    expect(encryptedCredential.value).not.toBe(ownerConnection.token);
-    expect(encryptedCredential.value).not.toBe(relaunchConnection.token);
+    const encryptedCredential = JSON.parse(await readFile(configured.paths.tokenCredentials, 'utf8')) as unknown;
+    inspectPackagedMcpCredential(encryptedCredential, ownerConnection.token);
+    inspectPackagedMcpCredential(encryptedCredential, relaunchConnection.token);
     expect(await access(configured.paths.providerCredentials).then(() => true, () => false)).toBe(false);
     expect(await access(configured.paths.forbiddenNetwork).then(() => true, () => false)).toBe(false);
     expect([...owner.externalRendererRequests, ...relaunch.externalRendererRequests]).toEqual([]);

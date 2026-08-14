@@ -99,10 +99,21 @@ export interface EditorAdvisoryState extends EditorAdvisoryInput {
 
 export interface McpConnectionInfo {
   running: boolean;
+  access?: 'active' | 'revoked' | 'unavailable';
   url?: string;
   port?: number;
   tokenHint?: string;
   sessions: AgentPresence[];
+}
+
+export interface McpCredentialLifecycleResult {
+  action: 'rotate' | 'revoke';
+  status: 'completed' | 'cancelled';
+  access: 'active' | 'revoked' | 'unavailable';
+  sessionsTerminated: number;
+  clientConfigurationsStale?: true;
+  warning?: true;
+  message: string;
 }
 
 export interface EngineStatus {
@@ -319,6 +330,8 @@ export interface AIDrawDesktopAPI {
   releaseHumanLock(lockId: Id): Promise<void>;
   getMcpConnectionInfo(): Promise<McpConnectionInfo>;
   getMcpCredentials(): Promise<{ url?: string; token: string }>;
+  rotateMcpCredential(): Promise<McpCredentialLifecycleResult>;
+  revokeMcpAccess(): Promise<McpCredentialLifecycleResult>;
   getEngineStatus(): Promise<EngineStatus>;
   setEngineStartAtLogin(enabled: boolean): Promise<EngineStatus>;
   configureAgentClient(clientId: AgentClientId): Promise<AgentClientSetupResult>;
@@ -386,6 +399,8 @@ export const IPC = {
   releaseHumanLock: 'aidraw:locks:release',
   mcpInfo: 'aidraw:mcp:info',
   mcpCredentials: 'aidraw:mcp:credentials',
+  mcpCredentialRotate: 'aidraw:mcp:credential:rotate',
+  mcpAccessRevoke: 'aidraw:mcp:access:revoke',
   engineStatus: 'aidraw:engine:status',
   engineStartAtLogin: 'aidraw:engine:start-at-login',
   configureAgentClient: 'aidraw:mcp:configure-agent-client',

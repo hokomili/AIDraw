@@ -6,6 +6,15 @@ export const PACKAGED_E2E_SELF_CONTAINED_CASES: 27;
 export const PACKAGED_E2E_RETAINED_CASES: 14;
 export const PACKAGED_E2E_RETAINED_PROFILE_ENVS: readonly string[];
 
+export interface PackagedMcpCredentialInspection {
+  version: 2;
+  status: 'active';
+  encryption: 'electron-safe-storage';
+  encryptedValuePresent: true;
+}
+
+export function inspectPackagedMcpCredential(value: unknown, liveToken: string): PackagedMcpCredentialInspection;
+
 export interface PackagedE2eArtifact {
   workspace: string;
   outRoot: string;
