@@ -185,7 +185,7 @@ export function aidrawHelp(topic: AIDrawHelpTopic): AIDrawHelpResult {
 export const AIDRAW_SERVER_INSTRUCTIONS = [
   'AIDraw is a stateful, authenticated, agent-native canvas. Start with aidraw_help topic=quickstart.',
   'Use session_manage join|inspect, then document_manage list and canvas_observe before canvas_apply.',
-  'tools/list is authoritative for conditional action inputs; aidraw_help provides concise workflows and aidraw://guide provides the optional complete guide.',
+  'tools/list exposes flat action-enum inputs for broad client discovery; the server strictly enforces each selected action’s required and forbidden fields. aidraw_help provides concise workflows and aidraw://guide provides the optional complete guide.',
   'Reuse clientOperationId only for the same logical transaction; honor expected revisions and human locks.',
   'AIDraw retains at most 32 transports. Terminate an unused session with authenticated HTTP DELETE; session_manage leave removes presence only.',
   'File and generation calls may return owner-scoped jobs. A human alone approves in AIDraw; follow returned next guidance with job_manage wait|inspect.',
@@ -210,6 +210,8 @@ AIDraw retains at most 32 authenticated transport sessions, counting initializat
 
 Each session may retain at most 128 distinct resource subscriptions. A duplicate subscribe is idempotent; resources/unsubscribe frees one slot.
 
+This endpoint uses the SDK's stateful legacy initialize/session profile and negotiates protocol version 2025-11-25. A legacy initialize carrying an unsupported or modern-only version receives the supported 2025-11-25 value in its initialize result; after initialization, requests must send that negotiated version and a mismatched MCP-Protocol-Version header is rejected with HTTP 400. This is not a claim that AIDraw exposes the separate modern server/discover profile or that any named installed client has passed runtime acceptance.
+
 ## Conditional action contracts
 
 - **session_manage**: join accepts identity/presence metadata; inspect accepts optional documentId; leave accepts no other fields.
@@ -217,7 +219,7 @@ Each session may retain at most 128 distinct resource subscriptions. A duplicate
 - **history_manage**: undo|redo|checkpoint-list accept optional documentId; replay requires transactionId; checkpoint-create requires name; checkpoint-restore|checkpoint-delete require checkpointId; checkpoint-merge requires checkpointId and 1–32 sourceIds.
 - **job_manage**: list; inspect|approve-dependent|cancel require jobId; wait requires jobId and accepts timeoutMs 0–30000; start-batch requires documentId and totalTransactions; resume-batch requires jobId and resumeToken.
 
-Strict branches reject fields from other actions. Tool descriptions and JSON Schema descriptions explain important parameter semantics and limits.
+Discovery deliberately exposes one flat object per tool: action is a required enum and the union of branch fields is optional and action-labelled, without oneOf/anyOf/allOf composition. Strict server validation rejects fields from other actions and requires the selected action’s conditional fields, so compatibility does not weaken file, ownership, revision, or approval boundaries. Tool descriptions and JSON Schema descriptions explain important parameter semantics and limits.
 
 ## Observation and mutation
 

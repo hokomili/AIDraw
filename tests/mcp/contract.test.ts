@@ -9,6 +9,7 @@ import { McpHost, parseFolderTrustSettings, parsePreferredPortSettings, type Gen
 import { TransactionTraceStore } from '@main/trace-store';
 import { createCanvas, loadImage } from '@napi-rs/canvas';
 import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createId, createPixelTileset, decodeTiledGid, encodeTiledGid, nowIso, readPixel, readTileAt } from '@aidraw/core';
+import { LATEST_PROTOCOL_VERSION } from '@modelcontextprotocol/server';
 
 const temporaryPaths: string[] = [];
 const hosts: McpHost[] = [];
@@ -23,8 +24,14 @@ function parseMcp(text: string): { result?: Record<string, unknown>; error?: unk
 }
 
 async function initializeClient(url: string, token: string, name: string) {
-  const initialize = await fetch(url, { method: 'POST', headers: { authorization: `Bearer ${token}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2026-07-28', capabilities: {}, clientInfo: { name, version: '1.0.0' } } }) });
-  const sessionId = initialize.headers.get('mcp-session-id'); if (!sessionId) throw new Error('MCP session ID missing'); const headers = { authorization: `Bearer ${token}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json', 'mcp-session-id': sessionId }; await fetch(url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) }); return { sessionId, headers };
+  const initialize = await fetch(url, { method: 'POST', headers: { authorization: `Bearer ${token}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: LATEST_PROTOCOL_VERSION, capabilities: {}, clientInfo: { name, version: '1.0.0' } } }) });
+  const initialized = parseMcp(await initialize.text());
+  if (initialize.status !== 200 || initialized.result?.protocolVersion !== LATEST_PROTOCOL_VERSION) throw new Error(`MCP initialize did not negotiate ${LATEST_PROTOCOL_VERSION}.`);
+  const sessionId = initialize.headers.get('mcp-session-id');
+  if (!sessionId) throw new Error('MCP session ID missing');
+  const headers = { authorization: `Bearer ${token}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json', 'mcp-session-id': sessionId, 'mcp-protocol-version': LATEST_PROTOCOL_VERSION };
+  await fetch(url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) });
+  return { sessionId, headers };
 }
 
 function toolPayload(message: { result?: Record<string, unknown> }): Record<string, unknown> {
@@ -47,16 +54,19 @@ interface DiscoverySchema {
   const?: unknown;
   default?: unknown;
   description?: string;
+  enum?: unknown[];
   maximum?: number;
   properties?: Record<string, DiscoverySchema>;
   required?: string[];
-  oneOf?: DiscoverySchema[];
-  anyOf?: DiscoverySchema[];
   additionalProperties?: boolean;
+  type?: string | string[];
 }
 
-function actionBranch(schema: DiscoverySchema | undefined, action: string): DiscoverySchema | undefined {
-  return [...(schema?.oneOf ?? []), ...(schema?.anyOf ?? [])].find((branch) => branch.properties?.action?.const === action);
+function expectFlatActionSchema(schema: DiscoverySchema | undefined, actions: string[], properties: string[]): void {
+  expect(schema).toMatchObject({ type: 'object', required: ['action'], additionalProperties: false });
+  expect(schema?.properties?.action?.enum).toEqual(actions);
+  expect(Object.keys(schema?.properties ?? {})).toEqual(expect.arrayContaining(['action', ...properties]));
+  expect(JSON.stringify(schema)).not.toMatch(/"(?:oneOf|anyOf|allOf)"/);
 }
 
 async function readSseUntil(response: Response, pattern: RegExp, timeoutMs = 4_000): Promise<string> {
@@ -85,18 +95,19 @@ describe('authenticated stateful MCP contract', () => {
     const initialize = await fetch(started.url, {
       method: 'POST',
       headers: { authorization: 'Bearer test-secret-token', accept: 'application/json, text/event-stream', 'content-type': 'application/json' },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2026-07-28', capabilities: {}, clientInfo: { name: 'contract-test', version: '1.0.0' } } }),
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: LATEST_PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: 'contract-test', version: '1.0.0' } } }),
     });
     expect(initialize.status).toBe(200);
     const initialized = parseMcp(await initialize.text());
     expect(initialized.result).toBeTruthy();
+    expect(initialized.result?.protocolVersion).toBe(LATEST_PROTOCOL_VERSION);
     expect(initialized.result?.instructions).toEqual(expect.stringContaining('aidraw_help'));
     expect(initialized.result?.instructions).toEqual(expect.stringContaining('human alone approves'));
     expect(initialized.result?.instructions).toEqual(expect.stringContaining('canvas_observe'));
     const sessionId = initialize.headers.get('mcp-session-id');
     expect(sessionId).toBeTruthy();
 
-    const headers = { authorization: 'Bearer test-secret-token', accept: 'application/json, text/event-stream', 'content-type': 'application/json', 'mcp-session-id': sessionId! };
+    const headers = { authorization: 'Bearer test-secret-token', accept: 'application/json, text/event-stream', 'content-type': 'application/json', 'mcp-session-id': sessionId!, 'mcp-protocol-version': LATEST_PROTOCOL_VERSION };
     await fetch(started.url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) });
     const listed = await fetch(started.url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }) });
     const message = parseMcp(await listed.text());
@@ -107,11 +118,13 @@ describe('authenticated stateful MCP contract', () => {
     expect(tools.find((tool) => tool.name === 'asset_import')?.inputSchema?.properties).toEqual(expect.objectContaining({ spriteSheet: expect.any(Object), paletteMode: expect.any(Object), projectLinkId: expect.any(Object) }));
     expect(tools.find((tool) => tool.name === 'document_export')?.inputSchema?.properties).toEqual(expect.objectContaining({ projectLinkId: expect.any(Object) }));
     const documentSchema = tools.find((tool) => tool.name === 'document_manage')?.inputSchema;
-    expect(actionBranch(documentSchema, 'list')).toMatchObject({ required: ['action'], additionalProperties: false, properties: { action: { const: 'list' } } });
-    expect(actionBranch(documentSchema, 'save-as')).toMatchObject({ required: ['action', 'documentId', 'path'], additionalProperties: false, properties: { action: { const: 'save-as' }, documentId: { description: expect.stringContaining('Canonical open document ID') }, path: { description: expect.stringContaining('Exact destination') } } });
-    expect(actionBranch(tools.find((tool) => tool.name === 'history_manage')?.inputSchema, 'checkpoint-merge')).toMatchObject({ required: ['action', 'checkpointId', 'sourceIds'], additionalProperties: false });
-    expect(actionBranch(tools.find((tool) => tool.name === 'job_manage')?.inputSchema, 'wait')).toMatchObject({ required: ['action', 'jobId'], additionalProperties: false, properties: { timeoutMs: { default: 0, maximum: 30_000 } } });
-    expect(actionBranch(tools.find((tool) => tool.name === 'session_manage')?.inputSchema, 'leave')).toMatchObject({ required: ['action'], additionalProperties: false, properties: { action: { const: 'leave' } } });
+    expectFlatActionSchema(documentSchema, ['list', 'new', 'activate', 'open', 'save', 'save-as', 'close'], ['documentId', 'path', 'kind', 'name', 'width', 'height', 'background', 'orientation', 'infinite', 'tileWidth', 'tileHeight']);
+    expectFlatActionSchema(tools.find((tool) => tool.name === 'history_manage')?.inputSchema, ['undo', 'redo', 'replay', 'checkpoint-list', 'checkpoint-create', 'checkpoint-restore', 'checkpoint-merge', 'checkpoint-delete'], ['documentId', 'transactionId', 'name', 'checkpointId', 'sourceIds']);
+    expectFlatActionSchema(tools.find((tool) => tool.name === 'job_manage')?.inputSchema, ['list', 'inspect', 'wait', 'approve-dependent', 'cancel', 'start-batch', 'resume-batch'], ['jobId', 'timeoutMs', 'documentId', 'totalTransactions', 'label', 'resumeToken']);
+    expectFlatActionSchema(tools.find((tool) => tool.name === 'session_manage')?.inputSchema, ['join', 'inspect', 'leave'], ['name', 'color', 'documentId', 'model', 'reasoningEffort', 'taskId']);
+    expect(documentSchema?.properties?.kind).toMatchObject({ default: 'illustration', description: expect.stringContaining('new only') });
+    expect(documentSchema?.properties?.path?.description).toContain('open/save-as only');
+    expect(tools.find((tool) => tool.name === 'job_manage')?.inputSchema?.properties?.timeoutMs).toMatchObject({ default: 0, maximum: 30_000, description: expect.stringContaining('wait only') });
     expect(tools.find((tool) => tool.name === 'canvas_apply')?.inputSchema?.properties?.clientOperationId?.description).toContain('idempotency');
     expect(tools.find((tool) => tool.name === 'aidraw_help')?.outputSchema).toMatchObject({ required: expect.arrayContaining(['topic', 'steps', 'invariants', 'guideUri']), properties: { guideUri: { const: 'aidraw://guide' } } });
     const canvasApplyOutput = tools.find((tool) => tool.name === 'canvas_apply')?.outputSchema;
@@ -128,11 +141,42 @@ describe('authenticated stateful MCP contract', () => {
       },
     });
     expect(tools.find((tool) => tool.name === 'job_manage')?.outputSchema?.properties).toEqual(expect.objectContaining({ status: expect.any(Object), next: expect.any(Object) }));
-    const crossActionFields = await callToolMessage(started.url, headers, 3, 'document_manage', { action: 'list', path: join(root, 'must-not-be-accepted.aidraw') });
-    const missingConditionalField = await callToolMessage(started.url, headers, 4, 'document_manage', { action: 'save-as', documentId: 'invented' });
-    expect(crossActionFields.result?.isError).toBe(true);
-    expect(missingConditionalField.result?.isError).toBe(true);
-    expect(JSON.stringify([crossActionFields, missingConditionalField])).toContain('Invalid arguments');
+    const invalidActionInputs = await Promise.all([
+      callToolMessage(started.url, headers, 3, 'session_manage', { action: 'leave', name: 'must-not-be-accepted' }),
+      callToolMessage(started.url, headers, 4, 'history_manage', { action: 'undo', transactionId: 'must-not-be-accepted' }),
+      callToolMessage(started.url, headers, 5, 'document_manage', { action: 'list', path: join(root, 'must-not-be-accepted.aidraw') }),
+      callToolMessage(started.url, headers, 6, 'document_manage', { action: 'save-as', documentId: 'invented' }),
+      callToolMessage(started.url, headers, 7, 'job_manage', { action: 'list', jobId: 'must-not-be-accepted' }),
+      callToolMessage(started.url, headers, 8, 'job_manage', { action: 'wait' }),
+      callToolMessage(started.url, headers, 9, 'document_manage', { action: 'new', background: 42 }),
+    ]);
+    expect(invalidActionInputs.every((message) => message.result?.isError === true)).toBe(true);
+    expect(JSON.stringify(invalidActionInputs)).toContain('Invalid arguments');
+  });
+
+  it('negotiates the pinned legacy protocol and rejects an unsupported version header after initialize', async () => {
+    expect(LATEST_PROTOCOL_VERSION).toBe('2025-11-25');
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-mcp-protocol-')); temporaryPaths.push(root);
+    const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0'); documents.initialize();
+    const host = new McpHost(documents, '1.0.0', join(root, 'port.json')); hosts.push(host);
+    const started = await host.start('protocol-token');
+    const initialize = await fetch(started.url, {
+      method: 'POST',
+      headers: { authorization: 'Bearer protocol-token', accept: 'application/json, text/event-stream', 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2026-07-28', capabilities: {}, clientInfo: { name: 'protocol-boundary-client', version: '1.0.0' } } }),
+    });
+    expect(initialize.status).toBe(200);
+    const initialized = parseMcp(await initialize.text());
+    expect(initialized.result?.protocolVersion).toBe(LATEST_PROTOCOL_VERSION);
+    const sessionId = initialize.headers.get('mcp-session-id');
+    expect(sessionId).toBeTruthy();
+    const unsupported = await fetch(started.url, {
+      method: 'POST',
+      headers: { authorization: 'Bearer protocol-token', accept: 'application/json, text/event-stream', 'content-type': 'application/json', 'mcp-session-id': sessionId!, 'mcp-protocol-version': '2026-07-28' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }),
+    });
+    expect(unsupported.status).toBe(400);
+    expect(await unsupported.text()).toContain('Unsupported protocol version');
   });
 
   it('teaches a cold tools-only client to join, observe, mutate, and follow a human approval job without private leakage', async () => {
@@ -187,11 +231,11 @@ describe('authenticated stateful MCP contract', () => {
     const guideResponse = await fetch(started.url, { method: 'POST', headers: client.headers, body: JSON.stringify({ jsonrpc: '2.0', id: 12, method: 'resources/read', params: { uri: 'aidraw://guide' } }) });
     const guide = ((parseMcp(await guideResponse.text()).result?.contents ?? []) as Array<{ text?: string }>)[0]?.text ?? '';
     expect(guide).toContain('Conditional action contracts');
-    expect(guide).toContain('Strict branches reject fields from other actions');
+    expect(guide).toContain('Strict server validation rejects fields from other actions');
     expect(guide).toContain('Only a human can approve');
   });
 
-  it('accepts the authenticated Streamable HTTP profile used by each supported agent client', async () => {
+  it('initializes the same raw Streamable HTTP profile under each configured client name', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aidraw-mcp-clients-')); temporaryPaths.push(root);
     const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0'); documents.initialize();
     const host = new McpHost(documents, '1.0.0', join(root, 'port.json')); hosts.push(host);
@@ -207,13 +251,13 @@ describe('authenticated stateful MCP contract', () => {
   it('caps concurrent clients at 32, retires terminated sessions, and preserves resources plus idempotent transactions', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aidraw-mcp-')); temporaryPaths.push(root); const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0', new TransactionTraceStore(join(root, 'traces'))); documents.initialize(); const host = new McpHost(documents, '1.0.0', join(root, 'port.json')); hosts.push(host); const started = await host.start('parallel-token');
     const attempts = await Promise.all(Array.from({ length: 33 }, async (_, index) => {
-      const response = await fetch(started.url, { method: 'POST', headers: { authorization: 'Bearer parallel-token', accept: 'application/json, text/event-stream', 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2026-07-28', capabilities: {}, clientInfo: { name: `client-${index}`, version: '1.0.0' } } }) });
+      const response = await fetch(started.url, { method: 'POST', headers: { authorization: 'Bearer parallel-token', accept: 'application/json, text/event-stream', 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: LATEST_PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: `client-${index}`, version: '1.0.0' } } }) });
       return { status: response.status, sessionId: response.headers.get('mcp-session-id'), cacheControl: response.headers.get('cache-control'), body: await response.text() };
     }));
     const accepted = attempts.filter((attempt) => attempt.status === 200); const refused = attempts.filter((attempt) => attempt.status === 429);
-    expect(accepted).toHaveLength(32); expect(new Set(accepted.map((attempt) => attempt.sessionId)).size).toBe(32); expect(accepted.every((attempt) => parseMcp(attempt.body).result)).toBe(true);
+    expect(accepted).toHaveLength(32); expect(new Set(accepted.map((attempt) => attempt.sessionId)).size).toBe(32); expect(accepted.every((attempt) => parseMcp(attempt.body).result?.protocolVersion === LATEST_PROTOCOL_VERSION)).toBe(true);
     expect(refused).toHaveLength(1); expect(refused[0]).toMatchObject({ sessionId: null, cacheControl: 'no-store' }); expect(JSON.parse(refused[0].body)).toEqual({ error: 'session_limit_reached', limit: 32, message: 'Terminate an existing MCP session with authenticated DELETE before retrying.' });
-    const clients = accepted.map((attempt) => ({ sessionId: attempt.sessionId!, headers: { authorization: 'Bearer parallel-token', accept: 'application/json, text/event-stream', 'content-type': 'application/json', 'mcp-session-id': attempt.sessionId! } }));
+    const clients = accepted.map((attempt) => ({ sessionId: attempt.sessionId!, headers: { authorization: 'Bearer parallel-token', accept: 'application/json, text/event-stream', 'content-type': 'application/json', 'mcp-session-id': attempt.sessionId!, 'mcp-protocol-version': LATEST_PROTOCOL_VERSION } }));
     await Promise.all(clients.map((client) => fetch(started.url, { method: 'POST', headers: client.headers, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) })));
     const first = clients[0]; const resource = await fetch(started.url, { method: 'POST', headers: first.headers, body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'resources/read', params: { uri: 'aidraw://documents' } }) }); expect(parseMcp(await resource.text()).result).toBeTruthy();
     const document = documents.snapshot().activeDocument!; const params = { name: 'canvas_apply', arguments: { documentId: document.id, clientOperationId: 'mcp-idempotent-op', label: 'MCP rename', operations: [{ kind: 'document.rename', name: 'Shared drawing' }], playback: { mode: 'instant', speed: 1 } } };

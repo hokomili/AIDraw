@@ -290,7 +290,12 @@ const ObservationFragmentSchema = z.object({
 
 const DocumentIdInputSchema = z.string().min(1).describe('Canonical open document ID returned by document_manage action=list, session_manage, or canvas_observe.');
 const JobIdInputSchema = z.string().min(1).describe('Owner-scoped job ID returned by an approval, generation, or batch-starting tool.');
-const SessionManageInputSchema = z.discriminatedUnion('action', [
+function enforceActionInput(value: unknown, context: z.core.$RefinementCtx, schema: z.ZodType): void {
+  const parsed = schema.safeParse(value);
+  if (!parsed.success) for (const issue of parsed.error.issues) context.addIssue({ ...issue });
+}
+
+const SessionManageStrictInputSchema = z.discriminatedUnion('action', [
   z.object({
     action: z.literal('join').describe('Join/update this authenticated agent presence.'),
     name: z.string().min(1).max(80).optional().describe('Human-readable agent name shown in AIDraw presence and attribution.'),
@@ -303,9 +308,19 @@ const SessionManageInputSchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('inspect').describe('Read presence, active document, human occupancy, and advisory editor state.'), documentId: DocumentIdInputSchema.optional() }).strict(),
   z.object({ action: z.literal('leave').describe('Remove this session from live presence without closing documents or the MCP session.') }).strict(),
 ]).describe('Action-specific AIDraw session contract.');
+const SessionManageInputSchema = z.object({
+  action: z.enum(['join', 'inspect', 'leave']).describe('Session action. The server strictly rejects fields that do not belong to the selected action.'),
+  name: z.string().min(1).max(80).optional().describe('join only: human-readable agent name shown in AIDraw presence and attribution.'),
+  color: z.string().optional().describe('join only: preferred #RRGGBB actor color; invalid values fall back to the assigned session color.'),
+  documentId: DocumentIdInputSchema.optional().describe('join/inspect only: optional document in which to publish or inspect presence.'),
+  model: z.string().trim().min(1).max(200).optional().describe('join only: descriptive client model metadata; not platform-attested.'),
+  reasoningEffort: z.enum(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']).optional().describe('join only: descriptive reasoning-effort metadata.'),
+  taskId: z.string().trim().min(1).max(200).optional().describe('join only: descriptive external task identifier.'),
+}).strict().superRefine((value, context) => enforceActionInput(value, context, SessionManageStrictInputSchema))
+  .describe('Flat discovery contract for client compatibility; the server still enforces the selected action’s strict field set.');
 
 const HistoryDocumentIdSchema = DocumentIdInputSchema.optional().describe('Optional target; omitted means the active document.');
-const HistoryManageInputSchema = z.discriminatedUnion('action', [
+const HistoryManageStrictInputSchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('undo'), documentId: HistoryDocumentIdSchema }).strict().describe('Undo this authenticated actor’s latest transaction.'),
   z.object({ action: z.literal('redo'), documentId: HistoryDocumentIdSchema }).strict().describe('Redo this authenticated actor’s latest undone transaction.'),
   z.object({ action: z.literal('replay'), documentId: HistoryDocumentIdSchema, transactionId: z.string().min(1).describe('Durable transaction ID obtained from trace/history.') }).strict().describe('Start one bounded, non-mutating trace replay.'),
@@ -315,8 +330,17 @@ const HistoryManageInputSchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('checkpoint-merge'), documentId: HistoryDocumentIdSchema, checkpointId: z.string().min(1).describe('Source checkpoint ID.'), sourceIds: z.array(z.string().min(1)).min(1).max(32).describe('Top-level checkpoint layer-tree or pixel-asset IDs to copy with dependency closure.') }).strict(),
   z.object({ action: z.literal('checkpoint-delete'), documentId: HistoryDocumentIdSchema, checkpointId: z.string().min(1).describe('Checkpoint ID; agents may delete only checkpoints they created.') }).strict(),
 ]).describe('Action-specific actor history, replay, and checkpoint contract.');
+const HistoryManageInputSchema = z.object({
+  action: z.enum(['undo', 'redo', 'replay', 'checkpoint-list', 'checkpoint-create', 'checkpoint-restore', 'checkpoint-merge', 'checkpoint-delete']).describe('History action. The server strictly rejects fields that do not belong to the selected action.'),
+  documentId: HistoryDocumentIdSchema,
+  transactionId: z.string().min(1).optional().describe('replay only: durable transaction ID obtained from trace/history.'),
+  name: z.string().trim().min(1).max(80).optional().describe('checkpoint-create only: human-readable attributed checkpoint name.'),
+  checkpointId: z.string().min(1).optional().describe('checkpoint-restore/merge/delete only: checkpoint ID returned by checkpoint-list/create.'),
+  sourceIds: z.array(z.string().min(1)).min(1).max(32).optional().describe('checkpoint-merge only: top-level checkpoint layer-tree or pixel-asset IDs to copy with dependency closure.'),
+}).strict().superRefine((value, context) => enforceActionInput(value, context, HistoryManageStrictInputSchema))
+  .describe('Flat discovery contract for client compatibility; the server still enforces the selected action’s strict field set.');
 
-const DocumentManageInputSchema = z.discriminatedUnion('action', [
+const DocumentManageStrictInputSchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('list').describe('List open document summaries and activeDocumentId.') }).strict(),
   z.object({
     action: z.literal('new').describe('Create and activate a new in-memory document.'),
@@ -336,8 +360,23 @@ const DocumentManageInputSchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('save-as'), documentId: DocumentIdInputSchema, path: z.string().min(1).describe('Exact destination; .aidraw is appended when absent.') }).strict(),
   z.object({ action: z.literal('close'), documentId: DocumentIdInputSchema }).strict().describe('Close without granting discard authority; dirty/save rules remain enforced.'),
 ]).describe('Action-specific AIDraw document lifecycle contract.');
+const DocumentManageInputSchema = z.object({
+  action: z.enum(['list', 'new', 'activate', 'open', 'save', 'save-as', 'close']).describe('Document action. The server strictly rejects fields that do not belong to the selected action.'),
+  documentId: DocumentIdInputSchema.optional().describe('activate/save/save-as/close only: canonical open document ID.'),
+  path: z.string().min(1).optional().describe('open/save-as only: exact native path presented for human approval.'),
+  kind: z.enum(['illustration', 'sprite', 'tilemap', 'project']).optional().meta({ default: 'illustration' }).describe('new only: document kind; omitted means illustration.'),
+  name: z.string().trim().min(1).max(200).optional().describe('new only: optional document name.'),
+  width: z.number().int().min(1).max(8_192).optional().describe('new only: illustration/sprite/map width; defaults come from the shared new-document contract.'),
+  height: z.number().int().min(1).max(8_192).optional().describe('new only: illustration/sprite/map height.'),
+  background: z.unknown().optional().describe('new only: illustration #RRGGBB/#RRGGBBAA background or null for transparency; the server validates this strictly.'),
+  orientation: z.enum(['orthogonal', 'isometric']).optional().describe('new only: tilemap orientation, meaningful for tilemap/project creation.'),
+  infinite: z.boolean().optional().describe('new only: whether a tilemap uses signed sparse chunks.'),
+  tileWidth: z.number().int().min(1).max(1_024).optional().describe('new only: tile width in pixels for tilemap creation.'),
+  tileHeight: z.number().int().min(1).max(1_024).optional().describe('new only: tile height in pixels for tilemap creation.'),
+}).strict().superRefine((value, context) => enforceActionInput(value, context, DocumentManageStrictInputSchema))
+  .describe('Flat discovery contract for client compatibility; the server still enforces the selected action’s strict field set.');
 
-const JobManageInputSchema = z.discriminatedUnion('action', [
+const JobManageStrictInputSchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('list').describe('List privacy-redacted jobs owned by this authenticated actor.') }).strict(),
   z.object({ action: z.literal('inspect'), jobId: JobIdInputSchema }).strict(),
   z.object({ action: z.literal('wait'), jobId: JobIdInputSchema, timeoutMs: z.number().int().min(0).max(30_000).default(0).describe('Bounded long-poll duration; 0 returns current state immediately.') }).strict(),
@@ -346,6 +385,16 @@ const JobManageInputSchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('start-batch'), documentId: DocumentIdInputSchema, totalTransactions: z.number().int().min(1).max(10_000).describe('Exact transaction count used for durable progress/sequence validation.'), label: z.string().min(1).max(200).optional() }).strict(),
   z.object({ action: z.literal('resume-batch'), jobId: JobIdInputSchema, resumeToken: z.string().min(32).max(200).describe('Private opaque token returned only by start-batch; never expose it in logs or public summaries.') }).strict(),
 ]).describe('Action-specific owner-scoped async job and durable-batch contract.');
+const JobManageInputSchema = z.object({
+  action: z.enum(['list', 'inspect', 'wait', 'approve-dependent', 'cancel', 'start-batch', 'resume-batch']).describe('Job action. The server strictly rejects fields that do not belong to the selected action.'),
+  jobId: JobIdInputSchema.optional().describe('inspect/wait/approve-dependent/cancel/resume-batch only: owner-scoped job ID.'),
+  timeoutMs: z.number().int().min(0).max(30_000).optional().meta({ default: 0 }).describe('wait only: bounded long-poll duration; omitted or 0 returns current state immediately.'),
+  documentId: DocumentIdInputSchema.optional().describe('start-batch only: canonical open document ID.'),
+  totalTransactions: z.number().int().min(1).max(10_000).optional().describe('start-batch only: exact transaction count for durable progress/sequence validation.'),
+  label: z.string().min(1).max(200).optional().describe('start-batch only: optional human-readable batch label.'),
+  resumeToken: z.string().min(32).max(200).optional().describe('resume-batch only: private opaque token returned by start-batch; never expose it in logs or public summaries.'),
+}).strict().superRefine((value, context) => enforceActionInput(value, context, JobManageStrictInputSchema))
+  .describe('Flat discovery contract for client compatibility; the server still enforces the selected action’s strict field set.');
 
 const HelpInputSchema = z.object({ topic: z.enum(AIDRAW_HELP_TOPICS).default('quickstart').describe('Progressive help topic; start with quickstart.') }).strict();
 const NextStepSchema = z.object({
@@ -1218,11 +1267,12 @@ export class McpHost {
 
     server.registerTool('session_manage', {
       title: 'Manage AIDraw agent session',
-      description: 'Join, identify, inspect, or leave the live AIDraw workspace. Each action has its own strict input branch; see aidraw_help topic=quickstart.',
+      description: 'Join, identify, inspect, or leave the live AIDraw workspace. Discovery uses one flat action-enum object for client compatibility; the server strictly validates action-specific fields. See aidraw_help topic=quickstart.',
       inputSchema: SessionManageInputSchema,
       outputSchema: SessionManageOutputSchema,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    }, async (request) => {
+    }, async (input) => {
+      const request = SessionManageStrictInputSchema.parse(input);
       let documentId: string | undefined;
       if (request.action === 'join') {
         documentId = request.documentId;
@@ -1363,10 +1413,11 @@ export class McpHost {
 
     server.registerTool('history_manage', {
       title: 'Manage this agent’s AIDraw history',
-      description: 'Undo or redo only this actor’s transactions, replay a durable trace, or manage named checkpoints. Each action exposes only its valid required inputs; see aidraw_help topic=history.',
+      description: 'Undo or redo only this actor’s transactions, replay a durable trace, or manage named checkpoints. Discovery is flat; the server strictly validates the selected action’s required and forbidden fields. See aidraw_help topic=history.',
       inputSchema: HistoryManageInputSchema,
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
-    }, async (request) => {
+    }, async (input) => {
+      const request = HistoryManageStrictInputSchema.parse(input);
       if (request.action === 'undo') return jsonText(await this.documents.undo(request.documentId, session.actor));
       if (request.action === 'redo') return jsonText(await this.documents.redo(request.documentId, session.actor));
       const id = request.documentId ?? this.documents.getActiveDocumentId();
@@ -1392,10 +1443,11 @@ export class McpHost {
 
     server.registerTool('document_manage', {
       title: 'Manage AIDraw documents',
-      description: 'List, create, activate, open, save, save-as, or close documents. Action-specific branches show exact required fields; file reads, new paths, and overwrites become human-visible approval jobs. See aidraw_help topic=documents or files.',
+      description: 'List, create, activate, open, save, save-as, or close documents. Discovery is flat; the server strictly validates the selected action’s required and forbidden fields. File reads, new paths, and overwrites become human-visible approval jobs. See aidraw_help topic=documents or files.',
       inputSchema: DocumentManageInputSchema,
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
-    }, async (request) => {
+    }, async (input) => {
+      const request = DocumentManageStrictInputSchema.parse(input);
       if (request.action === 'list') {
         const snapshot = this.documents.snapshot(session.actor.id);
         return jsonText({ activeDocumentId: snapshot.activeDocumentId, documents: snapshot.documents });
@@ -1495,11 +1547,12 @@ export class McpHost {
 
     server.registerTool('job_manage', {
       title: 'Inspect or cancel AIDraw jobs',
-      description: 'List owner-private redacted jobs, inspect/wait/cancel one, report a human approval dependency, or start/resume a durable transaction batch. Each action exposes only its valid required fields; see aidraw_help topic=jobs.',
+      description: 'List owner-private redacted jobs, inspect/wait/cancel one, report a human approval dependency, or start/resume a durable transaction batch. Discovery is flat; the server strictly validates the selected action’s required and forbidden fields. See aidraw_help topic=jobs.',
       inputSchema: JobManageInputSchema,
       outputSchema: JobManageOutputSchema,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    }, async (request) => {
+    }, async (input) => {
+      const request = JobManageStrictInputSchema.parse(input);
       if (request.action === 'start-batch') {
         try {
           const started = await this.batches.start(request.documentId, request.totalTransactions, request.label ?? 'Agent batch', session.actor);

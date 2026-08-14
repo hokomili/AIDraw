@@ -110,7 +110,7 @@ The current transitive advisory review and build-only exceptions are documented 
 
 ## Connect an agent
 
-Open Activity, choose Codex, Claude Code, OpenCode, Antigravity, or **Other MCP client**, then review the one-time consent prompt. Guided setup backs up the selected client configuration, replaces only its `aidraw` MCP entry, and enables the headless engine at OS sign-in. Restart or reconnect the selected client as instructed by the prominent result dialog. Closing the editor window leaves that engine, MCP endpoint, documents, recovery, and trace recorder running; launching AIDraw again attaches a new editor window to the same owner. The generic profile reveals the same authenticated Streamable HTTP URL/header contract without editing a file.
+Open Activity, choose Codex, Claude Code, OpenCode, Antigravity, or **Other MCP client**, then review the one-time consent prompt. These are guided configuration profiles, not installed-client support claims. Guided setup backs up the selected client configuration, replaces only its `aidraw` MCP entry, and enables the headless engine at OS sign-in. Restart or reconnect the selected client as instructed by the prominent result dialog. Closing the editor window leaves that engine, MCP endpoint, documents, recovery, and trace recorder running; launching AIDraw again attaches a new editor window to the same owner. The generic profile reveals the same authenticated Streamable HTTP URL/header contract without editing a file. Exact-version installed OpenCode/Antigravity native action and restart acceptance remains unearned; see [docs/MCP.md](docs/MCP.md) for the current protocol, stale-session, credential-lifecycle, and troubleshooting boundaries.
 
 | Client | Guided user configuration |
 | --- | --- |
