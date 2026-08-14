@@ -508,7 +508,7 @@ describe('FND-05 retained exact-package acceptance boundary', () => {
     for (const path of roots) expect(await access(path).then(() => true, () => false), `${path} must remain absent`).toBe(false);
   });
 
-  it('records consumed alive-hang r1/r2/r3/r4 and the bounded post-detach correction while keeping Working/P0 nonclaims', async () => {
+  it('records consumed alive-hang r1/r2/r3/r4 failures and the narrow r5 PASS without widening its observation boundary', async () => {
     const [changelog, tracker, testing] = await Promise.all([
       readFile(resolve('CHANGELOG.md'), 'utf8'),
       readFile(resolve('docs/FEATURE_TRACKER.md'), 'utf8'),
@@ -536,12 +536,25 @@ describe('FND-05 retained exact-package acceptance boundary', () => {
       'closeAndWait',
       'pending-after-debugger-detach',
       '**10,000 ms** no-replacement floor',
-      'alive-hang route has no PASS',
+      '20260814t062017z-41a3b0c-r5',
+      'passed **1/1 in 31.2 seconds**',
+      '3,030.199709 ms',
+      '28,176.619584 ms',
+      'owner/MCP PID 91335',
+      'renderer PID 91345',
+      'PID 91362',
+      'Zero external renderer requests were directly observed only during attached intervals',
+      'not directly observed',
       'Renderer-local work never submitted to the canonical engine is not promised',
     ]) expect(truth).toContain(claim);
-    expect(truth).toContain('fresh packaged alive-hang PASS, broader platforms');
+    expect(truth).toContain('historical executable/profile/cause, cache repair, broader platforms');
+    expect(truth).not.toContain('alive-hang route has no PASS');
+    expect(tracker).toContain('synchronized through base `41a3b0c6cf1851b01cf79c4d022632dc736c73d2`');
+    expect(tracker).toContain('This bounded four-path source/headless reconciliation');
+    expect(tracker).toContain("clean synchronized base's non-certifying audit remains Level 3 blocked **1** / stable v1 blocked **4**");
+    expect(tracker).toContain('producing **2 / 5** until ordinary review and commit');
 
-    const changelogEntry = changelog.split(/\r?\n/u).find((line) => line.startsWith('- Prepare a separate retained exact-package acceptance')) ?? '';
+    const changelogEntry = changelog.split(/\r?\n/u).find((line) => line.startsWith('- Prepare and execute a separate retained exact-package acceptance')) ?? '';
     expect(changelogEntry).toContain('Consumed r1 remains the immutable pre-launch Playwright callback-discovery failure');
     expect(changelogEntry).toContain('Consumed r3');
     expect(changelogEntry).toContain('Consumed r4');
@@ -553,14 +566,25 @@ describe('FND-05 retained exact-package acceptance boundary', () => {
     expect(changelogEntry).toContain('root-versus-child callback behavior');
     expect(changelogEntry).toContain('`pending-after-debugger-detach`');
     expect(changelogEntry).toContain('F24');
+    expect(changelogEntry).toContain('20260814t062017z-41a3b0c-r5');
+    expect(changelogEntry).toContain('passed **1/1 in 31.2 seconds**');
+    expect(changelogEntry).toContain('3,030.199709 ms');
+    expect(changelogEntry).toContain('28,176.619584 ms');
+    expect(changelogEntry).toContain('zero external renderer requests only while Playwright was attached');
+    expect(changelogEntry).toContain('detached interval was not directly observed');
     expect(changelogEntry).toContain('renderer-local work never submitted to the canonical engine');
+    expect(changelogEntry).not.toContain('no fresh native recovery PASS');
+    expect(changelog).not.toContain('native packaged alive-hang recovery');
+    expect(changelog).toContain('The separate immutable r5 result above supplies narrow macOS/arm64 current-package input-ACK-hang acceptance');
+    expect(changelog).not.toContain('still needs native packaged acceptance');
+    expect(tracker).not.toContain('still lacks native packaged acceptance');
     expect(testing).toContain('Thirteen exact-checkpoint cases');
-    expect(testing).toContain('### FND-05 alive-but-unresponsive controller, consumed r1/r2/r3/r4, and bounded post-detach correction');
+    expect(testing).toContain('### FND-05 alive-but-unresponsive controller, consumed r1/r2/r3/r4 failures, and narrow r5 PASS');
     expect(testing).toContain('exited 1 before any application/helper launch, stall, or product assertion');
     expect(testing).toContain('object-destructures the built-in `browserName` fixture');
     expect(testing).toContain('spawns the pinned local Playwright CLI');
     expect(testing).toContain('These are naming templates, not reserved or runnable identities');
-    expect(testing).toContain('Consumed r1/r2/r3/r4 remain immutable and non-reusable');
+    expect(testing).toContain('R1/r2/r3/r4/r5 remain immutable and non-reusable');
     expect(testing).toContain('Chromium **150.0.7871.224**');
     expect(testing).toContain('`ShouldIgnoreUnresponsiveRenderer()`');
     expect(testing).toContain('one-shot in-flight input-event ACK timer');
@@ -571,7 +595,21 @@ describe('FND-05 retained exact-package acceptance boundary', () => {
     expect(testing).toContain('**5,000 ms** deadline');
     expect(testing).toContain('product-unresponsive-confirmation-not-observed');
     expect(testing).toContain('debugger-transport-reconnect-not-completed');
-    expect(testing).toContain('renderer-local work never submitted before a confirmed hang may be lost');
-    expect(testing).toContain('source/headless evidence only');
+    expect(testing).toContain('passed **1/1 in 31.2 seconds** (30.9-second test body)');
+    expect(testing).toContain('Owner/MCP PID 91335');
+    expect(testing).toContain('3,030.199709 ms');
+    expect(testing).toContain('28,176.619584 ms');
+    expect(testing).toContain('e11f095ebe1a233d416b5e01f5b743a3bbd477e7e32ad1fd2e182b9a6d1033d6');
+    expect(testing).toContain('zero external requests only while Playwright was attached');
+    expect(testing).toContain('not a direct whole-run zero-request observation claim');
+    expect(testing).toContain('R1/r2/r3/r4/r5 remain immutable and non-reusable');
+    expect(testing).toContain('Renderer-local work never submitted before the confirmed hang may be lost');
+    expect(testing).toContain('FND-05 stays **Working/P0**');
+    expect(testing).toContain('This exact **four-path** r5 truth reconciliation');
+    expect(testing).toContain('focused FND-05/tracker/RC corpus at **3 files / 29 tests**');
+    expect(testing).toContain('complete safe gate passes TypeScript, full ESLint, and **193 files / 1,186 tests**');
+    expect(testing).toContain('clean committed `41a3b0c` audit remains Level 3 blocked **1** / stable v1 blocked **4**');
+    expect(testing).not.toContain('A future run must first independently review and synchronize this exact correction');
+    expect(testing).not.toContain('native alive-hang recovery, cache repair');
   });
 });
