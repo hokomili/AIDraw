@@ -17,6 +17,7 @@ import type { PixelSelectionFragment } from './document-fragment';
 import type { OnionSkinPreferences } from './onion-skin';
 import type { OrderedDitherPreferences } from './ordered-dither-preferences';
 import type { SpriteSymmetryPreferences } from './sprite-symmetry';
+import type { WorkspaceLayoutPreferences } from './workspace-layout';
 
 export type NewDocumentKind = 'illustration' | 'sprite' | 'tilemap' | 'project';
 export type ExportFormat = 'png' | 'jpeg' | 'webp' | 'svg' | 'pdf' | 'psd' | 'gif' | 'apng' | 'sprite-sheet' | 'tiled-json' | 'tiled-xml';
@@ -161,6 +162,7 @@ export interface EditorBootstrapSnapshot extends WorkspaceSnapshot {
   onionSkinPreferences: OnionSkinPreferences;
   orderedDitherPreferences: OrderedDitherPreferences;
   symmetryPreferences: SpriteSymmetryPreferences;
+  workspaceLayoutPreferences: WorkspaceLayoutPreferences;
 }
 
 export type OnionSkinPreferenceSaveResult =
@@ -173,6 +175,10 @@ export type OrderedDitherPreferenceSaveResult =
 
 export type SpriteSymmetryPreferenceSaveResult =
   | { saved: true; preferences: SpriteSymmetryPreferences }
+  | { saved: false; message: string };
+
+export type WorkspaceLayoutPreferenceSaveResult =
+  | { saved: true; preferences: WorkspaceLayoutPreferences }
   | { saved: false; message: string };
 
 export interface ApplyTransactionResponse {
@@ -393,6 +399,7 @@ export interface AIDrawDesktopAPI {
   setOnionSkinPreferences(preferences: OnionSkinPreferences): Promise<OnionSkinPreferenceSaveResult>;
   setOrderedDitherPreferences(preferences: OrderedDitherPreferences): Promise<OrderedDitherPreferenceSaveResult>;
   setSpriteSymmetryPreferences(preferences: SpriteSymmetryPreferences): Promise<SpriteSymmetryPreferenceSaveResult>;
+  setWorkspaceLayoutPreferences(preferences: WorkspaceLayoutPreferences): Promise<WorkspaceLayoutPreferenceSaveResult>;
   exportRendererDiagnostics(detail: { message: string; stack?: string; componentStack?: string; userAgent?: string }): Promise<{ saved: boolean; filePath?: string; cancelled?: boolean }>;
   /** Available only to the exact isolated packaged renderer-recovery test profile. */
   injectRendererRecoveryTestEvent(): Promise<{ injected: boolean; byteLength: number }>;
@@ -466,6 +473,7 @@ export const IPC = {
   onionSkinPreferencesSet: 'aidraw:preferences:onion-skin:set',
   orderedDitherPreferencesSet: 'aidraw:preferences:ordered-dither:set',
   spriteSymmetryPreferencesSet: 'aidraw:preferences:sprite-symmetry:set',
+  workspaceLayoutPreferencesSet: 'aidraw:preferences:workspace-layout:set',
   rendererDiagnosticsExport: 'aidraw:renderer-diagnostics:export',
   rendererRecoveryTestEvent: 'aidraw:renderer-recovery:test-event',
   event: 'aidraw:event',

@@ -6,6 +6,7 @@ import {
   MACOS_EDITOR_WINDOW_CHROME,
   editorOuterMinimumSize,
 } from '../../src/common/editor-layout';
+import { MINIMUM_EDITOR_CANVAS_WIDTH, effectiveInspectorWidth } from '../../src/common/workspace-layout';
 
 describe('professional editor density contract', () => {
   it('keeps a bounded canvas floor at the supported minimum content viewport', () => {
@@ -90,7 +91,9 @@ describe('professional editor density contract', () => {
     ];
     for (const [name, value] of cssTokens) expect(styles).toContain(`--${name}: ${value}px;`);
     expect(styles).toContain(`@media (max-width: ${EDITOR_CONTENT_VIEWPORT.compactBreakpointWidth}px)`);
-    expect(styles).toContain('var(--shell-sidebar-compact-width)');
+    expect(styles).toContain('var(--shell-sidebar-effective-width)');
+    expect(effectiveInspectorWidth(EDITOR_DENSITY.sidebarWidth, EDITOR_CONTENT_VIEWPORT.minimumWidth)).toBe(EDITOR_DENSITY.compactSidebarWidth);
+    expect(MINIMUM_EDITOR_CANVAS_WIDTH).toBe(EDITOR_CONTENT_VIEWPORT.minimumWidth - EDITOR_DENSITY.toolRailWidth - EDITOR_DENSITY.compactSidebarWidth);
     expect(styles).toContain('html[data-native-titlebar="hidden-inset"] .topbar { -webkit-app-region: drag; }');
     expect(styles).toContain(`--macos-traffic-light-inset: ${MACOS_EDITOR_WINDOW_CHROME.trafficLightReservedWidth}px;`);
     expect(styles).toContain('html[data-native-titlebar="hidden-inset"] .brand { width: calc(118px + var(--macos-traffic-light-inset)); padding-left: var(--macos-traffic-light-inset); }');

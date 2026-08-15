@@ -4,6 +4,7 @@ import type { AIDrawDesktopAPI, EditorBootstrapSnapshot, WorkspaceEvent, Workspa
 import { DEFAULT_ONION_SKIN_PREFERENCES, type OnionSkinPreferences } from '../../src/common/onion-skin';
 import { DEFAULT_ORDERED_DITHER_PREFERENCES, type OrderedDitherPreferences } from '../../src/common/ordered-dither-preferences';
 import { DEFAULT_SPRITE_SYMMETRY_PREFERENCES, type SpriteSymmetryPreferences } from '../../src/common/sprite-symmetry';
+import { DEFAULT_WORKSPACE_LAYOUT_PREFERENCES, type WorkspaceLayoutPreferences } from '../../src/common/workspace-layout';
 import { reconcileWorkspaceSnapshot, useEditorStore } from '../../src/renderer/store';
 
 function snapshot(workspaceRevision: number, document: AIDrawDocument): WorkspaceSnapshot {
@@ -27,8 +28,9 @@ function bootstrapSnapshot(
   onionSkinPreferences: OnionSkinPreferences = { ...DEFAULT_ONION_SKIN_PREFERENCES },
   symmetryPreferences: SpriteSymmetryPreferences = { mode: DEFAULT_SPRITE_SYMMETRY_PREFERENCES.mode, bindings: [] },
   orderedDitherPreferences: OrderedDitherPreferences = { current: { ...DEFAULT_ORDERED_DITHER_PREFERENCES.current }, presets: [], activePresetId: null },
+  workspaceLayoutPreferences: WorkspaceLayoutPreferences = { ...DEFAULT_WORKSPACE_LAYOUT_PREFERENCES },
 ): EditorBootstrapSnapshot {
-  return { ...snapshot(workspaceRevision, document), onionSkinPreferences, orderedDitherPreferences, symmetryPreferences };
+  return { ...snapshot(workspaceRevision, document), onionSkinPreferences, orderedDitherPreferences, symmetryPreferences, workspaceLayoutPreferences };
 }
 
 const transientState = (current: WorkspaceSnapshot) => ({
@@ -171,6 +173,66 @@ describe('renderer workspace ordering and document isolation', () => {
     expect(useEditorStore.getState().onionSkinPreferences).toEqual(recoveredIntent);
     expect(useEditorStore.getState().snapshot).toEqual(before);
     expect(applyTransaction).not.toHaveBeenCalled();
+  });
+
+  it('hydrates workspace layout before the canvas, keeps it across shell replacement, and retries failed persistence without touching artwork', async () => {
+    const document = createPixelDocument('sprite', 'Persistent workspace layout');
+    const durable: WorkspaceLayoutPreferences = { inspectorCollapsed: true, inspectorExpandedWidth: 472 };
+    const recovered: WorkspaceLayoutPreferences = { inspectorCollapsed: false, inspectorExpandedWidth: 448 };
+    let bootstrapCalls = 0;
+    const setTimeout = vi.fn();
+    const applyTransaction = vi.fn();
+    const setWorkspaceLayoutPreferences = vi.fn()
+      .mockResolvedValueOnce({ saved: false, message: 'Inspector layout changed in this editor, but AIDraw could not save it. The previous saved layout remains.' })
+      .mockResolvedValueOnce({ saved: true, preferences: recovered });
+    const api = {
+      bootstrap: vi.fn(async () => bootstrapSnapshot(
+        ++bootstrapCalls,
+        document,
+        undefined,
+        undefined,
+        undefined,
+        durable,
+      )),
+      onEvent: vi.fn(() => vi.fn()),
+      setWorkspaceLayoutPreferences,
+      applyTransaction,
+    } as unknown as AIDrawDesktopAPI;
+    Object.defineProperty(globalThis, 'window', { configurable: true, value: { aidraw: api, setTimeout } });
+    useEditorStore.setState({
+      snapshot: undefined,
+      loading: true,
+      workspaceLayoutPreferences: { ...DEFAULT_WORKSPACE_LAYOUT_PREFERENCES },
+      toast: undefined,
+    });
+
+    await useEditorStore.getState().initialize();
+    const canonicalSnapshot = structuredClone(useEditorStore.getState().snapshot);
+    expect(useEditorStore.getState().loading).toBe(false);
+    expect(useEditorStore.getState().workspaceLayoutPreferences).toEqual(durable);
+    expect(setWorkspaceLayoutPreferences).not.toHaveBeenCalled();
+
+    useEditorStore.getState().setWorkspaceLayoutPreferences(recovered);
+    await vi.waitFor(() => expect(setWorkspaceLayoutPreferences).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(useEditorStore.getState().toast).toMatchObject({ tone: 'warning', message: expect.stringContaining('could not save') }));
+    expect(useEditorStore.getState().workspaceLayoutPreferences).toEqual(recovered);
+    expect(useEditorStore.getState().snapshot).toEqual(canonicalSnapshot);
+    expect(applyTransaction).not.toHaveBeenCalled();
+
+    useEditorStore.getState().setWorkspaceLayoutPreferences(recovered);
+    await vi.waitFor(() => expect(setWorkspaceLayoutPreferences).toHaveBeenCalledTimes(2));
+    expect(useEditorStore.getState().workspaceLayoutPreferences).toEqual(recovered);
+    expect(useEditorStore.getState().snapshot).toEqual(canonicalSnapshot);
+    expect(applyTransaction).not.toHaveBeenCalled();
+
+    useEditorStore.setState({
+      snapshot: undefined,
+      loading: true,
+      workspaceLayoutPreferences: { ...DEFAULT_WORKSPACE_LAYOUT_PREFERENCES },
+    });
+    await useEditorStore.getState().initialize();
+    expect(useEditorStore.getState().workspaceLayoutPreferences).toEqual(durable);
+    expect(setWorkspaceLayoutPreferences).toHaveBeenCalledTimes(2);
   });
 
   it('hydrates dither configuration and presets before editing, keeps palette context local, and retries after save failure', async () => {

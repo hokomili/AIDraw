@@ -1,9 +1,11 @@
 import {
+  useCallback,
   useEffect,
   useId,
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type ComponentType,
 } from "react";
 import {
@@ -170,10 +172,17 @@ import { TilesetSliceEditor } from "./components/TilesetSliceEditor";
 import { TileVariantPreview } from "./components/TileVariantPreview";
 import { TileMapObjectInspector } from "./components/TileMapObjectInspector";
 import { ShortcutReferenceDialog } from "./components/ShortcutReferenceDialog";
+import { InspectorLayoutControls } from "./components/InspectorLayoutControls";
 import { documentTabFocusIndex } from "./document-tabs";
 import { menuFocusIndex } from "./popover-navigation";
 import { shortcutHelpRequested, toolRailFocusIndex } from "./shortcuts";
 import { requireWritableTileObject, requireWritableTileObjectLayer, TILE_OBJECT_ALIGNMENT_OPTIONS } from "../common/tile-object-authoring";
+import {
+  DEFAULT_WORKSPACE_LAYOUT_PREFERENCES,
+  MAX_INSPECTOR_EXPANDED_WIDTH,
+  effectiveInspectorWidth,
+  inspectorToggleShortcutRequested,
+} from "../common/workspace-layout";
 
 type Icon = ComponentType<{ size?: number; strokeWidth?: number }>;
 
@@ -1231,7 +1240,17 @@ function SpriteSheetImportDialog({ selection, onClose }: { selection: SpriteShee
   </ModalShell>;
 }
 
-function TopBar({ onOpenShortcuts }: { onOpenShortcuts: () => void }) {
+function TopBar({
+  inspectorCollapsed,
+  onOpenShortcuts,
+  onOpenAgentActivity,
+  onToggleInspector,
+}: {
+  inspectorCollapsed: boolean;
+  onOpenShortcuts: () => void;
+  onOpenAgentActivity: () => void;
+  onToggleInspector: () => void;
+}) {
   const open = useEditorStore((state) => state.open);
   const save = useEditorStore((state) => state.save);
   const undo = useEditorStore((state) => state.undo);
@@ -1464,6 +1483,19 @@ function TopBar({ onOpenShortcuts }: { onOpenShortcuts: () => void }) {
       <DocumentTabs />
       <div className="topbar-right">
         <button
+          id="inspector-toggle-button"
+          type="button"
+          className="icon-button"
+          title={`${inspectorCollapsed ? "Open" : "Collapse"} inspector (Ctrl/Cmd+Shift+I)`}
+          aria-label={`${inspectorCollapsed ? "Open" : "Collapse"} inspector sidebar`}
+          aria-keyshortcuts="Control+Shift+I Meta+Shift+I"
+          aria-controls="inspector-sidebar"
+          aria-expanded={!inspectorCollapsed}
+          onClick={onToggleInspector}
+        >
+          {inspectorCollapsed ? <ChevronLeft size={16} /> : <ChevronRight size={16} />}
+        </button>
+        <button
           type="button"
           className="icon-button"
           title="Keyboard shortcuts (F1 or ?)"
@@ -1477,7 +1509,7 @@ function TopBar({ onOpenShortcuts }: { onOpenShortcuts: () => void }) {
           className="agent-pill"
           aria-label="Open agent activity"
           title="Open agent activity"
-          onClick={() => useEditorStore.getState().setRightPanel("activity")}
+          onClick={onOpenAgentActivity}
         >
           <Bot size={15} />
           <span>
@@ -5697,7 +5729,27 @@ function AssetsPanel({ document }: { document: AIDrawDocument }) {
   );
 }
 
-function RightSidebar({ document }: { document: AIDrawDocument }) {
+function RightSidebar({
+  document,
+  collapsed,
+  savedWidth,
+  effectiveWidth,
+  maximumEffectiveWidth,
+  onResizePreview,
+  onResizeCommit,
+  onResizeCancel,
+  onResetLayout,
+}: {
+  document: AIDrawDocument;
+  collapsed: boolean;
+  savedWidth: number;
+  effectiveWidth: number;
+  maximumEffectiveWidth: number;
+  onResizePreview: (width: number) => void;
+  onResizeCommit: (width: number) => void;
+  onResizeCancel: () => void;
+  onResetLayout: () => void;
+}) {
   const panel = useEditorStore((state) => state.rightPanel);
   const visiblePanel = panel === "animation" && document.kind !== "illustration" ? "layers" : panel;
   const setPanel = useEditorStore((state) => state.setRightPanel);
@@ -5795,7 +5847,17 @@ function RightSidebar({ document }: { document: AIDrawDocument }) {
     ]);
   };
   return (
-    <aside className="right-sidebar">
+    <aside id="inspector-sidebar" className="right-sidebar" aria-label="Inspector sidebar" hidden={collapsed}>
+      <InspectorLayoutControls
+        collapsed={collapsed}
+        savedWidth={savedWidth}
+        effectiveWidth={effectiveWidth}
+        maximumEffectiveWidth={maximumEffectiveWidth}
+        onResizePreview={onResizePreview}
+        onResizeCommit={onResizeCommit}
+        onResizeCancel={onResizeCancel}
+        onReset={onResetLayout}
+      />
       <nav className="panel-tabs" role="tablist" aria-label="Inspector panels" onKeyDown={handlePanelKeys}>
         <button
           id="inspector-tab-layers"
@@ -6047,19 +6109,55 @@ function LoadingScreen() {
   );
 }
 
+function focusInspectorToggle(): void {
+  window.requestAnimationFrame(() => globalThis.document.getElementById("inspector-toggle-button")?.focus());
+}
+
+function focusActiveInspectorTab(): void {
+  window.requestAnimationFrame(() => {
+    const state = useEditorStore.getState();
+    const panel = state.rightPanel === "animation" && state.snapshot?.activeDocument?.kind !== "illustration"
+      ? "layers"
+      : state.rightPanel;
+    globalThis.document.getElementById(`inspector-tab-${panel}`)?.focus();
+  });
+}
+
+function toggleInspectorAndMoveFocus(): void {
+  const state = useEditorStore.getState();
+  const nextCollapsed = !state.workspaceLayoutPreferences.inspectorCollapsed;
+  state.setWorkspaceLayoutPreferences({
+    ...state.workspaceLayoutPreferences,
+    inspectorCollapsed: nextCollapsed,
+  });
+  if (nextCollapsed) focusInspectorToggle();
+  else focusActiveInspectorTab();
+}
+
 export function App() {
   const initialize = useEditorStore((state) => state.initialize);
   const snapshot = useEditorStore((state) => state.snapshot);
   const loading = useEditorStore((state) => state.loading);
   const toast = useEditorStore((state) => state.toast);
   const canvasAnimation = useEditorStore((state) => state.canvasAnimation);
+  const workspaceLayoutPreferences = useEditorStore((state) => state.workspaceLayoutPreferences);
+  const setWorkspaceLayoutPreferences = useEditorStore((state) => state.setWorkspaceLayoutPreferences);
   const [shortcutReferenceOpen, setShortcutReferenceOpen] = useState(false);
+  const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
+  const [inspectorResizePreview, setInspectorResizePreview] = useState<number>();
+  const cancelInspectorResize = useCallback(() => setInspectorResizePreview(undefined), []);
   const document = snapshot?.activeDocument;
   const canvasDocument = useMemo(() => document?.kind === "illustration" && canvasAnimation?.illustrationTimeMs !== undefined ? illustrationAtTime(document, canvasAnimation.illustrationTimeMs) : document, [canvasAnimation, document]);
 
   useEffect(() => {
     void initialize();
   }, [initialize]);
+
+  useEffect(() => {
+    const measure = () => setViewportWidth(window.innerWidth);
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, []);
 
   useEffect(() => {
     const onShortcutHelp = (event: KeyboardEvent) => {
@@ -6105,6 +6203,12 @@ export function App() {
         (event.target instanceof HTMLElement && event.target.isContentEditable)
       )
         return;
+      if (inspectorToggleShortcutRequested(event)) {
+        event.preventDefault();
+        cancelInspectorResize();
+        toggleInspectorAndMoveFocus();
+        return;
+      }
       if (event.key === "Delete" || event.key === "Backspace") {
         const state = useEditorStore.getState();
         const active = state.snapshot?.activeDocument;
@@ -6210,7 +6314,7 @@ export function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [cancelInspectorResize]);
 
   const title = useMemo(
     () =>
@@ -6227,11 +6331,35 @@ export function App() {
   const shortcutTools = (document.kind === "pixel" ? pixelTools : illustrationTools)
     .filter((tool): tool is ToolDefinition & { shortcut: string } => Boolean(tool.shortcut))
     .map((tool) => ({ id: tool.id, label: tool.label, shortcut: tool.shortcut }));
+  const requestedInspectorWidth = inspectorResizePreview ?? workspaceLayoutPreferences.inspectorExpandedWidth;
+  const shownInspectorWidth = workspaceLayoutPreferences.inspectorCollapsed
+    ? 0
+    : effectiveInspectorWidth(requestedInspectorWidth, viewportWidth);
+  const maximumShownInspectorWidth = effectiveInspectorWidth(MAX_INSPECTOR_EXPANDED_WIDTH, viewportWidth);
+  const shellStyle = {
+    "--shell-sidebar-effective-width": `${shownInspectorWidth}px`,
+  } as CSSProperties;
   return (
-    <div className="app-shell">
+    <div className={`app-shell${workspaceLayoutPreferences.inspectorCollapsed ? " is-inspector-collapsed" : ""}`} style={shellStyle}>
       <button type="button" className="skip-to-canvas" onClick={() => globalThis.document.getElementById("aidraw-canvas")?.focus()}>Skip to canvas</button>
       <span id="aidraw-canvas-keyboard-help" className="visually-hidden">Press F1 for keyboard shortcuts. Use the focus-visible Skip to canvas control to return directly to this drawing surface.</span>
-      <TopBar onOpenShortcuts={() => setShortcutReferenceOpen(true)} />
+      <TopBar
+        inspectorCollapsed={workspaceLayoutPreferences.inspectorCollapsed}
+        onOpenShortcuts={() => setShortcutReferenceOpen(true)}
+        onToggleInspector={() => {
+          cancelInspectorResize();
+          toggleInspectorAndMoveFocus();
+        }}
+        onOpenAgentActivity={() => {
+          cancelInspectorResize();
+          const state = useEditorStore.getState();
+          state.setRightPanel("activity");
+          if (state.workspaceLayoutPreferences.inspectorCollapsed) {
+            state.setWorkspaceLayoutPreferences({ ...state.workspaceLayoutPreferences, inspectorCollapsed: false });
+            focusActiveInspectorTab();
+          }
+        }}
+      />
       <ContextBar document={document} />
       <ToolRail document={document} />
       <main className="canvas-workspace">
@@ -6241,7 +6369,23 @@ export function App() {
           <PixelCanvas key={canvasDocument?.id} document={canvasDocument as PixelDocument} />
         )}
       </main>
-      <RightSidebar document={document} />
+      <RightSidebar
+        document={document}
+        collapsed={workspaceLayoutPreferences.inspectorCollapsed}
+        savedWidth={workspaceLayoutPreferences.inspectorExpandedWidth}
+        effectiveWidth={shownInspectorWidth}
+        maximumEffectiveWidth={maximumShownInspectorWidth}
+        onResizePreview={setInspectorResizePreview}
+        onResizeCancel={cancelInspectorResize}
+        onResizeCommit={(inspectorExpandedWidth) => setWorkspaceLayoutPreferences({
+          ...workspaceLayoutPreferences,
+          inspectorExpandedWidth,
+        })}
+        onResetLayout={() => {
+          cancelInspectorResize();
+          setWorkspaceLayoutPreferences({ ...DEFAULT_WORKSPACE_LAYOUT_PREFERENCES });
+        }}
+      />
       <StatusBar document={document} />
       {shortcutReferenceOpen && <ShortcutReferenceDialog
         mode={document.kind === "illustration" ? "illustration" : "pixel"}

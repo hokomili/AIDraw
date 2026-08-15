@@ -30,6 +30,7 @@ const expectedBridgeKeys = [
   'exportActiveDocument', 'copySelection', 'pasteClipboard', 'replayTrace', 'updateEditorAdvisory',
   'writePixelSelectionClipboard', 'readPixelSelectionClipboard', 'setOnionSkinPreferences', 'setOrderedDitherPreferences',
   'setSpriteSymmetryPreferences',
+  'setWorkspaceLayoutPreferences',
   'exportRendererDiagnostics', 'injectRendererRecoveryTestEvent', 'onEvent', 'onNewDocumentRequested',
 ].sort();
 
@@ -253,7 +254,7 @@ test(scenarioName, async () => {
       windowOpenDenied: true,
       webviewPrimitiveAbsent: true,
     });
-    expect(renderer.ownKeys).toHaveLength(63);
+    expect(renderer.ownKeys).toHaveLength(64);
     expect(renderer.csp).toContain("default-src 'self'");
     expect(renderer.csp).toContain("script-src 'self'");
     expect(renderer.csp).toContain("object-src 'none'");

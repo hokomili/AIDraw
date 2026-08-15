@@ -32,6 +32,7 @@
   --shell-tool-rail-width: 62px;
   --shell-sidebar-width: 318px;
   --shell-sidebar-compact-width: 286px;
+  --shell-sidebar-effective-width: var(--shell-sidebar-width);
   --macos-traffic-light-inset: 84px;
 }
 
@@ -82,7 +83,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 
 .app-shell {
   width: 100%; height: 100%; display: grid;
-  grid-template-columns: var(--shell-tool-rail-width) minmax(0, 1fr) var(--shell-sidebar-width);
+  grid-template-columns: var(--shell-tool-rail-width) minmax(0, 1fr) var(--shell-sidebar-effective-width);
   grid-template-rows: var(--shell-topbar-height) var(--shell-context-height) minmax(0, 1fr) var(--shell-status-height);
   grid-template-areas: "top top top" "tools context right" "tools canvas right" "status status status";
   background: var(--workspace);
@@ -258,7 +259,20 @@ html[data-native-titlebar="hidden-inset"] .brand { width: calc(118px + var(--mac
 .playback-lane progress::-webkit-progress-bar { background: #e9e3e8; }
 .playback-lane progress::-webkit-progress-value { background: var(--actor); }
 
-.right-sidebar { grid-area: right; background: var(--panel); border-left: 1px solid var(--border); min-height: 0; display: flex; flex-direction: column; z-index: 20; }
+.right-sidebar { position: relative; grid-area: right; min-width: 0; min-height: 0; display: flex; flex-direction: column; border-left: 1px solid var(--border); background: var(--panel); z-index: 20; }
+.right-sidebar[hidden] { display: none; }
+.inspector-layout-controls { min-width: 0; height: 40px; padding: 4px 6px 4px 10px; display: flex; align-items: center; gap: 8px; flex: 0 0 auto; border-bottom: 1px solid var(--border-soft); background: #faf7f4; }
+.inspector-layout-summary { min-width: 0; display: grid; gap: 1px; flex: 1; }
+.inspector-layout-summary strong { font-size: var(--ui-type-label); }
+.inspector-layout-summary small { overflow: hidden; color: var(--muted); font-size: var(--ui-type-caption); text-overflow: ellipsis; white-space: nowrap; }
+.inspector-layout-reset { min-width: var(--ui-hit-secondary); height: var(--ui-hit-secondary); padding: 0 7px; display: inline-flex; align-items: center; justify-content: center; gap: 4px; border-radius: 8px; background: transparent; color: #655d6e; font-size: var(--ui-type-caption); font-weight: 720; cursor: pointer; }
+.inspector-layout-reset:hover:not(:disabled) { background: var(--lavender-soft); color: #654db1; }
+.inspector-layout-reset:disabled { opacity: .4; cursor: default; }
+.inspector-layout-reset svg { width: var(--ui-icon-secondary); height: var(--ui-icon-secondary); }
+.inspector-resize-handle { position: absolute; top: 0; bottom: 0; left: -16px; width: var(--ui-hit-secondary); display: flex; align-items: center; justify-content: center; touch-action: none; cursor: col-resize; z-index: 21; }
+.inspector-resize-handle > span { width: 3px; height: 46px; border-radius: 3px; background: transparent; }
+.inspector-resize-handle:hover > span, .inspector-resize-handle:focus-visible > span { background: var(--lavender); }
+.inspector-resize-handle:focus-visible { outline: 2px solid var(--lavender); outline-offset: -5px; }
 .panel-tabs { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); height: 52px; border-bottom: 1px solid var(--border); flex: 0 0 auto; }
 .panel-tabs button { position: relative; min-width: 0; background: transparent; color: #817988; display: flex; align-items: center; justify-content: center; gap: 4px; flex-direction: column; font-size: var(--ui-type-caption); cursor: pointer; }
 .panel-tabs button > svg { width: 19px; height: 19px; }
@@ -459,7 +473,6 @@ html[data-native-titlebar="hidden-inset"] .brand { width: calc(118px + var(--mac
 
 /* Media-query width is the renderer content viewport; native frame insets are excluded. */
 @media (max-width: 1120px) {
-  .app-shell { grid-template-columns: var(--shell-tool-rail-width) minmax(0, 1fr) var(--shell-sidebar-compact-width); }
   .brand { width: 70px; padding: 0 12px; }.brand-name { display: none; }
   html[data-native-titlebar="hidden-inset"] .brand { width: calc(56px + var(--macos-traffic-light-inset)); padding-left: var(--macos-traffic-light-inset); }
   .file-actions { gap: 1px; padding-right: 5px; }

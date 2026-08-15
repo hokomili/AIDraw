@@ -827,6 +827,7 @@ function registerIpc(): void {
   handle(IPC.onionSkinPreferencesSet, (_event, value: unknown) => engineRuntime.setOnionSkinPreferences(value));
   handle(IPC.orderedDitherPreferencesSet, (_event, value: unknown) => engineRuntime.setOrderedDitherPreferences(value));
   handle(IPC.spriteSymmetryPreferencesSet, (_event, value: unknown) => engineRuntime.setSpriteSymmetryPreferences(value));
+  handle(IPC.workspaceLayoutPreferencesSet, (_event, value: unknown) => engineRuntime.setWorkspaceLayoutPreferences(value));
   handle(IPC.configureAgentClient, (_event, clientId: unknown) => configureAgentClient(clientId));
   handle(IPC.configureCodex, () => configureAgentClient('codex'));
 }

@@ -75,8 +75,8 @@ describe('UX-01 retained exact-package acceptance boundary', () => {
     const lowercaseTruth = truth.toLowerCase();
     for (const nonclaim of [
       'native window-chrome pass',
-      'customizable workspace persistence',
-      'progressive-disclosure completion',
+      'packaged inspector resize/collapse/restart',
+      'progressive-disclosure acceptance',
       '200% text',
       'assistive technology',
       'tablet/touchpad',

@@ -6,6 +6,7 @@ import { EngineRuntime } from '@main/engine-runtime';
 import { DEFAULT_ONION_SKIN_PREFERENCES } from '../../src/common/onion-skin';
 import { DEFAULT_ORDERED_DITHER_PREFERENCES, type OrderedDitherPreferences } from '../../src/common/ordered-dither-preferences';
 import { DEFAULT_SPRITE_SYMMETRY_PREFERENCES } from '../../src/common/sprite-symmetry';
+import { DEFAULT_WORKSPACE_LAYOUT_PREFERENCES } from '../../src/common/workspace-layout';
 
 describe('EngineRuntime stop', () => {
   it('binds bootstrap hydration and preference saves through the named trusted-renderer IPC boundary', async () => {
@@ -14,6 +15,7 @@ describe('EngineRuntime stop', () => {
     expect(source).toContain('handle(IPC.onionSkinPreferencesSet, (_event, value: unknown) => engineRuntime.setOnionSkinPreferences(value))');
     expect(source).toContain('handle(IPC.orderedDitherPreferencesSet, (_event, value: unknown) => engineRuntime.setOrderedDitherPreferences(value))');
     expect(source).toContain('handle(IPC.spriteSymmetryPreferencesSet, (_event, value: unknown) => engineRuntime.setSpriteSymmetryPreferences(value))');
+    expect(source).toContain('handle(IPC.workspaceLayoutPreferencesSet, (_event, value: unknown) => engineRuntime.setWorkspaceLayoutPreferences(value))');
   });
 
   it('hydrates onion preferences through bootstrap, merges one advisory, and bounds save failures', async () => {
@@ -30,6 +32,7 @@ describe('EngineRuntime stop', () => {
     vi.spyOn(runtime.orderedDitherPreferences, 'bootstrap').mockResolvedValue({
       preferences: { current: { ...DEFAULT_ORDERED_DITHER_PREFERENCES.current }, presets: [], activePresetId: null },
     });
+    vi.spyOn(runtime.workspaceLayoutPreferences, 'bootstrap').mockResolvedValue({ preferences: { ...DEFAULT_WORKSPACE_LAYOUT_PREFERENCES } });
 
     await expect(runtime.editorBootstrap()).resolves.toMatchObject({
       onionSkinPreferences: durable,
@@ -59,6 +62,7 @@ describe('EngineRuntime stop', () => {
     vi.spyOn(runtime.onionSkinPreferences, 'bootstrap').mockResolvedValue({ preferences: { ...DEFAULT_ONION_SKIN_PREFERENCES } });
     vi.spyOn(runtime.orderedDitherPreferences, 'bootstrap').mockResolvedValue({ preferences: { current: { ...DEFAULT_ORDERED_DITHER_PREFERENCES.current }, presets: [], activePresetId: null } });
     vi.spyOn(runtime.spriteSymmetryPreferences, 'bootstrap').mockResolvedValue({ preferences: durable, warning: 'Symmetry preference recovery advisory.' });
+    vi.spyOn(runtime.workspaceLayoutPreferences, 'bootstrap').mockResolvedValue({ preferences: { ...DEFAULT_WORKSPACE_LAYOUT_PREFERENCES } });
     await expect(runtime.editorBootstrap()).resolves.toMatchObject({ symmetryPreferences: durable, recoveryWarnings: ['Symmetry preference recovery advisory.'] });
 
     const save = vi.spyOn(runtime.spriteSymmetryPreferences, 'save').mockRejectedValueOnce(new Error('Injected replacement failure.')).mockResolvedValueOnce(durable);
@@ -83,6 +87,7 @@ describe('EngineRuntime stop', () => {
     vi.spyOn(runtime.onionSkinPreferences, 'bootstrap').mockResolvedValue({ preferences: { ...DEFAULT_ONION_SKIN_PREFERENCES } });
     vi.spyOn(runtime.orderedDitherPreferences, 'bootstrap').mockResolvedValue({ preferences: durable, warning: 'Dither preference recovery advisory.' });
     vi.spyOn(runtime.spriteSymmetryPreferences, 'bootstrap').mockResolvedValue({ preferences: { mode: 'none', bindings: [] } });
+    vi.spyOn(runtime.workspaceLayoutPreferences, 'bootstrap').mockResolvedValue({ preferences: { ...DEFAULT_WORKSPACE_LAYOUT_PREFERENCES } });
     await expect(runtime.editorBootstrap()).resolves.toMatchObject({ orderedDitherPreferences: durable, recoveryWarnings: ['Dither preference recovery advisory.'] });
 
     const save = vi.spyOn(runtime.orderedDitherPreferences, 'save').mockRejectedValueOnce(new Error('Injected replacement failure.')).mockResolvedValueOnce(durable);
@@ -96,6 +101,31 @@ describe('EngineRuntime stop', () => {
     await expect(runtime.setOrderedDitherPreferences(durable)).resolves.toEqual({ saved: true, preferences: durable });
   });
 
+  it('hydrates and bounds complete workspace layout preference saves without exposing document authority', async () => {
+    const runtime = new EngineRuntime({ userDataPath: '/private/aidraw-engine-workspace-layout-test', appVersion: 'test' });
+    runtime.service.initialize();
+    const durable = { inspectorCollapsed: true, inspectorExpandedWidth: 472 };
+    vi.spyOn(runtime.onionSkinPreferences, 'bootstrap').mockResolvedValue({ preferences: { ...DEFAULT_ONION_SKIN_PREFERENCES } });
+    vi.spyOn(runtime.orderedDitherPreferences, 'bootstrap').mockResolvedValue({ preferences: { current: { ...DEFAULT_ORDERED_DITHER_PREFERENCES.current }, presets: [], activePresetId: null } });
+    vi.spyOn(runtime.spriteSymmetryPreferences, 'bootstrap').mockResolvedValue({ preferences: { mode: 'none', bindings: [] } });
+    vi.spyOn(runtime.workspaceLayoutPreferences, 'bootstrap').mockResolvedValue({ preferences: durable, warning: 'Workspace layout recovery advisory.' });
+    await expect(runtime.editorBootstrap()).resolves.toMatchObject({ workspaceLayoutPreferences: durable, recoveryWarnings: ['Workspace layout recovery advisory.'] });
+
+    const save = vi.spyOn(runtime.workspaceLayoutPreferences, 'save')
+      .mockRejectedValueOnce(new Error('Injected replacement failure.'))
+      .mockResolvedValueOnce(durable);
+    await expect(runtime.setWorkspaceLayoutPreferences({ ...durable, inspectorExpandedWidth: 521 })).resolves.toEqual({
+      saved: false,
+      message: 'AIDraw rejected invalid workspace layout preferences; the saved layout was not changed.',
+    });
+    expect(save).not.toHaveBeenCalled();
+    await expect(runtime.setWorkspaceLayoutPreferences(durable)).resolves.toEqual({
+      saved: false,
+      message: 'Inspector layout changed in this editor, but AIDraw could not save it. The previous saved layout remains.',
+    });
+    await expect(runtime.setWorkspaceLayoutPreferences(durable)).resolves.toEqual({ saved: true, preferences: durable });
+  });
+
   it('coalesces concurrent callers and remains retryable until final recovery succeeds', async () => {
     const runtime = new EngineRuntime({ userDataPath: '/private/aidraw-engine-stop-test', appVersion: 'test' });
     const state = runtime as unknown as { started: boolean };
@@ -106,6 +136,7 @@ describe('EngineRuntime stop', () => {
     const flushPreferences = vi.spyOn(runtime.onionSkinPreferences, 'flush');
     const flushDitherPreferences = vi.spyOn(runtime.orderedDitherPreferences, 'flush');
     const flushSymmetryPreferences = vi.spyOn(runtime.spriteSymmetryPreferences, 'flush');
+    const flushWorkspaceLayoutPreferences = vi.spyOn(runtime.workspaceLayoutPreferences, 'flush');
     vi.spyOn(runtime.rasterUtilities, 'stop').mockImplementation(() => undefined);
     vi.spyOn(runtime.generationUtilities, 'stop').mockImplementation(() => undefined);
     const compactRecovery = vi.spyOn(runtime.service, 'compactRecovery')
@@ -123,6 +154,7 @@ describe('EngineRuntime stop', () => {
     expect(flushPreferences).toHaveBeenCalledOnce();
     expect(flushDitherPreferences).toHaveBeenCalledOnce();
     expect(flushSymmetryPreferences).toHaveBeenCalledOnce();
+    expect(flushWorkspaceLayoutPreferences).toHaveBeenCalledOnce();
     expect(state.started).toBe(true);
 
     await expect(runtime.stop()).resolves.toBeUndefined();
@@ -130,6 +162,7 @@ describe('EngineRuntime stop', () => {
     expect(flushPreferences).toHaveBeenCalledTimes(2);
     expect(flushDitherPreferences).toHaveBeenCalledTimes(2);
     expect(flushSymmetryPreferences).toHaveBeenCalledTimes(2);
+    expect(flushWorkspaceLayoutPreferences).toHaveBeenCalledTimes(2);
     expect(compactRecovery).toHaveBeenCalledTimes(2);
     expect(state.started).toBe(false);
 

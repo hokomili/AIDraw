@@ -5,6 +5,7 @@ import type { NewDocumentOptions, WorkspaceSnapshot } from '../common/contracts'
 import { DEFAULT_ONION_SKIN_PREFERENCES, parseOnionSkinPreferences, type OnionSkinPreferences } from '../common/onion-skin';
 import { DEFAULT_ORDERED_DITHER_PREFERENCES, parseOrderedDitherPreferences, type OrderedDitherPreferences } from '../common/ordered-dither-preferences';
 import { DEFAULT_SPRITE_SYMMETRY_PREFERENCES, parseSpriteSymmetryPreferences, type SpriteSymmetryPreferences } from '../common/sprite-symmetry';
+import { DEFAULT_WORKSPACE_LAYOUT_PREFERENCES, parseWorkspaceLayoutPreferences, type WorkspaceLayoutPreferences } from '../common/workspace-layout';
 import type { ReplaySource } from './replay';
 
 export type EditorTool =
@@ -29,6 +30,7 @@ interface EditorState {
   ditherMixIndex: number;
   onionSkinPreferences: OnionSkinPreferences;
   symmetryPreferences: SpriteSymmetryPreferences;
+  workspaceLayoutPreferences: WorkspaceLayoutPreferences;
   rightPanel: 'layers' | 'assets' | 'animation' | 'activity' | 'generation';
   selectedEntityId?: Id;
   selectedEntityIds: Id[];
@@ -52,6 +54,7 @@ interface EditorState {
   setDitherMixIndex(value: number): void;
   setOnionSkinPreferences(preferences: OnionSkinPreferences): void;
   setSpriteSymmetryPreferences(preferences: SpriteSymmetryPreferences): void;
+  setWorkspaceLayoutPreferences(preferences: WorkspaceLayoutPreferences): void;
   setRightPanel(panel: EditorState['rightPanel']): void;
   setSelectedEntity(id?: Id): void;
   setSelectedEntities(ids: Id[]): void;
@@ -120,6 +123,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   ditherMixIndex: 0,
   onionSkinPreferences: { ...DEFAULT_ONION_SKIN_PREFERENCES },
   symmetryPreferences: { mode: DEFAULT_SPRITE_SYMMETRY_PREFERENCES.mode, bindings: [] },
+  workspaceLayoutPreferences: { ...DEFAULT_WORKSPACE_LAYOUT_PREFERENCES },
   rightPanel: 'layers',
   playbacks: {},
   reportPulse: 0,
@@ -157,6 +161,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       onionSkinPreferences: structuredClone(snapshot.onionSkinPreferences),
       orderedDitherPreferences: structuredClone(snapshot.orderedDitherPreferences),
       symmetryPreferences: structuredClone(snapshot.symmetryPreferences),
+      workspaceLayoutPreferences: structuredClone(snapshot.workspaceLayoutPreferences),
       loading: false,
     }));
     if (snapshot.recoveryWarnings?.length) get().notify(snapshot.recoveryWarnings.join(' '), 'warning');
@@ -191,6 +196,13 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     void window.aidraw.setSpriteSymmetryPreferences(symmetryPreferences)
       .then((result) => { if (!result.saved) get().notify(result.message, 'warning'); })
       .catch(() => get().notify('Sprite symmetry changed in this editor, but AIDraw could not save it. The previous saved preference remains.', 'warning'));
+  },
+  setWorkspaceLayoutPreferences: (value) => {
+    const workspaceLayoutPreferences = parseWorkspaceLayoutPreferences(value);
+    set({ workspaceLayoutPreferences });
+    void window.aidraw.setWorkspaceLayoutPreferences(workspaceLayoutPreferences)
+      .then((result) => { if (!result.saved) get().notify(result.message, 'warning'); })
+      .catch(() => get().notify('Inspector layout changed in this editor, but AIDraw could not save it. The previous saved layout remains.', 'warning'));
   },
   setRightPanel: (rightPanel) => set({ rightPanel }),
   setSelectedEntity: (selectedEntityId) => set({ selectedEntityId, selectedEntityIds: selectedEntityId ? [selectedEntityId] : [] }),
