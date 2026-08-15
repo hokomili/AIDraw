@@ -14,7 +14,7 @@ import {
   type InspectorPointerCaptureTarget,
 } from '../../src/renderer/inspector-resize-session';
 
-describe('customizable inspector workspace', () => {
+describe('customizable inspector workspace and context disclosure', () => {
   it('renders one named composite resize route and a density-compliant reset action', () => {
     const markup = renderToStaticMarkup(createElement(InspectorLayoutControls, {
       collapsed: false,
@@ -84,7 +84,8 @@ describe('customizable inspector workspace', () => {
     expect(app).toContain('focusInspectorToggle()');
     expect(app).toContain('effectiveInspectorWidth(requestedInspectorWidth, viewportWidth)');
     expect(app).toContain('effectiveInspectorWidth(MAX_INSPECTOR_EXPANDED_WIDTH, viewportWidth)');
-    expect(app).toContain('setWorkspaceLayoutPreferences({ ...DEFAULT_WORKSPACE_LAYOUT_PREFERENCES })');
+    expect(app).toContain('setWorkspaceLayoutPreferences(resetInspectorLayoutPreferences(workspaceLayoutPreferences))');
+    expect(app).toContain('expanded={mapSetupExpanded}');
     expect(app).toContain('inspectorExpandedWidth,');
     expect(app).toContain('savedWidth={workspaceLayoutPreferences.inspectorExpandedWidth}');
     expect(app).toContain('maximumEffectiveWidth={maximumShownInspectorWidth}');
@@ -103,5 +104,6 @@ describe('customizable inspector workspace', () => {
     expect(EDITOR_DENSITY.secondaryHitTarget).toBe(32);
     expect(EDITOR_DENSITY.secondaryIcon).toBe(18);
     expect(DEFAULT_WORKSPACE_LAYOUT_PREFERENCES.inspectorExpandedWidth).toBe(318);
+    expect(DEFAULT_WORKSPACE_LAYOUT_PREFERENCES.mapSetupExpanded).toBe(false);
   });
 });

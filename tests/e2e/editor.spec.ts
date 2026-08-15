@@ -2604,6 +2604,8 @@ test('QA-06-WANG closes an exact packaged finite-map Wang-terrain lifecycle', as
     await page.getByTitle('Assets').click();
     await assetsPanel.locator('.pixel-asset-list button').filter({ hasText: createdAssets.mapName }).click();
     await page.getByTitle('Layers').click();
+    const mapSetupButton = page.locator('.map-setup-disclosure-trigger');
+    if ((await mapSetupButton.getAttribute('aria-expanded')) !== 'true') await mapSetupButton.click();
     const mapSettings = page.locator('.tilemap-settings');
     await expect(mapSettings).toBeVisible();
     const widthInput = mapSettings.getByRole('spinbutton', { name: 'Width', exact: true });
@@ -3072,6 +3074,8 @@ test('QA-06-INFINITE closes an exact packaged orthogonal sparse-chunk lifecycle'
     });
     await assetsPanel.locator('.pixel-asset-list button').filter({ hasText: createdAssets.mapName }).click();
     await page.getByTitle('Layers').click();
+    const mapSetupButton = page.locator('.map-setup-disclosure-trigger');
+    if ((await mapSetupButton.getAttribute('aria-expanded')) !== 'true') await mapSetupButton.click();
     const mapSettings = page.locator('.tilemap-settings');
     await expect(mapSettings).toBeVisible();
     const widthInput = mapSettings.getByRole('spinbutton', { name: 'Width', exact: true });
@@ -3603,6 +3607,8 @@ test('QA-06-TILED-RT closes an exact packaged supported orthogonal TMJ companion
     await page.getByTitle('Assets').click();
     await assetsPanel.locator('.pixel-asset-list button').filter({ hasText: 'Signed map' }).click();
     await page.getByTitle('Layers').click();
+    const sourceMapSetupButton = page.locator('.map-setup-disclosure-trigger');
+    if ((await sourceMapSetupButton.getAttribute('aria-expanded')) !== 'true') await sourceMapSetupButton.click();
     const sourceMapSettings = page.locator('.tilemap-settings');
     await expect(sourceMapSettings.getByText('Sparse infinite chunks', { exact: true })).toBeVisible();
     await expect(sourceMapSettings.getByText('qa06-scenario', { exact: true })).toBeVisible();
@@ -3687,6 +3693,8 @@ test('QA-06-TILED-RT closes an exact packaged supported orthogonal TMJ companion
 
     await page.getByTitle('Assets').click();
     await page.getByTitle('Layers').click();
+    const importedMapSetupButton = page.locator('.map-setup-disclosure-trigger');
+    if ((await importedMapSetupButton.getAttribute('aria-expanded')) !== 'true') await importedMapSetupButton.click();
     const importedMapSettings = page.locator('.tilemap-settings');
     await expect(importedMapSettings.getByText('Sparse infinite chunks', { exact: true })).toBeVisible();
     await expect(importedMapSettings.getByText('qa06-scenario', { exact: true })).toBeVisible();

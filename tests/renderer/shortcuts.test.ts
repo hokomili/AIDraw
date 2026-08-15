@@ -144,8 +144,9 @@ describe('keyboard shortcut reference', () => {
     ]);
     expect(readme).toContain('exactly 24 implemented bindings: 23 mode-scoped illustration/pixel tools plus the renderer-owned inspector toggle');
     expect(readme).toContain('remaining command/native-menu remapping');
-    expect(tracker).toContain('clean and live-synchronized through base `babf9de82292d96719964e4cbbca58c7a908ccc1`');
-    expect(tracker).toContain('exactly 23 mode-scoped tool bindings plus the renderer-owned inspector toggle');
+    expect(tracker).toContain('clean and live-synchronized through base `dd0aad0b39652b2af425f7c63fa32aac94f7a5ea`');
+    expect(tracker).toContain('tilemap Map setup disclosure');
+    expect(tracker).toContain('23 already implemented mode-scoped tool bindings plus the renderer-owned inspector toggle');
     expect(tracker).toContain('remapping beyond the later bounded UX-08 tool/inspector slice');
     expect(tracker).toContain('packaged/native shortcut-remapping acceptance');
     expect(tracker).not.toContain('This bounded **27-path** source/headless candidate');

@@ -207,7 +207,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     set({ workspaceLayoutPreferences });
     void window.aidraw.setWorkspaceLayoutPreferences(workspaceLayoutPreferences)
       .then((result) => { if (!result.saved) get().notify(result.message, 'warning'); })
-      .catch(() => get().notify('Inspector layout changed in this editor, but AIDraw could not save it. The previous saved layout remains.', 'warning'));
+      .catch(() => get().notify('Workspace layout changed in this editor, but AIDraw could not save it. The previous saved layout remains.', 'warning'));
   },
   setShortcutPreferences: (value) => {
     const shortcutPreferences = parseShortcutPreferences(value);

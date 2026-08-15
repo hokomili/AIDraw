@@ -7,10 +7,10 @@ import { readBoundedRegularFile } from './bounded-file-read';
 import { replacePrivateJsonFile, type PrivateJsonFileReplacer } from './private-json-file';
 
 export const MAX_WORKSPACE_LAYOUT_PREFERENCE_FILE_BYTES = 2_048;
-export const INVALID_WORKSPACE_LAYOUT_PREFERENCE_WARNING = 'Workspace layout preferences were invalid and were ignored; the default expanded inspector is active. Change the inspector layout to replace the invalid local file.';
+export const INVALID_WORKSPACE_LAYOUT_PREFERENCE_WARNING = 'Workspace layout preferences were invalid and were ignored; the default workspace layout is active. Change the workspace layout to replace the invalid local file.';
 
-interface PersistedWorkspaceLayoutPreferences {
-  version: 1;
+interface PersistedWorkspaceLayoutPreferencesV2 {
+  version: 2;
   preferences: WorkspaceLayoutPreferences;
 }
 
@@ -30,16 +30,35 @@ function defaults(): WorkspaceLayoutPreferences {
   return { ...DEFAULT_WORKSPACE_LAYOUT_PREFERENCES };
 }
 
+function parseVersionOnePreferences(value: unknown): WorkspaceLayoutPreferences {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid workspace layout preference file.');
+  const source = value as Record<string, unknown>;
+  const keys = Object.keys(source);
+  if (keys.length !== 2
+    || !keys.includes('inspectorCollapsed')
+    || !keys.includes('inspectorExpandedWidth')
+    || typeof source.inspectorCollapsed !== 'boolean'
+    || !Number.isInteger(source.inspectorExpandedWidth)) {
+    throw new Error('Invalid workspace layout preference file.');
+  }
+  return parseWorkspaceLayoutPreferences({
+    inspectorCollapsed: source.inspectorCollapsed,
+    inspectorExpandedWidth: source.inspectorExpandedWidth,
+    mapSetupExpanded: DEFAULT_WORKSPACE_LAYOUT_PREFERENCES.mapSetupExpanded,
+  });
+}
+
 function parsePersisted(value: unknown): WorkspaceLayoutPreferences {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid workspace layout preference file.');
   const source = value as Record<string, unknown>;
   const keys = Object.keys(source);
   if (keys.length !== PERSISTED_WORKSPACE_LAYOUT_PREFERENCE_KEYS.size
-    || keys.some((key) => !PERSISTED_WORKSPACE_LAYOUT_PREFERENCE_KEYS.has(key))
-    || source.version !== 1) {
+    || keys.some((key) => !PERSISTED_WORKSPACE_LAYOUT_PREFERENCE_KEYS.has(key))) {
     throw new Error('Invalid workspace layout preference file.');
   }
-  return parseWorkspaceLayoutPreferences(source.preferences);
+  if (source.version === 1) return parseVersionOnePreferences(source.preferences);
+  if (source.version === 2) return parseWorkspaceLayoutPreferences(source.preferences);
+  throw new Error('Invalid workspace layout preference file.');
 }
 
 /** Main-owned process-serial persistence for human-local editor layout preferences. */
@@ -74,7 +93,7 @@ export class WorkspaceLayoutPreferenceStore {
     return this.exclusive(async () => {
       await this.loadOnce();
       const preferences = parseWorkspaceLayoutPreferences(value);
-      const persisted: PersistedWorkspaceLayoutPreferences = { version: 1, preferences };
+      const persisted: PersistedWorkspaceLayoutPreferencesV2 = { version: 2, preferences };
       await replacePrivateJsonFile(this.filePath, persisted, this.options.replaceFile);
       this.preferences = preferences;
       return structuredClone(preferences);

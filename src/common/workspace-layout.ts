@@ -8,18 +8,20 @@ export const INSPECTOR_RESIZE_KEYBOARD_LARGE_STEP = 32;
 export interface WorkspaceLayoutPreferences {
   inspectorCollapsed: boolean;
   inspectorExpandedWidth: number;
+  mapSetupExpanded: boolean;
 }
 
 export const DEFAULT_WORKSPACE_LAYOUT_PREFERENCES: Readonly<WorkspaceLayoutPreferences> = Object.freeze({
   inspectorCollapsed: false,
   inspectorExpandedWidth: EDITOR_DENSITY.sidebarWidth,
+  mapSetupExpanded: false,
 });
 
 export const MINIMUM_EDITOR_CANVAS_WIDTH = EDITOR_CONTENT_VIEWPORT.minimumWidth
   - EDITOR_DENSITY.toolRailWidth
   - EDITOR_DENSITY.compactSidebarWidth;
 
-const WORKSPACE_LAYOUT_PREFERENCE_KEYS = new Set(['inspectorCollapsed', 'inspectorExpandedWidth']);
+const WORKSPACE_LAYOUT_PREFERENCE_KEYS = new Set(['inspectorCollapsed', 'inspectorExpandedWidth', 'mapSetupExpanded']);
 
 /** Strictly admit one complete renderer-independent human workspace layout value. */
 export function parseWorkspaceLayoutPreferences(value: unknown): WorkspaceLayoutPreferences {
@@ -29,6 +31,7 @@ export function parseWorkspaceLayoutPreferences(value: unknown): WorkspaceLayout
   if (keys.length !== WORKSPACE_LAYOUT_PREFERENCE_KEYS.size
     || keys.some((key) => !WORKSPACE_LAYOUT_PREFERENCE_KEYS.has(key))
     || typeof source.inspectorCollapsed !== 'boolean'
+    || typeof source.mapSetupExpanded !== 'boolean'
     || !Number.isInteger(source.inspectorExpandedWidth)
     || (source.inspectorExpandedWidth as number) < MIN_INSPECTOR_EXPANDED_WIDTH
     || (source.inspectorExpandedWidth as number) > MAX_INSPECTOR_EXPANDED_WIDTH) {
@@ -37,12 +40,23 @@ export function parseWorkspaceLayoutPreferences(value: unknown): WorkspaceLayout
   return {
     inspectorCollapsed: source.inspectorCollapsed,
     inspectorExpandedWidth: source.inspectorExpandedWidth as number,
+    mapSetupExpanded: source.mapSetupExpanded,
   };
 }
 
 export function clampInspectorExpandedWidth(value: number): number {
   const finite = Number.isFinite(value) ? Math.round(value) : DEFAULT_WORKSPACE_LAYOUT_PREFERENCES.inspectorExpandedWidth;
   return Math.max(MIN_INSPECTOR_EXPANDED_WIDTH, Math.min(MAX_INSPECTOR_EXPANDED_WIDTH, finite));
+}
+
+export function resetInspectorLayoutPreferences(
+  preferences: WorkspaceLayoutPreferences,
+): WorkspaceLayoutPreferences {
+  return {
+    ...preferences,
+    inspectorCollapsed: DEFAULT_WORKSPACE_LAYOUT_PREFERENCES.inspectorCollapsed,
+    inspectorExpandedWidth: DEFAULT_WORKSPACE_LAYOUT_PREFERENCES.inspectorExpandedWidth,
+  };
 }
 
 /**

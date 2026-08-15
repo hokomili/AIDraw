@@ -106,7 +106,7 @@ describe('EngineRuntime stop', () => {
   it('hydrates and bounds complete workspace layout preference saves without exposing document authority', async () => {
     const runtime = new EngineRuntime({ userDataPath: '/private/aidraw-engine-workspace-layout-test', appVersion: 'test' });
     runtime.service.initialize();
-    const durable = { inspectorCollapsed: true, inspectorExpandedWidth: 472 };
+    const durable = { inspectorCollapsed: true, inspectorExpandedWidth: 472, mapSetupExpanded: true };
     vi.spyOn(runtime.onionSkinPreferences, 'bootstrap').mockResolvedValue({ preferences: { ...DEFAULT_ONION_SKIN_PREFERENCES } });
     vi.spyOn(runtime.orderedDitherPreferences, 'bootstrap').mockResolvedValue({ preferences: { current: { ...DEFAULT_ORDERED_DITHER_PREFERENCES.current }, presets: [], activePresetId: null } });
     vi.spyOn(runtime.spriteSymmetryPreferences, 'bootstrap').mockResolvedValue({ preferences: { mode: 'none', bindings: [] } });
@@ -123,7 +123,7 @@ describe('EngineRuntime stop', () => {
     expect(save).not.toHaveBeenCalled();
     await expect(runtime.setWorkspaceLayoutPreferences(durable)).resolves.toEqual({
       saved: false,
-      message: 'Inspector layout changed in this editor, but AIDraw could not save it. The previous saved layout remains.',
+      message: 'Workspace layout changed in this editor, but AIDraw could not save it. The previous saved layout remains.',
     });
     await expect(runtime.setWorkspaceLayoutPreferences(durable)).resolves.toEqual({ saved: true, preferences: durable });
   });

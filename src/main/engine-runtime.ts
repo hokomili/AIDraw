@@ -205,7 +205,7 @@ export class EngineRuntime {
     try {
       return { saved: true, preferences: await this.workspaceLayoutPreferences.save(preferences) };
     } catch {
-      return { saved: false, message: 'Inspector layout changed in this editor, but AIDraw could not save it. The previous saved layout remains.' };
+      return { saved: false, message: 'Workspace layout changed in this editor, but AIDraw could not save it. The previous saved layout remains.' };
     }
   }
 

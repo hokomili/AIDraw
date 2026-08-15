@@ -12,28 +12,33 @@ import {
   inspectorWidthAfterKeyboardMove,
   inspectorWidthAfterPointerMove,
   parseWorkspaceLayoutPreferences,
+  resetInspectorLayoutPreferences,
 } from '../../src/common/workspace-layout';
 
 describe('workspace layout preference contract', () => {
-  it('strictly admits one complete bounded inspector preference', () => {
+  it('strictly admits one complete bounded workspace preference', () => {
     expect(DEFAULT_WORKSPACE_LAYOUT_PREFERENCES).toEqual({
       inspectorCollapsed: false,
       inspectorExpandedWidth: EDITOR_DENSITY.sidebarWidth,
+      mapSetupExpanded: false,
     });
-    expect(parseWorkspaceLayoutPreferences({ inspectorCollapsed: true, inspectorExpandedWidth: 472 })).toEqual({
+    expect(parseWorkspaceLayoutPreferences({ inspectorCollapsed: true, inspectorExpandedWidth: 472, mapSetupExpanded: true })).toEqual({
       inspectorCollapsed: true,
       inspectorExpandedWidth: 472,
+      mapSetupExpanded: true,
     });
     for (const value of [
       null,
       [],
       {},
       { inspectorCollapsed: false },
-      { inspectorCollapsed: 'false', inspectorExpandedWidth: 318 },
-      { inspectorCollapsed: false, inspectorExpandedWidth: 318.5 },
-      { inspectorCollapsed: false, inspectorExpandedWidth: MIN_INSPECTOR_EXPANDED_WIDTH - 1 },
-      { inspectorCollapsed: false, inspectorExpandedWidth: MAX_INSPECTOR_EXPANDED_WIDTH + 1 },
-      { inspectorCollapsed: false, inspectorExpandedWidth: 318, extra: true },
+      { inspectorCollapsed: true, inspectorExpandedWidth: 472 },
+      { inspectorCollapsed: 'false', inspectorExpandedWidth: 318, mapSetupExpanded: false },
+      { inspectorCollapsed: false, inspectorExpandedWidth: 318.5, mapSetupExpanded: false },
+      { inspectorCollapsed: false, inspectorExpandedWidth: MIN_INSPECTOR_EXPANDED_WIDTH - 1, mapSetupExpanded: false },
+      { inspectorCollapsed: false, inspectorExpandedWidth: MAX_INSPECTOR_EXPANDED_WIDTH + 1, mapSetupExpanded: false },
+      { inspectorCollapsed: false, inspectorExpandedWidth: 318, mapSetupExpanded: 'false' },
+      { inspectorCollapsed: false, inspectorExpandedWidth: 318, mapSetupExpanded: false, extra: true },
     ]) expect(() => parseWorkspaceLayoutPreferences(value)).toThrow('Invalid workspace layout preferences.');
   });
 
@@ -45,6 +50,18 @@ describe('workspace layout preference contract', () => {
     expect(effectiveInspectorWidth(MAX_INSPECTOR_EXPANDED_WIDTH, EDITOR_CONTENT_VIEWPORT.minimumWidth)).toBe(286);
     expect(effectiveInspectorWidth(MAX_INSPECTOR_EXPANDED_WIDTH, EDITOR_CONTENT_VIEWPORT.defaultWidth)).toBe(520);
     expect(EDITOR_CONTENT_VIEWPORT.minimumWidth - EDITOR_DENSITY.toolRailWidth - effectiveInspectorWidth(520, 980)).toBe(MINIMUM_EDITOR_CANVAS_WIDTH);
+  });
+
+  it('resets only the inspector fields while preserving the Map setup disclosure choice', () => {
+    expect(resetInspectorLayoutPreferences({
+      inspectorCollapsed: true,
+      inspectorExpandedWidth: 472,
+      mapSetupExpanded: true,
+    })).toEqual({
+      inspectorCollapsed: false,
+      inspectorExpandedWidth: EDITOR_DENSITY.sidebarWidth,
+      mapSetupExpanded: true,
+    });
   });
 
   it('uses deterministic bounded pointer and keyboard resize semantics', () => {

@@ -144,6 +144,7 @@ import { cropImageToAspect, resetImageCrop } from "../common/image-crop";
 import { BrushLibraryDialog } from "./components/BrushLibraryDialog";
 import { DitherPresetDialog, OrderedDitherPhaseInput } from "./components/DitherPresetDialog";
 import { ImageCropFields } from "./components/ImageCropFields";
+import { MapSetupDisclosure } from "./components/MapSetupDisclosure";
 import { flattenLayerTree, layerTreeDescendants, moveLayerTreeEntry } from "../common/layer-tree";
 import { assignWangTile, deleteWangColor, deleteWangSet, upsertWangColor, upsertWangSet } from "../common/wang-authoring";
 import { TILE_VARIANT_GROUP_PROPERTY, tileVariantCandidates, tileVariantGroup } from "../common/tile-variants";
@@ -185,9 +186,9 @@ import {
 } from "../common/shortcut-preferences";
 import { requireWritableTileObject, requireWritableTileObjectLayer, TILE_OBJECT_ALIGNMENT_OPTIONS } from "../common/tile-object-authoring";
 import {
-  DEFAULT_WORKSPACE_LAYOUT_PREFERENCES,
   MAX_INSPECTOR_EXPANDED_WIDTH,
   effectiveInspectorWidth,
+  resetInspectorLayoutPreferences,
 } from "../common/workspace-layout";
 
 type Icon = ComponentType<{ size?: number; strokeWidth?: number }>;
@@ -3610,6 +3611,8 @@ function PixelLayers({ document }: { document: PixelDocument }) {
   const setSelected = useEditorStore((state) => state.setSelectedEntity);
   const apply = useEditorStore((state) => state.apply);
   const notify = useEditorStore((state) => state.notify);
+  const mapSetupExpanded = useEditorStore((state) => state.workspaceLayoutPreferences.mapSetupExpanded);
+  const setWorkspaceLayoutPreferences = useEditorStore((state) => state.setWorkspaceLayoutPreferences);
   const [mapPropertyName, setMapPropertyName] = useState("");
   const [mapPropertyValue, setMapPropertyValue] = useState("");
   const [mapObjectType, setMapObjectType] = useState<"rectangle" | "ellipse" | "polygon" | "polyline">("rectangle");
@@ -3764,7 +3767,14 @@ function PixelLayers({ document }: { document: PixelDocument }) {
           }
         />
       )}
-      {asset.type === "tilemap" && <div className="tilemap-settings">
+      {asset.type === "tilemap" && <MapSetupDisclosure
+        expanded={mapSetupExpanded}
+        summary={`${asset.infinite ? "Sparse infinite" : "Finite"} · ${asset.orientation} · ${asset.width}×${asset.height} cells · ${asset.tileWidth}×${asset.tileHeight} px`}
+        onExpandedChange={(expanded) => {
+          const state = useEditorStore.getState();
+          setWorkspaceLayoutPreferences({ ...state.workspaceLayoutPreferences, mapSetupExpanded: expanded });
+        }}
+      ><div className="tilemap-settings">
         <div className="section-heading"><span>Map geometry</span><small>{asset.infinite ? "Sparse infinite chunks" : "Finite bounds"}</small></div>
         <div className="tilemap-setting-grid">
           <label className="field"><span>Width</span><input key={"map-width-" + asset.width} type="number" min="1" max="1048576" defaultValue={asset.width} onBlur={(event) => { const width = Math.max(1, Math.round(Number(event.target.value))); if (width !== asset.width) updateAsset({ ...asset, width }, "Resize tilemap width"); }} /></label>
@@ -3777,7 +3787,7 @@ function PixelLayers({ document }: { document: PixelDocument }) {
         <div className="section-heading"><span>Map properties</span></div>
         <div className="tile-property-add"><input aria-label="Map property name" placeholder="name" value={mapPropertyName} onChange={(event) => setMapPropertyName(event.target.value)} /><input aria-label="Map property value" placeholder="value" value={mapPropertyValue} onChange={(event) => setMapPropertyValue(event.target.value)} /><button disabled={!mapPropertyName.trim()} onClick={() => { const value = mapPropertyValue === "true" ? true : mapPropertyValue === "false" ? false : mapPropertyValue.trim() !== "" && Number.isFinite(Number(mapPropertyValue)) ? Number(mapPropertyValue) : mapPropertyValue; updateAsset({ ...asset, properties: { ...asset.properties, [mapPropertyName.trim()]: value } }, "Set map property"); setMapPropertyName(""); setMapPropertyValue(""); }}>Add</button></div>
         <div className="tile-property-list">{Object.entries(asset.properties).map(([key, value]) => <span key={key}><strong>{key}</strong> = {String(value)}<button onClick={() => { const properties = { ...asset.properties }; delete properties[key]; updateAsset({ ...asset, properties }, "Delete map property"); }}>×</button></span>)}</div>
-      </div>}
+      </div></MapSetupDisclosure>}
       <div className="panel-list layer-list">
         {flattenedLayers.map(({ entry: layer, depth }) => (
           <div
@@ -6396,7 +6406,7 @@ export function App() {
         })}
         onResetLayout={() => {
           cancelInspectorResize();
-          setWorkspaceLayoutPreferences({ ...DEFAULT_WORKSPACE_LAYOUT_PREFERENCES });
+          setWorkspaceLayoutPreferences(resetInspectorLayoutPreferences(workspaceLayoutPreferences));
         }}
       />
       <StatusBar document={document} />

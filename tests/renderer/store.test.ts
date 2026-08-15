@@ -179,13 +179,13 @@ describe('renderer workspace ordering and document isolation', () => {
 
   it('hydrates workspace layout before the canvas, keeps it across shell replacement, and retries failed persistence without touching artwork', async () => {
     const document = createPixelDocument('sprite', 'Persistent workspace layout');
-    const durable: WorkspaceLayoutPreferences = { inspectorCollapsed: true, inspectorExpandedWidth: 472 };
-    const recovered: WorkspaceLayoutPreferences = { inspectorCollapsed: false, inspectorExpandedWidth: 448 };
+    const durable: WorkspaceLayoutPreferences = { inspectorCollapsed: true, inspectorExpandedWidth: 472, mapSetupExpanded: true };
+    const recovered: WorkspaceLayoutPreferences = { inspectorCollapsed: false, inspectorExpandedWidth: 448, mapSetupExpanded: false };
     let bootstrapCalls = 0;
     const setTimeout = vi.fn();
     const applyTransaction = vi.fn();
     const setWorkspaceLayoutPreferences = vi.fn()
-      .mockResolvedValueOnce({ saved: false, message: 'Inspector layout changed in this editor, but AIDraw could not save it. The previous saved layout remains.' })
+      .mockResolvedValueOnce({ saved: false, message: 'Workspace layout changed in this editor, but AIDraw could not save it. The previous saved layout remains.' })
       .mockResolvedValueOnce({ saved: true, preferences: recovered });
     const api = {
       bootstrap: vi.fn(async () => bootstrapSnapshot(
