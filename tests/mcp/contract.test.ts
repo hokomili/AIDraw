@@ -368,6 +368,8 @@ describe('authenticated stateful MCP contract', () => {
     expect(guide).toContain('HTTP 404 unknown_session');
     expect(guide).toContain('Tool-level Invalid arguments');
     expect(guide).toContain('Configuration-profile availability remains separate from installed-client acceptance');
+    expect(guide).toContain('pixel.wang-terrain.stroke');
+    expect(guide).toContain('intent-derived deterministic stream');
     const safetyHelp = await callTool(started.url, client.headers, 13, 'aidraw_help', { topic: 'safety' });
     expect(safetyHelp.steps).toEqual(expect.arrayContaining([
       expect.stringContaining('HTTP 401 is authentication'),
@@ -377,6 +379,12 @@ describe('authenticated stateful MCP contract', () => {
       expect.stringContaining('HTTP 404 unknown_session is a stale process-lifetime session'),
       expect.stringContaining('tool Invalid arguments'),
     ]));
+    const operationsHelp = await callTool(started.url, client.headers, 14, 'aidraw_help', { topic: 'operations' });
+    expect(operationsHelp.steps).toEqual(expect.arrayContaining([
+      expect.stringContaining('pixel.wang-terrain.stroke requires one exact map'),
+      expect.stringContaining('creates no revision for an unmatched or already-matching stroke'),
+    ]));
+    expect(JSON.stringify(operationsHelp.examples)).toContain('pixel.wang-terrain.stroke');
   });
 
   it('initializes the same raw Streamable HTTP profile under each configured client name', async () => {
@@ -709,6 +717,86 @@ describe('authenticated stateful MCP contract', () => {
     expect(await callTool(started.url, client.headers, 4, 'canvas_apply', { documentId: document.id, clientOperationId: 'variant-paint', label: 'Paint weighted grass', playback: { mode: 'instant', speed: 1 }, operations: [{ kind: 'pixel.tile-variants.paint', mapId: currentMap.id, layerId: layer.id, tilesetId: tileset.id, tileId: 0, points, seed: 42, expectedRevision: layer.revision }] })).toMatchObject({ status: 'committed' });
     const painted = documents.getDocument(document.id); if (!painted || painted.kind !== 'pixel') throw new Error('Expected pixel document'); const paintedMap = painted.pixelAssets[map.id]; if (paintedMap.type !== 'tilemap') throw new Error('Expected tilemap'); const paintedLayer = paintedMap.layers[layer.id]; if (paintedLayer.type !== 'tile') throw new Error('Expected tile layer');
     const gids = points.map((point) => decodeTiledGid(readTileAt(paintedLayer.chunks ?? {}, point.x, point.y)).gid); expect(new Set(gids)).toEqual(new Set([1, 2]));
+  });
+
+  it('plans authenticated Wang terrain strokes atomically through one canonical actor transaction', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-mcp-')); temporaryPaths.push(root);
+    const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0'); documents.initialize();
+    const host = new McpHost(documents, '1.0.0', join(root, 'port.json')); hosts.push(host); const started = await host.start('terrain-token');
+    const client = await initializeClient(started.url, 'terrain-token', 'terrain-client');
+    const joined = await callTool(started.url, client.headers, 2, 'session_manage', { action: 'join', name: 'Terrain agent', color: '#547fc4' });
+    const actor = joined.actor as { id: string };
+    const created = await callTool(started.url, client.headers, 3, 'document_manage', { action: 'new', kind: 'tilemap', name: 'Semantic terrain', width: 2, height: 2, orientation: 'orthogonal', infinite: false, tileWidth: 16, tileHeight: 16 });
+    const document = created.activeDocument as ReturnType<DocumentService['snapshot']>['activeDocument']; if (!document || document.kind !== 'pixel') throw new Error('Expected pixel document');
+    const map = document.pixelAssets[document.activeAssetId]; if (map.type !== 'tilemap') throw new Error('Expected tilemap');
+    const layer = Object.values(map.layers).find((entry) => entry.type === 'tile'); if (!layer || layer.type !== 'tile') throw new Error('Expected tile layer');
+    const wangIdFromMask = (mask: number) => Array.from({ length: 8 }, (_, slot) => (mask & (1 << slot)) === 0 ? 0 : 1) as [number, number, number, number, number, number, number, number];
+    const completeTiles = Array.from({ length: 256 }, (_, mask) => ({ tileId: mask, wangId: wangIdFromMask(mask) }));
+    const weightedTiles = [...completeTiles, { tileId: 256, wangId: wangIdFromMask(255) }];
+    const color = { id: 1, name: 'Grass', color: '#55aa44', tileId: 255, probability: 1 };
+    const tileset = createPixelTileset('Semantic terrain tiles', 'semantic-terrain-source', 16, 16, 257, 1); tileset.firstGid = 37;
+    tileset.wangSets = [
+      { id: 'complete-terrain', name: 'Complete terrain', type: 'mixed', colors: [color], tiles: weightedTiles },
+      { id: 'missing-left-terrain', name: 'Missing left terrain', type: 'mixed', colors: [color], tiles: weightedTiles.filter((tile) => tile.tileId !== 224) },
+    ];
+    const attachedMap = structuredClone(map); attachedMap.tilesetIds = [tileset.id];
+    expect(await callTool(started.url, client.headers, 4, 'canvas_apply', { documentId: document.id, clientOperationId: 'terrain-setup', label: 'Attach terrain definitions', playback: { mode: 'instant', speed: 1 }, operations: [{ kind: 'pixel.asset.add', asset: tileset }, { kind: 'pixel.asset.replace', asset: attachedMap, expectedRevision: map.revision }] })).toMatchObject({ status: 'committed' });
+
+    const currentLayer = () => {
+      const current = documents.getDocument(document.id); if (!current || current.kind !== 'pixel') throw new Error('Expected pixel document');
+      const currentMap = current.pixelAssets[map.id]; if (currentMap.type !== 'tilemap') throw new Error('Expected tilemap');
+      const currentLayer = currentMap.layers[layer.id]; if (currentLayer.type !== 'tile' || !currentLayer.chunks) throw new Error('Expected tile layer');
+      return { document: current, map: currentMap, layer: currentLayer };
+    };
+    const stroke = (wangSetId: string, mode: 'paint' | 'erase', expectedRevision: number, points = [{ x: 0, y: 0 }, { x: 1, y: 1 }]) => ({
+      kind: 'pixel.wang-terrain.stroke', mapId: map.id, layerId: layer.id, tilesetId: tileset.id, wangSetId, colorId: 1, mode, points, expectedRevision,
+    });
+
+    const beforePaint = currentLayer();
+    expect(await callTool(started.url, client.headers, 5, 'canvas_apply', { documentId: document.id, clientOperationId: 'terrain-paint', label: 'Paint semantic terrain', playback: { mode: 'instant', speed: 1 }, operations: [stroke('complete-terrain', 'paint', beforePaint.layer.revision)] })).toMatchObject({ status: 'committed' });
+    const painted = currentLayer();
+    const coordinates = [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 0, y: 1 }, { x: 1, y: 1 }];
+    const paintedGids = coordinates.map(({ x, y }) => readTileAt(painted.layer.chunks!, x, y));
+    expect(paintedGids.every((gid) => decodeTiledGid(gid).gid >= tileset.firstGid)).toBe(true);
+    expect(painted.document.activity.find((entry) => entry.label === 'Paint semantic terrain')).toMatchObject({ actor: { id: actor.id }, operationCount: 1 });
+
+    const beforeNoop = structuredClone(painted.document);
+    const noop = await callToolMessage(started.url, client.headers, 6, 'canvas_apply', { documentId: document.id, clientOperationId: 'terrain-noop', label: 'Repeat semantic terrain', playback: { mode: 'instant', speed: 1 }, operations: [stroke('complete-terrain', 'paint', painted.layer.revision)] });
+    expect(noop.result?.isError).toBe(true);
+    expect(JSON.stringify(noop)).toContain('no tiles changed and no revision was created');
+    expect(documents.getDocument(document.id)).toEqual(beforeNoop);
+
+    expect(await callTool(started.url, client.headers, 7, 'canvas_apply', { documentId: document.id, clientOperationId: 'terrain-erase', label: 'Erase semantic terrain', playback: { mode: 'instant', speed: 1 }, operations: [stroke('complete-terrain', 'erase', painted.layer.revision)] })).toMatchObject({ status: 'committed' });
+    const erased = currentLayer();
+    expect(coordinates.map(({ x, y }) => readTileAt(erased.layer.chunks!, x, y))).toEqual([tileset.firstGid, tileset.firstGid, tileset.firstGid, tileset.firstGid]);
+
+    expect(await callTool(started.url, client.headers, 8, 'history_manage', { action: 'undo', documentId: document.id })).toMatchObject({ status: 'committed' });
+    expect(coordinates.map(({ x, y }) => readTileAt(currentLayer().layer.chunks!, x, y))).toEqual(paintedGids);
+    expect(await callTool(started.url, client.headers, 9, 'history_manage', { action: 'undo', documentId: document.id })).toMatchObject({ status: 'committed' });
+    const restored = currentLayer();
+    expect(coordinates.map(({ x, y }) => readTileAt(restored.layer.chunks!, x, y))).toEqual([0, 0, 0, 0]);
+
+    const beforeRefusals = structuredClone(restored.document);
+    const unmatched = await callToolMessage(started.url, client.headers, 10, 'canvas_apply', { documentId: document.id, clientOperationId: 'terrain-unmatched', label: 'Reject incomplete terrain', playback: { mode: 'instant', speed: 1 }, operations: [stroke('missing-left-terrain', 'paint', restored.layer.revision, [{ x: 0, y: 0 }])] });
+    expect(unmatched.result?.isError).toBe(true);
+    expect(JSON.stringify(unmatched)).toContain('need exact Wang mappings');
+    expect(JSON.stringify(unmatched)).toContain('No terrain tiles changed');
+    const outside = await callToolMessage(started.url, client.headers, 11, 'canvas_apply', { documentId: document.id, clientOperationId: 'terrain-outside', label: 'Reject outside terrain', playback: { mode: 'instant', speed: 1 }, operations: [stroke('complete-terrain', 'paint', restored.layer.revision, [{ x: 2, y: 2 }])] });
+    expect(outside.result?.isError).toBe(true);
+    expect(JSON.stringify(outside)).toContain('outside the map');
+    const stale = await callToolMessage(started.url, client.headers, 12, 'canvas_apply', { documentId: document.id, clientOperationId: 'terrain-stale', label: 'Reject stale terrain', playback: { mode: 'instant', speed: 1 }, operations: [stroke('complete-terrain', 'paint', 0)] });
+    expect(stale.result?.isError).toBe(true);
+    expect(JSON.stringify(stale)).toContain('observe and retry');
+    const invalid = await callToolMessage(started.url, client.headers, 13, 'canvas_apply', { documentId: document.id, clientOperationId: 'terrain-invalid', label: 'Reject invented terrain seed', playback: { mode: 'instant', speed: 1 }, operations: [{ ...stroke('complete-terrain', 'paint', restored.layer.revision), seed: 42 }] });
+    expect(invalid.result?.isError).toBe(true);
+    expect(JSON.stringify(invalid)).toContain('Unrecognized key');
+    expect(documents.getDocument(document.id)).toEqual(beforeRefusals);
+
+    const lock = documents.acquireLock({ documentId: document.id, region: { kind: 'tile', assetId: map.id, x: 0, y: 0, width: 2, height: 2 } });
+    expect(lock.acquired).toBe(true);
+    expect(await callTool(started.url, client.headers, 14, 'canvas_apply', { documentId: document.id, clientOperationId: 'terrain-locked', label: 'Respect terrain lock', playback: { mode: 'instant', speed: 1 }, operations: [stroke('complete-terrain', 'paint', restored.layer.revision)] })).toMatchObject({ status: 'locked', conflict: { retryable: true } });
+    if (lock.lockId) documents.releaseLock(lock.lockId);
+    expect(documents.getDocument(document.id)).toEqual(beforeRefusals);
   });
 
   it('authors typed per-tile collisions through the authenticated semantic contract', async () => {

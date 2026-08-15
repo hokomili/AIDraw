@@ -70,6 +70,28 @@ export interface WangTerrainPaintResult {
 export const MAX_WANG_TERRAIN_STROKE_POINTS = 65_536;
 export const MAX_WANG_TERRAIN_COORDINATE = 16_777_216;
 
+/**
+ * Build a platform-stable pseudo-random stream for semantic Wang planning.
+ * The caller owns the seed material; no document seed or ambient randomness is
+ * read or advanced. Hashing UTF-16 code units bytewise keeps the result exact
+ * across the browser and Node runtimes that share this package.
+ */
+export function createWangTerrainStrokeRandom(seedMaterial: string): () => number {
+  let state = 0x811c9dc5;
+  for (let index = 0; index < seedMaterial.length; index += 1) {
+    const code = seedMaterial.charCodeAt(index);
+    state = Math.imul((state ^ (code & 0xff)) >>> 0, 0x01000193) >>> 0;
+    state = Math.imul((state ^ (code >>> 8)) >>> 0, 0x01000193) >>> 0;
+  }
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let value = state;
+    value = Math.imul(value ^ (value >>> 15), value | 1);
+    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+    return ((value ^ (value >>> 14)) >>> 0) / 4_294_967_296;
+  };
+}
+
 export interface WangTerrainStrokeOptions {
   erase?: boolean;
   random?: () => number;

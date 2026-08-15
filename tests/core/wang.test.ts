@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { HUMAN_ACTOR, MAX_WANG_TERRAIN_COORDINATE, MAX_WANG_TERRAIN_STROKE_POINTS, applyTransaction, createId, createPixelDocument, matchingWangTiles, nowIso, paintWangTerrain, planWangTerrainStroke, readTileAt, selectWangTile, type WangSet } from '@aidraw/core';
+import { HUMAN_ACTOR, MAX_WANG_TERRAIN_COORDINATE, MAX_WANG_TERRAIN_STROKE_POINTS, applyTransaction, createId, createPixelDocument, createWangTerrainStrokeRandom, matchingWangTiles, nowIso, paintWangTerrain, planWangTerrainStroke, readTileAt, selectWangTile, type WangSet } from '@aidraw/core';
 
 const terrain: WangSet = {
   id: 'wang-grass', name: 'Grass', type: 'mixed',
@@ -65,6 +65,27 @@ describe('Wang terrain selection', () => {
     expect(plan.affectedCellCount).toBe(12);
     expect(plan.changes).toEqual([...plan.changes].sort((left, right) => left.y - right.y || left.x - right.x));
     expect(new Set(plan.changes.map((change) => `${change.x},${change.y}`)).size).toBe(plan.changes.length);
+  });
+
+  it('replays weighted concrete variants from explicit seed material without ambient randomness', () => {
+    const weighted: WangSet = {
+      ...transitions,
+      tiles: [
+        ...transitions.tiles,
+        { tileId: 10, wangId: [1, 1, 1, 1, 1, 1, 1, 1] },
+      ],
+    };
+    const points = [{ x: 4, y: 5 }, { x: 5, y: 5 }];
+    const seed = JSON.stringify(['aidraw-wang-terrain-stroke-v1', 'document', 'map', 'layer', 'tileset', 'wang', 1, 'paint', [4, 5, 5, 5]]);
+    const first = planWangTerrainStroke(weighted, points, 1, () => 0, { random: createWangTerrainStrokeRandom(seed) });
+    const second = planWangTerrainStroke(weighted, points, 1, () => 0, { random: createWangTerrainStrokeRandom(seed) });
+    expect(first).toEqual(second);
+    expect(first.status).toBe('ready');
+    if (first.status !== 'ready') return;
+    expect([1, 10]).toContain(first.changes.find(({ x, y }) => x === 4 && y === 5)?.tileId);
+    const samples = Array.from({ length: 8 }, createWangTerrainStrokeRandom(seed));
+    expect(samples.every((value) => value >= 0 && value < 1)).toBe(true);
+    expect(samples).toEqual(Array.from({ length: 8 }, createWangTerrainStrokeRandom(seed)));
   });
 
   it('omits every tile that already matches the completed stroke', () => {
@@ -172,5 +193,14 @@ describe('Wang terrain selection', () => {
     expect(() => planWangTerrainStroke(transitions, [{ x: 0.5, y: 0 }], 1, () => 0)).toThrow('safe integers');
     expect(() => planWangTerrainStroke(transitions, [{ x: MAX_WANG_TERRAIN_COORDINATE, y: 0 }], 1, () => 0)).toThrow('16,777,216');
     expect(() => planWangTerrainStroke(transitions, Array.from({ length: MAX_WANG_TERRAIN_STROKE_POINTS + 1 }, () => ({ x: 0, y: 0 })), 1, () => 0)).toThrow('65,536 points');
+  });
+
+  it('retains signed coordinates for an unbounded infinite-map stroke', () => {
+    const plan = planWangTerrainStroke(transitions, [{ x: -4, y: -7 }], 1, () => 0, { random: () => 0 });
+    expect(plan.status).toBe('ready');
+    if (plan.status !== 'ready') return;
+    expect(plan.changes).toHaveLength(9);
+    expect(plan.changes).toContainEqual({ x: -4, y: -7, tileId: 1 });
+    expect(plan.changes).toContainEqual({ x: -5, y: -8, tileId: 9 });
   });
 });

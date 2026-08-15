@@ -110,6 +110,7 @@ In addition to the canonical reducer kinds, MCP accepts these validated semantic
 - `pixel.map-object.upsert` and `pixel.map-object.delete` for typed rectangle/ellipse/polygon/polyline object-layer authoring in map-pixel coordinates;
 - `pixel.tileset-collision.upsert` and `pixel.tileset-collision.delete` for typed per-tile collision geometry and custom properties;
 - `pixel.wang-set.upsert|delete`, `pixel.wang-color.upsert|delete`, and `pixel.wang-tile.assign` for validated edge/corner/mixed terrain authoring;
+- `pixel.wang-terrain.stroke` for one exact paint/erase request against an observed map, tile layer, attached tileset, Wang set/color, 1–65,536 ordered signed points, and current layer revision. The shared all-or-nothing planner emits one ordinary `pixel.tilemap.set`; missing final signatures, foreign neighboring GIDs, stale identities/revisions, out-of-map points, and already-matching strokes return before canonical mutation;
 - `pixel.tile-variants.paint` for coordinate-stable weighted non-Wang variants using an explicit seed or the map's persisted `aidraw:variantSeed` property;
 - `illustration.path.node.move|insert|delete|convert` and `illustration.path.closed.set`; request `canvas_observe.pathObjectId` first for revision-labelled anchors and in/out handles.
 - `illustration.path.arcs.convert` for exact SVG elliptical-arc conversion into editable cubic segments without dropping subpaths silently;
@@ -119,6 +120,8 @@ In addition to the canonical reducer kinds, MCP accepts these validated semantic
 Path booleans use the same exact shared Paper.js kernel in renderer and headless execution. Large multi-stage work should remain semantically partitioned so progress, cancellation, undo, and attribution are understandable.
 
 `aidraw:variantGroup` (tile property) and `aidraw:variantSeed` (map property) are AIDraw-namespaced custom properties, not standard Tiled random-brush behavior. Tiled JSON/XML export retains them as ordinary typed properties, but no external editor interpretation is promised. UI and `pixel.tile-variants.paint` use the same coordinate-stable weighted choice; advancing the persisted seed changes subsequent choices only, while already painted GIDs remain exact.
+
+Semantic Wang strokes deliberately do not consume that mutable map seed. Their weighted selector is initialized from a versioned exact logical intent containing the canonical document/map/layer/tileset/set identities, color, paint/erase mode, and ordered points; actor identity and `expectedRevision` are excluded so an observe-and-retry does not reshuffle an unchanged intent. The admitted layer revision is still checked before planning and again by the canonical reducer, and every nonzero affected GID must resolve back to the selected attached tileset. This is deterministic lowering into the existing reducer, actor history, lock, replay, persistence, and Tiled-GID path—not a new stored operation kind or recursive terrain synthesizer.
 
 ### Illustration observation allocation boundary
 

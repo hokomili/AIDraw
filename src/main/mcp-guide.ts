@@ -145,7 +145,8 @@ const helpTopics: Record<AIDrawHelpTopic, AIDrawHelpResult> = {
     summary: 'Canvas operation families accepted by canvas_apply; field-level limits remain enforced by the tool and canonical schemas.',
     steps: [
       'Core document/asset operations include document.rename, asset/provenance add|delete, illustration artboard/layer/object/paint/guide/snap/animation operations, and pixel palette/frame/asset/cel/tilemap/link/stamp/font/cycle operations.',
-      'Pixel semantic operations include flood-fill, replace-color, palette replace-delete, adjust-index, ordered-dither, bitmap-text.paint, selection.transform, image.quantize, frame helpers, stamps, project links, map objects, collisions, Wang terrain, and tile variants.',
+      'Pixel semantic operations include flood-fill, replace-color, palette replace-delete, adjust-index, ordered-dither, bitmap-text.paint, selection.transform, image.quantize, frame helpers, stamps, project links, map objects, collisions, pixel.wang-terrain.stroke, Wang metadata, and tile variants.',
+      'pixel.wang-terrain.stroke requires one exact map, tile layer, attached tileset, Wang set, Wang color, paint|erase mode, 1–65,536 ordered signed points, and the current tile-layer revision. It plans atomically, chooses weighted variants deterministically from that exact logical intent, and creates no revision for an unmatched or already-matching stroke.',
       'Illustration semantic operations include align/distribute, path boolean/node/arc/split/join, material, gradient, text, crop, filters, masks, and animation helpers.',
       'Use canvas_observe to obtain exact IDs and revisions. For large exact changes prefer compact pixel.cel.region or pixel.tilemap.region runs.',
       'Unknown kinds, missing conditionally required fields, stale revisions, forged attribution, and unsafe graph/reference changes fail closed.',
@@ -154,6 +155,7 @@ const helpTopics: Record<AIDrawHelpTopic, AIDrawHelpResult> = {
     relatedTools: ['canvas_observe', 'canvas_apply'],
     examples: [
       { tool: 'canvas_apply', arguments: { documentId: '<documentId>', clientOperationId: '<id>', label: 'Flood fill', operations: [{ kind: 'pixel.flood-fill', spriteId: '<spriteId>', celId: '<celId>', x: 4, y: 4, index: 2, expectedRevision: 7 }] }, purpose: 'Semantic indexed operation expanded into canonical runs.' },
+      { tool: 'canvas_apply', arguments: { documentId: '<documentId>', clientOperationId: '<id>', label: 'Paint terrain path', operations: [{ kind: 'pixel.wang-terrain.stroke', mapId: '<mapId>', layerId: '<tileLayerId>', tilesetId: '<tilesetId>', wangSetId: '<wangSetId>', colorId: 1, mode: 'paint', points: [{ x: 4, y: 5 }, { x: 5, y: 5 }], expectedRevision: 7 }] }, purpose: 'Atomically lower one exact Wang stroke into the established canonical tilemap mutation.' },
       { tool: 'canvas_apply', arguments: { documentId: '<documentId>', clientOperationId: '<id>', label: 'Align shapes', operations: [{ kind: 'illustration.objects.align', objectIds: ['<a>', '<b>'], expectedRevisions: { '<a>': 2, '<b>': 1 }, mode: 'left', target: 'selection' }] }, purpose: 'Semantic multi-object revision-checked alignment.' },
     ],
     guideUri: AIDRAW_GUIDE_URI,
@@ -238,7 +240,7 @@ canvas_observe returns canonical snapshots or revision changes and can optionall
 
 canvas_apply accepts 1–256 operations. clientOperationId is the idempotency key for one logical transaction. A duplicate key does not apply twice. Use entity/document revisions from observation; stale replacements conflict, non-overlapping additions may still commit, and human locks return retryable locked state. Playback may be instant or visible/animated. Durable batches add jobId, private resumeToken, and exact sequence.
 
-Canonical operation families include document rename; asset/provenance; illustration artboard/layer/object/paint/guide/snap/animation; and pixel palette/frame/asset/cel/tilemap/link/stamp/font/cycle operations. Semantic helpers cover pixel fill/color/dither/text/selection/quantize/frame/stamp/link/map/collision/Wang/variant workflows and illustration alignment/path/material/gradient/text/crop/filter/mask/animation workflows. Call aidraw_help with topic=operations for compact examples; tools still validate every canonical field, limit, graph reference, and revision.
+Canonical operation families include document rename; asset/provenance; illustration artboard/layer/object/paint/guide/snap/animation; and pixel palette/frame/asset/cel/tilemap/link/stamp/font/cycle operations. Semantic helpers cover pixel fill/color/dither/text/selection/quantize/frame/stamp/link/map/collision/Wang/variant workflows and illustration alignment/path/material/gradient/text/crop/filter/mask/animation workflows. pixel.wang-terrain.stroke addresses one exact map/layer/attached-tileset/set/color, paint or erase, 1–65,536 ordered signed points, and the observed layer revision. It applies the complete shared Wang plan only by lowering it to one canonical pixel.tilemap.set; unmatched and already-matching requests create no revision, while weighted variants use an intent-derived deterministic stream without reading or changing a document seed. Call aidraw_help with topic=operations for compact examples; tools still validate every canonical field, limit, graph reference, and revision.
 
 ## Jobs, approvals, files, and privacy
 

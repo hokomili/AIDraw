@@ -11,11 +11,15 @@ import {
 import { z } from 'zod';
 import {
   CanvasOperationSchema,
+  MAX_WANG_TERRAIN_COORDINATE,
+  MAX_WANG_TERRAIN_STROKE_POINTS,
   NewDocumentOptionsSchema,
   applyTextStyleRange,
   bitmapTextCells,
   createId,
   createPixelCelReader,
+  createWangTerrainStrokeRandom,
+  decodeTiledGid,
   deletePixelAnimationTag,
   duplicatePixelFrame,
   encodeTiledGid,
@@ -24,12 +28,15 @@ import {
   orderedDitherIndex,
   placePixelStamp,
   placeTileStamp,
+  planWangTerrainStroke,
   readPixel,
+  readTileAt,
   replacePixelRegion,
   replaceAndDeletePaletteIndexOperations,
   replaceStyledText,
   reorderPixelFrame,
   resolvePixelCel,
+  resolveTilesetForGid,
   stepPaletteByLuminance,
   setPixelFrameCelsLinked,
   setPixelFramePaletteOverride,
@@ -244,6 +251,7 @@ const PixelProjectLinksPackSchema = z.object({ kind: z.literal('pixel.project-li
 const PixelStampPlaceSchema = z.object({ kind: z.literal('pixel.stamp.place'), stampId: z.string().min(1), spriteId: z.string().min(1), celId: z.string().min(1), x: z.number().int().min(-8_192).max(16_384), y: z.number().int().min(-8_192).max(16_384), transform: z.enum(['flip-horizontal', 'flip-vertical', 'rotate-clockwise', 'rotate-counterclockwise']).optional(), expectedRevision: z.number().int().nonnegative() }).strict();
 const PixelTileStampPlaceSchema = z.object({ kind: z.literal('pixel.tile-stamp.place'), stampId: z.string().min(1), mapId: z.string().min(1), layerId: z.string().min(1), x: z.number().int().min(-16_777_216).max(16_777_216), y: z.number().int().min(-16_777_216).max(16_777_216), transform: z.enum(['flip-horizontal', 'flip-vertical', 'rotate-clockwise', 'rotate-counterclockwise']).optional(), expectedRevision: z.number().int().nonnegative() }).strict();
 const PixelTileVariantsPaintSchema = z.object({ kind: z.literal('pixel.tile-variants.paint'), mapId: z.string().min(1), layerId: z.string().min(1), tilesetId: z.string().min(1), tileId: z.number().int().nonnegative(), points: z.array(z.object({ x: z.number().int().min(-16_777_216).max(16_777_216), y: z.number().int().min(-16_777_216).max(16_777_216) }).strict()).min(1).max(65_536), seed: z.number().int().min(-2_147_483_648).max(2_147_483_647).optional(), transforms: z.object({ hFlip: z.boolean().default(false), vFlip: z.boolean().default(false), diagonal: z.boolean().default(false) }).strict().optional(), expectedRevision: z.number().int().nonnegative() }).strict();
+const PixelWangTerrainStrokeSchema = z.object({ kind: z.literal('pixel.wang-terrain.stroke'), mapId: z.string().min(1).max(200), layerId: z.string().min(1).max(200), tilesetId: z.string().min(1).max(200), wangSetId: z.string().min(1).max(200), colorId: z.number().int().min(1).max(255), mode: z.enum(['paint', 'erase']), points: z.array(z.object({ x: z.number().int().min(-MAX_WANG_TERRAIN_COORDINATE).max(MAX_WANG_TERRAIN_COORDINATE), y: z.number().int().min(-MAX_WANG_TERRAIN_COORDINATE).max(MAX_WANG_TERRAIN_COORDINATE) }).strict()).min(1).max(MAX_WANG_TERRAIN_STROKE_POINTS), expectedRevision: z.number().int().nonnegative() }).strict();
 const MapObjectInputSchema = z.object({ id: z.string().min(1), type: z.enum(['rectangle', 'ellipse', 'polygon', 'polyline']), x: z.number().finite().min(-16_777_216).max(16_777_216), y: z.number().finite().min(-16_777_216).max(16_777_216), width: z.number().finite().positive().max(16_777_216).optional(), height: z.number().finite().positive().max(16_777_216).optional(), points: z.array(z.object({ x: z.number().finite(), y: z.number().finite() }).strict()).max(65_536).optional(), properties: z.record(z.string(), z.union([z.string(), z.number().finite(), z.boolean()])) }).strict().superRefine((object, context) => { if ((object.type === 'rectangle' || object.type === 'ellipse') && (object.width === undefined || object.height === undefined)) context.addIssue({ code: 'custom', message: 'Rectangle and ellipse map objects require width and height.' }); if ((object.type === 'polygon' || object.type === 'polyline') && (!object.points || object.points.length < 2)) context.addIssue({ code: 'custom', path: ['points'], message: 'Polygon and polyline map objects require at least two points.' }); });
 const PixelMapObjectUpsertSchema = z.object({ kind: z.literal('pixel.map-object.upsert'), mapId: z.string().min(1), layerId: z.string().min(1), object: MapObjectInputSchema, expectedRevision: z.number().int().nonnegative() }).strict();
 const PixelMapObjectDeleteSchema = z.object({ kind: z.literal('pixel.map-object.delete'), mapId: z.string().min(1), layerId: z.string().min(1), objectId: z.string().min(1), expectedRevision: z.number().int().nonnegative() }).strict();
@@ -777,6 +785,54 @@ async function expandAgentCanvasOperation(document: AIDrawDocument, value: Recor
     const transforms = operation.transforms ?? { hFlip: false, vFlip: false, diagonal: false };
     const changes = points.map((point) => ({ ...point, gid: encodeTiledGid(tileset.firstGid + chooseTileVariant(tileset, operation.tileId, point.x, point.y, seed), transforms) }));
     return [{ kind: 'pixel.tilemap.set', mapId: map.id, layerId: layer.id, changes, expectedRevision: operation.expectedRevision }];
+  }
+  if (value.kind === 'pixel.wang-terrain.stroke') {
+    const operation = PixelWangTerrainStrokeSchema.parse(value);
+    if (document.kind !== 'pixel') throw new Error('Wang terrain strokes require a pixel project.');
+    const map = document.pixelAssets[operation.mapId];
+    if (!map || map.type !== 'tilemap') throw new Error(`Tilemap ${operation.mapId} does not exist.`);
+    const layer = map.layers[operation.layerId];
+    if (!layer || layer.type !== 'tile' || !layer.chunks) throw new Error(`Tile layer ${operation.layerId} does not exist.`);
+    if (operation.expectedRevision !== layer.revision) throw new Error(`Tile layer ${layer.id} revision changed from ${operation.expectedRevision} to ${layer.revision}; observe and retry. No terrain tiles changed.`);
+    const tileset = document.pixelAssets[operation.tilesetId];
+    if (!tileset || tileset.type !== 'tileset' || !map.tilesetIds.includes(tileset.id)) throw new Error(`Tileset ${operation.tilesetId} is not attached to tilemap ${map.id}.`);
+    const wangSet = tileset.wangSets.find((entry) => entry.id === operation.wangSetId);
+    if (!wangSet) throw new Error(`Wang set ${operation.wangSetId} does not exist in tileset ${tileset.id}.`);
+    if (!wangSet.colors.some((color) => color.id === operation.colorId)) throw new Error(`Wang color ${operation.colorId} does not exist in ${wangSet.name}.`);
+    const tileCount = tileset.columns * tileset.rows;
+    if (wangSet.tiles.some((tile) => tile.tileId < 0 || tile.tileId >= tileCount)) throw new Error(`Wang set ${wangSet.id} addresses a tile outside tileset ${tileset.id}; no terrain tiles changed.`);
+    const contains = (x: number, y: number) => map.infinite || (x >= 0 && y >= 0 && x < map.width && y < map.height);
+    const localTileAt = (x: number, y: number): number | undefined => {
+      const gid = decodeTiledGid(readTileAt(layer.chunks!, x, y)).gid;
+      if (gid === 0) return undefined;
+      const resolved = resolveTilesetForGid(document, map, gid);
+      if (!resolved || resolved.tileset.id !== tileset.id) throw new Error(`Terrain stroke cell (${x}, ${y}) contains GID ${gid} outside tileset ${tileset.id}; no terrain tiles changed.`);
+      return resolved.localId;
+    };
+    const points = [...new Map(operation.points.map((point) => [`${point.x},${point.y}`, point])).values()];
+    const seedMaterial = JSON.stringify([
+      'aidraw-wang-terrain-stroke-v1', document.id, map.id, layer.id, tileset.id,
+      wangSet.id, operation.colorId, operation.mode,
+      points.flatMap((point) => [point.x, point.y]),
+    ]);
+    const plan = planWangTerrainStroke(wangSet, points, operation.colorId, localTileAt, {
+      erase: operation.mode === 'erase',
+      contains,
+      random: createWangTerrainStrokeRandom(seedMaterial),
+    });
+    if (plan.status === 'unmatched') {
+      const examples = plan.unmatched.slice(0, 3).map((entry) => `(${entry.x}, ${entry.y}) [${entry.wangId.join(',')}]`).join('; ');
+      const remainder = plan.unmatched.length > 3 ? `; +${plan.unmatched.length - 3} more` : '';
+      throw new Error(`Terrain stroke was not applied: ${plan.unmatched.length} in-map cell${plan.unmatched.length === 1 ? '' : 's'} need exact Wang mappings: ${examples}${remainder}. No terrain tiles changed; add those mappings to "${wangSet.name}" and retry.`);
+    }
+    if (!plan.changes.length) throw new Error('The terrain stroke already matches the requested terrain; no tiles changed and no revision was created.');
+    return [{
+      kind: 'pixel.tilemap.set',
+      mapId: map.id,
+      layerId: layer.id,
+      changes: plan.changes.map((change) => ({ x: change.x, y: change.y, gid: encodeTiledGid(tileset.firstGid + change.tileId) })),
+      expectedRevision: operation.expectedRevision,
+    }];
   }
   if (value.kind === 'pixel.map-object.upsert' || value.kind === 'pixel.map-object.delete') {
     const operation = value.kind === 'pixel.map-object.upsert' ? PixelMapObjectUpsertSchema.parse(value) : PixelMapObjectDeleteSchema.parse(value); if (document.kind !== 'pixel') throw new Error('Map objects require a pixel project.'); const source = document.pixelAssets[operation.mapId]; if (!source || source.type !== 'tilemap') throw new Error(`Tilemap ${operation.mapId} does not exist.`); const layer = source.layers[operation.layerId]; if (!layer || layer.type !== 'object') throw new Error('Map objects require an existing object layer.'); const map = structuredClone(source); const nextLayer = map.layers[operation.layerId]; if (nextLayer.type !== 'object') throw new Error('Map object layer changed unexpectedly.');
