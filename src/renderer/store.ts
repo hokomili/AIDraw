@@ -8,7 +8,7 @@ import type { ReplaySource } from './replay';
 export type EditorTool =
   | 'select' | 'lasso' | 'hand' | 'zoom' | 'pen' | 'pencil' | 'brush' | 'eraser'
   | 'bezier' | 'node' | 'gradient' | 'crop' | 'line' | 'rectangle' | 'ellipse' | 'polygon' | 'star' | 'text' | 'eyedropper'
-  | 'fill' | 'replace' | 'wand' | 'stamp' | 'dither' | 'lighten' | 'darken' | 'terrain';
+  | 'fill' | 'replace' | 'wand' | 'stamp' | 'dither' | 'lighten' | 'darken' | 'terrain' | 'tile-object';
 
 type ToastTone = 'info' | 'success' | 'warning' | 'error';
 

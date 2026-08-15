@@ -5,7 +5,7 @@ describe('orthogonal projection source parity', () => {
   it('shares authored-aspect extent and cell geometry across render surfaces', async () => {
     const interactive = await readFile(new URL('../../src/renderer/canvas/PixelCanvas.tsx', import.meta.url), 'utf8');
     const headless = await readFile(new URL('../../src/main/render-document.ts', import.meta.url), 'utf8');
-    expect(interactive).toContain("import { orthogonalCellRect, orthogonalCoordinateDeltaFromScreen, orthogonalObjectMatrix, orthogonalProjectionExtent } from '../../common/orthogonal-projection'");
+    expect(interactive).toContain("import { orthogonalCellRect, orthogonalObjectMatrix, orthogonalProjectionExtent } from '../../common/orthogonal-projection'");
     expect(headless).toContain("import { orthogonalCellRect, orthogonalObjectMatrix, orthogonalProjectionExtent } from '../common/orthogonal-projection'");
     expect(interactive).toContain("import { orthogonalMapTileArtworkEnvelope, orthogonalTileArtworkIntersects, orthogonalTileArtworkPlacement, type OrthogonalTileArtworkPlacement } from '../../common/orthogonal-tile-artwork'");
     expect(headless).toContain("import { orthogonalMapTileArtworkEnvelope, orthogonalTileArtworkIntersects, orthogonalTileArtworkPlacement } from '../common/orthogonal-tile-artwork'");
@@ -43,9 +43,12 @@ describe('orthogonal projection source parity', () => {
 
   it('uses the rectangular cell for objects, pointers, parallax, and grid rows', async () => {
     const source = await readFile(new URL('../../src/renderer/canvas/PixelCanvas.tsx', import.meta.url), 'utf8');
+    const coordinates = await readFile(new URL('../../src/renderer/canvas/pixel-coordinates.ts', import.meta.url), 'utf8');
     expect(source).toContain('clientPointToOrthogonalTile(event.clientX, event.clientY, bounds, size, layerView, view.scale * tilemap.tileHeight / tilemap.tileWidth)');
-    expect(source).toContain('clientPointToOrthogonalCoordinate(event.clientX, event.clientY, bounds, size, view, view.scale * tilemap.tileHeight / tilemap.tileWidth)');
-    expect(source).toContain('orthogonalCoordinateDeltaFromScreen(translation.x, translation.y, view.scale, view.scale * tilemap.tileHeight / tilemap.tileWidth)');
+    expect(source).toContain('clientPointToTilemapObjectAnchor(event.clientX, event.clientY, bounds, size, view, {');
+    expect(source).toContain('layerTranslation: translation');
+    expect(coordinates).toContain("geometry.orientation === 'isometric'");
+    expect(coordinates).toContain(': clientPointToOrthogonalCoordinate(clientX, clientY, bounds, logicalSize, layerView, cellHeight)');
     expect(source).toContain('orthogonalObjectMatrix(tilemap.tileWidth, tilemap.tileHeight, view.scale, orthogonalCellHeight)');
     expect(source).toContain("const rowHeight = tilemap?.orientation === 'orthogonal' ? orthogonalCellHeight : view.scale");
     expect(source.match(/tilemap\.orientation === 'orthogonal' \? view\.scale \/ tilemap\.tileWidth : view\.scale \/ Math\.max\(tilemap\.tileWidth, tilemap\.tileHeight\)/g)).toHaveLength(3);

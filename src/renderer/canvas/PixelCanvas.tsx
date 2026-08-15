@@ -70,18 +70,18 @@ import { TileTransformPicker } from '../components/TileTransformPicker';
 import { collectReplayMasks, replayPointKey, replayTileLayerKey } from '../replay';
 import { EditorDialog, EntryDialog } from '../components/EditorDialog';
 import { bresenham } from './geometry';
-import { clientPointToIsometricCoordinate, clientPointToIsometricTile, clientPointToOrthogonalCoordinate, clientPointToOrthogonalTile, clientPointToPixel } from './pixel-coordinates';
+import { clientPointToIsometricTile, clientPointToOrthogonalTile, clientPointToPixel, clientPointToTilemapObjectAnchor } from './pixel-coordinates';
 import { pixelSelectionBounds, transformPixelSelection, type PixelSelectionTransform } from '../../common/pixel-selection';
 import { MAX_GRID_LASSO_VERTICES, appendGridLassoPoint, captureGridSelection, combineGridSelection, createGridLassoDraft, placeGridClipboard, rasterizeGridLasso, scaleGridSelection, transformGridSelection, type GridLassoDraft, type GridSelectionClipboard } from '../../common/grid-selection';
 import type { PixelSelectionFragment } from '../../common/document-fragment';
 import { planPixelSelectionPaste } from '../../common/pixel-selection-clipboard';
 import { drawBoundedGridChecker } from '../../common/grid-checker';
 import { deleteMapObjectPoint, insertMapObjectPoint, mapObjectAtPoint, mapObjectBounds, moveMapObjectPoint, nearestMapObjectSegment, transformMapObject } from '../../common/map-objects';
-import { isometricCellRect, isometricCoordinateDeltaFromScreen, isometricObjectMatrix, isometricProjectionExtent, type IsometricCellRect } from '../../common/isometric-projection';
+import { isometricCellRect, isometricObjectMatrix, isometricProjectionExtent, type IsometricCellRect } from '../../common/isometric-projection';
 import { isometricMapTileArtworkEnvelope, isometricTileArtworkIntersects, isometricTileArtworkPlacement, type IsometricTileArtworkPlacement } from '../../common/isometric-tile-artwork';
 import { drawMapObjectOverlay, mapObjectIntersectsRasterRegion } from '../../common/map-object-render';
 import { tileObjectArtworkContainsPoint, tileObjectArtworkIntersects, tileObjectArtworkPlacement, tileObjectFallbackColor } from '../../common/tile-object-artwork';
-import { orthogonalCellRect, orthogonalCoordinateDeltaFromScreen, orthogonalObjectMatrix, orthogonalProjectionExtent } from '../../common/orthogonal-projection';
+import { orthogonalCellRect, orthogonalObjectMatrix, orthogonalProjectionExtent } from '../../common/orthogonal-projection';
 import { orthogonalMapTileArtworkEnvelope, orthogonalTileArtworkIntersects, orthogonalTileArtworkPlacement, type OrthogonalTileArtworkPlacement } from '../../common/orthogonal-tile-artwork';
 import { TILE_VARIANT_SEED_PROPERTY, chooseTileVariant, nextTileVariantSeed, tileVariantCandidates, tileVariantGroup } from '../../common/tile-variants';
 import { isometricTileRenderCells } from '../../common/tile-render-order';
@@ -95,6 +95,7 @@ import { BoundedResourceCache } from '../../common/bounded-resource-cache';
 import { drawPixelSpriteRegion, pixelSpriteRegionPlan } from '../../common/pixel-sprite-render';
 import { constrainTileTransformFlags, tileTransformFlagsAllowed } from '../../common/tile-transform-options';
 import { EDITOR_DENSITY } from '../../common/editor-layout';
+import { planTileObjectCreation, requireTileObjectPlacementTileset, requireWritableTileObject } from '../../common/tile-object-authoring';
 import { editableSpriteLayer, spriteRegionBitmap, visibleSpriteLayers, type SpriteRegionBitmap } from './pixel-bitmap';
 
 interface PixelPoint { x: number; y: number }
@@ -300,6 +301,8 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const [terrainErase, setTerrainErase] = useState(false);
   const [tileTransforms, setTileTransforms] = useState({ hFlip: false, vFlip: false, diagonal: false });
   const [tileTransformPickerOpen, setTileTransformPickerOpen] = useState(false);
+  const [tileObjectTilesetChoice, setTileObjectTilesetChoice] = useState<{ mapId: string; tilesetId: string }>();
+  const [tileObjectTileDraft, setTileObjectTileDraft] = useState<{ mapId: string; value: string }>();
   const [bitmapTextPoint, setBitmapTextPoint] = useState<PixelPoint>();
   const [durationFrameId, setDurationFrameId] = useState<string>();
   const [exposureGridOpen, setExposureGridOpen] = useState(false);
@@ -311,6 +314,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const setOnionSkinPreferences = useEditorStore((state) => state.setOnionSkinPreferences);
   const onionSkin = onionSettings.enabled;
   const tool = useEditorStore((state) => state.selectedTool);
+  const setTool = useEditorStore((state) => state.setTool);
   const zoom = useEditorStore((state) => state.zoom);
   const setZoom = useEditorStore((state) => state.setZoom);
   const brushSize = useEditorStore((state) => state.brushSize);
@@ -329,11 +333,13 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const notify = useEditorStore((state) => state.notify);
   const selectedEntityId = useEditorStore((state) => state.selectedEntityId);
   const setSelectedEntity = useEditorStore((state) => state.setSelectedEntity);
+  const setRightPanel = useEditorStore((state) => state.setRightPanel);
   const visibleMapLayers = useMemo(() => tilemap ? composedVisibleTilemapLayers(tilemap) : [], [tilemap]);
   const activeTileLayerEntry = useMemo(() => {
     const selectedLayer = visibleMapLayers.find((entry) => entry.layer.id === selectedEntityId && entry.layer.type === 'tile' && !entry.layer.locked);
     return selectedLayer ?? visibleMapLayers.find((entry) => entry.layer.type === 'tile' && !entry.layer.locked);
   }, [selectedEntityId, visibleMapLayers]);
+  const activeObjectLayerEntry = useMemo(() => visibleMapLayers.find((entry) => entry.layer.id === selectedEntityId && entry.layer.type === 'object' && !entry.layer.locked), [selectedEntityId, visibleMapLayers]);
   const playbackMap = useEditorStore((state) => state.playbacks);
   const playbacks = Object.values(playbackMap).filter((entry) => entry.documentId === document.id);
   const activeFrameId = sprite?.frameIds.includes(frameId ?? '') ? frameId : sprite?.frameIds[0];
@@ -347,12 +353,19 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const activeStamp = document.stamps.find((stamp) => stamp.id === activeStampId) ?? document.stamps[0];
   const placementStamp: PixelStamp = activeStamp ?? { id: 'builtin-plus', name: 'Built-in plus', width: 3, height: 3, anchorX: 1, anchorY: 1, cells: [{ x: 1, y: 1, index: pixelIndex }, { x: 0, y: 1, index: pixelIndex }, { x: 2, y: 1, index: pixelIndex }, { x: 1, y: 0, index: pixelIndex }, { x: 1, y: 2, index: pixelIndex }] };
   const activePaletteCycle = document.paletteCycles.find((cycle) => cycle.id === activePaletteCycleId) ?? document.paletteCycles[0];
-  const terrainTileset = tilemap?.tilesetIds.map((id) => document.pixelAssets[id]).find((entry) => entry?.type === 'tileset');
+  const attachedMapTilesets = useMemo(() => tilemap?.tilesetIds.flatMap((id) => {
+    const entry = document.pixelAssets[id];
+    return entry?.type === 'tileset' ? [entry] : [];
+  }) ?? [], [document.pixelAssets, tilemap]);
+  const tileObjectTilesetId = tilemap && tileObjectTilesetChoice?.mapId === tilemap.id ? tileObjectTilesetChoice.tilesetId : attachedMapTilesets[0]?.id;
+  const tileObjectTileset = attachedMapTilesets.find((entry) => entry.id === tileObjectTilesetId);
+  const terrainTileset = tool === 'tile-object' ? tileObjectTileset : attachedMapTilesets[0];
   const terrainSet = terrainTileset?.type === 'tileset' ? terrainTileset.wangSets.find((set) => set.id === terrainSetId) ?? terrainTileset.wangSets[0] : undefined;
   const terrainColor = terrainSet?.colors.find((color) => color.id === terrainColorId) ?? terrainSet?.colors[0];
   const terrainSource = terrainTileset?.type === 'tileset' ? document.pixelAssets[terrainTileset.spriteAssetId] : undefined;
   const terrainSourceSprite = terrainSource?.type === 'sprite' ? terrainSource : undefined;
-  const activeTileTransforms = constrainTileTransformFlags(tileTransforms, terrainTileset?.type === 'tileset' ? terrainTileset.transformations : undefined);
+  const constrainedTileTransforms = constrainTileTransformFlags(tileTransforms, terrainTileset?.type === 'tileset' ? terrainTileset.transformations : undefined);
+  const activeTileTransforms = tool === 'tile-object' ? { ...tileTransforms } : constrainedTileTransforms;
   const tileTransformCandidates = {
     hFlip: { ...activeTileTransforms, hFlip: !activeTileTransforms.hFlip },
     vFlip: { ...activeTileTransforms, vFlip: !activeTileTransforms.vFlip },
@@ -361,6 +374,8 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const activeTileStamp = document.tileStamps.find((stamp) => stamp.id === activeTileStampId) ?? document.tileStamps[0];
   const placementTileStamp: TileStamp = activeTileStamp ?? { id: 'builtin-tile', name: 'Current tile', width: 1, height: 1, anchorX: 0, anchorY: 0, cells: [{ x: 0, y: 0, gid: encodeTiledGid((terrainTileset?.type === 'tileset' ? terrainTileset.firstGid : 1) + Math.max(1, pixelIndex) - 1, activeTileTransforms) }] };
   const selectedTileId = Math.max(1, pixelIndex) - 1;
+  const tileObjectTileDraftValue = tilemap && tileObjectTileDraft?.mapId === tilemap.id ? tileObjectTileDraft.value : String(selectedTileId);
+  const tileObjectPlacementTileId = tileObjectTileDraftValue.trim() ? Number(tileObjectTileDraftValue) : Number.NaN;
   const selectedVariantGroup = terrainTileset?.type === 'tileset' ? tileVariantGroup(terrainTileset.tiles[selectedTileId]) : undefined;
   const selectedVariantCandidates = terrainTileset?.type === 'tileset' ? tileVariantCandidates(terrainTileset, selectedTileId) : [];
   const selectedVariantCount = selectedVariantCandidates.length;
@@ -885,19 +900,13 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     return clientPointToPixel(event.clientX, event.clientY, bounds, size, view);
   };
 
-  const toMapObjectPoint = (event: ReactPointerEvent<HTMLCanvasElement>): PixelPoint => {
-    const bounds = event.currentTarget.getBoundingClientRect(); if (!tilemap) return { x: 0, y: 0 };
-    if (tilemap.orientation === 'isometric') { const point = clientPointToIsometricCoordinate(event.clientX, event.clientY, bounds, size, view, tilemap.height, view.scale * tilemap.tileHeight / tilemap.tileWidth); return { x: point.x * tilemap.tileWidth, y: point.y * tilemap.tileHeight }; }
-    const point = clientPointToOrthogonalCoordinate(event.clientX, event.clientY, bounds, size, view, view.scale * tilemap.tileHeight / tilemap.tileWidth);
-    return { x: point.x * tilemap.tileWidth, y: point.y * tilemap.tileHeight };
-  };
-
   const toLayerMapObjectPoint = (event: ReactPointerEvent<HTMLCanvasElement>, entry: ComposedTilemapLayer): PixelPoint => {
-    const point = toMapObjectPoint(event); if (!tilemap) return point;
+    if (!tilemap) return { x: 0, y: 0 };
+    const bounds = event.currentTarget.getBoundingClientRect();
     const translation = mapLayerTranslations.get(entry.layer.id) ?? { x: 0, y: 0 };
-    if (tilemap.orientation === 'isometric') { const delta = isometricCoordinateDeltaFromScreen(translation.x, translation.y, view.scale, view.scale * tilemap.tileHeight / tilemap.tileWidth); return { x: point.x - delta.x * tilemap.tileWidth, y: point.y - delta.y * tilemap.tileHeight }; }
-    const delta = orthogonalCoordinateDeltaFromScreen(translation.x, translation.y, view.scale, view.scale * tilemap.tileHeight / tilemap.tileWidth);
-    return { x: point.x - delta.x * tilemap.tileWidth, y: point.y - delta.y * tilemap.tileHeight };
+    return clientPointToTilemapObjectAnchor(event.clientX, event.clientY, bounds, size, view, {
+      orientation: tilemap.orientation, mapHeight: tilemap.height, tileWidth: tilemap.tileWidth, tileHeight: tilemap.tileHeight, layerTranslation: translation,
+    });
   };
 
   const toLayerRasterPoint = (event: ReactPointerEvent<HTMLCanvasElement>, entry: ComposedTilemapLayer): PixelPoint => {
@@ -1114,6 +1123,56 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     }, pendingLocks, (lockId) => window.aidraw.releaseHumanLock(lockId));
   };
 
+  const placeTileObject = async (event: ReactPointerEvent<HTMLCanvasElement>): Promise<void> => {
+    if (!tilemap || event.button !== 0) return;
+    const snapshot = useEditorStore.getState().snapshot;
+    const liveDocument = snapshot?.activeDocument;
+    if (!liveDocument || liveDocument.kind !== 'pixel' || liveDocument.id !== document.id) { notify('The active pixel document changed. Re-select the object layer and try again.', 'warning'); return; }
+    const liveMap = liveDocument.pixelAssets[tilemap.id];
+    if (!liveMap || liveMap.type !== 'tilemap' || liveMap.revision !== tilemap.revision) { notify('The map changed before tile-object placement. Re-observe the layer and try again.', 'warning'); return; }
+    const liveEntry = composedVisibleTilemapLayers(liveMap).find((entry) => entry.layer.id === selectedEntityId && entry.layer.type === 'object');
+    if (!liveEntry) { notify('Select one visible, unlocked object layer before placing a tile object. No other layer was chosen.', 'warning'); return; }
+    if (!tileObjectTilesetId || !tileObjectTileset || tileObjectTileset.id !== tileObjectTilesetId) { notify('The selected tile-object tileset is no longer rendered. Re-observe the tileset and try again.', 'warning'); return; }
+    let liveTileset: typeof tileObjectTileset;
+    try { liveTileset = requireTileObjectPlacementTileset(liveDocument, liveMap, tileObjectTilesetId, tileObjectTileset.revision); }
+    catch (error) { notify(`${error instanceof Error ? error.message : 'The selected tile-object tileset is no longer current.'} Re-observe its tile range and transform permissions, then try again.`, 'warning'); return; }
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const layerTranslation = tilemapLayerScreenTranslation(liveEntry, pan, view.scale / liveMap.tileWidth);
+    const point = clientPointToTilemapObjectAnchor(event.clientX, event.clientY, bounds, size, view, {
+      orientation: liveMap.orientation, mapHeight: liveMap.height, tileWidth: liveMap.tileWidth, tileHeight: liveMap.tileHeight, layerTranslation,
+    });
+    let plan: ReturnType<typeof planTileObjectCreation>;
+    try {
+      plan = planTileObjectCreation(liveDocument, {
+        mapId: liveMap.id,
+        layerId: liveEntry.layer.id,
+        tilesetId: tileObjectTilesetId,
+        tileId: tileObjectPlacementTileId,
+        transforms: activeTileTransforms,
+        point,
+        objectId: createId('map-tile-object'),
+      });
+    } catch (error) {
+      notify(`${error instanceof Error ? error.message : 'The tile object could not be admitted.'} No map object was created.`, 'warning');
+      return;
+    }
+    const lock = await window.aidraw.acquireHumanLock({ documentId: liveDocument.id, objectIds: [liveMap.id, liveTileset.id] });
+    if (!lock.acquired) { notify(lock.reason ?? 'The complete map is busy. No tile object was created.', 'warning'); return; }
+    try {
+      const lockedDocument = useEditorStore.getState().snapshot?.activeDocument;
+      if (!lockedDocument || lockedDocument.kind !== 'pixel' || lockedDocument.id !== liveDocument.id) { notify('The active document changed while tile-object placement waited for its lock. Nothing was submitted.', 'warning'); return; }
+      const lockedMap = lockedDocument.pixelAssets[liveMap.id];
+      if (!lockedMap || lockedMap.type !== 'tilemap' || lockedMap.revision !== plan.expectedRevision || !lockedMap.tilesetIds.includes(liveTileset.id)) { notify('The map changed while tile-object placement waited for its lock. Re-observe it and try again.', 'warning'); return; }
+      try { requireTileObjectPlacementTileset(lockedDocument, lockedMap, liveTileset.id, liveTileset.revision); }
+      catch (error) { notify(`${error instanceof Error ? error.message : 'The selected tileset changed while placement waited for its lock.'} Re-observe it and try again.`, 'warning'); return; }
+      if (await apply('Place tile object', [{ kind: 'pixel.asset.replace', asset: plan.asset, expectedRevision: plan.expectedRevision }])) {
+        setSelectedEntity(plan.object.id); setRightPanel('layers'); setTool('select');
+      }
+    } finally {
+      if (lock.lockId) await window.aidraw.releaseHumanLock(lock.lockId);
+    }
+  };
+
   const updatePreview = (from: PixelPoint, point: PixelPoint): void => {
     if (tool === 'select') setPreview(rectangleFill(from, point));
     else if (['line', 'rectangle', 'ellipse'].includes(tool)) setPreview(withSymmetry(frameChanges(tool, from, point)));
@@ -1148,6 +1207,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     if (tool === 'zoom') { setZoom(zoom * (event.shiftKey ? 0.5 : 2)); return; }
     if (tool === 'hand' || event.button === 1) { setStart(point); setCursor(point); return; }
     if (!sprite && !tilemap) return;
+    if (tilemap && tool === 'tile-object') { await placeTileObject(event); return; }
     if (tilemap && tool === 'select') {
       const objectLayers = visibleMapLayers.filter((entry) => entry.layer.type === 'object' && !entry.layer.locked);
       let hit: { layer: typeof tilemap.layers[string]; object: MapObject; point: PixelPoint; rasterPoint: PixelPoint; tilePlacement?: ReturnType<typeof tileObjectArtworkPlacement> } | undefined;
@@ -1172,6 +1232,10 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
         const objectBounds = hit.object.type === 'tile' ? { x: hit.object.x - hit.object.width, y: hit.object.y - hit.object.height, width: hit.object.width * 2, height: hit.object.height * 2 } : mapObjectBounds(hit.object); const unitScale = tilemap.orientation === 'orthogonal' ? view.scale / tilemap.tileWidth : view.scale / Math.max(tilemap.tileWidth, tilemap.tileHeight); const handleThreshold = 9 / Math.max(0.001, unitScale); const pointIndex = selectedEntityId === hit.object.id && hit.object.type !== 'tile' && hit.object.points ? hit.object.points.findIndex((entry) => Math.hypot(hit.object.x + entry.x - hit.point.x, hit.object.y + entry.y - hit.point.y) <= handleThreshold) : -1; const atHandle = selectedEntityId === hit.object.id && (hit.object.type === 'tile' ? Boolean(hit.tilePlacement && Math.hypot(hit.rasterPoint.x - hit.tilePlacement.resizeHandle.x, hit.rasterPoint.y - hit.tilePlacement.resizeHandle.y) <= 9) : (hit.object.type === 'rectangle' || hit.object.type === 'ellipse') && Math.hypot(hit.point.x - (objectBounds.x + objectBounds.width), hit.point.y - (objectBounds.y + objectBounds.height)) <= handleThreshold);
         if (hit.object.type !== 'tile' && selectedEntityId === hit.object.id && pointIndex >= 0 && event.ctrlKey) { const minimum = hit.object.type === 'polygon' ? 3 : 2; if (!hit.object.points || hit.object.points.length <= minimum) return; const next = structuredClone(tilemap); const layer = next.layers[hit.layer.id]; if (layer.type === 'object') { const object = deleteMapObjectPoint(hit.object, pointIndex); layer.objects = (layer.objects ?? []).map((entry) => entry.id === object.id ? object : entry); void (async () => { const lock = await window.aidraw.acquireHumanLock({ documentId: document.id, objectIds: [tilemap.id] }); try { if (lock.acquired) await apply('Delete map object point', [{ kind: 'pixel.asset.replace', asset: next, expectedRevision: tilemap.revision }]); } finally { if (lock.lockId) await window.aidraw.releaseHumanLock(lock.lockId); } })(); } return; }
         if (hit.object.type !== 'tile' && selectedEntityId === hit.object.id && pointIndex < 0 && event.altKey && hit.object.points) { const nearest = nearestMapObjectSegment(hit.object, hit.point); if (nearest && nearest.distance <= handleThreshold) { const next = structuredClone(tilemap); const layer = next.layers[hit.layer.id]; if (layer.type === 'object') { const object = insertMapObjectPoint(hit.object, nearest.segmentIndex, nearest.point); layer.objects = (layer.objects ?? []).map((entry) => entry.id === object.id ? object : entry); void (async () => { const lock = await window.aidraw.acquireHumanLock({ documentId: document.id, objectIds: [tilemap.id] }); try { if (lock.acquired) await apply('Insert map object point', [{ kind: 'pixel.asset.replace', asset: next, expectedRevision: tilemap.revision }]); } finally { if (lock.lockId) await window.aidraw.releaseHumanLock(lock.lockId); } })(); } return; } }
+        if (hit.object.type === 'tile') {
+          try { requireWritableTileObject(tilemap, hit.layer.id, hit.object.id); }
+          catch (error) { notify(`${error instanceof Error ? error.message : 'This tile object is not writable.'} Nothing was moved or resized.`, 'warning'); return; }
+        }
         const region = { x: Math.floor(objectBounds.x / tilemap.tileWidth), y: Math.floor(objectBounds.y / tilemap.tileHeight), width: Math.max(1, Math.ceil(objectBounds.width / tilemap.tileWidth)), height: Math.max(1, Math.ceil(objectBounds.height / tilemap.tileHeight)) };
         setMapObjectGesture({ layerId: hit.layer.id, objectId: hit.object.id, mode: pointIndex >= 0 ? 'point' : atHandle ? 'resize' : 'move', pointIndex: pointIndex >= 0 ? pointIndex : undefined, start: hit.point, current: hit.point, original: structuredClone(hit.object), lockPromise: window.aidraw.acquireHumanLock({ documentId: document.id, objectIds: [tilemap.id], region: { kind: 'tile', assetId: tilemap.id, ...region } }) }); setSelectedEntity(hit.object.id); setSelection([]); setCursor(point); return;
       }
@@ -1257,7 +1321,21 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     const gestureEpoch = gestureEpochRef.current;
     if (mapObjectGesture && tilemap) {
       const gesture = mapObjectGesture; setMapObjectGesture(undefined); const lock = await gesture.lockPromise; if (gestureEpoch !== gestureEpochRef.current || !lock?.acquired) return;
-      try { const next = structuredClone(tilemap); const layer = next.layers[gesture.layerId]; if (layer?.type !== 'object') return; const object = previewMapObject(gesture); layer.objects = (layer.objects ?? []).map((entry) => entry.id === object.id ? object : entry); await apply(gesture.mode === 'point' ? 'Move map object point' : gesture.mode === 'move' ? 'Move map object' : 'Resize map object', [{ kind: 'pixel.asset.replace', asset: next, expectedRevision: tilemap.revision }]); }
+      try {
+        let sourceMap = tilemap;
+        if (gesture.original.type === 'tile') {
+          const liveDocument = useEditorStore.getState().snapshot?.activeDocument;
+          if (!liveDocument || liveDocument.kind !== 'pixel' || liveDocument.id !== document.id) { notify('The active document changed while the tile-object gesture waited for its lock. Nothing was submitted.', 'warning'); return; }
+          const liveMap = liveDocument.pixelAssets[tilemap.id];
+          if (!liveMap || liveMap.type !== 'tilemap') { notify('The tile-object map no longer exists. Nothing was moved or resized.', 'warning'); return; }
+          try { requireWritableTileObject(liveMap, gesture.layerId, gesture.objectId); }
+          catch (error) { notify(`${error instanceof Error ? error.message : 'This tile object is not writable.'} Nothing was moved or resized.`, 'warning'); return; }
+          if (liveMap.revision !== tilemap.revision) { notify('The tile-object map changed while the gesture waited for its lock. Nothing was moved or resized.', 'warning'); return; }
+          sourceMap = liveMap;
+        }
+        const next = structuredClone(sourceMap); const layer = next.layers[gesture.layerId]; if (layer?.type !== 'object') return; const object = previewMapObject(gesture); layer.objects = (layer.objects ?? []).map((entry) => entry.id === object.id ? object : entry);
+        await apply(gesture.mode === 'point' ? 'Move map object point' : gesture.mode === 'move' ? 'Move map object' : 'Resize map object', [{ kind: 'pixel.asset.replace', asset: next, expectedRevision: sourceMap.revision }]);
+      }
       finally { if (lock.lockId) await window.aidraw.releaseHumanLock(lock.lockId); }
       return;
     }
@@ -1543,6 +1621,11 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
         {sprite && <button className={paletteCycling ? 'is-active' : ''} onClick={() => { if (paletteCycling) setPaletteOffset(0); setPaletteCycling(!paletteCycling); }} title="Palette cycling preview"><Repeat2 size={14} /> Cycle</button>}
         {paletteCycling && document.paletteCycles.length > 0 && <select aria-label="Active palette cycle" value={activePaletteCycle?.id} onChange={(event) => { setActivePaletteCycleId(event.target.value); setPaletteOffset(0); }} title="Named palette cycle">{document.paletteCycles.map((cycle) => <option key={cycle.id} value={cycle.id}>{cycle.name}</option>)}</select>}
         {tool === 'terrain' && terrainTileset?.type === 'tileset' && <><select aria-label="Active Wang set" value={terrainSet?.id ?? ''} onChange={(event) => { setTerrainSetId(event.target.value); setTerrainColorId(undefined); }}><option value="" disabled>Wang set</option>{terrainTileset.wangSets.map((set) => <option key={set.id} value={set.id}>{set.name}</option>)}</select><select aria-label="Active Wang color" value={terrainColor?.id ?? ''} onChange={(event) => setTerrainColorId(Number(event.target.value))}><option value="" disabled>Terrain color</option>{terrainSet?.colors.map((color) => <option key={color.id} value={color.id}>{color.name}</option>)}</select><button className={terrainErase ? 'is-active' : ''} onClick={() => setTerrainErase((value) => !value)} title="Toggle terrain erase and neighbor repair"><Eraser size={13} /> {terrainErase ? 'Erase' : 'Paint'}</button></>}
+        {tool === 'tile-object' && tilemap && <>
+          <select aria-label="Tile object tileset" value={tileObjectTileset?.id ?? ''} onChange={(event) => setTileObjectTilesetChoice({ mapId: tilemap.id, tilesetId: event.target.value })} title="Exact attached tileset for the new tile object"><option value="" disabled>Attached tileset</option>{attachedMapTilesets.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}</select>
+          <label className="tile-object-tile-control"><span>Tile ID</span><input aria-label="Tile object local tile ID" type="number" min={0} max={Math.max(0, (tileObjectTileset?.columns ?? 1) * (tileObjectTileset?.rows ?? 1) - 1)} step={1} value={tileObjectTileDraftValue} onChange={(event) => { const value = event.target.value; setTileObjectTileDraft({ mapId: tilemap.id, value }); const parsed = Number(value); if (value.trim() && Number.isSafeInteger(parsed) && parsed >= 0) setPixelIndex(parsed + 1); }} /></label>
+          <span title="Exact destination object layer">{activeObjectLayerEntry ? activeObjectLayerEntry.layer.name : 'Select object layer'}</span>
+        </>}
         {tilemap && tool !== 'terrain' && terrainTileset?.type === 'tileset' && <>
           <button className={activeTileTransforms.hFlip ? 'is-active' : ''} disabled={!tileTransformFlagsAllowed(tileTransformCandidates.hFlip, terrainTileset.transformations)} onClick={() => setTileTransforms(tileTransformCandidates.hFlip)} title="Toggle the horizontal flag when the resulting transform is permitted"><FlipHorizontal2 size={13} /> Tile H</button>
           <button className={activeTileTransforms.vFlip ? 'is-active' : ''} disabled={!tileTransformFlagsAllowed(tileTransformCandidates.vFlip, terrainTileset.transformations)} onClick={() => setTileTransforms(tileTransformCandidates.vFlip)} title="Toggle the vertical flag when the resulting transform is permitted"><FlipVertical2 size={13} /> Tile V</button>

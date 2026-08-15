@@ -24,6 +24,14 @@ export interface PixelCoordinate {
   y: number;
 }
 
+export interface TilemapObjectPointerGeometry {
+  orientation: 'orthogonal' | 'isometric';
+  mapHeight: number;
+  tileWidth: number;
+  tileHeight: number;
+  layerTranslation: PixelCoordinate;
+}
+
 function clientPointToCanvas(clientX: number, clientY: number, bounds: CanvasBounds, logicalSize: CanvasLogicalSize) {
   const scaleX = bounds.width > 0 ? logicalSize.width / bounds.width : 1;
   const scaleY = bounds.height > 0 ? logicalSize.height / bounds.height : 1;
@@ -101,4 +109,30 @@ export function clientPointToIsometricCoordinate(
   const screenX = canvas.x - view.offsetX;
   const screenY = canvas.y - view.offsetY;
   return isometricCoordinateFromScreen(screenX, screenY, mapHeight, view.scale, cellHeight);
+}
+
+/**
+ * Converts one pointer to the selected object layer's canonical map-pixel
+ * anchor. The already-composed layer screen translation includes nested
+ * offsets and parallax, so authoring and the shared render/hit contract invert
+ * the same visible placement without changing map projection semantics.
+ */
+export function clientPointToTilemapObjectAnchor(
+  clientX: number,
+  clientY: number,
+  bounds: CanvasBounds,
+  logicalSize: CanvasLogicalSize,
+  view: PixelViewport,
+  geometry: TilemapObjectPointerGeometry,
+): PixelCoordinate {
+  const layerView = {
+    ...view,
+    offsetX: view.offsetX + geometry.layerTranslation.x,
+    offsetY: view.offsetY + geometry.layerTranslation.y,
+  };
+  const cellHeight = view.scale * geometry.tileHeight / geometry.tileWidth;
+  const coordinate = geometry.orientation === 'isometric'
+    ? clientPointToIsometricCoordinate(clientX, clientY, bounds, logicalSize, layerView, geometry.mapHeight, cellHeight)
+    : clientPointToOrthogonalCoordinate(clientX, clientY, bounds, logicalSize, layerView, cellHeight);
+  return { x: coordinate.x * geometry.tileWidth, y: coordinate.y * geometry.tileHeight };
 }

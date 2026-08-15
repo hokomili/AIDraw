@@ -9,6 +9,7 @@ import { importDocument } from '../../src/main/import-document';
 import { exportDocument } from '../../src/main/export-document';
 import { renderTilemap } from '../../src/main/render-document';
 import { runImportUtilityRequest } from '../../src/main/utility-import';
+import { editTileObject } from '../../src/common/tile-object-authoring';
 
 const fixture = new URL('../fixtures/tiled/isometric-external.tmj', import.meta.url).pathname.replace(/^\/(?=[A-Za-z]:)/, '');
 const xmlFixtureSource = new URL('../fixtures/tiled/orthogonal-external.tmx', import.meta.url).pathname.replace(/^\/(?=[A-Za-z]:)/, '');
@@ -179,12 +180,15 @@ describe('representative Tiled JSON interchange', () => {
     const imported = await importDocument(mapPath, true); expect(imported.warnings).toEqual([]); const document = imported.documents[0]; if (document.kind !== 'pixel') throw new Error('Expected pixel document'); const map = document.pixelAssets[document.activeAssetId]; if (map.type !== 'tilemap') throw new Error('Expected tilemap'); const importedTileset = document.pixelAssets[map.tilesetIds[0]]; if (importedTileset.type !== 'tileset') throw new Error('Expected tileset'); const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'object') throw new Error('Expected object layer');
     expect(importedTileset).toMatchObject({ firstGid: 17, objectAlignment: 'topright', tileOffset: { x: 2, y: -1 } });
     expect(layer.objects?.[0]).toEqual({ id: '8', type: 'tile', gid, x: 7, y: 11, width: 6, height: 8, rotation: 30, name: 'Gate', className: 'portal', properties: { target: 'north' } });
+    const importedObject = layer.objects?.[0]; if (!importedObject || importedObject.type !== 'tile') throw new Error('Expected tile object');
+    layer.objects![0] = editTileObject(importedObject, { ...importedObject, x: 9, y: 13, width: 7, height: 9, rotation: 45, name: 'Edited gate', className: 'portal-exit', properties: { target: 'south', cost: 2, open: true } });
+    importedTileset.objectAlignment = 'bottom';
 
     const output = await exportDocument(document, mapName.endsWith('.tmj') ? 'tiled-json' : 'tiled-xml');
     if (mapName.endsWith('.tmj')) {
-      const value = JSON.parse(output.data.toString()); expect(value.tilesets[0].objectalignment).toBe('topright'); expect(value.layers[0].objects[0]).toMatchObject({ gid, x: 7, y: 11, width: 6, height: 8, rotation: 30, name: 'Gate', type: 'portal', properties: [expect.objectContaining({ name: 'target', value: 'north' })] });
+      const value = JSON.parse(output.data.toString()); expect(value.tilesets[0].objectalignment).toBe('bottom'); expect(value.layers[0].objects[0]).toMatchObject({ gid, x: 9, y: 13, width: 7, height: 9, rotation: 45, name: 'Edited gate', type: 'portal-exit', properties: expect.arrayContaining([expect.objectContaining({ name: 'target', value: 'south' }), expect.objectContaining({ name: 'cost', value: 2 }), expect.objectContaining({ name: 'open', value: true })]) });
     } else {
-      expect(output.data.toString()).toContain('objectalignment="topright"'); expect(output.data.toString()).toContain(`name="Gate" type="portal" gid="${gid}" x="7" y="11" width="6" height="8" rotation="30"`);
+      expect(output.data.toString()).toContain('objectalignment="bottom"'); expect(output.data.toString()).toContain(`name="Edited gate" type="portal-exit" gid="${gid}" x="9" y="13" width="7" height="9" rotation="45"`); expect(output.data.toString()).toContain('<property name="cost" type="int" value="2"/>'); expect(output.data.toString()).toContain('<property name="open" type="bool" value="true"/>');
     }
   });
 

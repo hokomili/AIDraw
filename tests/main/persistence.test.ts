@@ -9,6 +9,7 @@ import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createId, createIllustrationDocument, 
 import type { TransactionTraceEntry } from '@common/contracts';
 import { MAX_TRANSACTION_SERIALIZED_BYTES } from '@common/transaction-limits';
 import { nativeSaveFileSystem, readNativeDocument, writeNativeDocument, type NativeSaveFileSystem } from '@main/persistence';
+import { editTileObject, planTileObjectCreation } from '../../src/common/tile-object-authoring';
 
 const temporaryPaths: string[] = [];
 afterEach(async () => { await Promise.all(temporaryPaths.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
@@ -503,11 +504,12 @@ describe('.aidraw persistence', () => {
       type: 'object', visible: true, locked: false, opacity: 1, offsetX: 0, offsetY: 0, parallaxX: 1, parallaxY: 1,
       objects: [
         { id: 'native-pixel-object', type: 'polygon', x: 1, y: 2, points: [{ x: 0, y: 0 }, { x: 8, y: 0 }, { x: 4, y: 6 }], properties: { role: 'spawn' } },
-        { id: 'native-tile-object', type: 'tile', gid: 0xa000_0001, x: 20, y: 30, width: 24, height: 18, rotation: 15, name: 'Door', className: 'exit', properties: { target: 'next' } },
       ],
     };
     map.layers[objectLayer.id] = objectLayer; map.layerIds.push(objectLayer.id);
     document.pixelAssets[tileset.id] = tileset; document.pixelAssets[map.id] = map; document.assetIds.push(tileset.id, map.id); document.activeAssetId = map.id;
+    const tilePlan = planTileObjectCreation(document, { mapId: map.id, layerId: objectLayer.id, tilesetId: tileset.id, tileId: 0, transforms: { hFlip: true, vFlip: false, diagonal: true }, point: { x: 20, y: 30 }, objectId: 'native-tile-object' });
+    objectLayer.objects!.push(editTileObject(tilePlan.object, { ...tilePlan.object, width: 24, height: 18, rotation: 15, name: 'Door', className: 'exit', properties: { target: 'next' } }));
 
     const sourcePath = await writeNativeDocument(join(root, 'source.aidraw'), document, '1.0.0'); const sourceBytes = await readFile(sourcePath);
     const files = unzipSync(new Uint8Array(sourceBytes)); const persisted = JSON.parse(strFromU8(files['document.json'])) as Record<string, unknown>;

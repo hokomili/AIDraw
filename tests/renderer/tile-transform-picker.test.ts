@@ -52,12 +52,13 @@ describe('tile transform picker', () => {
     expect(markup).not.toContain('intentionally limited to square tiles');
   });
 
-  it('uses constrained flags for both current-tile stamps and ordinary painting', async () => {
+  it('uses constrained flags for stamps/paint while tile-object admission refuses stale disallowed flags', async () => {
     const [canvasSource, pickerSource] = await Promise.all([
       readFile(new URL('../../src/renderer/canvas/PixelCanvas.tsx', import.meta.url), 'utf8'),
       readFile(new URL('../../src/renderer/components/TileTransformPicker.tsx', import.meta.url), 'utf8'),
     ]);
-    expect(canvasSource).toContain('const activeTileTransforms = constrainTileTransformFlags(tileTransforms');
+    expect(canvasSource).toContain('const constrainedTileTransforms = constrainTileTransformFlags(tileTransforms');
+    expect(canvasSource).toContain("const activeTileTransforms = tool === 'tile-object' ? { ...tileTransforms } : constrainedTileTransforms");
     expect(canvasSource).toContain('encodeTiledGid((terrainTileset?.type');
     expect(canvasSource).toContain('selectedTileId), activeTileTransforms)');
     expect(canvasSource).toContain('<TileTransformPicker');

@@ -19,7 +19,9 @@ describe('isometric projection source parity', () => {
     const coordinates = await readFile(new URL('../../src/renderer/canvas/pixel-coordinates.ts', import.meta.url), 'utf8');
     expect(coordinates).toContain('isometricCoordinateFromScreen(screenX, screenY, mapHeight, view.scale, cellHeight)');
     expect(canvas).toContain('clientPointToIsometricTile(event.clientX, event.clientY, bounds, size, layerView, tilemap.height');
-    expect(canvas).toContain('isometricCoordinateDeltaFromScreen(translation.x, translation.y');
+    expect(canvas).toContain('clientPointToTilemapObjectAnchor(event.clientX, event.clientY, bounds, size, view, {');
+    expect(canvas).toContain('layerTranslation: translation');
+    expect(coordinates).toContain('? clientPointToIsometricCoordinate(clientX, clientY, bounds, logicalSize, layerView, geometry.mapHeight, cellHeight)');
   });
 
   it('shares native sprite placement and exact overhang admission without changing nominal fallback geometry', async () => {

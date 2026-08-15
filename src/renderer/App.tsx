@@ -67,6 +67,7 @@ import type {
   IllustrationDocument,
   IllustrationLayer,
   IllustrationObject,
+  MapObject,
   PaintStyle,
   PixelDocument,
   PaletteCycle,
@@ -76,6 +77,8 @@ import type {
   RasterBrushPreset,
   TextObject,
   TextStyle,
+  TileMapObject,
+  TileObjectAlignment,
   TilemapLayer,
   WangSet,
 } from "@aidraw/core";
@@ -90,8 +93,10 @@ import {
   createPixelSprite,
   createPixelTilemap,
   createPixelTileset,
+  decodeTiledGid,
   illustrationAtTime,
   nowIso,
+  resolveTilesetForGid,
   resizePixelSpriteCanvas,
   replaceStyledText,
   replaceAndDeletePaletteIndexOperations,
@@ -149,10 +154,12 @@ import { IllustrationAnimationPanel } from "./components/IllustrationAnimationPa
 import { TileAnimationEditor } from "./components/TileAnimationEditor";
 import { TilesetSliceEditor } from "./components/TilesetSliceEditor";
 import { TileVariantPreview } from "./components/TileVariantPreview";
+import { TileMapObjectInspector } from "./components/TileMapObjectInspector";
 import { ShortcutReferenceDialog } from "./components/ShortcutReferenceDialog";
 import { documentTabFocusIndex } from "./document-tabs";
 import { menuFocusIndex } from "./popover-navigation";
 import { shortcutHelpRequested, toolRailFocusIndex } from "./shortcuts";
+import { requireWritableTileObject, requireWritableTileObjectLayer, TILE_OBJECT_ALIGNMENT_OPTIONS } from "../common/tile-object-authoring";
 
 type Icon = ComponentType<{ size?: number; strokeWidth?: number }>;
 
@@ -201,6 +208,7 @@ const pixelTools: ToolDefinition[] = [
   { id: "wand", label: "Magic wand", icon: WandSparkles, shortcut: "W" },
   { id: "stamp", label: "Stamp", icon: Stamp },
   { id: "terrain", label: "Wang terrain", icon: Shapes },
+  { id: "tile-object", label: "Tile object", icon: Layers3 },
   { id: "dither", label: "Ordered dither", icon: Grid3X3 },
   { id: "lighten", label: "Lighten", icon: SunMedium },
   { id: "darken", label: "Darken", icon: Moon },
@@ -3554,6 +3562,40 @@ function PixelLayers({ document }: { document: PixelDocument }) {
     const siblings = target.parentId ? layerTable[target.parentId]?.childIds ?? [] : asset.type === "sprite" || asset.type === "tilemap" ? asset.layerIds : []; const targetIndex = siblings.indexOf(target.id); const sourceIndex = siblings.indexOf(source.id); const adjustedTarget = sourceIndex >= 0 && sourceIndex < targetIndex ? targetIndex - 1 : targetIndex; const bounds = event.currentTarget.getBoundingClientRect(); const visuallyAbove = event.clientY < bounds.top + bounds.height / 2; moveLayer(source, target.parentId, Math.max(0, adjustedTarget + (visuallyAbove ? 1 : 0)));
   };
   const selectedLayer = layers.find((layer) => layer.id === selected) ?? (asset.type === "tilemap" ? layers.find((layer) => layer.type === "object" && layer.objects?.some((object) => object.id === selected)) : undefined);
+  const selectedTileObject = asset.type === "tilemap" && selectedLayer?.type === "object"
+    ? selectedLayer.objects?.find((object): object is TileMapObject => object.id === selected && object.type === "tile")
+    : undefined;
+  const tileObjectLayerError = asset.type === "tilemap" && selectedLayer?.type === "object" ? (() => {
+    try { requireWritableTileObjectLayer(asset, selectedLayer.id); return undefined; }
+    catch (error) { return error instanceof Error ? error.message : "This object layer is not writable."; }
+  })() : undefined;
+  const tileObjectIdentity = asset.type === "tilemap" && selectedTileObject ? (() => {
+    const decoded = decodeTiledGid(selectedTileObject.gid);
+    const resolved = resolveTilesetForGid(document, asset, decoded.gid);
+    if (!resolved) return `Unresolved raw GID ${selectedTileObject.gid}`;
+    const flags = [decoded.diagonal && "D", decoded.hFlip && "H", decoded.vFlip && "V"].filter(Boolean).join("+") || "ordinary";
+    return `${resolved.tileset.name} · tile ${resolved.localId} · ${flags}`;
+  })() : "";
+  const replaceTileObject = (object: TileMapObject, label: string) => {
+    if (asset.type !== "tilemap" || selectedLayer?.type !== "object") return;
+    let current: TileMapObject;
+    try { current = requireWritableTileObject(asset, selectedLayer.id, object.id); }
+    catch (error) { notify(error instanceof Error ? error.message : "This object layer is not writable.", "warning"); return; }
+    if (object.gid !== current.gid || object.type !== current.type) { notify("Tile-object identity changed before the edit; re-select it and try again.", "warning"); return; }
+    const next = structuredClone(asset); const layer = next.layers[selectedLayer.id];
+    if (layer?.type !== "object") { notify("That tile-object layer no longer exists. Re-select it and try again.", "warning"); return; }
+    layer.objects = (layer.objects ?? []).map((entry) => entry.id === object.id ? object : entry);
+    updateAsset(next, label);
+  };
+  const deleteMapObject = (object: MapObject, objectIndex: number) => {
+    if (asset.type !== "tilemap" || selectedLayer?.type !== "object") return;
+    if (object.type === "tile") {
+      try { requireWritableTileObject(asset, selectedLayer.id, object.id); }
+      catch (error) { notify(error instanceof Error ? error.message : "This tile object is not writable.", "warning"); return; }
+    }
+    updateLayer(selectedLayer, { objects: selectedLayer.objects!.filter((_, index) => index !== objectIndex) }, "Delete map object");
+    if (selected === object.id) setSelected(selectedLayer.id);
+  };
   if (asset.type === "tileset")
     return <TilesetPanel document={document} tileset={asset} />;
   return (
@@ -3743,7 +3785,16 @@ function PixelLayers({ document }: { document: PixelDocument }) {
           {selectedLayer.type === "object" && asset.type === "tilemap" && <div className="map-object-editor">
             <div className="section-heading"><span>Map objects</span><small>{selectedLayer.objects?.length ?? 0}</small></div>
             <div className="tileset-actions"><select value={mapObjectType} onChange={(event) => setMapObjectType(event.target.value as typeof mapObjectType)}><option value="rectangle">Rectangle</option><option value="ellipse">Ellipse</option><option value="polygon">Polygon</option><option value="polyline">Polyline</option></select><button onClick={() => { const points = mapObjectType === "polygon" || mapObjectType === "polyline" ? [{ x: 0, y: 0 }, { x: asset.tileWidth, y: 0 }, { x: asset.tileWidth, y: asset.tileHeight }, { x: 0, y: asset.tileHeight }] : undefined; updateLayer(selectedLayer, { objects: [...(selectedLayer.objects ?? []), { id: createId("map-object"), type: mapObjectType, x: 0, y: 0, width: asset.tileWidth, height: asset.tileHeight, points, properties: {} }] }, "Add map object"); }}>+ Object</button></div>
-            <div className="collision-list">{(selectedLayer.objects ?? []).map((object, objectIndex) => <div className={"collision-row " + (selected === object.id ? "is-selected" : "")} key={object.id} onClick={() => setSelected(object.id)}>{object.type === "tile" ? <span title={`Tile object GID ${object.gid}`}>Tile</span> : <select value={object.type} onChange={(event) => { const type = event.target.value as "rectangle" | "ellipse" | "polygon" | "polyline"; updateLayer(selectedLayer, { objects: selectedLayer.objects!.map((entry) => entry.id === object.id && entry.type !== "tile" ? { ...entry, type } : entry) }, "Change map object type"); }}><option value="rectangle">Rectangle</option><option value="ellipse">Ellipse</option><option value="polygon">Polygon</option><option value="polyline">Polyline</option></select>}<input aria-label={"Object x " + (objectIndex + 1)} type="number" value={object.x} onChange={(event) => updateLayer(selectedLayer, { objects: selectedLayer.objects!.map((entry, index) => index === objectIndex ? { ...entry, x: Number(event.target.value) } : entry) }, "Move map object")} /><input aria-label={"Object y " + (objectIndex + 1)} type="number" value={object.y} onChange={(event) => updateLayer(selectedLayer, { objects: selectedLayer.objects!.map((entry, index) => index === objectIndex ? { ...entry, y: Number(event.target.value) } : entry) }, "Move map object")} /><input aria-label={"Object width " + (objectIndex + 1)} type="number" value={object.width ?? 0} onChange={(event) => updateLayer(selectedLayer, { objects: selectedLayer.objects!.map((entry, index) => index === objectIndex ? { ...entry, width: Math.max(1, Number(event.target.value)) } : entry) }, "Resize map object")} /><input aria-label={"Object height " + (objectIndex + 1)} type="number" value={object.height ?? 0} onChange={(event) => updateLayer(selectedLayer, { objects: selectedLayer.objects!.map((entry, index) => index === objectIndex ? { ...entry, height: Math.max(1, Number(event.target.value)) } : entry) }, "Resize map object")} /><button title="Delete map object" onClick={() => updateLayer(selectedLayer, { objects: selectedLayer.objects!.filter((_, index) => index !== objectIndex) }, "Delete map object")}><Trash2 size={11} /></button></div>)}</div>
+            <div className="collision-list">{(selectedLayer.objects ?? []).map((object, objectIndex) => <div className={"collision-row map-object-row " + (selected === object.id ? "is-selected" : "")} key={object.id} onClick={() => setSelected(object.id)}>{object.type === "tile" ? <><span className="tile-object-row-kind" title={`Fixed tile object GID ${object.gid}`}>Tile</span><span className="tile-object-row-summary">{object.name || `GID ${object.gid}`}</span></> : <><select value={object.type} onChange={(event) => { const type = event.target.value as "rectangle" | "ellipse" | "polygon" | "polyline"; updateLayer(selectedLayer, { objects: selectedLayer.objects!.map((entry) => entry.id === object.id && entry.type !== "tile" ? { ...entry, type } : entry) }, "Change map object type"); }}><option value="rectangle">Rectangle</option><option value="ellipse">Ellipse</option><option value="polygon">Polygon</option><option value="polyline">Polyline</option></select><input aria-label={"Object x " + (objectIndex + 1)} type="number" value={object.x} onChange={(event) => updateLayer(selectedLayer, { objects: selectedLayer.objects!.map((entry, index) => index === objectIndex ? { ...entry, x: Number(event.target.value) } : entry) }, "Move map object")} /><input aria-label={"Object y " + (objectIndex + 1)} type="number" value={object.y} onChange={(event) => updateLayer(selectedLayer, { objects: selectedLayer.objects!.map((entry, index) => index === objectIndex ? { ...entry, y: Number(event.target.value) } : entry) }, "Move map object")} /><input aria-label={"Object width " + (objectIndex + 1)} type="number" value={object.width ?? 0} onChange={(event) => updateLayer(selectedLayer, { objects: selectedLayer.objects!.map((entry, index) => index === objectIndex ? { ...entry, width: Math.max(1, Number(event.target.value)) } : entry) }, "Resize map object")} /><input aria-label={"Object height " + (objectIndex + 1)} type="number" value={object.height ?? 0} onChange={(event) => updateLayer(selectedLayer, { objects: selectedLayer.objects!.map((entry, index) => index === objectIndex ? { ...entry, height: Math.max(1, Number(event.target.value)) } : entry) }, "Resize map object")} /></>}<button title="Delete map object" disabled={object.type === "tile" && Boolean(tileObjectLayerError)} onClick={(event) => { event.stopPropagation(); deleteMapObject(object, objectIndex); }}><Trash2 size={11} /></button></div>)}</div>
+            {selectedTileObject && <TileMapObjectInspector
+              key={`${asset.id}:${asset.revision}:${selectedLayer.id}:${selectedTileObject.id}`}
+              object={selectedTileObject}
+              identity={tileObjectIdentity}
+              disabled={Boolean(tileObjectLayerError)}
+              onReplace={replaceTileObject}
+              onInvalid={(message) => notify(message, "warning")}
+            />}
+            {selectedTileObject && tileObjectLayerError && <p className="tile-object-write-warning" role="status">{tileObjectLayerError}</p>}
           </div>}
         </div>
       )}
@@ -3982,6 +4033,14 @@ function TilesetPanel({
       </div>
       <div className="tileset-actions"><button disabled={drawingOffsetDraftMatchesTileset} onClick={applyDrawingOffset}>Apply drawing offset</button></div>
       <p className="fine-print">Moves this tileset’s tile-layer sprite artwork without moving map cells, grid geometry, or collision data.</p>
+      <div className="section-heading"><span>Tile-object alignment</span><small>Tiled anchor</small></div>
+      <label className="field tileset-object-alignment">
+        <span>Object anchor</span>
+        <select aria-label="Tileset tile-object alignment" value={tileset.objectAlignment} onChange={(event) => replace({ ...tileset, objectAlignment: event.target.value as TileObjectAlignment }, "Change tileset object alignment")}>
+          {TILE_OBJECT_ALIGNMENT_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+        </select>
+      </label>
+      <p className="fine-print">Changes the shared render, hit, and culling anchor for every resolved tile object that uses this tileset. Unspecified follows Tiled’s map-orientation default.</p>
       <div className="section-heading">
         <span>Transformations</span>
       </div>

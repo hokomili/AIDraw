@@ -22,6 +22,7 @@ import {
   type RasterStroke,
   type ShapeObject,
 } from '@aidraw/core';
+import { editTileObject, planTileObjectCreation } from '../../src/common/tile-object-authoring';
 
 function shapeTransaction(documentId: string, layerId: string, expectedRevision?: number): CanvasTransaction {
   const timestamp = nowIso();
@@ -56,28 +57,48 @@ describe('transaction reducer', () => {
     expect(restoredMap.layers[layer.id]).toMatchObject({ offsetX: 0, offsetY: 0 });
   });
 
-  it('authors a tileset drawing offset through one revisioned replacement with an exact inverse', () => {
+  it('authors tileset drawing offset and object alignment through one revisioned replacement with an exact inverse', () => {
     const document = createPixelDocument('project', 'Tileset offset history'); const sprite = document.pixelAssets[document.activeAssetId];
     if (sprite.type !== 'sprite') throw new Error('Expected sprite');
     const tileset = createPixelTileset('Offset terrain', sprite.id, 16, 16, 1, 1); document.pixelAssets[tileset.id] = tileset; document.assetIds.push(tileset.id);
     const transaction: CanvasTransaction = {
       id: createId('tx'), clientOperationId: createId('op'), documentId: document.id, actor: HUMAN_ACTOR, label: 'Change tileset drawing offset', createdAt: nowIso(),
-      operations: [{ kind: 'pixel.asset.replace', asset: { ...tileset, tileOffset: { x: -8, y: 13 } }, expectedRevision: tileset.revision }],
+      operations: [{ kind: 'pixel.asset.replace', asset: { ...tileset, tileOffset: { x: -8, y: 13 }, objectAlignment: 'center' }, expectedRevision: tileset.revision }],
     };
     const applied = applyTransaction(document, transaction); if (applied.document.kind !== 'pixel') throw new Error('Expected pixel document');
-    expect(applied.document.pixelAssets[tileset.id]).toMatchObject({ revision: 1, tileOffset: { x: -8, y: 13 } });
+    expect(applied.document.pixelAssets[tileset.id]).toMatchObject({ revision: 1, tileOffset: { x: -8, y: 13 }, objectAlignment: 'center' });
     expect(applied.document).toMatchObject({ revision: 1, dirty: true, activity: [expect.objectContaining({ label: 'Change tileset drawing offset', actor: HUMAN_ACTOR, operationCount: 1 })] });
     const restored = applyTransaction(applied.document, applied.inverse, { recordActivity: false }).document; if (restored.kind !== 'pixel') throw new Error('Expected pixel document');
-    expect(restored.pixelAssets[tileset.id]).toMatchObject({ tileOffset: { x: 0, y: 0 } });
+    expect(restored.pixelAssets[tileset.id]).toMatchObject({ tileOffset: { x: 0, y: 0 }, objectAlignment: 'unspecified' });
+  });
+
+  it('creates and metadata-edits a tile object through whole-map replacements with exact human inverse restoration', () => {
+    const document = createPixelDocument('project', 'Human tile-object history'); const sprite = document.pixelAssets[document.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('Expected sprite');
+    const spriteBefore = structuredClone(sprite); const paletteBefore = structuredClone(document.palette);
+    const tileset = createPixelTileset('Actors', sprite.id, 12, 20, 2, 1); tileset.firstGid = 5; const map = createPixelTilemap('Scene'); map.tilesetIds = [tileset.id]; const layer = map.layers[map.layerIds[0]]; layer.type = 'object'; delete layer.chunks; layer.objects = [];
+    document.pixelAssets[tileset.id] = tileset; document.pixelAssets[map.id] = map; document.assetIds.push(tileset.id, map.id); document.activeAssetId = map.id;
+    const plan = planTileObjectCreation(document, { mapId: map.id, layerId: layer.id, tilesetId: tileset.id, tileId: 1, transforms: { hFlip: true, vFlip: false, diagonal: true }, point: { x: 22, y: 33 }, objectId: 'human-tile-object' });
+    const transaction: CanvasTransaction = { id: createId('tx'), clientOperationId: createId('op'), documentId: document.id, actor: HUMAN_ACTOR, label: 'Place tile object', createdAt: nowIso(), operations: [{ kind: 'pixel.asset.replace', asset: plan.asset, expectedRevision: plan.expectedRevision }] };
+    const applied = applyTransaction(document, transaction); if (applied.document.kind !== 'pixel') throw new Error('Expected pixel document'); const appliedMap = applied.document.pixelAssets[map.id]; if (appliedMap.type !== 'tilemap') throw new Error('Expected tilemap');
+    expect(appliedMap.layers[layer.id].objects?.[0]).toEqual(plan.object); expect(applied.document.activity[0]).toMatchObject({ label: 'Place tile object', actor: HUMAN_ACTOR, operationCount: 1 });
+    expect(applied.document.pixelAssets[sprite.id]).toEqual(spriteBefore); expect(applied.document.palette).toEqual(paletteBefore);
+    const restored = applyTransaction(applied.document, applied.inverse, { recordActivity: false }).document; if (restored.kind !== 'pixel') throw new Error('Expected pixel document'); const restoredMap = restored.pixelAssets[map.id]; if (restoredMap.type !== 'tilemap') throw new Error('Expected tilemap'); expect(restoredMap.layers[layer.id].objects).toEqual([]);
+    const editedObject = editTileObject(plan.object, { ...plan.object, x: 44, y: 55, width: 18, height: 30, rotation: 90, name: 'Door', className: 'portal', properties: { target: 'north', cost: 2, open: false } });
+    const editedMap = structuredClone(appliedMap); const editedLayer = editedMap.layers[layer.id]; if (editedLayer.type !== 'object') throw new Error('Expected object layer'); editedLayer.objects = [editedObject];
+    const edited = applyTransaction(applied.document, { id: createId('tx'), clientOperationId: createId('op'), documentId: document.id, actor: HUMAN_ACTOR, label: 'Edit tile object', createdAt: nowIso(), operations: [{ kind: 'pixel.asset.replace', asset: editedMap, expectedRevision: appliedMap.revision }] });
+    if (edited.document.kind !== 'pixel') throw new Error('Expected pixel document'); const changedMap = edited.document.pixelAssets[map.id]; if (changedMap.type !== 'tilemap') throw new Error('Expected tilemap'); expect(changedMap.layers[layer.id].objects?.[0]).toEqual(editedObject);
+    const unedited = applyTransaction(edited.document, edited.inverse, { recordActivity: false }).document; if (unedited.kind !== 'pixel') throw new Error('Expected pixel document'); const uneditedMap = unedited.pixelAssets[map.id]; if (uneditedMap.type !== 'tilemap') throw new Error('Expected tilemap'); expect(uneditedMap.layers[layer.id].objects?.[0]).toEqual(plan.object);
   });
 
   it('moves and resizes a canonical tile object through one map replacement with exact inverse restoration', () => {
     const document = createPixelDocument('project', 'Tile object history'); const map = createPixelTilemap('Objects'); const layer = map.layers[map.layerIds[0]];
-    layer.type = 'object'; delete layer.chunks; layer.objects = [{ id: 'chest', type: 'tile', gid: 0xa000_0001, x: 12, y: 24, width: 16, height: 20, rotation: 30, name: 'Chest', className: 'loot', properties: { coins: 3 } }];
+    const importedProperties = JSON.parse('{"__proto__":"safe","  spaced  ":"exact","coins":3}') as Record<string, string | number | boolean>;
+    layer.type = 'object'; delete layer.chunks; layer.objects = [{ id: 'chest', type: 'tile', gid: 0xa000_0001, x: 12, y: 24, width: 16, height: 20, rotation: 30, name: 'Chest', className: 'loot', properties: importedProperties }];
     document.pixelAssets[map.id] = map; document.assetIds.push(map.id); document.activeAssetId = map.id;
     const replacement = structuredClone(map); const objectLayer = replacement.layers[layer.id]; if (objectLayer.type !== 'object') throw new Error('Expected object layer'); objectLayer.objects![0] = { ...objectLayer.objects![0], x: 20, y: 32, width: 24, height: 28 };
     const transaction: CanvasTransaction = { id: createId('tx'), clientOperationId: createId('op'), documentId: document.id, actor: HUMAN_ACTOR, label: 'Move tile object', createdAt: nowIso(), operations: [{ kind: 'pixel.asset.replace', asset: replacement, expectedRevision: map.revision }] };
-    const applied = applyTransaction(document, transaction); if (applied.document.kind !== 'pixel') throw new Error('Expected pixel document'); const changed = applied.document.pixelAssets[map.id]; if (changed.type !== 'tilemap') throw new Error('Expected tilemap'); expect(changed.layers[layer.id].objects?.[0]).toMatchObject({ type: 'tile', gid: 0xa000_0001, x: 20, y: 32, width: 24, height: 28, rotation: 30 });
+    const applied = applyTransaction(document, transaction); if (applied.document.kind !== 'pixel') throw new Error('Expected pixel document'); const changed = applied.document.pixelAssets[map.id]; if (changed.type !== 'tilemap') throw new Error('Expected tilemap'); const changedObject = changed.layers[layer.id].objects?.[0]; expect(changedObject).toMatchObject({ type: 'tile', gid: 0xa000_0001, x: 20, y: 32, width: 24, height: 28, rotation: 30 });
+    expect(JSON.stringify(changedObject?.properties)).toBe(JSON.stringify(importedProperties)); expect(Object.hasOwn(changedObject?.properties ?? {}, '__proto__')).toBe(true);
     const restored = applyTransaction(applied.document, applied.inverse, { recordActivity: false }).document; if (restored.kind !== 'pixel') throw new Error('Expected pixel document'); const restoredMap = restored.pixelAssets[map.id]; if (restoredMap.type !== 'tilemap') throw new Error('Expected tilemap'); expect(restoredMap.layers[layer.id].objects?.[0]).toEqual(layer.objects[0]);
   });
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { clientPointToIsometricCoordinate, clientPointToIsometricTile, clientPointToOrthogonalCoordinate, clientPointToOrthogonalTile, clientPointToPixel } from '../../src/renderer/canvas/pixel-coordinates';
+import { clientPointToIsometricCoordinate, clientPointToIsometricTile, clientPointToOrthogonalCoordinate, clientPointToOrthogonalTile, clientPointToPixel, clientPointToTilemapObjectAnchor } from '../../src/renderer/canvas/pixel-coordinates';
 
 describe('pixel canvas pointer coordinates', () => {
   it('maps through a CSS-stretched canvas without shifting the target pixel', () => {
@@ -59,5 +59,17 @@ describe('pixel canvas pointer coordinates', () => {
     const logicalSize = { width: 900, height: 640 }; const bounds = { left: 31, top: 19, width: 1200, height: 800 }; const view = { scale: 32, offsetX: 70, offsetY: 45 }; const mapHeight = 13; const cellHeight = 12; const target = { x: 7.25, y: 11.75 };
     const canvasX = view.offsetX + (target.x - target.y + mapHeight) * view.scale / 2; const canvasY = view.offsetY + (target.x + target.y) * cellHeight / 2;
     expect(clientPointToIsometricCoordinate(bounds.left + canvasX * bounds.width / logicalSize.width, bounds.top + canvasY * bounds.height / logicalSize.height, bounds, logicalSize, view, mapHeight, cellHeight)).toEqual(target);
+  });
+
+  it('places an orthogonal tile-object anchor through composed layer translation', () => {
+    const logicalSize = { width: 960, height: 540 }; const bounds = { left: 17.5, top: 22.25, width: 1200, height: 675 }; const view = { scale: 40, offsetX: 65, offsetY: 35 }; const layerTranslation = { x: 120, y: -15 }; const coordinate = { x: 1.5, y: 1.75 }; const tileWidth = 32; const tileHeight = 16;
+    const canvasX = view.offsetX + layerTranslation.x + coordinate.x * view.scale; const canvasY = view.offsetY + layerTranslation.y + coordinate.y * view.scale * tileHeight / tileWidth;
+    expect(clientPointToTilemapObjectAnchor(bounds.left + canvasX * bounds.width / logicalSize.width, bounds.top + canvasY * bounds.height / logicalSize.height, bounds, logicalSize, view, { orientation: 'orthogonal', mapHeight: 8, tileWidth, tileHeight, layerTranslation })).toEqual({ x: 48, y: 28 });
+  });
+
+  it('places an isometric tile-object anchor through composed layer translation', () => {
+    const logicalSize = { width: 900, height: 640 }; const bounds = { left: 31, top: 19, width: 1200, height: 800 }; const view = { scale: 32, offsetX: 70, offsetY: 45 }; const layerTranslation = { x: -48, y: 22 }; const coordinate = { x: 2.25, y: 3.5 }; const mapHeight = 13; const tileWidth = 32; const tileHeight = 12; const cellHeight = view.scale * tileHeight / tileWidth;
+    const canvasX = view.offsetX + layerTranslation.x + (coordinate.x - coordinate.y + mapHeight) * view.scale / 2; const canvasY = view.offsetY + layerTranslation.y + (coordinate.x + coordinate.y) * cellHeight / 2;
+    expect(clientPointToTilemapObjectAnchor(bounds.left + canvasX * bounds.width / logicalSize.width, bounds.top + canvasY * bounds.height / logicalSize.height, bounds, logicalSize, view, { orientation: 'isometric', mapHeight, tileWidth, tileHeight, layerTranslation })).toEqual({ x: 72, y: 42 });
   });
 });

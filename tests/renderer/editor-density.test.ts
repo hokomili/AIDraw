@@ -162,5 +162,10 @@ describe('professional editor density contract', () => {
     expect(styles).toContain('.onion-settings-panel > footer button { min-height: var(--ui-hit-secondary); font-size: var(--ui-type-caption); }');
     expect(styles).toMatch(/\.onion-settings-panel \{[^}]*max-height: min\(330px, calc\(100% - var\(--timeline-height\) - 48px\)\)/);
     expect(styles).toMatch(/\.onion-settings-panel \{[^}]*overflow: auto/);
+    expect(styles).toContain('.tile-object-actions button, .tile-object-property-editor button { min-height: var(--ui-hit-secondary);');
+    expect(styles).toContain('.tile-object-property-editor input, .tile-object-property-editor select { min-width: 0; height: var(--ui-hit-secondary);');
+    expect(styles).toContain('.tile-object-tile-control { height: var(--ui-hit-secondary);');
+    expect(styles).toContain('font-size: var(--ui-type-label);');
+    expect(styles).toContain('font-size: var(--ui-type-caption);');
   });
 });
