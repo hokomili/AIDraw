@@ -22,6 +22,7 @@ import { illustrationRegionBacking, illustrationRegionCanRenderLocally, paintTil
 import { isometricCellRect, isometricObjectMatrix, isometricProjectionExtent } from '../common/isometric-projection';
 import { drawMapObjectOverlay, mapObjectsIntersectingRasterRegion } from '../common/map-object-render';
 import { orthogonalCellRect, orthogonalObjectMatrix, orthogonalProjectionExtent } from '../common/orthogonal-projection';
+import { orthogonalMapTileArtworkEnvelope, orthogonalTileArtworkIntersects, orthogonalTileArtworkPlacement } from '../common/orthogonal-tile-artwork';
 import { paintTileCachePlan } from '../common/paint-tile-cache';
 import { renderRasterStroke } from '../common/raster-brush';
 import { drawPixelSpriteRegion, pixelSpriteRegionPlan, type PixelSpriteRegion } from '../common/pixel-sprite-render';
@@ -360,6 +361,7 @@ export function renderTilemapDimensions(map: PixelTilemap): { width: number; hei
 function renderTilemapSurface(document: PixelDocument, map: PixelTilemap, region: PixelSpriteRegion, onlyLayerId?: string, tileAnimationTimeMs = 0): Canvas {
   const isometric = map.orientation === 'isometric';
   const dimensions = renderTilemapDimensions(map);
+  const orthogonalArtworkEnvelope = isometric ? undefined : orthogonalMapTileArtworkEnvelope(document, map);
   if (![region.x, region.y, region.width, region.height].every(Number.isSafeInteger) || region.x < 0 || region.y < 0 || region.width < 1 || region.height < 1) throw new RangeError('Tilemap raster regions must use nonnegative safe-integer coordinates and positive safe-integer dimensions.');
   if (!Number.isSafeInteger(region.x + region.width) || !Number.isSafeInteger(region.y + region.height) || region.x + region.width > dimensions.width || region.y + region.height > dimensions.height) throw new RangeError('Tilemap raster region falls outside the nominal projected bounds.');
   assertStaticRasterDimensions(region.width, region.height, 'Tilemap raster region');
@@ -392,22 +394,38 @@ function renderTilemapSurface(document: PixelDocument, map: PixelTilemap, region
       rows: map.height,
       tileWidth: map.tileWidth,
       tileHeight: map.tileHeight,
+      orthogonalArtworkEnvelope,
     }, region);
     const drawCell = (tileX: number, tileY: number, raw: number) => {
       const decoded = decodeTiledGid(raw); if (!decoded.gid) return;
       const rect = isometric
         ? isometricCellRect(tileX, tileY, map.height, map.tileWidth, map.tileHeight)
         : orthogonalCellRect(tileX, tileY, map.tileWidth, map.tileHeight);
-      const transformedWidth = decoded.diagonal ? rect.height : rect.width; const transformedHeight = decoded.diagonal ? rect.width : rect.height; const centerX = rect.x + rect.width / 2; const centerY = rect.y + rect.height / 2;
-      if (centerX + transformedWidth / 2 <= region.x || centerY + transformedHeight / 2 <= region.y || centerX - transformedWidth / 2 >= region.x + region.width || centerY - transformedHeight / 2 >= region.y + region.height) return;
       const resolved = resolveTilesetForGid(document, map, decoded.gid); const sourceAsset = resolved ? document.pixelAssets[resolved.tileset.spriteAssetId] : undefined;
+      const sourceIsRenderable = sourceAsset?.type === 'sprite';
+      const orthogonalPlacement = !isometric && resolved
+        ? orthogonalTileArtworkPlacement(
+          rect,
+          map.tileWidth,
+          map.tileHeight,
+          sourceIsRenderable ? { width: resolved.tileset.tileWidth, height: resolved.tileset.tileHeight } : { width: map.tileWidth, height: map.tileHeight },
+          sourceIsRenderable ? decoded : {},
+        )
+        : undefined;
+      if (orthogonalPlacement) {
+        if (!orthogonalTileArtworkIntersects(orthogonalPlacement.bounds, region)) return;
+      } else {
+        const transformedWidth = decoded.diagonal ? rect.height : rect.width; const transformedHeight = decoded.diagonal ? rect.width : rect.height; const centerX = rect.x + rect.width / 2; const centerY = rect.y + rect.height / 2;
+        if (centerX + transformedWidth / 2 <= region.x || centerY + transformedHeight / 2 <= region.y || centerX - transformedWidth / 2 >= region.x + region.width || centerY - transformedHeight / 2 >= region.y + region.height) return;
+      }
       if (resolved && sourceAsset?.type === 'sprite') {
         const sourceRect = tilesetTileSourceRect(resolved.tileset, animatedLocalId(resolved.tileset, resolved.localId));
         const plan = pixelSpriteRegionPlan(sourceAsset, sourceRect); const frameId = sourceAsset.frameIds[0]; const cacheKey = `${sourceAsset.id}\0${frameId}\0${sourceRect.x},${sourceRect.y},${sourceRect.width},${sourceRect.height}`;
         const source = sources.acquire(cacheKey, plan.render.width * plan.render.height * 4, () => renderSpriteRegion(document, sourceAsset, sourceRect, frameId));
         try {
-          const transform = tiledTileTransformMatrix(decoded); const sampled = source.value;
-          context.save(); try { context.translate(rect.x + rect.width / 2, rect.y + rect.height / 2); context.transform(transform.a, transform.b, transform.c, transform.d, 0, 0); context.drawImage(sampled.canvas, sampled.sample.x, sampled.sample.y, sampled.sample.width, sampled.sample.height, -rect.width / 2, -rect.height / 2, rect.width, rect.height); } finally { context.restore(); }
+          const sampled = source.value;
+          const placement = orthogonalPlacement ?? { centerX: rect.x + rect.width / 2, centerY: rect.y + rect.height / 2, width: rect.width, height: rect.height, transform: tiledTileTransformMatrix(decoded) };
+          context.save(); try { context.translate(placement.centerX, placement.centerY); context.transform(placement.transform.a, placement.transform.b, placement.transform.c, placement.transform.d, 0, 0); context.drawImage(sampled.canvas, sampled.sample.x, sampled.sample.y, sampled.sample.width, sampled.sample.height, -placement.width / 2, -placement.height / 2, placement.width, placement.height); } finally { context.restore(); }
         } finally { source.release(); }
       } else { const visibleGid = resolved ? resolved.tileset.firstGid + animatedLocalId(resolved.tileset, resolved.localId) : decoded.gid; context.fillStyle = `hsl(${visibleGid * 47 % 360} 55% 60%)`; context.fillRect(rect.x, rect.y, rect.width, rect.height); }
     };

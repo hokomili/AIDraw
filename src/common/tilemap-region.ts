@@ -1,3 +1,5 @@
+import type { OrthogonalTileArtworkEnvelope } from './orthogonal-tile-artwork';
+
 export interface TilemapRegionChunk {
   x: number;
   y: number;
@@ -17,6 +19,8 @@ export interface TilemapProjectionGeometry {
   rows: number;
   tileWidth: number;
   tileHeight: number;
+  /** Optional exact cell-relative artwork extent for orthogonal chunk culling. */
+  orthogonalArtworkEnvelope?: OrthogonalTileArtworkEnvelope;
 }
 
 export interface RasterViewportProjection {
@@ -173,10 +177,11 @@ export function tilemapGridLineRange(region: TilemapRasterRegion, geometry: Tile
 }
 
 /**
- * Keeps only stored chunks whose projected cell envelope can reach a raster
- * region. The max-axis padding is conservative for every stored Tiled GID
- * transform, so filtering cannot hide a rotated rectangular cell. This scans
- * each chunk's geometry once; it is payload/cell pruning, not a spatial index.
+ * Keeps only stored chunks whose projected visual envelope can reach a raster
+ * region. Orthogonal callers may supply the exact cell-relative union for
+ * attached native artwork; the prior max-axis cell envelope remains the safe
+ * default and the isometric policy. This scans each chunk's geometry once; it
+ * is payload/cell pruning, not a spatial index.
  */
 export function tilemapChunksIntersectingRegion<T extends TilemapRegionChunk>(
   chunks: readonly T[],
@@ -189,6 +194,13 @@ export function tilemapChunksIntersectingRegion<T extends TilemapRegionChunk>(
   if (![region.x, region.y, region.width, region.height].every(Number.isSafeInteger)
     || region.width < 1 || region.height < 1) throw new RangeError('Tilemap raster region must use safe-integer coordinates and positive dimensions.');
   const padding = Math.max(geometry.tileWidth, geometry.tileHeight) / 2;
+  const artworkEnvelope = geometry.orthogonalArtworkEnvelope;
+  if (artworkEnvelope && ![artworkEnvelope.left, artworkEnvelope.top, artworkEnvelope.right, artworkEnvelope.bottom].every(Number.isFinite)) {
+    throw new RangeError('Orthogonal artwork envelope must use finite bounds.');
+  }
+  if (artworkEnvelope && (artworkEnvelope.right <= artworkEnvelope.left || artworkEnvelope.bottom <= artworkEnvelope.top)) {
+    throw new RangeError('Orthogonal artwork envelope must have positive bounds.');
+  }
   return chunks.filter((chunk) => {
     if (![chunk.x, chunk.y, chunk.width, chunk.height].every(Number.isSafeInteger)
       || chunk.width < 1 || chunk.height < 1) throw new RangeError('Tilemap chunk geometry must use safe integers and positive dimensions.');
@@ -197,10 +209,18 @@ export function tilemapChunksIntersectingRegion<T extends TilemapRegionChunk>(
     const maxX = chunk.x + chunk.width - 1;
     const maxY = chunk.y + chunk.height - 1;
     if (geometry.orientation === 'orthogonal') {
-      const left = (minX + 0.5) * geometry.tileWidth - padding;
-      const right = (maxX + 0.5) * geometry.tileWidth + padding;
-      const top = (minY + 0.5) * geometry.tileHeight - padding;
-      const bottom = (maxY + 0.5) * geometry.tileHeight + padding;
+      const left = artworkEnvelope
+        ? minX * geometry.tileWidth + artworkEnvelope.left
+        : (minX + 0.5) * geometry.tileWidth - padding;
+      const right = artworkEnvelope
+        ? maxX * geometry.tileWidth + artworkEnvelope.right
+        : (maxX + 0.5) * geometry.tileWidth + padding;
+      const top = artworkEnvelope
+        ? minY * geometry.tileHeight + artworkEnvelope.top
+        : (minY + 0.5) * geometry.tileHeight - padding;
+      const bottom = artworkEnvelope
+        ? maxY * geometry.tileHeight + artworkEnvelope.bottom
+        : (maxY + 0.5) * geometry.tileHeight + padding;
       return intersects(left, top, right, bottom, region);
     }
     const left = (minX - maxY + geometry.rows) * geometry.tileWidth / 2 - padding;

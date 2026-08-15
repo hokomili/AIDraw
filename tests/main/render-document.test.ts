@@ -172,6 +172,80 @@ describe('native document rendering', () => {
     expect({ width: image.width, height: image.height }).toEqual({ width: 3, height: 5 });
   });
 
+  it('renders native orthogonal artwork overhang in full and requested rasters without changing canonical or Tiled bytes', async () => {
+    const document = createPixelDocument('project', 'Native orthogonal overhang'); document.assetIds = []; document.pixelAssets = {};
+    document.palette[2].color = '#ed3f5fff';
+    const sprite = createPixelSprite('Six by eight tile', 6, 8); const cel = Object.values(sprite.cels)[0];
+    writePixels(cel, Array.from({ length: 48 }, (_, offset) => ({ x: offset % 6, y: Math.floor(offset / 6), index: 2 })));
+    const tileset = createPixelTileset('Six by eight tile', sprite.id, 6, 8, 1, 1); tileset.firstGid = 1;
+    const map = createPixelTilemap('Four-pixel cells'); map.width = 4; map.height = 33; map.tileWidth = 4; map.tileHeight = 4; map.tilesetIds = [tileset.id];
+    const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile' || !layer.chunks) throw new Error('Expected tile layer');
+    writeTiles(layer.chunks, [{ x: 3, y: 0, gid: 1 }, { x: 1, y: 32, gid: 1 }]);
+    document.pixelAssets = { [sprite.id]: sprite, [tileset.id]: tileset, [map.id]: map }; document.assetIds = [sprite.id, tileset.id, map.id]; document.activeAssetId = map.id;
+    const canonical = structuredClone(document); const tiledBefore = await exportDocument(document, 'tiled-json');
+
+    const full = renderTilemap(document, map); const requested = renderTilemapRegion(document, map, { x: 4, y: 124, width: 6, height: 4 });
+    expect({ width: full.width, height: full.height }).toEqual({ width: 16, height: 132 });
+    expect([...full.getContext('2d').getImageData(15, 0, 1, 1).data]).toEqual([237, 63, 95, 255]);
+    expect(Buffer.from(requested.getContext('2d').getImageData(0, 0, 6, 4).data)).toEqual(Buffer.from(full.getContext('2d').getImageData(4, 124, 6, 4).data));
+    expect([...requested.getContext('2d').getImageData(0, 0, 6, 4).data].every((value, offset) => value === [237, 63, 95, 255][offset % 4])).toBe(true);
+
+    const tiledAfter = await exportDocument(document, 'tiled-json');
+    expect(document).toEqual(canonical);
+    expect(tiledAfter).toEqual(tiledBefore);
+  });
+
+  it('retains a nominal-cell fallback when a smaller resolved tileset has no sprite source', () => {
+    const document = createPixelDocument('project', 'Missing native tile source'); document.assetIds = []; document.pixelAssets = {};
+    const tileset = createPixelTileset('Missing two-pixel source', 'missing-sprite', 2, 2, 1, 1); tileset.firstGid = 1;
+    const map = createPixelTilemap('Sixteen-pixel fallback'); map.width = 1; map.height = 1; map.tileWidth = 16; map.tileHeight = 16; map.tilesetIds = [tileset.id];
+    const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile' || !layer.chunks) throw new Error('Expected tile layer');
+    writeTiles(layer.chunks, [{ x: 0, y: 0, gid: 1 }]);
+    document.pixelAssets = { [tileset.id]: tileset, [map.id]: map }; document.assetIds = [tileset.id, map.id]; document.activeAssetId = map.id;
+
+    const full = renderTilemap(document, map);
+    const requested = renderTilemapRegion(document, map, { x: 15, y: 0, width: 1, height: 1 });
+    const expected = full.getContext('2d').getImageData(15, 0, 1, 1).data;
+    expect(expected[3]).toBe(255);
+    expect(Buffer.from(requested.getContext('2d').getImageData(0, 0, 1, 1).data)).toEqual(Buffer.from(expected));
+  });
+
+  it('preserves all eight Tiled transforms inside a native rectangular orthogonal footprint', () => {
+    const document = createPixelDocument('project', 'Native rectangular transforms'); document.assetIds = []; document.pixelAssets = {};
+    const colors = ['#ef476fff', '#ffd166ff', '#06d6a0ff', '#118ab2ff', '#8338ecff', '#fb5607ff', '#3a86ffff', '#8ac926ff'];
+    colors.forEach((color, offset) => { document.palette[offset + 2].color = color; });
+    const sprite = createPixelSprite('Four by two corners', 4, 2); const cel = Object.values(sprite.cels)[0];
+    writePixels(cel, Array.from({ length: 8 }, (_, offset) => ({ x: offset % 4, y: Math.floor(offset / 4), index: offset + 2 })));
+    const tileset = createPixelTileset('Four by two corners', sprite.id, 4, 2, 1, 1); tileset.firstGid = 1;
+    const map = createPixelTilemap('Native transform strip'); map.width = 8; map.height = 2; map.tileWidth = 6; map.tileHeight = 4; map.tilesetIds = [tileset.id];
+    const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile' || !layer.chunks) throw new Error('Expected tile layer');
+    const cases = [
+      [{}, ['0,2:A', '1,2:B', '2,2:C', '3,2:D', '0,3:E', '1,3:F', '2,3:G', '3,3:H']],
+      [{ hFlip: true }, ['0,2:D', '1,2:C', '2,2:B', '3,2:A', '0,3:H', '1,3:G', '2,3:F', '3,3:E']],
+      [{ vFlip: true }, ['0,2:E', '1,2:F', '2,2:G', '3,2:H', '0,3:A', '1,3:B', '2,3:C', '3,3:D']],
+      [{ hFlip: true, vFlip: true }, ['0,2:H', '1,2:G', '2,2:F', '3,2:E', '0,3:D', '1,3:C', '2,3:B', '3,3:A']],
+      [{ diagonal: true }, ['1,1:H', '2,1:D', '1,2:G', '2,2:C', '1,3:F', '2,3:B', '1,4:E', '2,4:A']],
+      [{ diagonal: true, hFlip: true }, ['1,1:D', '2,1:H', '1,2:C', '2,2:G', '1,3:B', '2,3:F', '1,4:A', '2,4:E']],
+      [{ diagonal: true, vFlip: true }, ['1,1:E', '2,1:A', '1,2:F', '2,2:B', '1,3:G', '2,3:C', '1,4:H', '2,4:D']],
+      [{ diagonal: true, hFlip: true, vFlip: true }, ['1,1:A', '2,1:E', '1,2:B', '2,2:F', '1,3:C', '2,3:G', '1,4:D', '2,4:H']],
+    ] as const;
+    writeTiles(layer.chunks, cases.map(([transforms], x) => ({ x, y: 0, gid: encodeTiledGid(1, transforms) })));
+    document.pixelAssets = { [sprite.id]: sprite, [tileset.id]: tileset, [map.id]: map }; document.assetIds = [sprite.id, tileset.id, map.id]; document.activeAssetId = map.id;
+
+    const source = renderSprite(document, sprite).getContext('2d').getImageData(0, 0, 4, 2).data;
+    const labels = new Map(Array.from({ length: 8 }, (_, offset) => [Buffer.from(source.slice(offset * 4, offset * 4 + 4)).toString('hex'), String.fromCharCode(65 + offset)]));
+    const rendered = renderTilemap(document, map).getContext('2d');
+    cases.forEach(([, expected], cellX) => {
+      const actual: string[] = [];
+      const pixels = rendered.getImageData(cellX * 6, 0, 6, 8).data;
+      for (let y = 0; y < 8; y += 1) for (let x = 0; x < 6; x += 1) {
+        const offset = (y * 6 + x) * 4; if (!pixels[offset + 3]) continue;
+        actual.push(`${x},${y}:${labels.get(Buffer.from(pixels.slice(offset, offset + 4)).toString('hex'))}`);
+      }
+      expect(actual, `transform case ${cellX}`).toEqual(expected);
+    });
+  });
+
   it('renders orthogonal and isometric nominal regions byte-exactly against full-raster crops', () => {
     for (const orientation of ['orthogonal', 'isometric'] as const) {
       const document = createPixelDocument('tilemap', `${orientation} region parity`); const map = document.pixelAssets[document.activeAssetId]; if (map.type !== 'tilemap') throw new Error('Expected tilemap');
@@ -223,7 +297,7 @@ describe('native document rendering', () => {
     writeTiles(layer.chunks, [{ x: 0, y: 0, gid: 1 }]);
     document.pixelAssets = { [sprite.id]: sprite, [tileset.id]: tileset, [map.id]: map }; document.assetIds = [sprite.id, tileset.id, map.id]; document.activeAssetId = map.id;
 
-    const full = renderSprite(document, sprite); const expected = createCanvas(4, 1); expected.getContext('2d').imageSmoothingEnabled = false; expected.getContext('2d').drawImage(full, 1.5, 0, 2, 1, 0, 0, 4, 1);
+    const full = renderSprite(document, sprite); const expected = createCanvas(4, 1); expected.getContext('2d').imageSmoothingEnabled = false; expected.getContext('2d').drawImage(full, 1.5, 0, 2, 1, 0, 0, 2, 1);
     expect(Buffer.from(renderTilemap(document, map).getContext('2d').getImageData(0, 0, 4, 1).data)).toEqual(Buffer.from(expected.getContext('2d').getImageData(0, 0, 4, 1).data));
   });
 

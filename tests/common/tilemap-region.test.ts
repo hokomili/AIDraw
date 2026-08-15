@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { orthogonalTileArtworkEnvelope } from '../../src/common/orthogonal-tile-artwork';
 import { coveringRasterViewportRegion, createGridRasterRegionFilter, tilemapChunksIntersectingRegion, tilemapGridLineRange } from '../../src/common/tilemap-region';
 
 function chunk(id: string, x: number, y: number, width = 32, height = 32) {
@@ -17,6 +18,18 @@ describe('tilemap region chunk filtering', () => {
       .toEqual([rotatedRectangular]);
   });
 
+  it('retains a chunk whose native artwork overhang reaches the region', () => {
+    const overhanging = chunk('overhanging', 0, 1, 1, 1);
+    const far = chunk('far', 0, 10, 1, 1);
+    const region = { x: 0, y: 0, width: 1, height: 1 };
+    const base = { orientation: 'orthogonal' as const, rows: 64, tileWidth: 4, tileHeight: 4 };
+    expect(tilemapChunksIntersectingRegion([overhanging, far], base, region)).toEqual([]);
+    expect(tilemapChunksIntersectingRegion([overhanging, far], {
+      ...base,
+      orthogonalArtworkEnvelope: orthogonalTileArtworkEnvelope(4, 4, [{ width: 4, height: 12 }]),
+    }, region)).toEqual([overhanging]);
+  });
+
   it('filters isometric chunks conservatively without changing retained order', () => {
     const chunks = [chunk('far-right', 64, 0), chunk('target-second', 0, 0), chunk('target-first', -32, -32), chunk('far-bottom', 64, 64)];
     const region = { x: 496, y: -4, width: 24, height: 16 };
@@ -29,6 +42,7 @@ describe('tilemap region chunk filtering', () => {
     expect(() => tilemapChunksIntersectingRegion(valid, { orientation: 'orthogonal', rows: 0, tileWidth: 16, tileHeight: 16 }, { x: 0, y: 0, width: 1, height: 1 })).toThrow(/row count/);
     expect(() => tilemapChunksIntersectingRegion(valid, { orientation: 'orthogonal', rows: 1, tileWidth: 16, tileHeight: 16 }, { x: 0.5, y: 0, width: 1, height: 1 })).toThrow(/safe-integer/);
     expect(() => tilemapChunksIntersectingRegion([chunk('invalid', 0, 0, 0, 32)], { orientation: 'orthogonal', rows: 1, tileWidth: 16, tileHeight: 16 }, { x: 0, y: 0, width: 1, height: 1 })).toThrow(/chunk geometry/);
+    expect(() => tilemapChunksIntersectingRegion(valid, { orientation: 'orthogonal', rows: 1, tileWidth: 16, tileHeight: 16, orthogonalArtworkEnvelope: { left: 0, top: 0, right: Number.NaN, bottom: 16 } }, { x: 0, y: 0, width: 1, height: 1 })).toThrow(/finite bounds/);
   });
 
   it('outward-rounds a fractional translated viewport in canonical map pixels', () => {

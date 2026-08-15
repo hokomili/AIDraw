@@ -81,6 +81,7 @@ import { deleteMapObjectPoint, insertMapObjectPoint, mapObjectAtPoint, mapObject
 import { isometricCellRect, isometricCoordinateDeltaFromScreen, isometricObjectMatrix, isometricProjectionExtent, type IsometricCellRect } from '../../common/isometric-projection';
 import { drawMapObjectOverlay, mapObjectIntersectsRasterRegion } from '../../common/map-object-render';
 import { orthogonalCellRect, orthogonalCoordinateDeltaFromScreen, orthogonalObjectMatrix, orthogonalProjectionExtent } from '../../common/orthogonal-projection';
+import { orthogonalMapTileArtworkEnvelope, orthogonalTileArtworkIntersects, orthogonalTileArtworkPlacement, type OrthogonalTileArtworkPlacement } from '../../common/orthogonal-tile-artwork';
 import { TILE_VARIANT_SEED_PROPERTY, chooseTileVariant, nextTileVariantSeed, tileVariantCandidates, tileVariantGroup } from '../../common/tile-variants';
 import { isometricTileRenderCells } from '../../common/tile-render-order';
 import { coveringRasterViewportRegion, createGridRasterRegionFilter, tilemapChunksIntersectingRegion, tilemapGridLineRange } from '../../common/tilemap-region';
@@ -599,6 +600,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       }
     } else if (tilemap) {
       const mapSources = new BoundedResourceCache<SpriteRegionBitmap>(MAX_MAP_TILE_SOURCE_CACHE_ENTRIES, MAX_MAP_TILE_SOURCE_CACHE_BYTES, (source) => { source.canvas.width = 1; source.canvas.height = 1; });
+      const orthogonalArtworkEnvelope = tilemap.orientation === 'orthogonal' ? orthogonalMapTileArtworkEnvelope(document, tilemap) : undefined;
       const animatedLocalIds = new Map<string, number>();
       const animatedLocalId = (resolved: NonNullable<ReturnType<typeof resolveTilesetForGid>>) => {
         const key = `${resolved.tileset.id}\0${resolved.localId}`; const cached = animatedLocalIds.get(key); if (cached !== undefined) return cached;
@@ -643,23 +645,37 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
           rows: tilemap.height,
           tileWidth: tilemap.tileWidth,
           tileHeight: tilemap.tileHeight,
+          orthogonalArtworkEnvelope,
         }, layerViewportRegion);
         context.globalAlpha = entry.opacity;
         const drawCell = (x: number, y: number, raw: number) => {
           const decoded = decodeTiledGid(raw); if (!decoded.gid || hiddenCells?.has(replayPointKey(x, y))) return;
-          const resolved = resolveTilesetForGid(document, tilemap, decoded.gid); const mapSourceAsset = resolved ? document.pixelAssets[resolved.tileset.spriteAssetId] : undefined;
+          const resolved = resolveTilesetForGid(document, tilemap, decoded.gid);
+          const mapSourceAsset = resolved ? document.pixelAssets[resolved.tileset.spriteAssetId] : undefined;
+          const sourceIsRenderable = mapSourceAsset?.type === 'sprite';
+          const canonicalPlacement = tilemap.orientation === 'orthogonal' && resolved
+            ? orthogonalTileArtworkPlacement(
+              orthogonalCellRect(x, y, tilemap.tileWidth, tilemap.tileHeight),
+              tilemap.tileWidth,
+              tilemap.tileHeight,
+              sourceIsRenderable ? { width: resolved.tileset.tileWidth, height: resolved.tileset.tileHeight } : { width: tilemap.tileWidth, height: tilemap.tileHeight },
+              sourceIsRenderable ? decoded : {},
+            )
+            : undefined;
+          if (canonicalPlacement && !orthogonalTileArtworkIntersects(canonicalPlacement.bounds, layerViewportRegion)) return;
           const visibleLocalId = resolved ? animatedLocalId(resolved) : undefined;
           const sourceRect = resolved && visibleLocalId !== undefined ? tilesetTileSourceRect(resolved.tileset, visibleLocalId) : undefined;
           const sourcePlan = mapSourceAsset?.type === 'sprite' && sourceRect ? pixelSpriteRegionPlan(mapSourceAsset, sourceRect) : undefined; const frameId = mapSourceAsset?.type === 'sprite' ? mapSourceAsset.frameIds[0] : undefined;
           const mapSource = mapSourceAsset?.type === 'sprite' && sourceRect && sourcePlan && frameId
             ? mapSources.acquire(`${mapSourceAsset.id}\0${frameId}\0${sourceRect.x},${sourceRect.y},${sourceRect.width},${sourceRect.height}`, sourcePlan.render.width * sourcePlan.render.height * 4, () => spriteRegionBitmap(mapSourceAsset, frameId, document.palette, sourceRect))
             : undefined;
-          const drawTile = (rect: IsometricCellRect) => { if (!mapSource || !resolved || !sourceRect) return false; const transform = tiledTileTransformMatrix(decoded); const sampled = mapSource.value; context.save(); try { context.translate(rect.x + rect.width / 2, rect.y + rect.height / 2); context.transform(transform.a, transform.b, transform.c, transform.d, 0, 0); context.drawImage(sampled.canvas, sampled.sample.x, sampled.sample.y, sampled.sample.width, sampled.sample.height, -rect.width / 2, -rect.height / 2, rect.width, rect.height); } finally { context.restore(); } return true; };
+          const drawTile = (rect: IsometricCellRect, artworkPlacement?: OrthogonalTileArtworkPlacement) => { if (!mapSource || !resolved || !sourceRect) return false; const placement = artworkPlacement ?? { centerX: rect.x + rect.width / 2, centerY: rect.y + rect.height / 2, width: rect.width, height: rect.height, transform: tiledTileTransformMatrix(decoded) }; const sampled = mapSource.value; context.save(); try { context.translate(placement.centerX, placement.centerY); context.transform(placement.transform.a, placement.transform.b, placement.transform.c, placement.transform.d, 0, 0); context.drawImage(sampled.canvas, sampled.sample.x, sampled.sample.y, sampled.sample.width, sampled.sample.height, -placement.width / 2, -placement.height / 2, placement.width, placement.height); } finally { context.restore(); } return true; };
           const visibleGid = resolved && visibleLocalId !== undefined ? resolved.tileset.firstGid + visibleLocalId : decoded.gid;
           try {
             if (tilemap.orientation === 'orthogonal') {
               const rect = gridCellRect({ x, y });
-              if (!drawTile(rect)) { context.fillStyle = `hsl(${visibleGid * 47 % 360} 52% 62%)`; context.fillRect(rect.x, rect.y, rect.width, rect.height); }
+              const placement = resolved && sourceIsRenderable ? orthogonalTileArtworkPlacement(rect, tilemap.tileWidth, tilemap.tileHeight, { width: resolved.tileset.tileWidth, height: resolved.tileset.tileHeight }, decoded) : undefined;
+              if (!drawTile(rect, placement)) { context.fillStyle = `hsl(${visibleGid * 47 % 360} 52% 62%)`; context.fillRect(rect.x, rect.y, rect.width, rect.height); }
             } else {
               const rect = gridCellRect({ x, y });
               if (!drawTile(rect)) { context.fillStyle = `hsl(${visibleGid * 47 % 360} 52% 62%)`; traceIsometricCell(context, rect); context.fill(); }
