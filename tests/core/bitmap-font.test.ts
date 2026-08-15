@@ -13,10 +13,16 @@ import {
   createId,
   createPixelDocument,
   deleteBitmapFont,
+  deleteBitmapFontGlyph,
+  editBitmapFontGlyph,
   mapBitmapFontGlyphSheet,
   measureBitmapText,
   minimumBitmapFontLineHeight,
   nowIso,
+  orderedBitmapFontCharacters,
+  renameBitmapFont,
+  resizeBitmapGlyph,
+  resolveBitmapFontCharacter,
   resolveBitmapFontId,
   upsertBitmapFontGlyph,
 } from '@aidraw/core';
@@ -164,6 +170,69 @@ describe('bitmap fonts', () => {
     const restored = applyTransaction(applied.document, applied.inverse, { recordActivity: false }).document;
     if (restored.kind !== 'pixel') throw new Error('Expected pixel document');
     expect(restored.bitmapFonts).toEqual(document.bitmapFonts);
+  });
+
+  it('renames and edits one observed font without changing its ID or untouched library content', () => {
+    const first = createDefaultBitmapFont();
+    const second = createEmptyBitmapFont([first], { id: 'bitmap-font-notes', name: 'Notes', lineHeight: 12 }).font;
+    const source = [first, second]; const before = structuredClone(source);
+    const renamed = renameBitmapFont(source, structuredClone(first), '  UI Symbols  ');
+    expect(renamed.font).toMatchObject({ id: first.id, name: 'UI Symbols', lineHeight: first.lineHeight });
+    expect(renamed.font.glyphs).toEqual(first.glyphs);
+    expect(renamed.fonts[1]).toBe(second);
+    expect(source).toEqual(before);
+
+    const resized = resizeBitmapGlyph(renamed.font.glyphs.A, 7, 5);
+    expect(resized.rows).toEqual(['.###...', '#...#..', '#...#..', '#####..', '#...#..']);
+    const edited = editBitmapFontGlyph(renamed.fonts, structuredClone(renamed.font), 'A', { ...resized, advance: 8 }, 7);
+    expect(edited.font).toMatchObject({ id: first.id, name: 'UI Symbols', lineHeight: 7 });
+    expect(edited.font.glyphs.A).toEqual({ width: 7, advance: 8, rows: resized.rows });
+    expect(edited.font.glyphs.B).toEqual(first.glyphs.B);
+    expect(edited.fonts[1]).toBe(second);
+    expect(renamed.font.glyphs.A).toEqual(first.glyphs.A);
+  });
+
+  it('fails stale edits closed and deterministically recovers after deleting the final mapping', () => {
+    const font = createDefaultBitmapFont();
+    const observed = structuredClone(font);
+    const concurrentlyRenamed = { ...font, name: 'Changed elsewhere' };
+    expect(() => renameBitmapFont([concurrentlyRenamed], observed, 'New name')).toThrow(/font changed/i);
+    expect(() => editBitmapFontGlyph([concurrentlyRenamed], observed, 'A', observed.glyphs.A, observed.lineHeight)).toThrow(/font changed/i);
+    expect(() => deleteBitmapFontGlyph([concurrentlyRenamed], observed, 'A')).toThrow(/font changed/i);
+    expect(() => editBitmapFontGlyph([font], observed, '🦊', { width: 1, advance: 1, rows: ['#'] }, 8)).toThrow(/no longer exists/i);
+    expect(() => deleteBitmapFontGlyph([font], observed, '🦊')).toThrow(/no longer exists/i);
+
+    const single = upsertBitmapFontGlyph(createEmptyBitmapFont([font], { id: 'bitmap-font-one', name: 'One', lineHeight: 2 }).font, '🦊', { width: 1, advance: 2, rows: ['#'] }, 2);
+    const deleted = deleteBitmapFontGlyph([font, single], structuredClone(single), '🦊');
+    expect(deleted.font).toEqual({ ...single, glyphs: {} });
+    expect(deleted.selectedCharacter).toBe('');
+    expect(deleted.fonts[0]).toBe(font);
+    expect(resolveBitmapFontCharacter(deleted.font, '🦊')).toBe('');
+    expect(orderedBitmapFontCharacters(font).slice(0, 4)).toEqual([' ', '!', '+', ',']);
+  });
+
+  it('commits rename, glyph editing, and glyph deletion as exact whole-library inverses without raster changes', () => {
+    const document = createPixelDocument('sprite', 'Font editing');
+    const visualState = { pixelAssets: structuredClone(document.pixelAssets), palette: structuredClone(document.palette), activeAssetId: document.activeAssetId };
+    const renamed = renameBitmapFont(document.bitmapFonts, structuredClone(document.bitmapFonts[0]), 'Interface');
+    const edited = editBitmapFontGlyph(renamed.fonts, structuredClone(renamed.font), 'A', { width: 2, advance: 3, rows: ['#.', '##'] }, 8);
+    const withoutQuestion = deleteBitmapFontGlyph(edited.fonts, structuredClone(edited.font), '?');
+    const applied = applyTransaction(document, {
+      id: createId('tx'), clientOperationId: createId('op'), documentId: document.id, actor: HUMAN_ACTOR,
+      label: 'Edit bitmap font glyph', createdAt: nowIso(), playback: { mode: 'instant', speed: 1 },
+      operations: [{ kind: 'pixel.bitmap-fonts.replace', fonts: withoutQuestion.fonts }],
+    });
+    if (applied.document.kind !== 'pixel') throw new Error('Expected pixel document');
+    expect(applied.document.bitmapFonts).toEqual(withoutQuestion.fonts);
+    expect(applied.document.bitmapFonts[0].id).toBe(document.bitmapFonts[0].id);
+    expect(applied.document.bitmapFonts[0].glyphs.A).toEqual({ width: 2, advance: 3, rows: ['#.', '##'] });
+    expect(applied.document.bitmapFonts[0].glyphs['?']).toBeUndefined();
+    expect(applied.document).toMatchObject(visualState);
+    expect(applied.document.activity.at(-1)).toMatchObject({ label: 'Edit bitmap font glyph', operationCount: 1 });
+    const restored = applyTransaction(applied.document, applied.inverse, { recordActivity: false }).document;
+    if (restored.kind !== 'pixel') throw new Error('Expected pixel document');
+    expect(restored.bitmapFonts).toEqual(document.bitmapFonts);
+    expect(restored).toMatchObject(visualState);
   });
 
   it('maps a uniform indexed glyph sheet in explicit row-major order without mutating its inputs', () => {

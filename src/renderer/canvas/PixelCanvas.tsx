@@ -12,9 +12,11 @@ import {
   createPixelCelReader,
   cycledPaletteIndex,
   deleteBitmapFont,
+  deleteBitmapFontGlyph,
   deletePixelAnimationTag,
   duplicatePixelFrame,
   ellipsePixels,
+  editBitmapFontGlyph,
   floodPixelRegion,
   HUMAN_ACTOR,
   createId,
@@ -33,6 +35,7 @@ import {
   replacePixelRegion,
   resolveBitmapFontId,
   reorderPixelFrame,
+  renameBitmapFont,
   resolveTilesetForGid,
   setPixelCelLinked,
   setPixelFrameCelsLinked,
@@ -62,7 +65,12 @@ import { useEditorStore } from '../store';
 import { CelExposureGrid } from '../components/CelExposureGrid';
 import { BitmapGlyphMapperDialog } from '../components/BitmapGlyphMapperDialog';
 import { BitmapGlyphSheetMapperDialog } from '../components/BitmapGlyphSheetMapperDialog';
-import { BitmapFontLibraryDialog } from '../components/BitmapFontLibraryDialog';
+import {
+  BitmapFontLibraryDialog,
+  type BitmapFontGlyphDeleteRequest,
+  type BitmapFontGlyphEditRequest,
+  type BitmapFontRenameRequest,
+} from '../components/BitmapFontLibraryDialog';
 import { OnionSkinSettingsPanel } from '../components/OnionSkinSettingsPanel';
 import { SpriteSymmetrySettingsPanel } from '../components/SpriteSymmetrySettingsPanel';
 import { PlaybackLanes } from '../components/PlaybackLanes';
@@ -1566,6 +1574,30 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     return applied;
   };
 
+  const renameSelectedBitmapFont = async (request: BitmapFontRenameRequest): Promise<boolean> => {
+    const renamed = renameBitmapFont(currentBitmapFonts(), request.expectedFont, request.name);
+    const applied = await apply('Rename bitmap font', [{ kind: 'pixel.bitmap-fonts.replace', fonts: renamed.fonts }]);
+    if (applied) {
+      setBitmapFontId(renamed.font.id);
+      notify(`Renamed bitmap font to ${renamed.font.name}.`, 'success');
+    }
+    return applied;
+  };
+
+  const editSelectedBitmapGlyph = async (request: BitmapFontGlyphEditRequest): Promise<boolean> => {
+    const edited = editBitmapFontGlyph(currentBitmapFonts(), request.expectedFont, request.character, request.glyph, request.lineHeight);
+    const applied = await apply('Edit bitmap font glyph', [{ kind: 'pixel.bitmap-fonts.replace', fonts: edited.fonts }]);
+    if (applied) notify(`Updated ${request.character} in ${edited.font.name}.`, 'success');
+    return applied;
+  };
+
+  const removeSelectedBitmapGlyph = async (request: BitmapFontGlyphDeleteRequest): Promise<boolean> => {
+    const deleted = deleteBitmapFontGlyph(currentBitmapFonts(), request.expectedFont, request.character);
+    const applied = await apply('Delete bitmap font glyph', [{ kind: 'pixel.bitmap-fonts.replace', fonts: deleted.fonts }]);
+    if (applied) notify(`Deleted ${request.character} from ${deleted.font.name}. Existing cel pixels remain unchanged.`, 'success');
+    return applied;
+  };
+
   const changeFrameDuration = async (value: string) => {
     if (!sprite || !durationFrameId) return;
     const current = sprite.frames[durationFrameId];
@@ -1645,7 +1677,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       <PlaybackLanes playbacks={playbacks} />
       {tileset && <div className="tileset-canvas-label"><Grid3X3 size={14} /><span><strong>Tileset source</strong><small>{tileset.tileWidth} × {tileset.tileHeight}px cells · metadata in Layers</small></span></div>}
       <div className="pixel-floating-controls">
-        <button className={fontLibraryOpen ? 'is-active' : ''} aria-expanded={fontLibraryOpen} onClick={() => { setFontLibraryOpen(true); setGlyphMapperOpen(false); setGlyphSheetMapperOpen(false); setBitmapTextPoint(undefined); }} title="Create or delete document-owned bitmap font assets"><CaseUpper size={EDITOR_DENSITY.secondaryIcon} /> Fonts</button>
+        <button className={fontLibraryOpen ? 'is-active' : ''} aria-expanded={fontLibraryOpen} onClick={() => { setFontLibraryOpen(true); setGlyphMapperOpen(false); setGlyphSheetMapperOpen(false); setBitmapTextPoint(undefined); }} title="Manage document-owned bitmap fonts and mapped glyphs"><CaseUpper size={EDITOR_DENSITY.secondaryIcon} /> Fonts</button>
         {hasTimeline && <button className={onionSkin ? 'is-active' : ''} onClick={() => setOnionSkinPreferences({ ...onionSettings, enabled: !onionSkin })} title="Onion skin"><Eye size={14} /> Onion</button>}
         {hasTimeline && <button className={onionSettingsOpen ? 'is-active' : ''} aria-expanded={onionSettingsOpen} aria-controls="onion-skin-settings" onClick={() => { setOnionSettingsOpen((open) => !open); setExposureGridOpen(false); }} title="Configure bounded onion skin frames, tint, and opacity"><SlidersHorizontal size={13} /> Onion setup</button>}
         {sprite && <button className={wrapEditing ? 'is-active' : ''} aria-pressed={wrapEditing} onClick={() => setWrapEditing((value) => !value)} title="Preview and edit through repeated copies across opposite sprite edges"><Repeat2 size={14} /> Wrap edit</button>}
@@ -1742,6 +1774,9 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
         onSelectedFontChange={setBitmapFontId}
         onCreate={createBitmapFont}
         onDelete={removeBitmapFont}
+        onRename={renameSelectedBitmapFont}
+        onEditGlyph={editSelectedBitmapGlyph}
+        onDeleteGlyph={removeSelectedBitmapGlyph}
         onClose={() => setFontLibraryOpen(false)}
       />}
       {glyphMapperOpen && sprite && <BitmapGlyphMapperDialog

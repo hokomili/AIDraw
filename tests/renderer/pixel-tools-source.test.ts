@@ -112,14 +112,14 @@ describe('pixel tool renderer wiring', () => {
     expect(component).not.toContain("kind: 'pixel.cel.set'");
   });
 
-  it('creates or deletes one document font from current state while all font selectors recover together', async () => {
+  it('manages one observed document font and glyph through current-state library transactions', async () => {
     const source = await readFile(new URL('../../src/renderer/canvas/PixelCanvas.tsx', import.meta.url), 'utf8');
     const start = source.indexOf('const createBitmapFont = async');
     const end = source.indexOf('const changeFrameDuration = async', start);
     const lifecycle = source.slice(start, end);
     expect(start).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(start);
-    expect(source).toContain('Create or delete document-owned bitmap font assets');
+    expect(source).toContain('Manage document-owned bitmap fonts and mapped glyphs');
     expect(source).toContain('<BitmapFontLibraryDialog');
     expect(source).toContain('selectedFontId={selectedBitmapFontId}');
     expect(source).toContain('onSelectedFontChange={setBitmapFontId}');
@@ -129,9 +129,15 @@ describe('pixel tool renderer wiring', () => {
     expect(source).toContain('useEditorStore.getState().snapshot?.activeDocument');
     expect(lifecycle).toContain("createEmptyBitmapFont(currentBitmapFonts(), { id: createId('bitmap-font'), ...request })");
     expect(lifecycle).toContain('deleteBitmapFont(currentBitmapFonts(), fontId)');
+    expect(lifecycle).toContain('renameBitmapFont(currentBitmapFonts(), request.expectedFont, request.name)');
+    expect(lifecycle).toContain('editBitmapFontGlyph(currentBitmapFonts(), request.expectedFont, request.character, request.glyph, request.lineHeight)');
+    expect(lifecycle).toContain('deleteBitmapFontGlyph(currentBitmapFonts(), request.expectedFont, request.character)');
     expect(lifecycle).toContain("apply('Create bitmap font', [{ kind: 'pixel.bitmap-fonts.replace'");
     expect(lifecycle).toContain("apply('Delete bitmap font', [{ kind: 'pixel.bitmap-fonts.replace'");
-    expect(lifecycle.match(/kind: 'pixel\.bitmap-fonts\.replace'/gu)).toHaveLength(2);
+    expect(lifecycle).toContain("apply('Rename bitmap font', [{ kind: 'pixel.bitmap-fonts.replace'");
+    expect(lifecycle).toContain("apply('Edit bitmap font glyph', [{ kind: 'pixel.bitmap-fonts.replace'");
+    expect(lifecycle).toContain("apply('Delete bitmap font glyph', [{ kind: 'pixel.bitmap-fonts.replace'");
+    expect(lifecycle.match(/kind: 'pixel\.bitmap-fonts\.replace'/gu)).toHaveLength(5);
     expect(lifecycle).not.toContain("kind: 'pixel.cel.set'");
     expect(lifecycle).not.toContain('setSelection(');
     expect(lifecycle).toContain('Existing bitmap text remains rasterized in its cels.');

@@ -1,12 +1,39 @@
 import { describe, expect, it } from 'vitest';
 import { createCanvas, loadImage } from '@napi-rs/canvas';
 import { createHash } from 'node:crypto';
-import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createIllustrationDocument, createPixelDocument, createPixelSprite, createPixelTilemap, createPixelTileset, encodeTiledGid, nowIso, writePixels, writeTiles, type CollisionShape, type DocumentAsset, type GroupObject, type ImageObject, type ShapeObject } from '@aidraw/core';
+import { HUMAN_ACTOR, IDENTITY_TRANSFORM, applyTransaction, createId, createIllustrationDocument, createPixelDocument, createPixelSprite, createPixelTilemap, createPixelTileset, deleteBitmapFontGlyph, editBitmapFontGlyph, encodeTiledGid, nowIso, renameBitmapFont, writePixels, writeTiles, type CollisionShape, type DocumentAsset, type GroupObject, type ImageObject, type ShapeObject } from '@aidraw/core';
 import { exportDocument } from '@main/export-document';
 import { materializePaintTiles } from '@main/persistence';
 import { renderIllustration, renderIllustrationRegion, renderSprite, renderSpriteRegion, renderTilemap, renderTilemapRegion } from '@main/render-document';
 
 describe('native document rendering', () => {
+  it('keeps sprite and PNG export pixels exact while editing document-owned font assets', async () => {
+    const document = createPixelDocument('sprite', 'Font-independent raster');
+    const sprite = document.pixelAssets[document.activeAssetId];
+    if (sprite.type !== 'sprite') throw new Error('Expected sprite');
+    writePixels(Object.values(sprite.cels)[0], [{ x: 1, y: 1, index: 4 }, { x: 2, y: 1, index: 5 }]);
+    const beforeRaster = Buffer.from(renderSprite(document, sprite).getContext('2d').getImageData(0, 0, sprite.width, sprite.height).data);
+    const beforeExport = await exportDocument(document, 'png');
+    const visualState = { pixelAssets: structuredClone(document.pixelAssets), palette: structuredClone(document.palette), activeAssetId: document.activeAssetId };
+
+    const renamed = renameBitmapFont(document.bitmapFonts, structuredClone(document.bitmapFonts[0]), 'Interface');
+    const edited = editBitmapFontGlyph(renamed.fonts, structuredClone(renamed.font), 'A', { width: 2, advance: 3, rows: ['#.', '##'] }, 8);
+    const deleted = deleteBitmapFontGlyph(edited.fonts, structuredClone(edited.font), '?');
+    const result = applyTransaction(document, {
+      id: createId('tx'), clientOperationId: createId('op'), documentId: document.id, actor: HUMAN_ACTOR,
+      label: 'Edit bitmap font', createdAt: nowIso(), playback: { mode: 'instant', speed: 1 },
+      operations: [{ kind: 'pixel.bitmap-fonts.replace', fonts: deleted.fonts }],
+    });
+    if (result.document.kind !== 'pixel') throw new Error('Expected pixel document');
+    const changedSprite = result.document.pixelAssets[result.document.activeAssetId];
+    if (changedSprite.type !== 'sprite') throw new Error('Expected sprite');
+    const afterRaster = Buffer.from(renderSprite(result.document, changedSprite).getContext('2d').getImageData(0, 0, changedSprite.width, changedSprite.height).data);
+    const afterExport = await exportDocument(result.document, 'png');
+    expect(afterRaster).toEqual(beforeRaster);
+    expect(afterExport.data).toEqual(beforeExport.data);
+    expect(result.document).toMatchObject(visualState);
+  });
+
   it('renders locality-safe illustration regions byte-exactly against full-raster crops', async () => {
     const document = createIllustrationDocument('Illustration region parity');
     document.artboard = { ...document.artboard, width: 96, height: 72, background: '#f8efe5' };

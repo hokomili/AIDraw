@@ -8,8 +8,11 @@ import {
   createEmptyBitmapFont,
   createId,
   deleteBitmapFont,
+  deleteBitmapFontGlyph,
+  editBitmapFontGlyph,
   nowIso,
   readPixel,
+  renameBitmapFont,
   type Actor,
   type CanvasOperation,
   type CanvasTransaction,
@@ -127,6 +130,43 @@ describe('per-actor document history lineage', () => {
     current = pixel(service, created.id);
     expect(current.bitmapFonts).toEqual(creation.fonts);
     expect(current.pixelAssets).toEqual(originalAssets);
+    expect((await service.undo(created.id, HUMAN_ACTOR)).status).toBe('committed');
+    current = pixel(service, created.id);
+    expect(current.bitmapFonts).toEqual(originalFonts);
+    expect(current.pixelAssets).toEqual(originalAssets);
+    expect(current.palette).toEqual(originalPalette);
+  });
+
+  it('undoes selected-font rename, glyph editing, and glyph deletion through exact library snapshots', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-history-font-edit-'));
+    temporaryPaths.push(root);
+    const service = new DocumentService(new RecoveryJournal(root), '1.0.0');
+    services.push(service);
+    const created = service.create({ kind: 'sprite', name: 'Font edit history', width: 8, height: 8 }).activeDocument;
+    if (!created || created.kind !== 'pixel') throw new Error('Expected pixel document');
+    const originalFonts = structuredClone(created.bitmapFonts);
+    const originalAssets = structuredClone(created.pixelAssets);
+    const originalPalette = structuredClone(created.palette);
+
+    const renamed = renameBitmapFont(created.bitmapFonts, structuredClone(created.bitmapFonts[0]), 'Interface');
+    expect((await service.apply(transaction(created.id, HUMAN_ACTOR, 'Rename bitmap font', [{ kind: 'pixel.bitmap-fonts.replace', fonts: renamed.fonts }]))).status).toBe('committed');
+    let current = pixel(service, created.id);
+    const edited = editBitmapFontGlyph(current.bitmapFonts, structuredClone(current.bitmapFonts[0]), 'A', { width: 2, advance: 3, rows: ['#.', '##'] }, 8);
+    expect((await service.apply(transaction(created.id, HUMAN_ACTOR, 'Edit bitmap font glyph', [{ kind: 'pixel.bitmap-fonts.replace', fonts: edited.fonts }]))).status).toBe('committed');
+    current = pixel(service, created.id);
+    const deleted = deleteBitmapFontGlyph(current.bitmapFonts, structuredClone(current.bitmapFonts[0]), '?');
+    expect((await service.apply(transaction(created.id, HUMAN_ACTOR, 'Delete bitmap font glyph', [{ kind: 'pixel.bitmap-fonts.replace', fonts: deleted.fonts }]))).status).toBe('committed');
+    current = pixel(service, created.id);
+    expect(current.bitmapFonts[0].name).toBe('Interface');
+    expect(current.bitmapFonts[0].glyphs.A).toEqual({ width: 2, advance: 3, rows: ['#.', '##'] });
+    expect(current.bitmapFonts[0].glyphs['?']).toBeUndefined();
+    expect(current.pixelAssets).toEqual(originalAssets);
+    expect(current.palette).toEqual(originalPalette);
+
+    expect((await service.undo(created.id, HUMAN_ACTOR)).status).toBe('committed');
+    expect(pixel(service, created.id).bitmapFonts[0].glyphs['?']).toEqual(originalFonts[0].glyphs['?']);
+    expect((await service.undo(created.id, HUMAN_ACTOR)).status).toBe('committed');
+    expect(pixel(service, created.id).bitmapFonts[0]).toEqual(renamed.font);
     expect((await service.undo(created.id, HUMAN_ACTOR)).status).toBe('committed');
     current = pixel(service, created.id);
     expect(current.bitmapFonts).toEqual(originalFonts);

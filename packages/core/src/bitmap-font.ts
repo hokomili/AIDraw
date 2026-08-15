@@ -1,6 +1,7 @@
 import type { BitmapFont, BitmapGlyph } from './model';
 
-const MAX_BITMAP_GLYPH_AXIS = 64;
+export const MAX_BITMAP_GLYPH_AXIS = 64;
+const MAX_BITMAP_GLYPH_ADVANCE = 128;
 const MAX_BITMAP_GLYPH_CELLS = MAX_BITMAP_GLYPH_AXIS * MAX_BITMAP_GLYPH_AXIS;
 const MAX_BITMAP_GLYPH_SHEET_CHARACTERS = 256;
 const MAX_BITMAP_GLYPH_SHEET_CELLS = 65_536;
@@ -42,6 +43,12 @@ export interface BitmapFontDeletion {
   font: BitmapFont;
   fonts: BitmapFont[];
   selectedFontId: string;
+}
+
+export interface BitmapFontLibraryEdit {
+  font: BitmapFont;
+  fonts: BitmapFont[];
+  selectedCharacter: string;
 }
 
 const PATTERNS: Record<string, string> = {
@@ -105,6 +112,123 @@ export function resolveBitmapFontId(fonts: ReadonlyArray<BitmapFont>, selectedFo
   return fonts.some((font) => font.id === selectedFontId) ? selectedFontId! : fonts[0]?.id ?? '';
 }
 
+/** Return mapped characters in locale-independent Unicode scalar order. */
+export function orderedBitmapFontCharacters(font: BitmapFont): string[] {
+  return Object.keys(font.glyphs).sort((left, right) => (left.codePointAt(0) ?? 0) - (right.codePointAt(0) ?? 0));
+}
+
+/** Keep an existing mapped character or recover deterministically by code point. */
+export function resolveBitmapFontCharacter(font: BitmapFont, selectedCharacter?: string): string {
+  return selectedCharacter !== undefined && Object.hasOwn(font.glyphs, selectedCharacter)
+    ? selectedCharacter
+    : orderedBitmapFontCharacters(font)[0] ?? '';
+}
+
+/** Resize one glyph from its top-left origin, clipping or filling with clear cells. */
+export function resizeBitmapGlyph(glyphValue: BitmapGlyph, width: number, height: number): BitmapGlyph {
+  if (!Number.isInteger(width) || width < 1 || width > MAX_BITMAP_GLYPH_AXIS) throw new Error(`Bitmap glyph width must be a whole number from 1 through ${MAX_BITMAP_GLYPH_AXIS}.`);
+  if (!Number.isInteger(height) || height < 1 || height > MAX_BITMAP_GLYPH_AXIS) throw new Error(`Bitmap glyph height must be a whole number from 1 through ${MAX_BITMAP_GLYPH_AXIS}.`);
+  return {
+    width,
+    advance: glyphValue.advance,
+    rows: Array.from({ length: height }, (_, y) => Array.from({ length: width }, (_, x) => glyphValue.rows[y]?.[x] === '#' ? '#' : '.').join('')),
+  };
+}
+
+/** Toggle one exact monochrome cell without mutating the glyph. */
+export function toggleBitmapGlyphCell(glyphValue: BitmapGlyph, x: number, y: number): BitmapGlyph {
+  if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x >= glyphValue.width || y >= glyphValue.rows.length) throw new Error('The bitmap glyph cell is outside the editable grid.');
+  const rows = [...glyphValue.rows];
+  rows[y] = `${rows[y].slice(0, x)}${rows[y][x] === '#' ? '.' : '#'}${rows[y].slice(x + 1)}`;
+  return { ...glyphValue, rows };
+}
+
+function bitmapGlyphEquals(left: BitmapGlyph, right: BitmapGlyph): boolean {
+  return left.width === right.width && left.advance === right.advance
+    && left.rows.length === right.rows.length
+    && left.rows.every((row, index) => row === right.rows[index]);
+}
+
+/** Compare exact canonical font identity and content without relying on key order. */
+export function bitmapFontEquals(left: BitmapFont, right: BitmapFont): boolean {
+  if (left.id !== right.id || left.name !== right.name || left.lineHeight !== right.lineHeight) return false;
+  const leftCharacters = Object.keys(left.glyphs);
+  const rightCharacters = Object.keys(right.glyphs);
+  return leftCharacters.length === rightCharacters.length
+    && leftCharacters.every((character) => Object.hasOwn(right.glyphs, character) && bitmapGlyphEquals(left.glyphs[character], right.glyphs[character]));
+}
+
+function requireCurrentBitmapFont(fonts: ReadonlyArray<BitmapFont>, expectedFont: BitmapFont): BitmapFont {
+  const current = fonts.find((font) => font.id === expectedFont.id);
+  if (!current) throw new Error('The selected bitmap font no longer exists. Choose an available font and try again.');
+  if (!bitmapFontEquals(current, expectedFont)) throw new Error('The selected bitmap font changed. Review its current glyphs and try again.');
+  return current;
+}
+
+function replaceBitmapFont(fonts: ReadonlyArray<BitmapFont>, font: BitmapFont, selectedCharacter: string): BitmapFontLibraryEdit {
+  return {
+    font,
+    fonts: fonts.map((entry) => entry.id === font.id ? font : entry),
+    selectedCharacter,
+  };
+}
+
+export function bitmapFontRenameError(font: BitmapFont, name: string): string | undefined {
+  const trimmedName = name.trim();
+  if (!trimmedName) return 'Enter a bitmap font name.';
+  if (trimmedName.length > MAX_BITMAP_FONT_NAME_LENGTH) return `Bitmap font names are limited to ${MAX_BITMAP_FONT_NAME_LENGTH} characters.`;
+  if (trimmedName === font.name) return 'Change the font name before applying.';
+  return undefined;
+}
+
+/** Plan an exact selected-font rename against the action-time library. */
+export function renameBitmapFont(fonts: ReadonlyArray<BitmapFont>, expectedFont: BitmapFont, name: string): BitmapFontLibraryEdit {
+  const current = requireCurrentBitmapFont(fonts, expectedFont);
+  const validationError = bitmapFontRenameError(current, name);
+  if (validationError) throw new Error(validationError);
+  return replaceBitmapFont(fonts, { ...current, name: name.trim() }, resolveBitmapFontCharacter(current));
+}
+
+function glyphsWithout(font: BitmapFont, character: string): Record<string, BitmapGlyph> {
+  return Object.fromEntries(Object.entries(font.glyphs).filter(([entry]) => entry !== character));
+}
+
+export function bitmapFontGlyphEditError(font: BitmapFont, character: string, glyphValue: BitmapGlyph, lineHeight: number): string | undefined {
+  if (!Object.hasOwn(font.glyphs, character)) return 'The selected glyph mapping no longer exists. Choose an available character and try again.';
+  try {
+    const withoutCurrent = { ...font, glyphs: glyphsWithout(font, character) };
+    const edited = upsertBitmapFontGlyph(withoutCurrent, character, glyphValue, lineHeight);
+    if (bitmapFontEquals(font, edited)) return 'Change the glyph cells or metrics before applying.';
+  } catch (error) {
+    return error instanceof Error ? error.message : 'The bitmap glyph is invalid.';
+  }
+  return undefined;
+}
+
+/** Plan one exact existing glyph edit against the observed selected font. */
+export function editBitmapFontGlyph(
+  fonts: ReadonlyArray<BitmapFont>,
+  expectedFont: BitmapFont,
+  character: string,
+  glyphValue: BitmapGlyph,
+  lineHeight: number,
+): BitmapFontLibraryEdit {
+  const current = requireCurrentBitmapFont(fonts, expectedFont);
+  const validationError = bitmapFontGlyphEditError(current, character, glyphValue, lineHeight);
+  if (validationError) throw new Error(validationError);
+  const withoutCurrent = { ...current, glyphs: glyphsWithout(current, character) };
+  const edited = upsertBitmapFontGlyph(withoutCurrent, character, glyphValue, lineHeight);
+  return replaceBitmapFont(fonts, edited, character);
+}
+
+/** Plan deletion of one mapping; an empty font remains a valid reusable asset. */
+export function deleteBitmapFontGlyph(fonts: ReadonlyArray<BitmapFont>, expectedFont: BitmapFont, character: string): BitmapFontLibraryEdit {
+  const current = requireCurrentBitmapFont(fonts, expectedFont);
+  if (!Object.hasOwn(current.glyphs, character)) throw new Error('The selected glyph mapping no longer exists. Choose an available character and try again.');
+  const edited = { ...current, glyphs: glyphsWithout(current, character) };
+  return replaceBitmapFont(fonts, edited, resolveBitmapFontCharacter(edited));
+}
+
 /**
  * Capture one bounded monochrome glyph from an exact sprite selection.
  * Selected nonzero palette indices become ink; index 0 and unselected cells
@@ -136,7 +260,7 @@ export function captureBitmapGlyph(
   }
   if (!ink.size) throw new Error('The selected sprite cells contain no nonzero palette indices.');
   const resolvedAdvance = advance ?? width + 1;
-  if (!Number.isInteger(resolvedAdvance) || resolvedAdvance < 1 || resolvedAdvance > 128) throw new Error('Bitmap glyph advance must be a whole number from 1 through 128.');
+  if (!Number.isInteger(resolvedAdvance) || resolvedAdvance < 1 || resolvedAdvance > MAX_BITMAP_GLYPH_ADVANCE) throw new Error(`Bitmap glyph advance must be a whole number from 1 through ${MAX_BITMAP_GLYPH_ADVANCE}.`);
   const rows = Array.from({ length: height }, (_, row) => Array.from({ length: width }, (_, column) => ink.has(`${minX + column},${minY + row}`) ? '#' : '.').join(''));
   return {
     glyph: { width, advance: resolvedAdvance, rows },
@@ -165,7 +289,7 @@ export function upsertBitmapFontGlyph(font: BitmapFont, character: string, glyph
   const characterError = bitmapFontCharacterError(character);
   if (characterError) throw new Error(characterError);
   if (!Number.isInteger(glyphValue.width) || glyphValue.width < 1 || glyphValue.width > 64) throw new Error('Bitmap glyph width must be a whole number from 1 through 64.');
-  if (!Number.isInteger(glyphValue.advance) || glyphValue.advance < 1 || glyphValue.advance > 128) throw new Error('Bitmap glyph advance must be a whole number from 1 through 128.');
+  if (!Number.isInteger(glyphValue.advance) || glyphValue.advance < 1 || glyphValue.advance > MAX_BITMAP_GLYPH_ADVANCE) throw new Error(`Bitmap glyph advance must be a whole number from 1 through ${MAX_BITMAP_GLYPH_ADVANCE}.`);
   if (!glyphValue.rows.length || glyphValue.rows.length > 64 || glyphValue.rows.some((row) => row.length !== glyphValue.width || !/^[.#]+$/.test(row))) throw new Error('Every bitmap glyph row must match its width and contain only . or # cells.');
   const minimumLineHeight = minimumBitmapFontLineHeight(font, glyphValue);
   if (!Number.isInteger(lineHeight) || lineHeight < minimumLineHeight || lineHeight > 128) throw new Error(`Bitmap font line height must be a whole number from ${minimumLineHeight} through 128.`);
@@ -222,7 +346,7 @@ export function mapBitmapFontGlyphSheet(
   const cellWidth = width / columns; const cellHeight = height / rowCount;
   if (cellWidth < 1 || cellHeight < 1 || cellWidth > MAX_BITMAP_GLYPH_AXIS || cellHeight > MAX_BITMAP_GLYPH_AXIS) throw new Error(`Every glyph-sheet cell must be from 1 × 1 through ${MAX_BITMAP_GLYPH_AXIS} × ${MAX_BITMAP_GLYPH_AXIS} cells.`);
   const resolvedAdvance = advance ?? cellWidth;
-  if (!Number.isInteger(resolvedAdvance) || resolvedAdvance < 1 || resolvedAdvance > 128) throw new Error('Bitmap glyph-sheet advance must be a whole number from 1 through 128.');
+  if (!Number.isInteger(resolvedAdvance) || resolvedAdvance < 1 || resolvedAdvance > MAX_BITMAP_GLYPH_ADVANCE) throw new Error(`Bitmap glyph-sheet advance must be a whole number from 1 through ${MAX_BITMAP_GLYPH_ADVANCE}.`);
   const minimumLineHeight = Math.max(minimumBitmapFontLineHeight(font), cellHeight);
   const resolvedLineHeight = lineHeight ?? Math.max(font.lineHeight, cellHeight);
   if (!Number.isInteger(resolvedLineHeight) || resolvedLineHeight < minimumLineHeight || resolvedLineHeight > 128) throw new Error(`Bitmap glyph-sheet line height must be a whole number from ${minimumLineHeight} through 128.`);
