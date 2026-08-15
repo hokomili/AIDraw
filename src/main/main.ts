@@ -15,7 +15,7 @@ import type { GenerationManager } from './generation-manager';
 import { EngineRuntime } from './engine-runtime';
 import type { GenerationRequest } from '../common/generation';
 import type { ExportFormat } from './export-document';
-import { cliHelp, executeBatchExport, parseCliArguments, type CliCommand } from './cli';
+import { parseCliArguments, runCliInvocation, type CliCommand } from './cli';
 import { validateSpriteSheetSliceOptions, type SpriteSheetSliceOptions } from '../common/sprite-sheet';
 import { buildRendererDiagnostics, type RendererFailureDetail } from './renderer-diagnostics';
 import { embedPixelLink, externalizePixelLink } from '../common/pixel-links';
@@ -1155,17 +1155,12 @@ app.on('web-contents-created', (_event, contents) => {
 
 async function initializeApplication(): Promise<void> {
   if (cliInvocation) {
-    let exitCode = 0;
-    try {
-      if (cliParseError) throw cliParseError;
-      if (cliCommand?.kind === 'help') process.stdout.write(`${cliHelp(basename(process.execPath))}\n`);
-      else if (cliCommand?.kind === 'version') process.stdout.write(`${app.getVersion()}\n`);
-      else if (cliCommand?.kind === 'batch-export') process.stdout.write(`${JSON.stringify(await executeBatchExport(cliCommand), null, 2)}\n`);
-      else throw new Error('No AIDraw CLI command was provided.');
-    } catch (error) {
-      exitCode = 1;
-      process.stderr.write(`AIDraw CLI: ${error instanceof Error ? error.message : String(error)}\n\n${cliHelp(basename(process.execPath))}\n`);
-    }
+    const exitCode = await runCliInvocation({
+      command: cliCommand,
+      parseError: cliParseError,
+      version: app.getVersion(),
+      executable: basename(process.execPath),
+    });
     gracefulShutdown.markComplete();
     app.exit(exitCode);
     return;

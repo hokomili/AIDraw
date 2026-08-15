@@ -134,10 +134,22 @@ The packaged executable can export a native document without opening the editor 
 
 ```powershell
 AIDraw.exe --batch slime.aidraw --scale 8 --save-as slime-x8.gif
+AIDraw.exe --batch slime.aidraw --animation-tag "Run east" --scale 4 --save-as run-east.apng
 AIDraw.exe -b hero.aidraw --format sprite-sheet --scale 4 --save-as hero-x4.png
+AIDraw.exe -b world.aidraw --save-as world.tmj
 ```
 
-The output format is inferred from the destination extension except for `sprite-sheet`, which requires `--format sprite-sheet`. Existing outputs are protected unless `--overwrite` is explicitly supplied. Use `AIDraw.exe --help` for the complete command reference. The same scale is available in the pixel-mode Export menu and as `scale` on the MCP `document_export` tool.
+The output format is inferred from the destination extension except for `sprite-sheet`, which requires `--format sprite-sheet`. GIF, APNG, and sprite-sheet exports accept one exact animation tag ID or one unambiguous case-insensitive name; ambiguous names are refused and require the ID. Tiled JSON/XML uses `.tmj`/`.tmx` for maps and `.tsj`/`.tsx` for standalone tilesets. Sprite sheets publish a PNG plus referenced JSON metadata; supported Tiled exports publish their document plus every referenced tileset image.
+
+The primary and all companions are one publication set. AIDraw admits every resolved sibling destination before changing any output and rejects duplicate identities or existing members unless `--overwrite` is explicit. A previously absent member is published with an atomic no-clobber sibling hard link, so a file that appears after admission is preserved instead of replaced. Existing regular files remain named while private hard-link backups retain rollback bytes for an explicit whole-set overwrite. AIDraw rolls every earlier member back if publishing or cleanup fails; `--overwrite` therefore applies to the whole set, never just the primary path.
+
+The process exit-code contract is:
+
+- `0`: help, version, or complete export success;
+- `2`: command argument or pre-publication validation refusal, including destination collisions;
+- `1`: native read, export, publication, or other runtime failure.
+
+Use `AIDraw.exe --help` for the complete command reference. The same scale is available in the pixel-mode Export menu and as `scale` on the MCP `document_export` tool.
 
 Automated local provisioning can request a one-time connection handoff without opening the editor:
 

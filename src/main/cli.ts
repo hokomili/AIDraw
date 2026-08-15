@@ -1,8 +1,8 @@
-import { access, mkdir, rename, unlink, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, join, resolve } from 'node:path';
 import process from 'node:process';
 import type { ExportFormat } from '../common/contracts';
 import { exportDocument, normalizeExportScale, type ExportArtifact } from './export-document';
+import { ExportPublicationRefusalError, publishExportSet } from './export-publication';
 import { readNativeDocument } from './persistence';
 import { RasterUtilitySupervisor } from './utility-supervisor';
 import type { ImageDecodeValidator } from './transaction-policy';
@@ -24,9 +24,32 @@ export interface BatchExportResult {
   warnings: string[];
 }
 
+export const CLI_EXIT_CODES = {
+  success: 0,
+  runtimeFailure: 1,
+  refusal: 2,
+} as const;
+
+export class CliRefusalError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CliRefusalError';
+  }
+}
+
+export interface CliInvocationOptions {
+  command: CliCommand | undefined;
+  parseError?: Error;
+  version: string;
+  executable?: string;
+  writeStdout?: (message: string) => void;
+  writeStderr?: (message: string) => void;
+  executeBatch?: typeof executeBatchExport;
+}
+
 function nextValue(arguments_: string[], index: number, option: string): string {
   const value = arguments_[index + 1];
-  if (!value || value.startsWith('-')) throw new Error(`${option} requires a value.`);
+  if (!value || value.startsWith('-')) throw new CliRefusalError(`${option} requires a value.`);
   return value;
 }
 
@@ -43,18 +66,22 @@ export function parseCliArguments(arguments_: string[]): CliCommand | undefined 
     if (argument === '-b' || argument === '--batch') batch = true;
     else if (argument === '--overwrite') overwrite = true;
     else if (argument === '--save-as') { outputPath = nextValue(arguments_, index, argument); index += 1; }
-    else if (argument === '--scale') { scale = normalizeExportScale(nextValue(arguments_, index, argument)); index += 1; }
-    else if (argument === '--animation-tag') { animationTag = nextValue(arguments_, index, argument).trim(); if (!animationTag || animationTag.length > 120) throw new Error('--animation-tag must contain from 1 to 120 characters.'); index += 1; }
+    else if (argument === '--scale') {
+      try { scale = normalizeExportScale(nextValue(arguments_, index, argument)); }
+      catch (error) { throw new CliRefusalError(error instanceof Error ? error.message : String(error)); }
+      index += 1;
+    }
+    else if (argument === '--animation-tag') { animationTag = nextValue(arguments_, index, argument).trim(); if (!animationTag || animationTag.length > 120) throw new CliRefusalError('--animation-tag must contain from 1 to 120 characters.'); index += 1; }
     else if (argument === '--format') {
       const value = nextValue(arguments_, index, argument);
-      if (!formats.includes(value as ExportFormat)) throw new Error(`Unknown export format “${value}”.`);
+      if (!formats.includes(value as ExportFormat)) throw new CliRefusalError(`Unknown export format “${value}”.`);
       format = value as ExportFormat; index += 1;
-    } else if (argument.startsWith('-')) throw new Error(`Unknown CLI option “${argument}”.`);
+    } else if (argument.startsWith('-')) throw new CliRefusalError(`Unknown CLI option “${argument}”.`);
     else positional.push(argument);
   }
-  if (!batch) throw new Error('Batch export requires --batch or -b.');
-  if (positional.length !== 1) throw new Error(`Batch export requires exactly one input .aidraw file; received ${positional.length}.`);
-  if (!outputPath) throw new Error('Batch export requires --save-as <output>.');
+  if (!batch) throw new CliRefusalError('Batch export requires --batch or -b.');
+  if (positional.length !== 1) throw new CliRefusalError(`Batch export requires exactly one input .aidraw file; received ${positional.length}.`);
+  if (!outputPath) throw new CliRefusalError('Batch export requires --save-as <output>.');
   return { kind: 'batch-export', inputPath: positional[0], outputPath, format, scale, animationTag, overwrite };
 }
 
@@ -69,10 +96,13 @@ export function cliHelp(executable = 'AIDraw.exe'): string {
     '  --save-as <path>     Exact output path',
     '  --format <format>    Optional explicit format (required for sprite-sheet)',
     '  --scale <1-64>       Integer nearest-neighbor scale for pixel presentation exports',
-    '  --animation-tag <id/name>  Export one exact sprite tag range (GIF/APNG/sprite-sheet)',
-    '  --overwrite          Replace an existing exact output path',
+    '  --animation-tag <id/name>  Export one exact ID or unambiguous name (GIF/APNG/sprite-sheet)',
+    '  --overwrite          Replace every admitted member of the complete output set',
     '  -h, --help           Show this help',
     '  --version            Show the AIDraw version',
+    '',
+    'Tiled JSON/XML destinations use .tmj/.tmx for maps or .tsj/.tsx for tilesets.',
+    'Exit codes: 0 help/version/export success; 2 argument or validation refusal; 1 read/export/publication/runtime failure.',
     '',
     'Examples:',
     `  ${executable} -b slime.aidraw --scale 8 --save-as slime-x8.gif`,
@@ -83,8 +113,8 @@ export function cliHelp(executable = 'AIDraw.exe'): string {
 function inferFormat(filePath: string): ExportFormat | undefined {
   const extension = extname(filePath).toLowerCase();
   if (extension === '.jpg' || extension === '.jpeg') return 'jpeg';
-  if (extension === '.tmj') return 'tiled-json';
-  if (extension === '.tmx') return 'tiled-xml';
+  if (extension === '.tmj' || extension === '.tsj') return 'tiled-json';
+  if (extension === '.tmx' || extension === '.tsx') return 'tiled-xml';
   const value = extension.slice(1);
   return formats.includes(value as ExportFormat) && value !== 'sprite-sheet' ? value as ExportFormat : undefined;
 }
@@ -94,13 +124,9 @@ function extensionMatches(format: ExportFormat, filePath: string): boolean {
   if (!extension) return true;
   if (format === 'jpeg') return extension === '.jpg' || extension === '.jpeg';
   if (format === 'sprite-sheet') return extension === '.png';
-  if (format === 'tiled-json') return extension === '.tmj';
-  if (format === 'tiled-xml') return extension === '.tmx';
+  if (format === 'tiled-json') return extension === '.tmj' || extension === '.tsj';
+  if (format === 'tiled-xml') return extension === '.tmx' || extension === '.tsx';
   return extension === `.${format}`;
-}
-
-async function exists(filePath: string): Promise<boolean> {
-  try { await access(filePath); return true; } catch { return false; }
 }
 
 function companionBytes(data: Buffer, format: ExportFormat, target: string): Buffer {
@@ -124,25 +150,6 @@ function outputEntries(artifact: ExportArtifact, format: ExportFormat, target: s
   return entries;
 }
 
-async function atomicWrite(filePath: string, data: Buffer, overwrite: boolean): Promise<void> {
-  await mkdir(dirname(filePath), { recursive: true });
-  const present = await exists(filePath);
-  if (present && !overwrite) throw new Error(`Output already exists: ${filePath}. Pass --overwrite to replace it.`);
-  const temporary = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-  const backup = `${filePath}.${process.pid}.${Date.now()}.bak`;
-  await writeFile(temporary, data, { flag: 'wx' });
-  let backedUp = false;
-  try {
-    if (present) { await rename(filePath, backup); backedUp = true; }
-    await rename(temporary, filePath);
-    if (backedUp) await unlink(backup);
-  } catch (error) {
-    await unlink(temporary).catch(() => undefined);
-    if (backedUp) await rename(backup, filePath).catch(() => undefined);
-    throw error;
-  }
-}
-
 export async function executeBatchExport(
   command: Extract<CliCommand, { kind: 'batch-export' }>,
   imageDecoder?: ImageDecodeValidator,
@@ -151,26 +158,39 @@ export async function executeBatchExport(
   const decode = imageDecoder ?? ((bytes, expected) => ownedUtilities!.validateImage(bytes, expected));
   try {
     const inputPath = resolve(command.inputPath);
-    if (extname(inputPath).toLowerCase() !== '.aidraw') throw new Error('Batch export input must be an .aidraw file.');
-    const loaded = await readNativeDocument(inputPath, decode);
+    if (extname(inputPath).toLowerCase() !== '.aidraw') throw new CliRefusalError('Batch export input must be an .aidraw file.');
     const format = command.format ?? inferFormat(command.outputPath);
-    if (!format) throw new Error('Cannot infer the export format. Add --format <format>.');
-    if (!extensionMatches(format, command.outputPath)) throw new Error(`The output extension does not match --format ${format}.`);
+    if (!format) throw new CliRefusalError('Cannot infer the export format. Add --format <format>.');
+    if (!extensionMatches(format, command.outputPath)) throw new CliRefusalError(`The output extension does not match --format ${format}.`);
+    if (command.animationTag && !['gif', 'apng', 'sprite-sheet'].includes(format)) {
+      throw new CliRefusalError('--animation-tag requires a GIF, APNG, or sprite-sheet export from a pixel sprite.');
+    }
+    const loaded = await readNativeDocument(inputPath, decode);
     let animationTagId: string | undefined;
     if (command.animationTag) {
-      if (!['gif', 'apng', 'sprite-sheet'].includes(format) || loaded.document.kind !== 'pixel') throw new Error('--animation-tag requires a GIF, APNG, or sprite-sheet export from a pixel sprite.');
-      const sprite = loaded.document.pixelAssets[loaded.document.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('--animation-tag requires an active pixel sprite.'); const tag = sprite.tags.find((entry) => entry.id === command.animationTag || entry.name.toLocaleLowerCase() === command.animationTag!.toLocaleLowerCase()); if (!tag) throw new Error(`Animation tag “${command.animationTag}” does not exist.`); animationTagId = tag.id;
+      if (loaded.document.kind !== 'pixel') throw new CliRefusalError('--animation-tag requires a GIF, APNG, or sprite-sheet export from a pixel sprite.');
+      const sprite = loaded.document.pixelAssets[loaded.document.activeAssetId];
+      if (sprite.type !== 'sprite') throw new CliRefusalError('--animation-tag requires an active pixel sprite.');
+      const exactId = sprite.tags.find((entry) => entry.id === command.animationTag);
+      const named = exactId ? [] : sprite.tags.filter((entry) => entry.name.toLocaleLowerCase() === command.animationTag!.toLocaleLowerCase());
+      if (!exactId && named.length > 1) throw new CliRefusalError(`Animation tag name “${command.animationTag}” is ambiguous; use an exact tag ID.`);
+      const tag = exactId ?? named[0];
+      if (!tag) throw new CliRefusalError(`Animation tag “${command.animationTag}” does not exist.`);
+      animationTagId = tag.id;
     }
     const artifact = await exportDocument(loaded.document, format, { scale: command.scale, animationTagId });
     const requested = resolve(command.outputPath);
+    if ((format === 'tiled-json' || format === 'tiled-xml') && extname(requested)
+      && extname(requested).toLowerCase() !== `.${artifact.extension}`) {
+      throw new CliRefusalError(`The active Tiled asset exports as .${artifact.extension}; the requested destination uses ${extname(requested)}.`);
+    }
     const target = extname(requested) ? requested : `${requested}.${artifact.extension}`;
     const entries = outputEntries(artifact, format, target);
-    if (!command.overwrite) for (const entry of entries) if (await exists(entry.path)) throw new Error(`Output already exists: ${entry.path}. Pass --overwrite to replace it.`);
-    for (const entry of entries) await atomicWrite(entry.path, entry.data, command.overwrite);
+    const publishedPaths = await publishExportSet(entries, command.overwrite);
     return {
       inputPath,
       outputPath: target,
-      companionPaths: entries.slice(1).map((entry) => entry.path),
+      companionPaths: publishedPaths.slice(1),
       format,
       scale: command.scale,
       byteLength: artifact.data.byteLength,
@@ -178,5 +198,27 @@ export async function executeBatchExport(
     };
   } finally {
     ownedUtilities?.stop();
+  }
+}
+
+export async function runCliInvocation(options: CliInvocationOptions): Promise<number> {
+  const executable = options.executable ?? 'AIDraw.exe';
+  const stdout = options.writeStdout ?? ((message: string) => { process.stdout.write(message); });
+  const stderr = options.writeStderr ?? ((message: string) => { process.stderr.write(message); });
+  try {
+    if (options.parseError) throw options.parseError;
+    if (options.command?.kind === 'help') stdout(`${cliHelp(executable)}\n`);
+    else if (options.command?.kind === 'version') stdout(`${options.version}\n`);
+    else if (options.command?.kind === 'batch-export') {
+      const execute = options.executeBatch ?? executeBatchExport;
+      stdout(`${JSON.stringify(await execute(options.command), null, 2)}\n`);
+    } else throw new CliRefusalError('No AIDraw CLI command was provided.');
+    return CLI_EXIT_CODES.success;
+  } catch (error) {
+    const exitCode = error instanceof CliRefusalError || error instanceof ExportPublicationRefusalError
+      ? CLI_EXIT_CODES.refusal
+      : CLI_EXIT_CODES.runtimeFailure;
+    stderr(`AIDraw CLI: ${error instanceof Error ? error.message : String(error)}\n\n${cliHelp(executable)}\n`);
+    return exitCode;
   }
 }
