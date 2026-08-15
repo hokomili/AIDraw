@@ -23,15 +23,16 @@ describe('orthogonal projection source parity', () => {
       expect(source).toContain('orthogonalArtworkEnvelope,');
       expect(source).toContain('orthogonalTileArtworkPlacement(');
       expect(source).toContain('orthogonalTileArtworkIntersects(');
-      expect(source).toContain('sourceIsRenderable ? decoded : {}');
-      expect(source).toContain('sourceIsRenderable ? resolved.tileset.tileOffset : undefined');
+      expect(source).toContain('resolved && sourceIsRenderable');
+      expect(source).toContain('{ width: resolved.tileset.tileWidth, height: resolved.tileset.tileHeight }');
+      expect(source).toContain('resolved.tileset.tileOffset');
     }
     expect(headless).toContain("const sourceIsRenderable = sourceAsset?.type === 'sprite'");
-    expect(headless).toContain('sourceIsRenderable ? { width: resolved.tileset.tileWidth, height: resolved.tileset.tileHeight } : { width: map.tileWidth, height: map.tileHeight }');
+    expect(headless).toContain(': rect.x + rect.width > region.x && rect.y + rect.height > region.y');
     expect(interactive).toContain("const sourceIsRenderable = mapSourceAsset?.type === 'sprite'");
-    expect(interactive).toContain('sourceIsRenderable ? { width: resolved.tileset.tileWidth, height: resolved.tileset.tileHeight } : { width: tilemap.tileWidth, height: tilemap.tileHeight }');
+    expect(interactive).toContain(': canonicalRect.x + canonicalRect.width > layerViewportRegion.x');
     expect(interactive.indexOf('const mapSourceAsset =')).toBeLessThan(interactive.indexOf('const canonicalPlacement ='));
-    expect(interactive.indexOf('if (canonicalPlacement && !orthogonalTileArtworkIntersects')).toBeLessThan(interactive.indexOf('const sourcePlan ='));
+    expect(interactive.indexOf('const canonicalIntersects = canonicalPlacement')).toBeLessThan(interactive.indexOf('const sourcePlan ='));
     expect(interactive).toContain('const placement = resolved && sourceIsRenderable ? orthogonalTileArtworkPlacement(');
     expect(interactive).toContain('decoded, resolved.tileset.tileOffset)');
     expect(interactive).toContain("const gridCellRect = (point: PixelPoint): IsometricCellRect => tilemap?.orientation === 'isometric'");

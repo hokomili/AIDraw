@@ -32,8 +32,9 @@ describe('tile animation editor wiring', () => {
       expect(source).toContain('tileAnimationFrameAt');
       expect(source).toContain('tilesetTileSourceRect');
       expect(source).toContain('animatedLocalId');
-      expect(source).toContain('tiledTileTransformMatrix(decoded)');
     }
+    expect(renderer).toContain('artworkPlacement.transform.a');
+    expect(headless).toContain('placement.transform.a');
     expect(renderer).toContain('tileAnimationTimeMs');
     expect(renderer).toContain('MIN_TILE_ANIMATION_TICK_MS');
     expect(renderer).toContain("matchMedia?.('(prefers-reduced-motion: reduce)')");

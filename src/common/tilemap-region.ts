@@ -1,4 +1,5 @@
 import type { OrthogonalTileArtworkEnvelope } from './orthogonal-tile-artwork';
+import type { IsometricTileArtworkEnvelope } from './isometric-tile-artwork';
 
 export interface TilemapRegionChunk {
   x: number;
@@ -21,6 +22,8 @@ export interface TilemapProjectionGeometry {
   tileHeight: number;
   /** Optional exact cell-relative artwork extent for orthogonal chunk culling. */
   orthogonalArtworkEnvelope?: OrthogonalTileArtworkEnvelope;
+  /** Optional exact cell-relative artwork extent for isometric chunk culling. */
+  isometricArtworkEnvelope?: IsometricTileArtworkEnvelope;
 }
 
 export interface RasterViewportProjection {
@@ -178,10 +181,10 @@ export function tilemapGridLineRange(region: TilemapRasterRegion, geometry: Tile
 
 /**
  * Keeps only stored chunks whose projected visual envelope can reach a raster
- * region. Orthogonal callers may supply the exact cell-relative union for
- * attached native artwork; the prior max-axis cell envelope remains the safe
- * default and the isometric policy. This scans each chunk's geometry once; it
- * is payload/cell pruning, not a spatial index.
+ * region. Callers may supply the exact projection-specific cell-relative union
+ * for attached native artwork; the prior max-axis cell envelope remains the
+ * compatibility default. This scans each chunk's geometry once; it is
+ * payload/cell pruning, not a spatial index.
  */
 export function tilemapChunksIntersectingRegion<T extends TilemapRegionChunk>(
   chunks: readonly T[],
@@ -194,12 +197,20 @@ export function tilemapChunksIntersectingRegion<T extends TilemapRegionChunk>(
   if (![region.x, region.y, region.width, region.height].every(Number.isSafeInteger)
     || region.width < 1 || region.height < 1) throw new RangeError('Tilemap raster region must use safe-integer coordinates and positive dimensions.');
   const padding = Math.max(geometry.tileWidth, geometry.tileHeight) / 2;
-  const artworkEnvelope = geometry.orthogonalArtworkEnvelope;
+  if (geometry.orientation === 'orthogonal' && geometry.isometricArtworkEnvelope) {
+    throw new RangeError('Isometric artwork envelope requires isometric projection.');
+  }
+  if (geometry.orientation === 'isometric' && geometry.orthogonalArtworkEnvelope) {
+    throw new RangeError('Orthogonal artwork envelope requires orthogonal projection.');
+  }
+  const artworkEnvelope = geometry.orientation === 'orthogonal'
+    ? geometry.orthogonalArtworkEnvelope
+    : geometry.isometricArtworkEnvelope;
   if (artworkEnvelope && ![artworkEnvelope.left, artworkEnvelope.top, artworkEnvelope.right, artworkEnvelope.bottom].every(Number.isFinite)) {
-    throw new RangeError('Orthogonal artwork envelope must use finite bounds.');
+    throw new RangeError(`${geometry.orientation === 'orthogonal' ? 'Orthogonal' : 'Isometric'} artwork envelope must use finite bounds.`);
   }
   if (artworkEnvelope && (artworkEnvelope.right <= artworkEnvelope.left || artworkEnvelope.bottom <= artworkEnvelope.top)) {
-    throw new RangeError('Orthogonal artwork envelope must have positive bounds.');
+    throw new RangeError(`${geometry.orientation === 'orthogonal' ? 'Orthogonal' : 'Isometric'} artwork envelope must have positive bounds.`);
   }
   return chunks.filter((chunk) => {
     if (![chunk.x, chunk.y, chunk.width, chunk.height].every(Number.isSafeInteger)
@@ -223,10 +234,18 @@ export function tilemapChunksIntersectingRegion<T extends TilemapRegionChunk>(
         : (maxY + 0.5) * geometry.tileHeight + padding;
       return intersects(left, top, right, bottom, region);
     }
-    const left = (minX - maxY + geometry.rows) * geometry.tileWidth / 2 - padding;
-    const right = (maxX - minY + geometry.rows) * geometry.tileWidth / 2 + padding;
-    const top = (minX + minY + 1) * geometry.tileHeight / 2 - padding;
-    const bottom = (maxX + maxY + 1) * geometry.tileHeight / 2 + padding;
+    const left = artworkEnvelope
+      ? (minX - maxY + geometry.rows - 1) * geometry.tileWidth / 2 + artworkEnvelope.left
+      : (minX - maxY + geometry.rows) * geometry.tileWidth / 2 - padding;
+    const right = artworkEnvelope
+      ? (maxX - minY + geometry.rows - 1) * geometry.tileWidth / 2 + artworkEnvelope.right
+      : (maxX - minY + geometry.rows) * geometry.tileWidth / 2 + padding;
+    const top = artworkEnvelope
+      ? (minX + minY) * geometry.tileHeight / 2 + artworkEnvelope.top
+      : (minX + minY + 1) * geometry.tileHeight / 2 - padding;
+    const bottom = artworkEnvelope
+      ? (maxX + maxY) * geometry.tileHeight / 2 + artworkEnvelope.bottom
+      : (maxX + maxY + 1) * geometry.tileHeight / 2 + padding;
     return intersects(left, top, right, bottom, region);
   });
 }

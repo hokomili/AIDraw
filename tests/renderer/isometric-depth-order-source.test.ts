@@ -9,6 +9,7 @@ describe('tilemap traversal source wiring', () => {
     expect(interactive).toContain("import { coveringRasterViewportRegion, createGridRasterRegionFilter, tilemapChunksIntersectingRegion, tilemapGridLineRange } from '../../common/tilemap-region'");
     expect(interactive).toContain("tilemap.orientation === 'isometric'");
     expect(interactive).toContain('const candidateChunks = tilemapChunksIntersectingRegion(Object.values(layer.chunks)');
+    expect(interactive).toContain("const isometricArtworkEnvelope = tilemap.orientation === 'isometric' ? isometricMapTileArtworkEnvelope(document, tilemap) : undefined;");
     expect(interactive).toContain('const layerViewportRegion = layerOffsetX === 0 && layerOffsetY === 0 ? baseRasterViewportRegion!');
     expect(interactive).toContain('layerOffsetX,');
     expect(interactive).toContain('layerOffsetY,');
@@ -26,6 +27,7 @@ describe('tilemap traversal source wiring', () => {
     expect(headless).toContain("import { isometricTileRenderCells } from '../common/tile-render-order'");
     expect(headless).toContain("import { tilemapChunksIntersectingRegion } from '../common/tilemap-region'");
     expect(headless).toContain('const candidateChunks = tilemapChunksIntersectingRegion(Object.values(layer.chunks)');
+    expect(headless).toContain('const isometricArtworkEnvelope = isometric ? isometricMapTileArtworkEnvelope(document, map) : undefined;');
     expect(headless).toContain('isometricTileRenderCells(candidateChunks, (chunk) => decodeTilemapChunk(chunk))');
   });
 });

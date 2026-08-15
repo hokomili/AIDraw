@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { isometricTileArtworkEnvelope } from '../../src/common/isometric-tile-artwork';
 import { orthogonalTileArtworkEnvelope } from '../../src/common/orthogonal-tile-artwork';
 import { coveringRasterViewportRegion, createGridRasterRegionFilter, tilemapChunksIntersectingRegion, tilemapGridLineRange } from '../../src/common/tilemap-region';
 
@@ -37,12 +38,28 @@ describe('tilemap region chunk filtering', () => {
       .toEqual(['target-second', 'target-first']);
   });
 
+  it('retains an isometric chunk whose native transformed overhang reaches the region', () => {
+    const overhanging = chunk('overhanging', 2, 2, 1, 1);
+    const far = chunk('far', 20, 20, 1, 1);
+    const region = { x: 13, y: 0, width: 1, height: 1 };
+    const base = { orientation: 'isometric' as const, rows: 3, tileWidth: 4, tileHeight: 2 };
+    expect(tilemapChunksIntersectingRegion([overhanging, far], base, region)).toEqual([]);
+    expect(tilemapChunksIntersectingRegion([overhanging, far], {
+      ...base,
+      isometricArtworkEnvelope: isometricTileArtworkEnvelope(4, 2, [
+        { width: 6, height: 8, offset: { x: 2, y: -1 } },
+      ]),
+    }, region)).toEqual([overhanging]);
+  });
+
   it('fails closed on unsafe region, projection, or chunk geometry', () => {
     const valid = [chunk('valid', 0, 0)];
     expect(() => tilemapChunksIntersectingRegion(valid, { orientation: 'orthogonal', rows: 0, tileWidth: 16, tileHeight: 16 }, { x: 0, y: 0, width: 1, height: 1 })).toThrow(/row count/);
     expect(() => tilemapChunksIntersectingRegion(valid, { orientation: 'orthogonal', rows: 1, tileWidth: 16, tileHeight: 16 }, { x: 0.5, y: 0, width: 1, height: 1 })).toThrow(/safe-integer/);
     expect(() => tilemapChunksIntersectingRegion([chunk('invalid', 0, 0, 0, 32)], { orientation: 'orthogonal', rows: 1, tileWidth: 16, tileHeight: 16 }, { x: 0, y: 0, width: 1, height: 1 })).toThrow(/chunk geometry/);
     expect(() => tilemapChunksIntersectingRegion(valid, { orientation: 'orthogonal', rows: 1, tileWidth: 16, tileHeight: 16, orthogonalArtworkEnvelope: { left: 0, top: 0, right: Number.NaN, bottom: 16 } }, { x: 0, y: 0, width: 1, height: 1 })).toThrow(/finite bounds/);
+    expect(() => tilemapChunksIntersectingRegion(valid, { orientation: 'isometric', rows: 1, tileWidth: 16, tileHeight: 16, isometricArtworkEnvelope: { left: 0, top: 0, right: 0, bottom: 16 } }, { x: 0, y: 0, width: 1, height: 1 })).toThrow(/positive bounds/);
+    expect(() => tilemapChunksIntersectingRegion(valid, { orientation: 'orthogonal', rows: 1, tileWidth: 16, tileHeight: 16, isometricArtworkEnvelope: { left: 0, top: 0, right: 16, bottom: 16 } }, { x: 0, y: 0, width: 1, height: 1 })).toThrow(/requires isometric/);
   });
 
   it('outward-rounds a fractional translated viewport in canonical map pixels', () => {

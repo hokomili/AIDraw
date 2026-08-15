@@ -39,6 +39,6 @@ describe('tileset slice editor source wiring', () => {
     expect(app).toMatch(/if \(drawingOffsetDraftMatchesTileset\) \{\s*setDrawingOffsetDraft\(undefined\);\s*return;/u);
     expect(app).toContain('replace({ ...tileset, tileOffset: { x, y } }, "Change tileset drawing offset")');
     expect(app).toContain('Apply drawing offset');
-    expect(app).toContain('Moves this tileset’s orthogonal sprite artwork without moving map cells, grid geometry, or collision data.');
+    expect(app).toContain('Moves this tileset’s tile-layer sprite artwork without moving map cells, grid geometry, or collision data.');
   });
 });

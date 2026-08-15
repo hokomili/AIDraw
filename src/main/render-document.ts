@@ -4,7 +4,6 @@ import {
   decodeTiledGid,
   decodeTilemapChunk,
   resolveTilesetForGid,
-  tiledTileTransformMatrix,
   type AIDrawDocument,
   type BlendMode,
   type IllustrationDocument,
@@ -20,6 +19,7 @@ import { colorWithOpacity } from '../common/color';
 import { illustrationGroupRequiresIsolation, illustrationObjectHasTransform } from '../common/illustration-geometry';
 import { illustrationRegionBacking, illustrationRegionCanRenderLocally, paintTileCacheEntriesForIllustrationRegion, phaseExactIllustrationObjectIntersectsRegion, type IllustrationRasterRegion } from '../common/illustration-region';
 import { isometricCellRect, isometricObjectMatrix, isometricProjectionExtent } from '../common/isometric-projection';
+import { isometricMapTileArtworkEnvelope, isometricTileArtworkIntersects, isometricTileArtworkPlacement } from '../common/isometric-tile-artwork';
 import { drawMapObjectOverlay, mapObjectsIntersectingRasterRegion } from '../common/map-object-render';
 import { orthogonalCellRect, orthogonalObjectMatrix, orthogonalProjectionExtent } from '../common/orthogonal-projection';
 import { orthogonalMapTileArtworkEnvelope, orthogonalTileArtworkIntersects, orthogonalTileArtworkPlacement } from '../common/orthogonal-tile-artwork';
@@ -362,6 +362,7 @@ function renderTilemapSurface(document: PixelDocument, map: PixelTilemap, region
   const isometric = map.orientation === 'isometric';
   const dimensions = renderTilemapDimensions(map);
   const orthogonalArtworkEnvelope = isometric ? undefined : orthogonalMapTileArtworkEnvelope(document, map);
+  const isometricArtworkEnvelope = isometric ? isometricMapTileArtworkEnvelope(document, map) : undefined;
   if (![region.x, region.y, region.width, region.height].every(Number.isSafeInteger) || region.x < 0 || region.y < 0 || region.width < 1 || region.height < 1) throw new RangeError('Tilemap raster regions must use nonnegative safe-integer coordinates and positive safe-integer dimensions.');
   if (!Number.isSafeInteger(region.x + region.width) || !Number.isSafeInteger(region.y + region.height) || region.x + region.width > dimensions.width || region.y + region.height > dimensions.height) throw new RangeError('Tilemap raster region falls outside the nominal projected bounds.');
   assertStaticRasterDimensions(region.width, region.height, 'Tilemap raster region');
@@ -395,6 +396,7 @@ function renderTilemapSurface(document: PixelDocument, map: PixelTilemap, region
       tileWidth: map.tileWidth,
       tileHeight: map.tileHeight,
       orthogonalArtworkEnvelope,
+      isometricArtworkEnvelope,
     }, region);
     const drawCell = (tileX: number, tileY: number, raw: number) => {
       const decoded = decodeTiledGid(raw); if (!decoded.gid) return;
@@ -403,29 +405,24 @@ function renderTilemapSurface(document: PixelDocument, map: PixelTilemap, region
         : orthogonalCellRect(tileX, tileY, map.tileWidth, map.tileHeight);
       const resolved = resolveTilesetForGid(document, map, decoded.gid); const sourceAsset = resolved ? document.pixelAssets[resolved.tileset.spriteAssetId] : undefined;
       const sourceIsRenderable = sourceAsset?.type === 'sprite';
-      const orthogonalPlacement = !isometric && resolved
-        ? orthogonalTileArtworkPlacement(
-          rect,
-          map.tileWidth,
-          map.tileHeight,
-          sourceIsRenderable ? { width: resolved.tileset.tileWidth, height: resolved.tileset.tileHeight } : { width: map.tileWidth, height: map.tileHeight },
-          sourceIsRenderable ? decoded : {},
-          sourceIsRenderable ? resolved.tileset.tileOffset : undefined,
-        )
+      const artworkPlacement = resolved && sourceIsRenderable
+        ? isometric
+          ? isometricTileArtworkPlacement(rect, map.tileWidth, map.tileHeight, { width: resolved.tileset.tileWidth, height: resolved.tileset.tileHeight }, decoded, resolved.tileset.tileOffset)
+          : orthogonalTileArtworkPlacement(rect, map.tileWidth, map.tileHeight, { width: resolved.tileset.tileWidth, height: resolved.tileset.tileHeight }, decoded, resolved.tileset.tileOffset)
         : undefined;
-      if (orthogonalPlacement) {
-        if (!orthogonalTileArtworkIntersects(orthogonalPlacement.bounds, region)) return;
-      } else {
-        const transformedWidth = decoded.diagonal ? rect.height : rect.width; const transformedHeight = decoded.diagonal ? rect.width : rect.height; const centerX = rect.x + rect.width / 2; const centerY = rect.y + rect.height / 2;
-        if (centerX + transformedWidth / 2 <= region.x || centerY + transformedHeight / 2 <= region.y || centerX - transformedWidth / 2 >= region.x + region.width || centerY - transformedHeight / 2 >= region.y + region.height) return;
-      }
+      const artworkIntersects = artworkPlacement
+        ? isometric
+          ? isometricTileArtworkIntersects(artworkPlacement.bounds, region)
+          : orthogonalTileArtworkIntersects(artworkPlacement.bounds, region)
+        : rect.x + rect.width > region.x && rect.y + rect.height > region.y && rect.x < region.x + region.width && rect.y < region.y + region.height;
+      if (!artworkIntersects) return;
       if (resolved && sourceAsset?.type === 'sprite') {
         const sourceRect = tilesetTileSourceRect(resolved.tileset, animatedLocalId(resolved.tileset, resolved.localId));
         const plan = pixelSpriteRegionPlan(sourceAsset, sourceRect); const frameId = sourceAsset.frameIds[0]; const cacheKey = `${sourceAsset.id}\0${frameId}\0${sourceRect.x},${sourceRect.y},${sourceRect.width},${sourceRect.height}`;
         const source = sources.acquire(cacheKey, plan.render.width * plan.render.height * 4, () => renderSpriteRegion(document, sourceAsset, sourceRect, frameId));
         try {
           const sampled = source.value;
-          const placement = orthogonalPlacement ?? { centerX: rect.x + rect.width / 2, centerY: rect.y + rect.height / 2, width: rect.width, height: rect.height, transform: tiledTileTransformMatrix(decoded) };
+          const placement = artworkPlacement!;
           context.save(); try { context.translate(placement.centerX, placement.centerY); context.transform(placement.transform.a, placement.transform.b, placement.transform.c, placement.transform.d, 0, 0); context.drawImage(sampled.canvas, sampled.sample.x, sampled.sample.y, sampled.sample.width, sampled.sample.height, -placement.width / 2, -placement.height / 2, placement.width, placement.height); } finally { context.restore(); }
         } finally { source.release(); }
       } else { const visibleGid = resolved ? resolved.tileset.firstGid + animatedLocalId(resolved.tileset, resolved.localId) : decoded.gid; context.fillStyle = `hsl(${visibleGid * 47 % 360} 55% 60%)`; context.fillRect(rect.x, rect.y, rect.width, rect.height); }

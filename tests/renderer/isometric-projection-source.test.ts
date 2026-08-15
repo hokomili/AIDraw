@@ -21,4 +21,19 @@ describe('isometric projection source parity', () => {
     expect(canvas).toContain('clientPointToIsometricTile(event.clientX, event.clientY, bounds, size, view, tilemap.height');
     expect(canvas).toContain('isometricCoordinateDeltaFromScreen');
   });
+
+  it('shares native sprite placement and exact overhang admission without changing nominal fallback geometry', async () => {
+    const interactive = await readFile(new URL('../../src/renderer/canvas/PixelCanvas.tsx', import.meta.url), 'utf8');
+    const headless = await readFile(new URL('../../src/main/render-document.ts', import.meta.url), 'utf8');
+    for (const source of [interactive, headless]) {
+      expect(source).toContain('isometricMapTileArtworkEnvelope');
+      expect(source).toContain('isometricTileArtworkPlacement');
+      expect(source).toContain('isometricTileArtworkIntersects');
+      expect(source).toContain('sourceIsRenderable');
+      expect(source).toContain('resolved.tileset.tileOffset');
+      expect(source).toContain('isometricArtworkEnvelope,');
+    }
+    expect(interactive).toContain('traceIsometricCell(context, rect); context.fill();');
+    expect(headless).toContain('context.fillRect(rect.x, rect.y, rect.width, rect.height);');
+  });
 });

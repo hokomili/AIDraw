@@ -3943,7 +3943,7 @@ function TilesetPanel({
         ))}
       </div>
       <div className="tileset-actions"><button disabled={drawingOffsetDraftMatchesTileset} onClick={applyDrawingOffset}>Apply drawing offset</button></div>
-      <p className="fine-print">Moves this tileset’s orthogonal sprite artwork without moving map cells, grid geometry, or collision data.</p>
+      <p className="fine-print">Moves this tileset’s tile-layer sprite artwork without moving map cells, grid geometry, or collision data.</p>
       <div className="section-heading">
         <span>Transformations</span>
       </div>
