@@ -60,4 +60,16 @@ describe('pixel tool renderer wiring', () => {
     expect(source).toContain("kind: 'pixel.cel.set'");
     expect(source).toContain("region: { kind: bounds.kind, assetId: sprite.id, x: 0, y: 0, width: bounds.width, height: bounds.height }");
   });
+
+  it('maps a bounded indexed sprite selection into the document bitmap-font transaction', async () => {
+    const source = await readFile(new URL('../../src/renderer/canvas/PixelCanvas.tsx', import.meta.url), 'utf8');
+    expect(source).toContain('captureBitmapGlyph(selection, compositePixelReader(sprite, activeFrameId))');
+    expect(source).toContain('Map selected nonzero indexed cells to a reusable bitmap-font character');
+    expect(source).toContain('<CaseUpper size={EDITOR_DENSITY.secondaryIcon} /> Glyph');
+    expect(source).toContain('<BitmapGlyphMapperDialog');
+    expect(source).toContain('upsertBitmapFontGlyph(font, character, { ...capture.glyph, advance }, lineHeight)');
+    expect(source).toContain("apply('Map bitmap font glyph', [{ kind: 'pixel.bitmap-fonts.replace'");
+    expect(source).toContain('Use the Text tool to paint it as editable indexed pixels.');
+    expect(source).not.toContain("kind: 'pixel.cel.set', spriteId: sprite.id, celId: cel.id, changes: capture");
+  });
 });

@@ -4,6 +4,7 @@ import {
   decodeTilemapChunk,
   encodeTiledGid,
   capturePixelStamp,
+  captureBitmapGlyph,
   captureTileStamp,
   bitmapTextCells,
   measureBitmapText,
@@ -36,12 +37,14 @@ import {
   tiledTileTransformMatrix,
   transformPixelStamp,
   transformTileStamp,
+  upsertBitmapFontGlyph,
   upsertPixelAnimationTag,
   wrapPixelPoint,
   wrapPixelPoints,
   type CanvasOperation,
   type CollisionShape,
   type BitmapFont,
+  type BitmapGlyphCapture,
   type PixelIndexRun,
   type PixelRegionResult,
   type PixelDocument,
@@ -51,9 +54,10 @@ import {
   type TileStamp,
   type TilemapChunk,
 } from '@aidraw/core';
-import { ArrowLeft, ArrowRight, ChevronLeft, ChevronRight, ClipboardPaste, Copy, Dices, Eraser, Eye, FlipHorizontal2, FlipVertical2, Grid3X3, Link2, Move, Palette, Pause, Play, Repeat2, RotateCcw, RotateCw, Scaling, Scissors, SlidersHorizontal, Table2, Trash2, Unlink2 } from 'lucide-react';
+import { ArrowLeft, ArrowRight, CaseUpper, ChevronLeft, ChevronRight, ClipboardPaste, Copy, Dices, Eraser, Eye, FlipHorizontal2, FlipVertical2, Grid3X3, Link2, Move, Palette, Pause, Play, Repeat2, RotateCcw, RotateCw, Scaling, Scissors, SlidersHorizontal, Table2, Trash2, Unlink2 } from 'lucide-react';
 import { useEditorStore } from '../store';
 import { CelExposureGrid } from '../components/CelExposureGrid';
+import { BitmapGlyphMapperDialog } from '../components/BitmapGlyphMapperDialog';
 import { OnionSkinSettingsPanel } from '../components/OnionSkinSettingsPanel';
 import { PlaybackLanes } from '../components/PlaybackLanes';
 import { StampLibraryDialog } from '../components/StampLibraryDialog';
@@ -251,6 +255,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const lassoDraftRef = useRef<GridLassoDraft | undefined>(undefined);
   const selectionCombination = useRef<SelectionCombination>('replace');
   const [selectionScaleOpen, setSelectionScaleOpen] = useState(false);
+  const [glyphMapperOpen, setGlyphMapperOpen] = useState(false);
   const [clipboardAvailable, setClipboardAvailable] = useState(Boolean(localSelectionClipboard));
   const [mapObjectGesture, setMapObjectGesture] = useState<MapObjectGesture>();
   const mapObjectGestureRef = useRef<MapObjectGesture | undefined>(undefined);
@@ -306,6 +311,11 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const playbackMap = useEditorStore((state) => state.playbacks);
   const playbacks = Object.values(playbackMap).filter((entry) => entry.documentId === document.id);
   const activeFrameId = sprite?.frameIds.includes(frameId ?? '') ? frameId : sprite?.frameIds[0];
+  const selectedGlyphCapture = useMemo<{ capture?: BitmapGlyphCapture; error?: string }>(() => {
+    if (!glyphMapperOpen || !sprite || !activeFrameId || !selection.length) return {};
+    try { return { capture: captureBitmapGlyph(selection, compositePixelReader(sprite, activeFrameId)) }; }
+    catch (error) { return { error: error instanceof Error ? error.message : 'The selected glyph could not be captured.' }; }
+  }, [activeFrameId, glyphMapperOpen, selection, sprite]);
   const activePaletteOverride = sprite && activeFrameId ? sprite.paletteOverrides[activeFrameId] : undefined;
   const activeStamp = document.stamps.find((stamp) => stamp.id === activeStampId) ?? document.stamps[0];
   const placementStamp: PixelStamp = activeStamp ?? { id: 'builtin-plus', name: 'Built-in plus', width: 3, height: 3, anchorX: 1, anchorY: 1, cells: [{ x: 1, y: 1, index: pixelIndex }, { x: 0, y: 1, index: pixelIndex }, { x: 2, y: 1, index: pixelIndex }, { x: 1, y: 0, index: pixelIndex }, { x: 1, y: 2, index: pixelIndex }] };
@@ -1353,6 +1363,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
           <button onClick={() => void transformSelection('rotate-clockwise')} title="Rotate selected cells 90° clockwise"><RotateCw size={13} /> CW</button>
           <button onClick={() => void transformSelection('rotate-counterclockwise')} title="Rotate selected cells 90° counterclockwise"><RotateCcw size={13} /> CCW</button>
           <button onClick={() => setSelectionScaleOpen(true)} title="Scale selected cells by independent integer factors"><Scaling size={13} /> Scale</button>
+          {sprite && <button onClick={() => setGlyphMapperOpen(true)} title="Map selected nonzero indexed cells to a reusable bitmap-font character"><CaseUpper size={EDITOR_DENSITY.secondaryIcon} /> Glyph</button>}
           <button onClick={() => void deleteSelection()} title="Delete selected pixels"><Trash2 size={13} /></button>
           <button onClick={() => { setSelection([]); setSelectionOffset(undefined); }} title="Clear selection">Clear</button>
         </>}
@@ -1391,6 +1402,21 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       )}
       {exposureGridOpen && sprite && activeFrameId && <CelExposureGrid key={`${sprite.id}:${sprite.revision}:${activeFrameId}:${selectedEntityId ?? ''}`} sprite={sprite} activeFrameId={activeFrameId} activeLayerId={selectedEntityId} onSelect={(nextFrameId, layerId) => { setFrameId(nextFrameId); setSelectedEntity(layerId); }} onToggleLink={(layerId, nextFrameId) => void toggleCelExposureLink(layerId, nextFrameId)} onClose={() => setExposureGridOpen(false)} />}
       {onionSettingsOpen && hasTimeline && sprite && <OnionSkinSettingsPanel settings={onionSettings} onChange={setOnionSettings} onClose={() => setOnionSettingsOpen(false)} />}
+      {glyphMapperOpen && sprite && <BitmapGlyphMapperDialog
+        fonts={document.bitmapFonts}
+        capture={selectedGlyphCapture.capture}
+        captureError={selectedGlyphCapture.error}
+        onSubmit={async ({ fontId, character, advance, lineHeight }) => {
+          const font = document.bitmapFonts.find((entry) => entry.id === fontId);
+          const capture = selectedGlyphCapture.capture;
+          if (!font || !capture) return false;
+          const mapped = upsertBitmapFontGlyph(font, character, { ...capture.glyph, advance }, lineHeight);
+          const applied = await apply('Map bitmap font glyph', [{ kind: 'pixel.bitmap-fonts.replace', fonts: document.bitmapFonts.map((entry) => entry.id === fontId ? mapped : entry) }]);
+          if (applied) { notify(`Mapped ${character} in ${font.name}. Use the Text tool to paint it as editable indexed pixels.`, 'success'); setGlyphMapperOpen(false); }
+          return applied;
+        }}
+        onClose={() => setGlyphMapperOpen(false)}
+      />}
       {bitmapTextPoint && sprite && <BitmapTextDialog fonts={document.bitmapFonts} origin={bitmapTextPoint} spriteSize={{ width: sprite.width, height: sprite.height }} paletteIndex={pixelIndex} wrap={wrapEditing} onSubmit={addBitmapText} onFontsReplace={(fonts) => apply('Replace bitmap font library', [{ kind: 'pixel.bitmap-fonts.replace', fonts }])} onClose={() => setBitmapTextPoint(undefined)} />}
       {stampCaptureOpen && (sprite || tilemap) && <EntryDialog
         title="Save reusable stamp"
