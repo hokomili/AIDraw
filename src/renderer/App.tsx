@@ -82,6 +82,7 @@ import type {
 import {
   HUMAN_ACTOR,
   IDENTITY_TRANSFORM,
+  MAX_TILESET_DRAWING_OFFSET,
   applyTextStyleRange,
   countPaletteIndexUsage,
   createId,
@@ -3729,6 +3730,7 @@ function TilesetPanel({
   const [propertyName, setPropertyName] = useState("");
   const [propertyValue, setPropertyValue] = useState("");
   const [selectedWangSetId, setSelectedWangSetId] = useState<string>();
+  const [drawingOffsetDraft, setDrawingOffsetDraft] = useState<{ tilesetId: string; revision: number; x: string; y: string }>();
   const replace = (next: PixelTileset, label: string) =>
     void apply(label, [
       {
@@ -3757,6 +3759,28 @@ function TilesetPanel({
     const next = structuredClone(tileset);
     next.tiles[selectedTileId] = { ...structuredClone(selectedTile), ...patch };
     replace(next, label);
+  };
+  const currentDrawingOffsetDraft = drawingOffsetDraft?.tilesetId === tileset.id && drawingOffsetDraft.revision === tileset.revision
+    ? drawingOffsetDraft
+    : { tilesetId: tileset.id, revision: tileset.revision, x: String(tileset.tileOffset.x), y: String(tileset.tileOffset.y) };
+  const parsedDrawingOffset = { x: Number(currentDrawingOffsetDraft.x), y: Number(currentDrawingOffsetDraft.y) };
+  const drawingOffsetDraftIsValid = [currentDrawingOffsetDraft.x, currentDrawingOffsetDraft.y].every((value) => value.trim())
+    && [parsedDrawingOffset.x, parsedDrawingOffset.y].every((value) => Number.isInteger(value) && Math.abs(value) <= MAX_TILESET_DRAWING_OFFSET);
+  const drawingOffsetDraftMatchesTileset = drawingOffsetDraftIsValid
+    && parsedDrawingOffset.x === tileset.tileOffset.x
+    && parsedDrawingOffset.y === tileset.tileOffset.y;
+  const applyDrawingOffset = () => {
+    const { x, y } = parsedDrawingOffset;
+    if (!drawingOffsetDraftIsValid) {
+      notify(`Tileset drawing offsets must be whole pixels from −${MAX_TILESET_DRAWING_OFFSET.toLocaleString("en-US")} to ${MAX_TILESET_DRAWING_OFFSET.toLocaleString("en-US")}.`, "warning");
+      return;
+    }
+    if (drawingOffsetDraftMatchesTileset) {
+      setDrawingOffsetDraft(undefined);
+      return;
+    }
+    setDrawingOffsetDraft(undefined);
+    replace({ ...tileset, tileOffset: { x, y } }, "Change tileset drawing offset");
   };
   const addTerrain = () => {
     const terrainId = tileset.wangSets.length + 1;
@@ -3899,6 +3923,27 @@ function TilesetPanel({
       <div className="collision-list">{selectedTile.collisions.map((shape, shapeIndex) => <div className={"collision-row " + (selectedCollisionSet.has(shape.id) ? "is-selected" : "")} key={shape.id} onClick={(event) => { if ((event.target as HTMLElement).closest("input, select, button")) return; setSelectedCollisionIds(event.shiftKey ? selectedCollisionSet.has(shape.id) ? selectedCollisionIds.filter((id) => id !== shape.id) : [...selectedCollisionIds, shape.id] : [shape.id]); }}><input aria-label={"Select collision " + (shapeIndex + 1)} type="checkbox" checked={selectedCollisionSet.has(shape.id)} onChange={(event) => setSelectedCollisionIds(event.target.checked ? [...selectedCollisionIds, shape.id] : selectedCollisionIds.filter((id) => id !== shape.id))} /><select aria-label={"Collision type " + (shapeIndex + 1)} value={shape.type} onChange={(event) => updateTile({ collisions: selectedTile.collisions.map((entry, index) => index === shapeIndex ? { ...entry, type: event.target.value as typeof shape.type } : entry) }, "Change collision type")}><option value="rectangle">Rectangle</option><option value="ellipse">Ellipse</option><option value="polygon">Polygon</option><option value="polyline">Polyline</option></select><input aria-label={"Collision x " + (shapeIndex + 1)} type="number" value={shape.x} onChange={(event) => updateTile({ collisions: selectedTile.collisions.map((entry, index) => index === shapeIndex ? { ...entry, x: Number(event.target.value) } : entry) }, "Move collision")} /><input aria-label={"Collision y " + (shapeIndex + 1)} type="number" value={shape.y} onChange={(event) => updateTile({ collisions: selectedTile.collisions.map((entry, index) => index === shapeIndex ? { ...entry, y: Number(event.target.value) } : entry) }, "Move collision")} /><input aria-label={"Collision width " + (shapeIndex + 1)} type="number" value={shape.width ?? tileset.tileWidth} onChange={(event) => updateTile({ collisions: selectedTile.collisions.map((entry, index) => index === shapeIndex ? { ...entry, width: Math.max(1, Number(event.target.value)) } : entry) }, "Resize collision")} /><input aria-label={"Collision height " + (shapeIndex + 1)} type="number" value={shape.height ?? tileset.tileHeight} onChange={(event) => updateTile({ collisions: selectedTile.collisions.map((entry, index) => index === shapeIndex ? { ...entry, height: Math.max(1, Number(event.target.value)) } : entry) }, "Resize collision")} /><button title="Delete collision" onClick={() => { updateTile({ collisions: selectedTile.collisions.filter((_, index) => index !== shapeIndex) }, "Delete collision"); setSelectedCollisionIds(selectedCollisionIds.filter((id) => id !== shape.id)); }}><Trash2 size={11} /></button></div>)}</div>
       {selectedCollisions.length > 1 && <small className="collision-selection-note">Drag the highlighted shapes together, or select exactly one collision to edit its points and custom properties.</small>}
       {selectedCollision && <div className="collision-property-editor"><div className="section-heading"><span>Collision properties</span><small>{Object.keys(selectedCollision.properties).length}</small></div><div className="tile-property-add"><input aria-label="Collision property name" placeholder="name" value={collisionPropertyName} onChange={(event) => setCollisionPropertyName(event.target.value)} /><input aria-label="Collision property value" placeholder="value" value={collisionPropertyValue} onChange={(event) => setCollisionPropertyValue(event.target.value)} /><button disabled={!collisionPropertyName.trim()} onClick={() => { const parsed = collisionPropertyValue === "true" ? true : collisionPropertyValue === "false" ? false : collisionPropertyValue.trim() !== "" && Number.isFinite(Number(collisionPropertyValue)) ? Number(collisionPropertyValue) : collisionPropertyValue; updateTile({ collisions: selectedTile.collisions.map((entry) => entry.id === selectedCollision.id ? { ...entry, properties: { ...entry.properties, [collisionPropertyName.trim()]: parsed } } : entry) }, "Set collision property"); setCollisionPropertyName(""); setCollisionPropertyValue(""); }}>Add</button></div><div className="tile-property-list">{Object.entries(selectedCollision.properties).map(([key, value]) => <span key={key}><strong>{key}</strong> = {String(value)}<button title="Delete collision property" onClick={() => { const properties = { ...selectedCollision.properties }; delete properties[key]; updateTile({ collisions: selectedTile.collisions.map((entry) => entry.id === selectedCollision.id ? { ...entry, properties } : entry) }, "Delete collision property"); }}>×</button></span>)}</div></div>}
+      <div className="section-heading"><span>Drawing offset</span><small>map pixels</small></div>
+      <div className="two-fields">
+        {(["x", "y"] as const).map((axis) => (
+          <label className="field" key={axis}>
+            <span>{axis.toUpperCase()} · {axis === "x" ? "right" : "down"} positive</span>
+            <input
+              key={`${tileset.id}:${tileset.revision}:offset-${axis}`}
+              aria-label={`Tileset drawing offset ${axis.toUpperCase()}`}
+              type="number"
+              min={-MAX_TILESET_DRAWING_OFFSET}
+              max={MAX_TILESET_DRAWING_OFFSET}
+              step={1}
+              value={currentDrawingOffsetDraft[axis]}
+              onChange={(event) => setDrawingOffsetDraft({ ...currentDrawingOffsetDraft, [axis]: event.currentTarget.value })}
+              onKeyDown={(event) => { if (event.key === "Enter") applyDrawingOffset(); }}
+            />
+          </label>
+        ))}
+      </div>
+      <div className="tileset-actions"><button disabled={drawingOffsetDraftMatchesTileset} onClick={applyDrawingOffset}>Apply drawing offset</button></div>
+      <p className="fine-print">Moves this tileset’s orthogonal sprite artwork without moving map cells, grid geometry, or collision data.</p>
       <div className="section-heading">
         <span>Transformations</span>
       </div>
@@ -3933,7 +3978,7 @@ function TilesetPanel({
       </div>
       <p className="fine-print">
         Edit the source pixels directly on canvas. Terrain rules, probabilities,
-        animation, properties, and collision data export through Tiled JSON.
+        animation, drawing offset, properties, and collision data export through Tiled.
       </p>
     </div>
   );

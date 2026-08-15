@@ -195,9 +195,30 @@ describe('native document rendering', () => {
     expect(tiledAfter).toEqual(tiledBefore);
   });
 
+  it('applies a tileset drawing offset after native placement without expanding the nominal raster', () => {
+    const document = createPixelDocument('project', 'Orthogonal tileset drawing offset'); document.assetIds = []; document.pixelAssets = {};
+    document.palette[2].color = '#ed3f5fff';
+    const sprite = createPixelSprite('Offset source', 2, 2); const cel = Object.values(sprite.cels)[0];
+    writePixels(cel, Array.from({ length: 4 }, (_, offset) => ({ x: offset % 2, y: Math.floor(offset / 2), index: 2 })));
+    const tileset = createPixelTileset('Offset tiles', sprite.id, 2, 2, 1, 1); tileset.firstGid = 1; tileset.tileOffset = { x: 5, y: -3 };
+    const map = createPixelTilemap('Nominal offset canvas'); map.width = 3; map.height = 2; map.tileWidth = 4; map.tileHeight = 4; map.tilesetIds = [tileset.id];
+    const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile' || !layer.chunks) throw new Error('Expected tile layer');
+    writeTiles(layer.chunks, [{ x: 0, y: 1, gid: 1 }]);
+    document.pixelAssets = { [sprite.id]: sprite, [tileset.id]: tileset, [map.id]: map }; document.assetIds = [sprite.id, tileset.id, map.id]; document.activeAssetId = map.id;
+    const canonical = structuredClone(document);
+
+    const full = renderTilemap(document, map);
+    const requested = renderTilemapRegion(document, map, { x: 5, y: 3, width: 2, height: 2 });
+    expect({ width: full.width, height: full.height }).toEqual({ width: 12, height: 8 });
+    expect([...full.getContext('2d').getImageData(5, 3, 1, 1).data]).toEqual([237, 63, 95, 255]);
+    expect([...full.getContext('2d').getImageData(0, 6, 1, 1).data]).toEqual([0, 0, 0, 0]);
+    expect(Buffer.from(requested.getContext('2d').getImageData(0, 0, 2, 2).data)).toEqual(Buffer.from(full.getContext('2d').getImageData(5, 3, 2, 2).data));
+    expect(document).toEqual(canonical);
+  });
+
   it('retains a nominal-cell fallback when a smaller resolved tileset has no sprite source', () => {
     const document = createPixelDocument('project', 'Missing native tile source'); document.assetIds = []; document.pixelAssets = {};
-    const tileset = createPixelTileset('Missing two-pixel source', 'missing-sprite', 2, 2, 1, 1); tileset.firstGid = 1;
+    const tileset = createPixelTileset('Missing two-pixel source', 'missing-sprite', 2, 2, 1, 1); tileset.firstGid = 1; tileset.tileOffset = { x: 1_000, y: -1_000 };
     const map = createPixelTilemap('Sixteen-pixel fallback'); map.width = 1; map.height = 1; map.tileWidth = 16; map.tileHeight = 16; map.tilesetIds = [tileset.id];
     const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile' || !layer.chunks) throw new Error('Expected tile layer');
     writeTiles(layer.chunks, [{ x: 0, y: 0, gid: 1 }]);

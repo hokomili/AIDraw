@@ -350,6 +350,7 @@ describe('persisted pixel schemas', () => {
     sprite.paletteOverrides[firstFrameId] = structuredClone(document.palette);
 
     const tileset = createPixelTileset('Persisted terrain', sprite.id, 16, 16, 2, 1);
+    tileset.tileOffset = { x: -12, y: 34 };
     tileset.tiles[0] = {
       id: 0, sourceX: 0, sourceY: 0, probability: 1, animation: [{ tileId: 1, durationMs: 120 }],
       collisions: [{ id: 'persisted-collision', type: 'rectangle', x: 0, y: 0, width: 16, height: 16, properties: { solid: true } }],
@@ -380,13 +381,17 @@ describe('persisted pixel schemas', () => {
   }
 
   it('normalizes recoverable key aliases and absent preferences before exact canonical validation', () => {
-    const { document, sprite } = pixelDocument(); const layer = sprite.layers[sprite.layerIds[0]]; const frame = sprite.frames[sprite.frameIds[0]]; const cel = Object.values(sprite.cels)[0];
+    const { document, sprite, tileset } = pixelDocument(); const layer = sprite.layers[sprite.layerIds[0]]; const frame = sprite.frames[sprite.frameIds[0]]; const cel = Object.values(sprite.cels)[0];
     sprite.layers = { 'legacy-layer-key': layer }; sprite.frames = { 'legacy-frame-key': frame, [sprite.frameIds[1]]: sprite.frames[sprite.frameIds[1]] }; sprite.cels = { 'legacy-cel-key': cel, 'legacy-second-cel-key': sprite.cels['persisted-cel-two'] };
     document.pixelAssets = { 'legacy-sprite-key': sprite, [document.assetIds[1]]: document.pixelAssets[document.assetIds[1]], [document.assetIds[2]]: document.pixelAssets[document.assetIds[2]] };
     const migrated = migrateDocument(document); if (migrated.kind !== 'pixel') throw new Error('Expected pixel document'); const recovered = migrated.pixelAssets[sprite.id]; if (recovered.type !== 'sprite') throw new Error('Expected sprite');
     expect(recovered.layers[layer.id]).toMatchObject({ id: layer.id }); expect(recovered.frames[frame.id]).toMatchObject({ id: frame.id }); expect(recovered.cels[cel.id]).toMatchObject({ id: cel.id });
     expect(recovered.cels['persisted-cel-two'].linkedToCelId).toBe('missing-linked-cel');
     expect(migrated.linkedAssets[0].cachedPreviewAssetId).toBe('missing-cache-asset');
+
+    const absentOffset = structuredClone(document); delete (absentOffset.pixelAssets[tileset.id] as unknown as { tileOffset?: unknown }).tileOffset;
+    const offsetDefaulted = migrateDocument(absentOffset); if (offsetDefaulted.kind !== 'pixel') throw new Error('Expected pixel document');
+    expect(offsetDefaulted.pixelAssets[tileset.id]).toMatchObject({ type: 'tileset', tileOffset: { x: 0, y: 0 } });
 
     const absent = pixelDocument().document as unknown as Record<string, unknown>;
     delete absent.paletteCycles; delete absent.stamps; delete absent.tileStamps; delete absent.bitmapFonts; delete absent.linkedAssets; delete absent.conversionDefaults;
@@ -418,6 +423,8 @@ describe('persisted pixel schemas', () => {
       ['Invalid persisted pixel asset metadata.', ({ firstCel }) => { (Object.values(firstCel.chunks)[0] as unknown as Record<string, unknown>).unexpected = true; }],
       ['Invalid persisted pixel asset metadata.', ({ sprite, firstCel }) => { const duplicate = structuredClone(firstCel); duplicate.id = 'duplicate-exposure'; sprite.cels[duplicate.id] = duplicate; }],
       ['Invalid persisted pixel asset metadata.', ({ tileset }) => { tileset.tiles[0].id = 1; }],
+      ['Invalid persisted pixel asset metadata.', ({ tileset }) => { tileset.tileOffset.x = 16_777_217; }],
+      ['Invalid persisted pixel asset metadata.', ({ tileset }) => { tileset.tileOffset.y = 0.5; }],
       ['Invalid persisted pixel asset metadata.', ({ tileset }) => { tileset.wangSets[0].tiles[0].wangId[0] = 2; }],
       ['Invalid persisted pixel asset metadata.', ({ objectLayer }) => { delete objectLayer.objects?.[0].points; }],
       ['Invalid persisted pixel asset metadata.', ({ map }) => { const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile' || !layer.chunks) throw new Error('Expected tile layer'); Object.values(layer.chunks)[0].x = 1; }],
@@ -431,9 +438,11 @@ describe('persisted pixel schemas', () => {
   });
 
   it('uses the same strict nested schemas for newly supplied pixel assets and libraries', () => {
-    const { map, document } = pixelDocument(); const tileLayer = map.layers[map.layerIds[0]]; if (tileLayer.type !== 'tile' || !tileLayer.chunks) throw new Error('Expected tile layer');
+    const { map, tileset, document } = pixelDocument(); const tileLayer = map.layers[map.layerIds[0]]; if (tileLayer.type !== 'tile' || !tileLayer.chunks) throw new Error('Expected tile layer');
     Object.values(tileLayer.chunks)[0].data = 'AAAA';
     expect(CanvasOperationSchema.safeParse({ kind: 'pixel.asset.replace', asset: map, expectedRevision: 0 }).success).toBe(false);
+    tileset.tileOffset.x = 0.5;
+    expect(CanvasOperationSchema.safeParse({ kind: 'pixel.asset.replace', asset: tileset, expectedRevision: 0 }).success).toBe(false);
     expect(CanvasOperationSchema.safeParse({ kind: 'pixel.stamps.replace', stamps: [document.stamps[0], structuredClone(document.stamps[0])] }).success).toBe(false);
     expect(CanvasOperationSchema.safeParse({ kind: 'pixel.palette-cycles.replace', cycles: [document.paletteCycles[0], structuredClone(document.paletteCycles[0])] }).success).toBe(false);
   });

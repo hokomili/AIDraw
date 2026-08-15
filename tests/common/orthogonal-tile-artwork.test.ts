@@ -47,12 +47,33 @@ describe('orthogonal native tile artwork geometry', () => {
     expect(equalSize.height).toBe(fractionalCell.height);
   });
 
+  it('translates the final transformed footprint by the signed map-axis drawing offset', () => {
+    const cell = { x: 10, y: 20, width: 8, height: 6 };
+    const original = orthogonalTileArtworkPlacement(cell, 4, 3, { width: 6, height: 9 }, { diagonal: true, hFlip: true });
+    const shifted = orthogonalTileArtworkPlacement(cell, 4, 3, { width: 6, height: 9 }, { diagonal: true, hFlip: true }, { x: 3, y: -2 });
+    expect(shifted).toEqual({
+      ...original,
+      centerX: original.centerX + 6,
+      centerY: original.centerY - 4,
+      bounds: {
+        left: original.bounds.left + 6,
+        top: original.bounds.top - 4,
+        right: original.bounds.right + 6,
+        bottom: original.bounds.bottom - 4,
+      },
+    });
+  });
+
   it('unions ordinary and diagonal overhang for every attached artwork size', () => {
     expect(orthogonalTileArtworkEnvelope(4, 4, [
       { width: 4, height: 4 },
       { width: 6, height: 8 },
       { width: 10, height: 2 },
     ])).toEqual({ left: -1, top: -4, right: 10, bottom: 8 });
+    expect(orthogonalTileArtworkEnvelope(4, 4, [
+      { width: 4, height: 4 },
+      { width: 6, height: 8, offset: { x: 3, y: -2 } },
+    ])).toEqual({ left: 0, top: -6, right: 10, bottom: 4 });
   });
 
   it('uses strict raster intersection and rejects unsafe geometry', () => {
@@ -60,6 +81,7 @@ describe('orthogonal native tile artwork geometry', () => {
     expect(orthogonalTileArtworkIntersects(bounds, { x: -1, y: -1, width: 1, height: 1 })).toBe(true);
     expect(orthogonalTileArtworkIntersects(bounds, { x: 7, y: -1, width: 1, height: 1 })).toBe(false);
     expect(() => orthogonalTileArtworkPlacement({ x: 0, y: 0, width: 4, height: 4 }, 4, 4, { width: 0, height: 4 })).toThrow(/artwork width/);
+    expect(() => orthogonalTileArtworkPlacement({ x: 0, y: 0, width: 4, height: 4 }, 4, 4, { width: 4, height: 4 }, {}, { x: Number.NaN, y: 0 })).toThrow(/offset/);
     expect(() => orthogonalTileArtworkEnvelope(4, 4, [])).toThrow(/at least one footprint/);
   });
 });

@@ -473,6 +473,11 @@ export interface PixelTileset extends EntityBase {
   tileHeight: number;
   margin: number;
   spacing: number;
+  /** Tiled-compatible drawing translation in map-axis pixels. Positive Y points down. */
+  tileOffset: {
+    x: number;
+    y: number;
+  };
   columns: number;
   rows: number;
   spriteAssetId: Id;

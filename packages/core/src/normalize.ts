@@ -183,6 +183,7 @@ function normalizeSprite(value: Record<string, unknown>, current: PixelSprite | 
 function normalizeTileset(value: Record<string, unknown>, current: PixelTileset | undefined, timestamp: string, actorId: string): PixelTileset {
   const base = entityBase(value, text(value.id, 'recovered-tileset'), 'Recovered tileset', current, timestamp, actorId);
   const transformations = record(value.transformations);
+  const tileOffset = record(value.tileOffset);
   return {
     ...base,
     type: 'tileset',
@@ -191,6 +192,10 @@ function normalizeTileset(value: Record<string, unknown>, current: PixelTileset 
     tileHeight: positiveInteger(value.tileHeight, current?.tileHeight ?? 16),
     margin: Math.max(0, Math.round(finite(value.margin, current?.margin ?? 0))),
     spacing: Math.max(0, Math.round(finite(value.spacing, current?.spacing ?? 0))),
+    tileOffset: {
+      x: finite(tileOffset.x, current?.tileOffset?.x ?? 0),
+      y: finite(tileOffset.y, current?.tileOffset?.y ?? 0),
+    },
     columns: positiveInteger(value.columns, current?.columns ?? 1),
     rows: positiveInteger(value.rows, current?.rows ?? 1),
     spriteAssetId: text(value.spriteAssetId, current?.spriteAssetId ?? ''),

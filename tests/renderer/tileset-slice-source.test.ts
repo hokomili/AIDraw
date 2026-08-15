@@ -25,4 +25,20 @@ describe('tileset slice editor source wiring', () => {
     expect(styles).toContain('.draft-slice-cell');
     expect(styles).toContain('.tileset-reslice-ack');
   });
+
+  it('authors bounded signed tileset drawing offsets and settles semantically equal no-op drafts', async () => {
+    const app = await readFile(new URL('../../src/renderer/App.tsx', import.meta.url), 'utf8');
+    expect(app).toContain('Tileset drawing offset ${axis.toUpperCase()}');
+    expect(app).toContain('right" : "down"} positive');
+    expect(app).toContain('drawingOffsetDraft?.tilesetId === tileset.id && drawingOffsetDraft.revision === tileset.revision');
+    expect(app).toContain('const parsedDrawingOffset = { x: Number(currentDrawingOffsetDraft.x), y: Number(currentDrawingOffsetDraft.y) };');
+    expect(app).toContain('Math.abs(value) <= MAX_TILESET_DRAWING_OFFSET');
+    for (const equivalentZero of ['0.0', '00', '-0']) expect(Number(equivalentZero) === 0).toBe(true);
+    expect(app).toContain('const drawingOffsetDraftMatchesTileset = drawingOffsetDraftIsValid');
+    expect(app).toContain('disabled={drawingOffsetDraftMatchesTileset}');
+    expect(app).toMatch(/if \(drawingOffsetDraftMatchesTileset\) \{\s*setDrawingOffsetDraft\(undefined\);\s*return;/u);
+    expect(app).toContain('replace({ ...tileset, tileOffset: { x, y } }, "Change tileset drawing offset")');
+    expect(app).toContain('Apply drawing offset');
+    expect(app).toContain('Moves this tileset’s orthogonal sprite artwork without moving map cells, grid geometry, or collision data.');
+  });
 });

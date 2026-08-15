@@ -660,6 +660,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
               tilemap.tileHeight,
               sourceIsRenderable ? { width: resolved.tileset.tileWidth, height: resolved.tileset.tileHeight } : { width: tilemap.tileWidth, height: tilemap.tileHeight },
               sourceIsRenderable ? decoded : {},
+              sourceIsRenderable ? resolved.tileset.tileOffset : undefined,
             )
             : undefined;
           if (canonicalPlacement && !orthogonalTileArtworkIntersects(canonicalPlacement.bounds, layerViewportRegion)) return;
@@ -674,7 +675,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
           try {
             if (tilemap.orientation === 'orthogonal') {
               const rect = gridCellRect({ x, y });
-              const placement = resolved && sourceIsRenderable ? orthogonalTileArtworkPlacement(rect, tilemap.tileWidth, tilemap.tileHeight, { width: resolved.tileset.tileWidth, height: resolved.tileset.tileHeight }, decoded) : undefined;
+              const placement = resolved && sourceIsRenderable ? orthogonalTileArtworkPlacement(rect, tilemap.tileWidth, tilemap.tileHeight, { width: resolved.tileset.tileWidth, height: resolved.tileset.tileHeight }, decoded, resolved.tileset.tileOffset) : undefined;
               if (!drawTile(rect, placement)) { context.fillStyle = `hsl(${visibleGid * 47 % 360} 52% 62%)`; context.fillRect(rect.x, rect.y, rect.width, rect.height); }
             } else {
               const rect = gridCellRect({ x, y });

@@ -410,6 +410,7 @@ function renderTilemapSurface(document: PixelDocument, map: PixelTilemap, region
           map.tileHeight,
           sourceIsRenderable ? { width: resolved.tileset.tileWidth, height: resolved.tileset.tileHeight } : { width: map.tileWidth, height: map.tileHeight },
           sourceIsRenderable ? decoded : {},
+          sourceIsRenderable ? resolved.tileset.tileOffset : undefined,
         )
         : undefined;
       if (orthogonalPlacement) {

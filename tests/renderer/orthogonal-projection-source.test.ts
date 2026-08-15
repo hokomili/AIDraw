@@ -24,6 +24,7 @@ describe('orthogonal projection source parity', () => {
       expect(source).toContain('orthogonalTileArtworkPlacement(');
       expect(source).toContain('orthogonalTileArtworkIntersects(');
       expect(source).toContain('sourceIsRenderable ? decoded : {}');
+      expect(source).toContain('sourceIsRenderable ? resolved.tileset.tileOffset : undefined');
     }
     expect(headless).toContain("const sourceIsRenderable = sourceAsset?.type === 'sprite'");
     expect(headless).toContain('sourceIsRenderable ? { width: resolved.tileset.tileWidth, height: resolved.tileset.tileHeight } : { width: map.tileWidth, height: map.tileHeight }');
@@ -32,6 +33,7 @@ describe('orthogonal projection source parity', () => {
     expect(interactive.indexOf('const mapSourceAsset =')).toBeLessThan(interactive.indexOf('const canonicalPlacement ='));
     expect(interactive.indexOf('if (canonicalPlacement && !orthogonalTileArtworkIntersects')).toBeLessThan(interactive.indexOf('const sourcePlan ='));
     expect(interactive).toContain('const placement = resolved && sourceIsRenderable ? orthogonalTileArtworkPlacement(');
+    expect(interactive).toContain('decoded, resolved.tileset.tileOffset)');
     expect(interactive).toContain("const gridCellRect = (point: PixelPoint): IsometricCellRect => tilemap?.orientation === 'isometric'");
     expect(interactive).toContain('orthogonalCellRect(point.x, point.y, view.scale, orthogonalCellHeight)');
   });

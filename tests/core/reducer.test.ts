@@ -7,6 +7,7 @@ import {
   createId,
   createIllustrationDocument,
   createPixelDocument,
+  createPixelTileset,
   duplicatePixelFrame,
   findDocumentAssetReferences,
   nowIso,
@@ -39,6 +40,21 @@ function shapeTransaction(documentId: string, layerId: string, expectedRevision?
 }
 
 describe('transaction reducer', () => {
+  it('authors a tileset drawing offset through one revisioned replacement with an exact inverse', () => {
+    const document = createPixelDocument('project', 'Tileset offset history'); const sprite = document.pixelAssets[document.activeAssetId];
+    if (sprite.type !== 'sprite') throw new Error('Expected sprite');
+    const tileset = createPixelTileset('Offset terrain', sprite.id, 16, 16, 1, 1); document.pixelAssets[tileset.id] = tileset; document.assetIds.push(tileset.id);
+    const transaction: CanvasTransaction = {
+      id: createId('tx'), clientOperationId: createId('op'), documentId: document.id, actor: HUMAN_ACTOR, label: 'Change tileset drawing offset', createdAt: nowIso(),
+      operations: [{ kind: 'pixel.asset.replace', asset: { ...tileset, tileOffset: { x: -8, y: 13 } }, expectedRevision: tileset.revision }],
+    };
+    const applied = applyTransaction(document, transaction); if (applied.document.kind !== 'pixel') throw new Error('Expected pixel document');
+    expect(applied.document.pixelAssets[tileset.id]).toMatchObject({ revision: 1, tileOffset: { x: -8, y: 13 } });
+    expect(applied.document).toMatchObject({ revision: 1, dirty: true, activity: [expect.objectContaining({ label: 'Change tileset drawing offset', actor: HUMAN_ACTOR, operationCount: 1 })] });
+    const restored = applyTransaction(applied.document, applied.inverse, { recordActivity: false }).document; if (restored.kind !== 'pixel') throw new Error('Expected pixel document');
+    expect(restored.pixelAssets[tileset.id]).toMatchObject({ tileOffset: { x: 0, y: 0 } });
+  });
+
   it('replaces and exactly restores illustration artboard geometry', () => {
     const document = createIllustrationDocument(); const artboard = { width: 640, height: 360, background: null, colorSpace: 'srgb' as const, dpi: 144 };
     const transaction: CanvasTransaction = { id: createId('tx'), clientOperationId: createId('op'), documentId: document.id, actor: HUMAN_ACTOR, label: 'Resize artboard', createdAt: nowIso(), operations: [{ kind: 'illustration.artboard.replace', artboard, expectedRevision: 0 }] };

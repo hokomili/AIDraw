@@ -9,6 +9,7 @@ import {
   HUMAN_ACTOR,
   IDENTITY_TRANSFORM,
   MAX_ILLUSTRATION_TEXT_LENGTH,
+  MAX_TILESET_DRAWING_OFFSET,
   createId,
   createIllustrationDocument,
   createPixelDocument,
@@ -706,6 +707,11 @@ function validateTilesetStructure(source: any, fallbackTileWidth: number, fallba
   const tileCount = integerInRange(source.tilecount ?? Math.max(1, imageColumns * imageRows, arrayify(source.tiles ?? source.tile).length), 0, MAX_TILESET_TILES, 'Tileset tile count');
   const columns = integerInRange(source.columns ?? imageColumns, 1, Math.max(1, MAX_TILESET_TILES), 'Tileset column count');
   if (tileCount > 0 && columns > tileCount) throw new Error('Tileset columns cannot exceed its tile count.');
+  if (source.tileoffset !== undefined) {
+    if (!source.tileoffset || typeof source.tileoffset !== 'object' || Array.isArray(source.tileoffset)) throw new Error('Tileset drawing offset must provide bounded integer x and y values.');
+    integerInRange(source.tileoffset.x ?? 0, -MAX_TILESET_DRAWING_OFFSET, MAX_TILESET_DRAWING_OFFSET, 'Tileset drawing offset x');
+    integerInRange(source.tileoffset.y ?? 0, -MAX_TILESET_DRAWING_OFFSET, MAX_TILESET_DRAWING_OFFSET, 'Tileset drawing offset y');
+  }
   const tiles = arrayify(source.tiles ?? source.tile); if (tiles.length > MAX_TILESET_TILES) throw new Error('Tileset metadata exceeds the one-million-tile limit.');
   let animationFrames = 0; let collisionObjects = 0;
   for (const tile of tiles) {
@@ -765,7 +771,7 @@ async function attachTileset(document: ReturnType<typeof createPixelDocument>, s
   }
   const columns = Math.max(1, Number(source.columns ?? (Math.floor(imageWidth / tileWidth) || 1))); const tileCount = Math.max(1, Number(source.tilecount ?? columns * Math.max(1, Math.floor(imageHeight / tileHeight)))); const rows = Math.max(1, Math.ceil(tileCount / columns)); const spriteWidth = Math.max(tileWidth, imageWidth || columns * tileWidth); const spriteHeight = Math.max(tileHeight, imageHeight || rows * tileHeight); assertImageDimensions(spriteWidth, spriteHeight, 'Tileset pixel source'); const sprite = createPixelSprite(String(source.name ?? 'Tileset pixels'), spriteWidth, spriteHeight);
   if (imageBytes) { const cel = Object.values(sprite.cels)[0]; writePixels(cel, await quantizeImageToPalette(imageBytes, sprite.width, sprite.height, document.palette, { alphaThreshold: document.conversionDefaults.alphaThreshold, dithering: document.conversionDefaults.dithering })); const embedded = imageAsset(basename(imagePath!), `image/${extname(imagePath!).slice(1).replace('jpg', 'jpeg') || 'png'}`, imageBytes); document.assets[embedded.id] = embedded; document.linkedAssets.push({ id: createId('link'), name: basename(imagePath!), mode: 'linked', relativePath: relative(dirname(rootFilePath), imagePath!).replace(/\\/g, '/'), sha256: embedded.sha256, cachedPreviewAssetId: embedded.id }); }
-  const tileset = createPixelTileset(String(source.name ?? 'Tileset'), sprite.id, tileWidth, tileHeight, columns, rows); tileset.firstGid = Math.max(1, Number(sourceReference.firstgid ?? 1)); const margin = Number(source.margin ?? 0); const spacing = Number(source.spacing ?? 0); tileset.margin = margin; tileset.spacing = spacing; const metadata = new Map(arrayify(source.tiles ?? source.tile).map((tile: any) => [Number(tile.id), tile]));
+  const tileset = createPixelTileset(String(source.name ?? 'Tileset'), sprite.id, tileWidth, tileHeight, columns, rows); tileset.firstGid = Math.max(1, Number(sourceReference.firstgid ?? 1)); const margin = Number(source.margin ?? 0); const spacing = Number(source.spacing ?? 0); tileset.margin = margin; tileset.spacing = spacing; tileset.tileOffset = { x: Number(source.tileoffset?.x ?? 0), y: Number(source.tileoffset?.y ?? 0) }; const metadata = new Map(arrayify(source.tiles ?? source.tile).map((tile: any) => [Number(tile.id), tile]));
   for (let id = 0; id < tileCount; id += 1) { const tile = metadata.get(id); const definition: TileDefinition = { id, sourceX: margin + id % columns * (tileWidth + spacing), sourceY: margin + Math.floor(id / columns) * (tileHeight + spacing), probability: Number(tile?.probability ?? 1), animation: arrayify(tile?.animation).map((frame: any) => ({ tileId: Number(frame.tileid ?? frame.tileId), durationMs: Number(frame.duration ?? frame.durationMs ?? 100) })), collisions: arrayify(tile?.objectgroup?.objects ?? tile?.collisions).map(tiledObject), properties: tiledProperties(tile?.properties) }; tileset.tiles[id] = definition; }
   tileset.wangSets = arrayify(source.wangsets).map((set: any): WangSet => ({ id: createId('wang'), name: String(set.name ?? 'Terrain'), type: set.type === 'corner' || set.type === 'edge' ? set.type : 'mixed', colors: arrayify(set.colors ?? set.wangcolors).map((color: any, index) => ({ id: index + 1, name: String(color.name ?? `Terrain ${index + 1}`), color: String(color.color ?? '#ff00ff'), tileId: Number(color.tile ?? -1), probability: Number(color.probability ?? 1) })), tiles: arrayify(set.wangtiles).map((tile: any) => ({ tileId: Number(tile.tileid), wangId: wangId(tile.wangid) })) }));
   const transforms = source.transformations; if (transforms) tileset.transformations = { hFlip: transforms.hflip !== false && transforms.hflip !== 0, vFlip: transforms.vflip !== false && transforms.vflip !== 0, rotate: transforms.rotate !== false && transforms.rotate !== 0 };
