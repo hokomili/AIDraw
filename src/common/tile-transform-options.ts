@@ -1,4 +1,8 @@
-import type { PixelTileset } from '@aidraw/core';
+import {
+  tiledTileTransformMatrix,
+  type PixelTileset,
+  type TiledTileTransformMatrix,
+} from '@aidraw/core';
 
 export interface TileTransformFlags {
   hFlip: boolean;
@@ -13,6 +17,18 @@ export interface TileTransformChoice {
   flags: TileTransformFlags;
 }
 
+export interface TileTransformPreviewGeometry {
+  surfaceSide: number;
+  sampleWidth: number;
+  sampleHeight: number;
+  drawWidth: number;
+  drawHeight: number;
+  transformedWidth: number;
+  transformedHeight: number;
+  bounds: { left: number; top: number; right: number; bottom: number };
+  transform: TiledTileTransformMatrix;
+}
+
 export const TILE_TRANSFORM_CHOICES: readonly TileTransformChoice[] = [
   { id: 'identity', shortLabel: '—', label: 'Original', flags: { hFlip: false, vFlip: false, diagonal: false } },
   { id: 'h', shortLabel: 'H', label: 'Horizontal', flags: { hFlip: true, vFlip: false, diagonal: false } },
@@ -23,6 +39,48 @@ export const TILE_TRANSFORM_CHOICES: readonly TileTransformChoice[] = [
   { id: 'dv', shortLabel: 'D+V', label: 'Diagonal + vertical', flags: { hFlip: false, vFlip: true, diagonal: true } },
   { id: 'dhv', shortLabel: 'D+H+V', label: 'Diagonal + horizontal + vertical', flags: { hFlip: true, vFlip: true, diagonal: true } },
 ] as const;
+
+function positiveSafeInteger(value: number, label: string): number {
+  if (!Number.isSafeInteger(value) || value < 1) throw new RangeError(`${label} must be a positive safe integer.`);
+  return value;
+}
+
+/**
+ * Aspect-fits one selected tile crop into the existing square preview surface.
+ * The centered bounds are preview-local only: map renderers retain their own
+ * orthogonal/isometric placement and offset contracts.
+ */
+export function tileTransformPreviewGeometry(
+  sourceWidth: number,
+  sourceHeight: number,
+  flags: TileTransformFlags,
+  surfaceSide: number,
+): TileTransformPreviewGeometry {
+  const width = positiveSafeInteger(sourceWidth, 'Tile preview source width');
+  const height = positiveSafeInteger(sourceHeight, 'Tile preview source height');
+  const side = positiveSafeInteger(surfaceSide, 'Tile preview surface side');
+  const transform = tiledTileTransformMatrix(flags);
+  const rawTransformedWidth = Math.abs(transform.a) * width + Math.abs(transform.c) * height;
+  const rawTransformedHeight = Math.abs(transform.b) * width + Math.abs(transform.d) * height;
+  const scale = side / Math.max(rawTransformedWidth, rawTransformedHeight);
+  const drawWidth = width * scale;
+  const drawHeight = height * scale;
+  const transformedWidth = Math.min(side, Math.abs(transform.a) * drawWidth + Math.abs(transform.c) * drawHeight);
+  const transformedHeight = Math.min(side, Math.abs(transform.b) * drawWidth + Math.abs(transform.d) * drawHeight);
+  const left = (side - transformedWidth) / 2;
+  const top = (side - transformedHeight) / 2;
+  return {
+    surfaceSide: side,
+    sampleWidth: Math.max(1, Math.min(side, Math.round(drawWidth))),
+    sampleHeight: Math.max(1, Math.min(side, Math.round(drawHeight))),
+    drawWidth,
+    drawHeight,
+    transformedWidth,
+    transformedHeight,
+    bounds: { left, top, right: left + transformedWidth, bottom: top + transformedHeight },
+    transform,
+  };
+}
 
 export function tileTransformChoiceAllowed(
   choice: TileTransformChoice,

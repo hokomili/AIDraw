@@ -13,7 +13,7 @@ function fixture(tileWidth = 8, tileHeight = 8) {
 }
 
 describe('tile transform picker', () => {
-  it('renders all eight exact square-tile choices with permissions and bounded-copy text', () => {
+  it('renders all eight exact choices with permissions and bounded-copy text', () => {
     const { document, sprite, tileset } = fixture();
     tileset.transformations = { hFlip: false, vFlip: false, rotate: true };
     const markup = renderToStaticMarkup(createElement(TileTransformPicker, {
@@ -25,16 +25,16 @@ describe('tile transform picker', () => {
       onChange: () => undefined,
       onClose: () => undefined,
     }));
-    expect(markup).toContain('aria-label="Square tile transform preview"');
+    expect(markup).toContain('aria-label="Tile transform preview"');
     expect(markup).toContain('Diagonal first, then H/V');
     expect(markup.match(/aria-label="Use [^"]* tile transform"/g)).toHaveLength(8);
     expect(markup.match(/disabled=""/g)).toHaveLength(4);
     expect(markup).toContain('aria-label="Use diagonal + horizontal tile transform"');
     expect(markup).toContain('aria-pressed="true"');
-    expect(markup).toContain('Preview is capped at 32 × 32px and never materializes the complete source sprite.');
+    expect(markup).toContain('Preview aspect-fits the complete transformed footprint inside 32 × 32px and never materializes the complete source sprite.');
   });
 
-  it('states the rectangular diagonal boundary instead of presenting an unproved preview', () => {
+  it('presents every permitted rectangular state without changing labels or accessibility', () => {
     const { document, sprite, tileset } = fixture(16, 8);
     const markup = renderToStaticMarkup(createElement(TileTransformPicker, {
       document,
@@ -45,9 +45,11 @@ describe('tile transform picker', () => {
       onChange: () => undefined,
       onClose: () => undefined,
     }));
-    expect(markup).toContain('intentionally limited to square tiles');
-    expect(markup).toContain('rectangular diagonal geometry needs a separate product contract');
-    expect(markup).not.toContain('aria-label="Use original tile transform"');
+    expect(markup).toContain('Tile 0 · 16 × 8px');
+    expect(markup.match(/aria-label="Use [^"]* tile transform"/g)).toHaveLength(8);
+    expect(markup).toContain('aria-label="Use original tile transform"');
+    expect(markup).toContain('aria-label="Use diagonal + vertical tile transform"');
+    expect(markup).not.toContain('intentionally limited to square tiles');
   });
 
   it('uses constrained flags for both current-tile stamps and ordinary painting', async () => {
@@ -67,7 +69,11 @@ describe('tile transform picker', () => {
     expect(canvasSource).not.toMatch(/encodeTiledGid\([^\n]+, tileTransforms\)/);
     expect(pickerSource).toContain('TILE_TRANSFORM_PREVIEW_SIDE = 32');
     expect(pickerSource).toContain('tilesetTileSourceRect(tileset, tileId)');
-    expect(pickerSource).toContain('tiledTileTransformMatrix(choice.flags)');
+    expect(pickerSource).toContain('tileTransformPreviewGeometry(tileset.tileWidth, tileset.tileHeight, choice.flags');
+    expect(pickerSource).toContain('source.width = geometry.sampleWidth');
+    expect(pickerSource).toContain('geometry.transform.a');
+    expect(pickerSource).toContain('geometry.drawWidth');
+    expect(pickerSource).toContain('context.imageSmoothingEnabled = false');
     expect(pickerSource).toContain('source.width = 1');
   });
 });
