@@ -25,6 +25,10 @@ export interface ExportOptions {
   animationTagId?: Id;
   /** Batch/CLI-friendly exact tag name, resolved independently in each sprite. */
   animationTagName?: string;
+  /** Optional named palette cycle exported as one complete GIF/APNG period. */
+  paletteCycleId?: Id;
+  /** Exact sprite frame used as the immutable source for a palette-cycle export. */
+  paletteCycleFrameId?: Id;
 }
 
 export type NewDocumentOptions = NewDocumentOptionsInput;

@@ -7,12 +7,15 @@ import { getStroke } from 'perfect-freehand';
 import {
   illustrationAnimationSamples,
   illustrationAtTime,
+  cycledPaletteIndex,
   normalizeTextStyleRanges,
   pixelAnimationSequence,
+  validatePaletteCycle,
   type AIDrawDocument,
   type IllustrationDocument,
   type IllustrationObject,
   type PaintStyle,
+  type PaletteCycle,
   type PixelDocument,
   type PixelSprite,
   type PixelTilemap,
@@ -890,6 +893,51 @@ function animationExportWarnings(sprite: PixelSprite, tagId: string | undefined,
   return [...scaleWarnings(scale), ...(tag ? [`Exported animation tag “${tag.name}” using ${tag.direction} playback.`] : [])];
 }
 
+interface PixelAnimationExportFrame {
+  frameId: string;
+  sprite: PixelSprite;
+  delayMs: number;
+}
+
+function paletteCycleFrameSprite(
+  document: PixelDocument,
+  sprite: PixelSprite,
+  frameId: string,
+  cycle: PaletteCycle,
+  offset: number,
+): PixelSprite {
+  const sourcePalette = sprite.paletteOverrides?.[frameId] ?? document.palette;
+  const cycledPalette = sourcePalette.map((entry, index) => {
+    const color = sourcePalette[cycledPaletteIndex(index, cycle, offset)]?.color;
+    if (!color) throw new Error(`Palette cycle “${cycle.name}” refers to a missing palette entry.`);
+    return { ...entry, color };
+  });
+  return { ...sprite, paletteOverrides: { ...sprite.paletteOverrides, [frameId]: cycledPalette } };
+}
+
+function paletteCycleExportFrames(
+  document: PixelDocument,
+  sprite: PixelSprite,
+  cycleId: string,
+  frameId: string,
+): { cycle: PaletteCycle; frameName: string; frames: PixelAnimationExportFrame[] } {
+  const cycle = document.paletteCycles.find((entry) => entry.id === cycleId);
+  if (!cycle) throw new Error(`Palette cycle “${cycleId}” does not exist.`);
+  validatePaletteCycle(cycle, document.palette.length);
+  const frame = sprite.frames[frameId];
+  if (!frame || !sprite.frameIds.includes(frameId)) throw new Error(`Palette-cycle source frame “${frameId}” does not exist in the active sprite.`);
+  const frameCount = cycle.toIndex - cycle.fromIndex + 1;
+  return {
+    cycle,
+    frameName: frame.name,
+    frames: Array.from({ length: frameCount }, (_, offset) => ({
+      frameId,
+      sprite: paletteCycleFrameSprite(document, sprite, frameId, cycle, offset),
+      delayMs: cycle.stepMs,
+    })),
+  };
+}
+
 async function spriteSheet(document: PixelDocument, sprite: PixelSprite, scale = 1, tagId?: string): Promise<ExportArtifact> {
   const frameIds = pixelAnimationSequence(sprite, tagId); const columns = Math.ceil(Math.sqrt(frameIds.length)); const rows = Math.ceil(frameIds.length / columns);
   assertScaledDimensions(columns * sprite.width, rows * sprite.height, scale);
@@ -916,47 +964,81 @@ async function spriteSheet(document: PixelDocument, sprite: PixelSprite, scale =
   return { data, mimeType: 'image/png', extension: 'png', companion: { data: Buffer.from(JSON.stringify({ frames, meta: { app: 'AIDraw', image: `${sprite.name}.png`, size: { w: sheetWidth, h: sheetHeight }, scale, frameOrder: frameIds, selectedTagId: tagId, tags: sprite.tags } }, null, 2)), extension: 'json', mimeType: 'application/json' }, report: { warnings: animationExportWarnings(sprite, tagId, scale), rasterized: [] } };
 }
 
-async function animatedImage(document: PixelDocument, sprite: PixelSprite, format: 'gif' | 'apng', scale = 1, tagId?: string): Promise<ExportArtifact> {
+async function encodePixelAnimation(
+  document: PixelDocument,
+  sprite: PixelSprite,
+  format: 'gif' | 'apng',
+  scale: number,
+  frames: PixelAnimationExportFrame[],
+  warnings: string[],
+): Promise<ExportArtifact> {
   assertScaledDimensions(sprite.width, sprite.height, scale);
   const width = sprite.width * scale; const height = sprite.height * scale;
-  const frameIds = pixelAnimationSequence(sprite, tagId);
-  const delays = frameIds.map((frameId) => sprite.frames[frameId]?.durationMs ?? 100); const warnings = animationExportWarnings(sprite, tagId, scale);
+  const delays = frames.map((frame) => frame.delayMs);
   if (format === 'apng') {
-    assertAnimationExpandedPixelBudget(width, height, frameIds.length);
-    const frames = frameIds.map((frameId) => {
-      const exact = exactNormalCompositeAnimationFrame(document.palette, sprite, frameId);
-      const rgba = exact ?? renderSprite(document, sprite, frameId).getContext('2d').getImageData(0, 0, sprite.width, sprite.height).data;
+    assertAnimationExpandedPixelBudget(width, height, frames.length);
+    const rgbaFrames = frames.map((frame) => {
+      const exact = exactNormalCompositeAnimationFrame(document.palette, frame.sprite, frame.frameId);
+      const rgba = exact ?? renderSprite(document, frame.sprite, frame.frameId).getContext('2d').getImageData(0, 0, sprite.width, sprite.height).data;
       return nearestNeighborFrame(rgba, sprite.width, sprite.height, scale);
     });
     // upng-js sizes its output buffer from the first raw frame and only adds 100
     // bytes total, which truncates tiny animations where per-frame chunk overhead
     // is larger than the pixel payload. A small per-frame reserve on frame zero
     // grows that allocation without changing the encoded image rectangle.
-    const inputs = frames.map((frame, index) => { if (index) return frame.buffer as ArrayBuffer; const reserved = new Uint8Array(frame.byteLength + 128); reserved.set(frame); for (let offset = frame.byteLength + 3; offset < reserved.length; offset += 4) reserved[offset] = 255; return reserved.buffer; });
+    const inputs = rgbaFrames.map((frame, index) => { if (index) return frame.buffer as ArrayBuffer; const reserved = new Uint8Array(frame.byteLength + 128); reserved.set(frame); for (let offset = frame.byteLength + 3; offset < reserved.length; offset += 4) reserved[offset] = 255; return reserved.buffer; });
     // The maintained runtime exposes a sixth `forbidPlte` argument, but the
     // DefinitelyTyped declaration still stops at `delays`.
     const encodeApng = UPNG.encode as unknown as (images: ArrayBuffer[], frameWidth: number, frameHeight: number, colors: number, frameDelays?: number[], forbidPalette?: boolean) => ArrayBuffer;
     return { data: Buffer.from(encodeApng(inputs, width, height, 0, delays, true)), mimeType: 'image/apng', extension: 'apng', report: { warnings, rasterized: [] } };
   }
   let everyFrameIsExact = true;
-  for (const frameId of frameIds) {
-    if (!exactNormalCompositeGifFrame(document.palette, sprite, frameId)) { everyFrameIsExact = false; break; }
+  for (const frame of frames) {
+    if (!exactNormalCompositeGifFrame(document.palette, frame.sprite, frame.frameId)) { everyFrameIsExact = false; break; }
   }
   const encoder = GIFEncoder();
   if (everyFrameIsExact) {
-    for (let index = 0; index < frameIds.length; index += 1) {
-      const frame = exactNormalCompositeGifFrame(document.palette, sprite, frameIds[index]);
-      if (!frame) throw new Error('Exact GIF frame eligibility changed during synchronous export.');
-      encoder.writeFrame(nearestNeighborIndexes(frame.indexes, sprite.width, sprite.height, scale), width, height, { palette: frame.palette, transparent: true, transparentIndex: 0, delay: delays[index], repeat: 0 });
+    for (let index = 0; index < frames.length; index += 1) {
+      const exact = exactNormalCompositeGifFrame(document.palette, frames[index].sprite, frames[index].frameId);
+      if (!exact) throw new Error('Exact GIF frame eligibility changed during synchronous export.');
+      encoder.writeFrame(nearestNeighborIndexes(exact.indexes, sprite.width, sprite.height, scale), width, height, { palette: exact.palette, transparent: true, transparentIndex: 0, delay: delays[index], repeat: 0 });
     }
   } else {
-    frameIds.forEach((frameId, index) => {
-      const frame = nearestNeighborFrame(renderSprite(document, sprite, frameId).getContext('2d').getImageData(0, 0, sprite.width, sprite.height).data, sprite.width, sprite.height, scale);
+    frames.forEach((entry, index) => {
+      const frame = nearestNeighborFrame(renderSprite(document, entry.sprite, entry.frameId).getContext('2d').getImageData(0, 0, sprite.width, sprite.height).data, sprite.width, sprite.height, scale);
       const palette = quantize(frame, 256, { format: 'rgba4444', oneBitAlpha: true, clearAlpha: true }); encoder.writeFrame(applyPalette(frame, palette, 'rgba4444'), width, height, { palette, transparent: true, transparentIndex: 0, delay: delays[index], repeat: 0 });
     });
   }
   encoder.finish();
   return { data: Buffer.from(encoder.bytes()), mimeType: 'image/gif', extension: 'gif', report: { warnings, rasterized: [] } };
+}
+
+async function animatedImage(document: PixelDocument, sprite: PixelSprite, format: 'gif' | 'apng', scale = 1, tagId?: string): Promise<ExportArtifact> {
+  const frameIds = pixelAnimationSequence(sprite, tagId);
+  return encodePixelAnimation(
+    document,
+    sprite,
+    format,
+    scale,
+    frameIds.map((frameId) => ({ frameId, sprite, delayMs: sprite.frames[frameId]?.durationMs ?? 100 })),
+    animationExportWarnings(sprite, tagId, scale),
+  );
+}
+
+async function animatedPaletteCycle(
+  document: PixelDocument,
+  sprite: PixelSprite,
+  format: 'gif' | 'apng',
+  scale: number,
+  cycleId: string,
+  frameId: string,
+): Promise<ExportArtifact> {
+  const planned = paletteCycleExportFrames(document, sprite, cycleId, frameId);
+  if (format === 'gif' && planned.cycle.stepMs % 10 !== 0) {
+    throw new Error(`Palette cycle “${planned.cycle.name}” uses ${planned.cycle.stepMs} ms steps, which GIF cannot represent exactly; export APNG or use a 10-millisecond multiple.`);
+  }
+  const warning = `Exported one complete ${planned.frames.length}-step palette cycle “${planned.cycle.name}” from frame “${planned.frameName}” using ${planned.cycle.direction} rotation at ${planned.cycle.stepMs} ms per step.`;
+  return encodePixelAnimation(document, sprite, format, scale, planned.frames, [...scaleWarnings(scale), warning]);
 }
 
 async function animatedIllustrationImage(document: IllustrationDocument, format: 'gif' | 'apng'): Promise<ExportArtifact> {
@@ -984,6 +1066,13 @@ async function animatedIllustrationImage(document: IllustrationDocument, format:
 
 export async function exportDocument(document: AIDrawDocument, format: ExportFormat, options: ExportOptions = {}): Promise<ExportArtifact> {
   const scale = resolveExportScale(document, format, options);
+  const paletteCycleRequested = options.paletteCycleId !== undefined || options.paletteCycleFrameId !== undefined;
+  if (paletteCycleRequested && (typeof options.paletteCycleId !== 'string' || !options.paletteCycleId || typeof options.paletteCycleFrameId !== 'string' || !options.paletteCycleFrameId)) {
+    throw new Error('Palette-cycle export requires both a named cycle and an exact source frame.');
+  }
+  if (paletteCycleRequested && document.kind !== 'pixel') throw new Error('Palette-cycle export requires an active pixel sprite.');
+  if (paletteCycleRequested && format !== 'gif' && format !== 'apng') throw new Error('Palette-cycle export is available only for GIF and APNG.');
+  if (paletteCycleRequested && (options.animationTagId || options.animationTagName)) throw new Error('Choose either a timeline/tag animation or a palette cycle, not both.');
   if (format === 'png' || format === 'jpeg' || format === 'webp') return raster(document, format, scale);
   if (format === 'svg') {
     if (document.kind === 'illustration') return illustrationSvg(document);
@@ -996,7 +1085,11 @@ export async function exportDocument(document: AIDrawDocument, format: ExportFor
   if (format === 'psd') return psd(document);
   if (format === 'gif' || format === 'apng') {
     if (document.kind === 'illustration') return animatedIllustrationImage(document, format);
-    const sprite = document.pixelAssets[document.activeAssetId]; if (sprite?.type !== 'sprite') throw new Error('Choose a sprite before exporting animation.'); return animatedImage(document, sprite, format, scale, options.animationTagId);
+    const sprite = document.pixelAssets[document.activeAssetId];
+    if (sprite?.type !== 'sprite') throw new Error('Choose a sprite before exporting animation.');
+    return paletteCycleRequested
+      ? animatedPaletteCycle(document, sprite, format, scale, options.paletteCycleId!, options.paletteCycleFrameId!)
+      : animatedImage(document, sprite, format, scale, options.animationTagId);
   }
   if (format === 'sprite-sheet') {
     if (document.kind !== 'pixel') throw new Error('Sprite sheet export requires pixel mode.');

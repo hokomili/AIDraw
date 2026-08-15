@@ -39,4 +39,17 @@ describe('renderer popover keyboard navigation', () => {
     expect(app).toContain('exportButtonRef.current?.focus()');
     expect(app).toContain('exportWrapRef.current?.contains(event.target as Node)');
   });
+
+  it('offers one named palette-cycle period from the active sprite frame without combining timeline scheduling', async () => {
+    const app = await readFile(new URL('../../src/renderer/App.tsx', import.meta.url), 'utf8');
+    expect(app).toContain('<strong>Palette-cycle output</strong><small>{selectedExportCycle && selectedExportCycle.stepMs % 10 !== 0 ? "APNG exact · GIF needs 10 ms steps" : "GIF/APNG · active frame"}</small>');
+    expect(app).toContain('aria-label="Palette-cycle export"');
+    expect(app).toContain('Timeline or tag animation');
+    expect(app).toContain('cycle.toIndex - cycle.fromIndex + 1} steps · {cycle.stepMs} ms');
+    expect(app).toContain('disabled={Boolean(selectedExportCycle)}');
+    expect(app).toContain('disabled={format === "gif" && Boolean(selectedExportCycle && selectedExportCycle.stepMs % 10 !== 0)}');
+    expect(app).toContain('paletteCycleId: ["gif", "apng"].includes(format) ? selectedExportCycle?.id : undefined');
+    expect(app).toContain('paletteCycleFrameId: ["gif", "apng"].includes(format) && selectedExportCycle ? exportFrameId : undefined');
+    expect(app).toContain('canvasAnimation?.activeAssetId === exportSprite.id');
+  });
 });

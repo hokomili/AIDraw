@@ -1215,10 +1215,12 @@ function TopBar({ onOpenShortcuts }: { onOpenShortcuts: () => void }) {
   const canUndo = useEditorStore((state) => state.snapshot?.canUndo);
   const canRedo = useEditorStore((state) => state.snapshot?.canRedo);
   const snapshot = useEditorStore((state) => state.snapshot);
+  const canvasAnimation = useEditorStore((state) => state.canvasAnimation);
   const notify = useEditorStore((state) => state.notify);
   const [exporting, setExporting] = useState(false);
   const [exportScale, setExportScale] = useState(1);
   const [exportTagId, setExportTagId] = useState("");
+  const [exportPaletteCycleId, setExportPaletteCycleId] = useState("");
   const [spriteSheetSelection, setSpriteSheetSelection] = useState<SpriteSheetSelection>();
   const exportWrapRef = useRef<HTMLDivElement>(null);
   const exportButtonRef = useRef<HTMLButtonElement>(null);
@@ -1226,6 +1228,10 @@ function TopBar({ onOpenShortcuts }: { onOpenShortcuts: () => void }) {
   const exportMenuId = useId();
   const document = snapshot?.activeDocument;
   const exportSprite = document?.kind === "pixel" && document.pixelAssets[document.activeAssetId]?.type === "sprite" ? document.pixelAssets[document.activeAssetId] as PixelSprite : undefined;
+  const selectedExportCycle = document?.kind === "pixel" ? document.paletteCycles.find((cycle) => cycle.id === exportPaletteCycleId) : undefined;
+  const exportFrameId = exportSprite && canvasAnimation?.activeAssetId === exportSprite.id && canvasAnimation.activeFrameId && exportSprite.frames[canvasAnimation.activeFrameId]
+    ? canvasAnimation.activeFrameId
+    : exportSprite?.frameIds[0];
   const exportChoices =
     document?.kind === "pixel"
       ? [
@@ -1366,7 +1372,8 @@ function TopBar({ onOpenShortcuts }: { onOpenShortcuts: () => void }) {
                   </select>
                 </label>
               )}
-              {exportSprite && exportSprite.tags.length > 0 && <label className="export-scale-control"><span><strong>Animation range</strong><small>GIF, APNG, sheet</small></span><select aria-label="Animation export range" value={exportSprite.tags.some((tag) => tag.id === exportTagId) ? exportTagId : ""} onChange={(event) => setExportTagId(event.target.value)}><option value="">Full timeline</option>{exportSprite.tags.map((tag) => <option key={tag.id} value={tag.id}>{tag.name} · {tag.direction}</option>)}</select></label>}
+              {exportSprite && exportSprite.tags.length > 0 && <label className="export-scale-control"><span><strong>Animation range</strong><small>GIF, APNG, sheet</small></span><select aria-label="Animation export range" disabled={Boolean(selectedExportCycle)} value={exportSprite.tags.some((tag) => tag.id === exportTagId) ? exportTagId : ""} onChange={(event) => { setExportTagId(event.target.value); setExportPaletteCycleId(""); }}><option value="">Full timeline</option>{exportSprite.tags.map((tag) => <option key={tag.id} value={tag.id}>{tag.name} · {tag.direction}</option>)}</select></label>}
+              {exportSprite && document?.kind === "pixel" && document.paletteCycles.length > 0 && <label className="export-scale-control"><span><strong>Palette-cycle output</strong><small>{selectedExportCycle && selectedExportCycle.stepMs % 10 !== 0 ? "APNG exact · GIF needs 10 ms steps" : "GIF/APNG · active frame"}</small></span><select aria-label="Palette-cycle export" value={selectedExportCycle?.id ?? ""} onChange={(event) => { setExportPaletteCycleId(event.target.value); if (event.target.value) setExportTagId(""); }}><option value="">Timeline or tag animation</option>{document.paletteCycles.map((cycle) => <option key={cycle.id} value={cycle.id}>{cycle.name} · {cycle.toIndex - cycle.fromIndex + 1} steps · {cycle.stepMs} ms</option>)}</select></label>}
               {exportChoices.map((format) => {
                 const scalable =
                   document?.kind === "pixel" &&
@@ -1375,6 +1382,7 @@ function TopBar({ onOpenShortcuts }: { onOpenShortcuts: () => void }) {
                 return (
                   <button
                     key={format}
+                    disabled={format === "gif" && Boolean(selectedExportCycle && selectedExportCycle.stepMs % 10 !== 0)}
                     onClick={async () => {
                       setExporting(false);
                       exportButtonRef.current?.focus();
@@ -1382,7 +1390,12 @@ function TopBar({ onOpenShortcuts }: { onOpenShortcuts: () => void }) {
                         format as Parameters<
                           typeof window.aidraw.exportActiveDocument
                         >[0],
-                        { scale, animationTagId: ["gif", "apng", "sprite-sheet"].includes(format) && exportTagId ? exportTagId : undefined },
+                        {
+                          scale,
+                          animationTagId: ["gif", "apng", "sprite-sheet"].includes(format) && !selectedExportCycle && exportTagId ? exportTagId : undefined,
+                          paletteCycleId: ["gif", "apng"].includes(format) ? selectedExportCycle?.id : undefined,
+                          paletteCycleFrameId: ["gif", "apng"].includes(format) && selectedExportCycle ? exportFrameId : undefined,
+                        },
                       );
                       if (result.exported)
                         notify(
@@ -1394,7 +1407,7 @@ function TopBar({ onOpenShortcuts }: { onOpenShortcuts: () => void }) {
                     }}
                   >
                     <span>{format.replace("-", " ").toUpperCase()}</span>
-                    {scale > 1 && <small>{scale}×</small>}
+                    {selectedExportCycle && ["gif", "apng"].includes(format) ? <small>{selectedExportCycle.name}</small> : scale > 1 && <small>{scale}×</small>}
                   </button>
                 );
               })}

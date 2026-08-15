@@ -254,6 +254,58 @@ describe('interchange exporters', () => {
     await expect(exportDocument(document, 'gif', { animationTagId: 'missing' })).rejects.toThrow(/does not exist/);
   });
 
+  it('exports one exact named palette-cycle period from a selected sprite frame without mutating canonical state', async () => {
+    const document = createPixelDocument('sprite', 'Palette-cycle delivery'); const sprite = document.pixelAssets[document.activeAssetId];
+    if (sprite.type !== 'sprite') throw new Error('Expected sprite');
+    sprite.width = 1; sprite.height = 1;
+    document.palette = [
+      { id: 'transparent', name: 'Transparent', color: '#00000000' },
+      { id: 'one', name: 'One', color: '#ff0000' },
+      { id: 'two', name: 'Two', color: '#00ff00' },
+      { id: 'three', name: 'Three', color: '#0000ff' },
+    ];
+    const frameId = sprite.frameIds[0];
+    writePixels(Object.values(sprite.cels)[0], [{ x: 0, y: 0, index: 1 }]);
+    sprite.paletteOverrides[frameId] = document.palette.map((entry, index) => ({
+      ...entry,
+      color: ['#00000000', '#ffff00', '#00ffff', '#ff00ff'][index],
+    }));
+    document.paletteCycles = [{ id: 'signal', name: 'Signal', fromIndex: 1, toIndex: 3, direction: 'reverse', stepMs: 80 }];
+    const before = JSON.stringify(document);
+    const options = { paletteCycleId: 'signal', paletteCycleFrameId: frameId };
+
+    const apng = await exportDocument(document, 'apng', options);
+    const decodedApng = UPNG.decode(Uint8Array.from(apng.data).buffer);
+    const rgbaFrames = UPNG.toRGBA8(decodedApng).map((frame) => [...new Uint8Array(frame).subarray(0, 4)]);
+    expect(decodedApng.frames.map((frame) => frame.delay)).toEqual([80, 80, 80]);
+    expect(rgbaFrames).toEqual([[255, 255, 0, 255], [255, 0, 255, 255], [0, 255, 255, 255]]);
+
+    const gif = await exportDocument(document, 'gif', options);
+    const gifFrames = decompressFrames(parseGIF(Uint8Array.from(gif.data).buffer), true);
+    expect(gifFrames).toHaveLength(3);
+    expect(gifFrames.map((frame) => frame.delay)).toEqual([80, 80, 80]);
+    expect(gifFrames.map((frame) => [...frame.patch.subarray(0, 4)])).toEqual(rgbaFrames);
+    expect(gif.report.warnings).toContain('Exported one complete 3-step palette cycle “Signal” from frame “Frame 1” using reverse rotation at 80 ms per step.');
+    expect(JSON.stringify(document)).toBe(before);
+  });
+
+  it('fails closed on ambiguous or unsupported palette-cycle export requests', async () => {
+    const document = createPixelDocument('sprite'); const sprite = document.pixelAssets[document.activeAssetId];
+    if (sprite.type !== 'sprite') throw new Error('Expected sprite');
+    const frameId = sprite.frameIds[0];
+    document.paletteCycles = [{ id: 'pulse', name: 'Pulse', fromIndex: 1, toIndex: 2, direction: 'forward', stepMs: 120 }];
+    await expect(exportDocument(document, 'gif', { paletteCycleId: 'pulse' })).rejects.toThrow(/both a named cycle and an exact source frame/);
+    await expect(exportDocument(document, 'png', { paletteCycleId: 'pulse', paletteCycleFrameId: frameId })).rejects.toThrow(/only for GIF and APNG/);
+    await expect(exportDocument(document, 'gif', { paletteCycleId: 'missing', paletteCycleFrameId: frameId })).rejects.toThrow(/does not exist/);
+    await expect(exportDocument(document, 'gif', { paletteCycleId: 'pulse', paletteCycleFrameId: 'missing' })).rejects.toThrow(/does not exist in the active sprite/);
+    await expect(exportDocument(document, 'gif', { animationTagId: 'tag', paletteCycleId: 'pulse', paletteCycleFrameId: frameId })).rejects.toThrow(/either a timeline\/tag animation or a palette cycle/);
+    await expect(exportDocument(createIllustrationDocument('Vector'), 'gif', { paletteCycleId: 'pulse', paletteCycleFrameId: frameId })).rejects.toThrow(/active pixel sprite/);
+    document.paletteCycles[0].stepMs = 17;
+    const apng = UPNG.decode(Uint8Array.from((await exportDocument(document, 'apng', { paletteCycleId: 'pulse', paletteCycleFrameId: frameId })).data).buffer);
+    expect(apng.frames.map((frame) => frame.delay)).toEqual([17, 17]);
+    await expect(exportDocument(document, 'gif', { paletteCycleId: 'pulse', paletteCycleFrameId: frameId })).rejects.toThrow(/GIF cannot represent exactly/);
+  });
+
   it('exports pixel artwork at an integer nearest-neighbor presentation scale', async () => {
     const document = createPixelDocument('sprite'); const sprite = document.pixelAssets[document.activeAssetId];
     if (sprite.type !== 'sprite') throw new Error('Expected sprite');
