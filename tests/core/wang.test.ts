@@ -55,7 +55,8 @@ describe('Wang terrain selection', () => {
   });
 
   it('plans a deduplicated drag against queued repairs and returns one sorted change set', () => {
-    const plan = planWangTerrainStroke(transitions, [{ x: 4, y: 5 }, { x: 5, y: 5 }, { x: 4, y: 5 }], 1, () => 0, { random: () => 0 });
+    let randomCalls = 0;
+    const plan = planWangTerrainStroke(transitions, [{ x: 4, y: 5 }, { x: 5, y: 5 }, { x: 4, y: 5 }], 1, () => 0, { random: () => { randomCalls += 1; return 0; } });
     expect(plan.status).toBe('ready');
     if (plan.status !== 'ready') return;
     expect(plan.strokePointCount).toBe(2);
@@ -63,6 +64,7 @@ describe('Wang terrain selection', () => {
     expect(plan.targetChangeCount).toBe(2);
     expect(plan.repairChangeCount).toBe(10);
     expect(plan.affectedCellCount).toBe(12);
+    expect(randomCalls).toBe(12);
     expect(plan.changes).toEqual([...plan.changes].sort((left, right) => left.y - right.y || left.x - right.x));
     expect(new Set(plan.changes.map((change) => `${change.x},${change.y}`)).size).toBe(plan.changes.length);
   });
@@ -129,20 +131,20 @@ describe('Wang terrain selection', () => {
     expect(readTileAt(restoredLayer.chunks, 6, 5)).toBe(0);
   });
 
-  it('returns no partial changes and exact diagnostics when an in-map transition is missing', () => {
+  it('returns no partial changes and exact diagnostics when a required signature has no authored tile', () => {
     const initial = new Map<string, number>([['2,2', 0]]);
     const plan = planWangTerrainStroke(
-      { ...terrain, tiles: transitions.tiles.slice(0, 2) },
+      { ...terrain, tiles: [{ tileId: 0, wangId: wangIdFromMask(0) }] },
       [{ x: 2, y: 2 }],
       1,
       (x, y) => initial.get(`${x},${y}`) ?? 0,
       { random: () => 0 },
     );
-    expect(plan).toMatchObject({ status: 'unmatched', changes: [], strokePointCount: 1, affectedCellCount: 9, provisionalChangeCount: 1 });
+    expect(plan).toMatchObject({ status: 'unmatched', changes: [], strokePointCount: 1, affectedCellCount: 9, provisionalChangeCount: 0 });
     if (plan.status !== 'unmatched') return;
     expect(plan.unmatched.map(({ x, y }) => [x, y])).toEqual([
       [1, 1], [2, 1], [3, 1],
-      [1, 2], [3, 2],
+      [1, 2], [2, 2], [3, 2],
       [1, 3], [2, 3], [3, 3],
     ]);
     expect(plan.unmatched[1]?.wangId).toEqual([0, 0, 0, 1, 1, 1, 0, 0]);
@@ -163,7 +165,7 @@ describe('Wang terrain selection', () => {
     });
   });
 
-  it('retains an unmatched desired boundary until a later diagonal repair satisfies its union', () => {
+  it('retains an earlier desired boundary when a later diagonal target adds another constraint', () => {
     const everySignatureExceptLeftOnly: WangSet = {
       ...terrain,
       tiles: Array.from({ length: 256 }, (_, mask) => ({ tileId: mask, wangId: wangIdFromMask(mask) }))
@@ -171,9 +173,9 @@ describe('Wang terrain selection', () => {
     };
     const contains = (x: number, y: number) => x >= 0 && x < 2 && y >= 0 && y < 2;
     const firstPoint = planWangTerrainStroke(everySignatureExceptLeftOnly, [{ x: 0, y: 0 }], 1, () => 0, { contains, random: () => 0 });
-    expect(firstPoint.status).toBe('unmatched');
-    if (firstPoint.status !== 'unmatched') return;
-    expect(firstPoint.unmatched.find(({ x, y }) => x === 1 && y === 0)?.wangId).toEqual(wangIdFromMask(224));
+    expect(firstPoint.status).toBe('ready');
+    if (firstPoint.status !== 'ready') return;
+    expect(firstPoint.changes.find(({ x, y }) => x === 1 && y === 0)).toEqual({ x: 1, y: 0, tileId: 225 });
 
     const plan = planWangTerrainStroke(
       everySignatureExceptLeftOnly,
@@ -186,6 +188,63 @@ describe('Wang terrain selection', () => {
     if (plan.status !== 'ready') return;
     expect(plan.changes.find(({ x, y }) => x === 1 && y === 0)).toEqual({ x: 1, y: 0, tileId: 248 });
     expect(plan.changes).not.toContainEqual({ x: 1, y: 0, tileId: 56 });
+  });
+
+  it('propagates exact paint and erase repairs beyond the former radius-one neighborhood', () => {
+    const lineTerrain: WangSet = {
+      ...terrain,
+      tiles: [
+        { tileId: 0, wangId: wangIdFromMask(0) },
+        { tileId: 1, wangId: wangIdFromMask(255) },
+        { tileId: 2, wangId: wangIdFromMask(238) },
+      ],
+    };
+    const contains = (x: number, y: number) => y === 0 && x >= 0 && x < 4;
+    const seed = 'bounded-line-propagation';
+    const first = planWangTerrainStroke(lineTerrain, [{ x: 0, y: 0 }], 1, () => 0, { contains, random: createWangTerrainStrokeRandom(seed) });
+    const repeated = planWangTerrainStroke(lineTerrain, [{ x: 0, y: 0 }], 1, () => 0, { contains, random: createWangTerrainStrokeRandom(seed) });
+    expect(repeated).toEqual(first);
+    expect(first).toEqual({
+      status: 'ready',
+      changes: [
+        { x: 0, y: 0, tileId: 1 },
+        { x: 1, y: 0, tileId: 2 },
+        { x: 2, y: 0, tileId: 2 },
+        { x: 3, y: 0, tileId: 2 },
+      ],
+      targetChangeCount: 1,
+      repairChangeCount: 3,
+      strokePointCount: 1,
+      affectedCellCount: 4,
+    });
+
+    const painted = new Map(first.status === 'ready' ? first.changes.map((change) => [`${change.x},${change.y}`, change.tileId]) : []);
+    const erased = planWangTerrainStroke(lineTerrain, [{ x: 0, y: 0 }], 1, (x, y) => painted.get(`${x},${y}`) ?? 0, { contains, erase: true, random: () => 0 });
+    expect(erased).toMatchObject({ status: 'ready', targetChangeCount: 1, repairChangeCount: 3, affectedCellCount: 4 });
+    if (erased.status !== 'ready') return;
+    expect(erased.changes).toEqual(Array.from({ length: 4 }, (_, x) => ({ x, y: 0, tileId: 0 })));
+  });
+
+  it('fails the whole propagated frontier on a foreign cell or coordinate overflow', () => {
+    const lineTerrain: WangSet = {
+      ...terrain,
+      tiles: [
+        { tileId: 0, wangId: wangIdFromMask(0) },
+        { tileId: 1, wangId: wangIdFromMask(255) },
+        { tileId: 2, wangId: wangIdFromMask(238) },
+      ],
+    };
+    const contains = (x: number, y: number) => y === 0 && x >= 0 && x < 4;
+    expect(() => planWangTerrainStroke(lineTerrain, [{ x: 0, y: 0 }], 1, (x) => {
+      if (x === 2) throw new Error('foreign GID at propagated cell');
+      return 0;
+    }, { contains, random: () => 0 })).toThrow('foreign GID at propagated cell');
+
+    const edgeStart = MAX_WANG_TERRAIN_COORDINATE - 2;
+    expect(() => planWangTerrainStroke(lineTerrain, [{ x: edgeStart, y: 0 }], 1, () => 0, {
+      contains: (x, y) => y === 0 && x >= edgeStart,
+      random: () => 0,
+    })).toThrow('16,777,216');
   });
 
   it('fails closed on out-of-map, unsafe, or oversized strokes', () => {

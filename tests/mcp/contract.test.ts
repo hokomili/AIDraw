@@ -737,7 +737,7 @@ describe('authenticated stateful MCP contract', () => {
     const tileset = createPixelTileset('Semantic terrain tiles', 'semantic-terrain-source', 16, 16, 257, 1); tileset.firstGid = 37;
     tileset.wangSets = [
       { id: 'complete-terrain', name: 'Complete terrain', type: 'mixed', colors: [color], tiles: weightedTiles },
-      { id: 'missing-left-terrain', name: 'Missing left terrain', type: 'mixed', colors: [color], tiles: weightedTiles.filter((tile) => tile.tileId !== 224) },
+      { id: 'unmapped-terrain', name: 'Unmapped terrain', type: 'mixed', colors: [color], tiles: [{ tileId: 0, wangId: wangIdFromMask(0) }] },
     ];
     const attachedMap = structuredClone(map); attachedMap.tilesetIds = [tileset.id];
     expect(await callTool(started.url, client.headers, 4, 'canvas_apply', { documentId: document.id, clientOperationId: 'terrain-setup', label: 'Attach terrain definitions', playback: { mode: 'instant', speed: 1 }, operations: [{ kind: 'pixel.asset.add', asset: tileset }, { kind: 'pixel.asset.replace', asset: attachedMap, expectedRevision: map.revision }] })).toMatchObject({ status: 'committed' });
@@ -777,7 +777,7 @@ describe('authenticated stateful MCP contract', () => {
     expect(coordinates.map(({ x, y }) => readTileAt(restored.layer.chunks!, x, y))).toEqual([0, 0, 0, 0]);
 
     const beforeRefusals = structuredClone(restored.document);
-    const unmatched = await callToolMessage(started.url, client.headers, 10, 'canvas_apply', { documentId: document.id, clientOperationId: 'terrain-unmatched', label: 'Reject incomplete terrain', playback: { mode: 'instant', speed: 1 }, operations: [stroke('missing-left-terrain', 'paint', restored.layer.revision, [{ x: 0, y: 0 }])] });
+    const unmatched = await callToolMessage(started.url, client.headers, 10, 'canvas_apply', { documentId: document.id, clientOperationId: 'terrain-unmatched', label: 'Reject incomplete terrain', playback: { mode: 'instant', speed: 1 }, operations: [stroke('unmapped-terrain', 'paint', restored.layer.revision, [{ x: 0, y: 0 }])] });
     expect(unmatched.result?.isError).toBe(true);
     expect(JSON.stringify(unmatched)).toContain('need exact Wang mappings');
     expect(JSON.stringify(unmatched)).toContain('No terrain tiles changed');
@@ -797,6 +797,64 @@ describe('authenticated stateful MCP contract', () => {
     expect(await callTool(started.url, client.headers, 14, 'canvas_apply', { documentId: document.id, clientOperationId: 'terrain-locked', label: 'Respect terrain lock', playback: { mode: 'instant', speed: 1 }, operations: [stroke('complete-terrain', 'paint', restored.layer.revision)] })).toMatchObject({ status: 'locked', conflict: { retryable: true } });
     if (lock.lockId) documents.releaseLock(lock.lockId);
     expect(documents.getDocument(document.id)).toEqual(beforeRefusals);
+  });
+
+  it('propagates authenticated Wang repairs beyond one cell and refuses a foreign-GID frontier atomically', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-mcp-')); temporaryPaths.push(root);
+    const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0'); documents.initialize();
+    const host = new McpHost(documents, '1.0.0', join(root, 'port.json')); hosts.push(host); const started = await host.start('propagated-terrain-token');
+    const client = await initializeClient(started.url, 'propagated-terrain-token', 'propagated-terrain-client');
+    const joined = await callTool(started.url, client.headers, 2, 'session_manage', { action: 'join', name: 'Terrain propagation agent', color: '#6b8f45' });
+    const actor = joined.actor as { id: string };
+    const created = await callTool(started.url, client.headers, 3, 'document_manage', { action: 'new', kind: 'tilemap', name: 'Propagated terrain', width: 4, height: 1, orientation: 'orthogonal', infinite: false, tileWidth: 16, tileHeight: 16 });
+    const document = created.activeDocument as ReturnType<DocumentService['snapshot']>['activeDocument']; if (!document || document.kind !== 'pixel') throw new Error('Expected pixel document');
+    const map = document.pixelAssets[document.activeAssetId]; if (map.type !== 'tilemap') throw new Error('Expected tilemap');
+    const layer = Object.values(map.layers).find((entry) => entry.type === 'tile'); if (!layer || layer.type !== 'tile') throw new Error('Expected tile layer');
+    const wangIdFromMask = (mask: number) => Array.from({ length: 8 }, (_, slot) => (mask & (1 << slot)) === 0 ? 0 : 1) as [number, number, number, number, number, number, number, number];
+    const terrainTileset = createPixelTileset('Propagated terrain tiles', 'propagated-terrain-source', 16, 16, 256, 1); terrainTileset.firstGid = 41;
+    terrainTileset.wangSets = [{
+      id: 'line-terrain', name: 'Line terrain', type: 'mixed',
+      colors: [{ id: 1, name: 'Grass', color: '#55aa44', tileId: 255, probability: 1 }],
+      tiles: [
+        { tileId: 0, wangId: wangIdFromMask(0) },
+        { tileId: 255, wangId: wangIdFromMask(255) },
+        { tileId: 238, wangId: wangIdFromMask(238) },
+      ],
+    }];
+    const foreignTileset = createPixelTileset('Foreign terrain tiles', 'foreign-terrain-source', 16, 16, 1, 1); foreignTileset.firstGid = 401;
+    const attachedMap = structuredClone(map); attachedMap.tilesetIds = [terrainTileset.id, foreignTileset.id];
+    expect(await callTool(started.url, client.headers, 4, 'canvas_apply', { documentId: document.id, clientOperationId: 'propagated-terrain-setup', label: 'Attach propagated terrain definitions', playback: { mode: 'instant', speed: 1 }, operations: [{ kind: 'pixel.asset.add', asset: terrainTileset }, { kind: 'pixel.asset.add', asset: foreignTileset }, { kind: 'pixel.asset.replace', asset: attachedMap, expectedRevision: map.revision }] })).toMatchObject({ status: 'committed' });
+
+    const currentLayer = () => {
+      const current = documents.getDocument(document.id); if (!current || current.kind !== 'pixel') throw new Error('Expected pixel document');
+      const currentMap = current.pixelAssets[map.id]; if (currentMap.type !== 'tilemap') throw new Error('Expected tilemap');
+      const currentLayer = currentMap.layers[layer.id]; if (currentLayer.type !== 'tile' || !currentLayer.chunks) throw new Error('Expected tile layer');
+      return { document: current, map: currentMap, layer: currentLayer };
+    };
+    const stroke = (mode: 'paint' | 'erase', expectedRevision: number) => ({
+      kind: 'pixel.wang-terrain.stroke', mapId: map.id, layerId: layer.id, tilesetId: terrainTileset.id, wangSetId: 'line-terrain', colorId: 1, mode, points: [{ x: 0, y: 0 }], expectedRevision,
+    });
+
+    const beforePaint = currentLayer();
+    expect(await callTool(started.url, client.headers, 5, 'canvas_apply', { documentId: document.id, clientOperationId: 'propagated-terrain-paint', label: 'Paint propagated terrain', playback: { mode: 'instant', speed: 1 }, operations: [stroke('paint', beforePaint.layer.revision)] })).toMatchObject({ status: 'committed' });
+    const painted = currentLayer();
+    expect(Array.from({ length: 4 }, (_, x) => decodeTiledGid(readTileAt(painted.layer.chunks!, x, 0)).gid - terrainTileset.firstGid)).toEqual([255, 238, 238, 238]);
+    expect(painted.document.activity.find((entry) => entry.label === 'Paint propagated terrain')).toMatchObject({ actor: { id: actor.id }, operationCount: 1 });
+
+    expect(await callTool(started.url, client.headers, 6, 'canvas_apply', { documentId: document.id, clientOperationId: 'propagated-terrain-erase', label: 'Erase propagated terrain', playback: { mode: 'instant', speed: 1 }, operations: [stroke('erase', painted.layer.revision)] })).toMatchObject({ status: 'committed' });
+    expect(Array.from({ length: 4 }, (_, x) => readTileAt(currentLayer().layer.chunks!, x, 0))).toEqual(Array.from({ length: 4 }, () => terrainTileset.firstGid));
+    expect(await callTool(started.url, client.headers, 7, 'history_manage', { action: 'undo', documentId: document.id })).toMatchObject({ status: 'committed' });
+    expect(await callTool(started.url, client.headers, 8, 'history_manage', { action: 'undo', documentId: document.id })).toMatchObject({ status: 'committed' });
+    expect(Array.from({ length: 4 }, (_, x) => readTileAt(currentLayer().layer.chunks!, x, 0))).toEqual([0, 0, 0, 0]);
+
+    const beforeForeignSetup = currentLayer();
+    expect(await callTool(started.url, client.headers, 9, 'canvas_apply', { documentId: document.id, clientOperationId: 'propagated-terrain-foreign-setup', label: 'Place foreign terrain cell', playback: { mode: 'instant', speed: 1 }, operations: [{ kind: 'pixel.tilemap.set', mapId: map.id, layerId: layer.id, changes: [{ x: 2, y: 0, gid: foreignTileset.firstGid }], expectedRevision: beforeForeignSetup.layer.revision }] })).toMatchObject({ status: 'committed' });
+    const beforeForeignStroke = currentLayer();
+    const foreign = await callToolMessage(started.url, client.headers, 10, 'canvas_apply', { documentId: document.id, clientOperationId: 'propagated-terrain-foreign-refusal', label: 'Refuse foreign terrain frontier', playback: { mode: 'instant', speed: 1 }, operations: [stroke('paint', beforeForeignStroke.layer.revision)] });
+    expect(foreign.result?.isError).toBe(true);
+    expect(JSON.stringify(foreign)).toContain(`outside tileset ${terrainTileset.id}`);
+    expect(JSON.stringify(foreign)).toContain('No terrain tiles changed');
+    expect(documents.getDocument(document.id)).toEqual(beforeForeignStroke.document);
   });
 
   it('authors typed per-tile collisions through the authenticated semantic contract', async () => {

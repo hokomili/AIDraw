@@ -4,39 +4,30 @@ export type WangNeighborhood = Partial<Record<'top' | 'topRight' | 'right' | 'bo
 
 const positions: Array<keyof WangNeighborhood> = ['top', 'topRight', 'right', 'bottomRight', 'bottom', 'bottomLeft', 'left', 'topLeft'];
 
-const wangTerrainNeighbors: Array<{ dx: number; dy: number; neighborSlots: number[] }> = [
-  { dx: 0, dy: -1, neighborSlots: [4, 3, 5] },
-  { dx: 1, dy: -1, neighborSlots: [5] },
-  { dx: 1, dy: 0, neighborSlots: [6, 7, 5] },
-  { dx: 1, dy: 1, neighborSlots: [7] },
-  { dx: 0, dy: 1, neighborSlots: [0, 1, 7] },
-  { dx: -1, dy: 1, neighborSlots: [1] },
-  { dx: -1, dy: 0, neighborSlots: [2, 3, 1] },
-  { dx: -1, dy: -1, neighborSlots: [3] },
+type WangSlot = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7;
+
+const wangSlots: WangSlot[] = [0, 1, 2, 3, 4, 5, 6, 7];
+const wangTerrainNeighbors: Array<{ dx: number; dy: number; sharedSlots: Array<{ source: WangSlot; neighbor: WangSlot }> }> = [
+  { dx: 0, dy: -1, sharedSlots: [{ source: 0, neighbor: 4 }, { source: 1, neighbor: 3 }, { source: 7, neighbor: 5 }] },
+  { dx: 1, dy: -1, sharedSlots: [{ source: 1, neighbor: 5 }] },
+  { dx: 1, dy: 0, sharedSlots: [{ source: 2, neighbor: 6 }, { source: 1, neighbor: 7 }, { source: 3, neighbor: 5 }] },
+  { dx: 1, dy: 1, sharedSlots: [{ source: 3, neighbor: 7 }] },
+  { dx: 0, dy: 1, sharedSlots: [{ source: 4, neighbor: 0 }, { source: 3, neighbor: 1 }, { source: 5, neighbor: 7 }] },
+  { dx: -1, dy: 1, sharedSlots: [{ source: 5, neighbor: 1 }] },
+  { dx: -1, dy: 0, sharedSlots: [{ source: 6, neighbor: 2 }, { source: 5, neighbor: 3 }, { source: 7, neighbor: 1 }] },
+  { dx: -1, dy: -1, sharedSlots: [{ source: 7, neighbor: 3 }] },
 ];
+
+const wangTerrainNeighborsBySlot = wangSlots.map((slot) => wangTerrainNeighbors.flatMap((neighbor) => (
+  neighbor.sharedSlots
+    .filter((shared) => shared.source === slot)
+    .map((shared) => ({ dx: neighbor.dx, dy: neighbor.dy, neighborSlot: shared.neighbor }))
+)));
 
 const emptyWangId = (): WangTile['wangId'] => [0, 0, 0, 0, 0, 0, 0, 0];
 
 function wangIdForTile(set: WangSet, tileId: number | undefined): WangTile['wangId'] {
   return [...(set.tiles.find((tile) => tile.tileId === tileId)?.wangId ?? emptyWangId())] as WangTile['wangId'];
-}
-
-function desiredWangTerrainCells(
-  x: number,
-  y: number,
-  targetValue: number,
-  getWangId: (x: number, y: number) => WangTile['wangId'],
-): Map<string, { x: number; y: number; wangId: WangTile['wangId'] }> {
-  const desired = new Map<string, { x: number; y: number; wangId: WangTile['wangId'] }>();
-  desired.set(`${x},${y}`, { x, y, wangId: [targetValue, targetValue, targetValue, targetValue, targetValue, targetValue, targetValue, targetValue] });
-  for (const neighbor of wangTerrainNeighbors) {
-    const targetX = x + neighbor.dx;
-    const targetY = y + neighbor.dy;
-    const wangId = getWangId(targetX, targetY);
-    for (const neighborSlot of neighbor.neighborSlots) wangId[neighborSlot] = targetValue;
-    desired.set(`${targetX},${targetY}`, { x: targetX, y: targetY, wangId });
-  }
-  return desired;
 }
 
 export function matchingWangTiles(set: WangSet, neighborhood: WangNeighborhood): WangTile[] {
@@ -69,6 +60,7 @@ export interface WangTerrainPaintResult {
 
 export const MAX_WANG_TERRAIN_STROKE_POINTS = 65_536;
 export const MAX_WANG_TERRAIN_COORDINATE = 16_777_216;
+export const MAX_WANG_TERRAIN_PLAN_CELLS = MAX_WANG_TERRAIN_STROKE_POINTS * 9;
 
 /**
  * Build a platform-stable pseudo-random stream for semantic Wang planning.
@@ -126,25 +118,19 @@ export function paintWangTerrain(
   erase = false,
   random = Math.random,
 ): WangTerrainPaintResult {
-  if (!set.colors.some((color) => color.id === colorId)) throw new Error('Wang color ' + colorId + ' does not exist in ' + set.name + '.');
-  const targetValue = erase ? 0 : colorId;
-  const desired = desiredWangTerrainCells(x, y, targetValue, (targetX, targetY) => wangIdForTile(set, getTileId(targetX, targetY)));
-  const result: WangTerrainPaintResult = { changes: [], unmatched: [] };
-  for (const entry of desired.values()) {
-    const neighborhood = Object.fromEntries(positions.map((position, index) => [position, entry.wangId[index]])) as WangNeighborhood;
-    const tile = selectWangTile(set, neighborhood, random);
-    if (tile) result.changes.push({ x: entry.x, y: entry.y, tileId: tile.tileId });
-    else result.unmatched.push(entry);
-  }
-  return result;
+  const plan = planWangTerrainStroke(set, [{ x, y }], colorId, getTileId, { erase, random });
+  return plan.status === 'ready'
+    ? { changes: plan.changes, unmatched: [] }
+    : { changes: [], unmatched: plan.unmatched };
 }
 
 /**
- * Accumulate every desired boundary across a complete terrain stroke before
- * selecting concrete tiles. A missing final in-map transition rejects the
- * complete plan instead of returning a partial mutation. The optional
- * containment predicate excludes nonexistent finite-map neighbors while
- * leaving signed infinite-map coordinates unrestricted.
+ * Accumulate every desired boundary across a complete terrain stroke, then
+ * propagate only when an exact authored signature must change another shared
+ * edge or corner. A missing final in-map transition or unfinished bounded
+ * frontier rejects the complete plan instead of returning a partial mutation.
+ * The optional containment predicate excludes nonexistent finite-map
+ * neighbors while leaving signed infinite-map coordinates unrestricted.
  */
 export function planWangTerrainStroke(
   set: WangSet,
@@ -158,15 +144,27 @@ export function planWangTerrainStroke(
 
   const contains = options.contains ?? (() => true);
   const random = options.random ?? Math.random;
+  interface PlannedCell {
+    x: number;
+    y: number;
+    wangId: WangTile['wangId'];
+    required: boolean[];
+  }
+  interface SignatureGroup {
+    wangId: WangTile['wangId'];
+  }
+
   const initial = new Map<string, number | undefined>();
-  const desired = new Map<string, { x: number; y: number; wangId: WangTile['wangId'] }>();
+  const desired = new Map<string, PlannedCell>();
   const pending = new Map<string, number>();
   const unresolved = new Map<string, { x: number; y: number; wangId: WangTile['wangId'] }>();
-  const affected = new Set<string>();
   const targetKeys = new Set<string>();
   const uniquePoints: Array<{ x: number; y: number }> = [];
+  const signatureGroups: SignatureGroup[] = [];
+  const signatureKeys = new Set<string>();
 
   const keyOf = (x: number, y: number) => `${x},${y}`;
+  const signatureKey = (wangId: WangTile['wangId']) => wangId.join(',');
   const assertCoordinate = (x: number, y: number): void => {
     if (!Number.isSafeInteger(x) || !Number.isSafeInteger(y)) throw new Error('Wang terrain stroke coordinates must be safe integers.');
     if (Math.abs(x) > MAX_WANG_TERRAIN_COORDINATE || Math.abs(y) > MAX_WANG_TERRAIN_COORDINATE) throw new Error(`Wang terrain stroke coordinates must stay within ±${MAX_WANG_TERRAIN_COORDINATE.toLocaleString('en-US')}.`);
@@ -176,14 +174,39 @@ export function planWangTerrainStroke(
     if (!initial.has(key)) initial.set(key, getTileId(x, y));
     return initial.get(key);
   };
-  const desiredWangIdAt = (x: number, y: number): WangTile['wangId'] => {
-    if (!contains(x, y)) return emptyWangId();
+  const ensureCell = (x: number, y: number): PlannedCell => {
     assertCoordinate(x, y);
-    const accumulated = desired.get(keyOf(x, y));
-    return accumulated
-      ? [...accumulated.wangId] as WangTile['wangId']
-      : wangIdForTile(set, initialTileAt(x, y));
+    const key = keyOf(x, y);
+    const current = desired.get(key);
+    if (current) return current;
+    if (desired.size >= MAX_WANG_TERRAIN_PLAN_CELLS) {
+      throw new Error(`Wang terrain repair exceeds the ${MAX_WANG_TERRAIN_PLAN_CELLS.toLocaleString('en-US')}-cell planning limit at (${x}, ${y}); no terrain tiles changed.`);
+    }
+    const cell: PlannedCell = {
+      x,
+      y,
+      wangId: wangIdForTile(set, initialTileAt(x, y)),
+      required: wangSlots.map(() => false),
+    };
+    desired.set(key, cell);
+    return cell;
   };
+  const requireSlot = (cell: PlannedCell, slot: WangSlot, value: number): boolean => {
+    if (cell.required[slot] && cell.wangId[slot] !== value) {
+      throw new Error(`Wang terrain repair produced conflicting exact constraints at (${cell.x}, ${cell.y}) slot ${slot}; no terrain tiles changed.`);
+    }
+    const changed = cell.wangId[slot] !== value;
+    cell.wangId[slot] = value;
+    cell.required[slot] = true;
+    return changed;
+  };
+
+  for (const tile of set.tiles) {
+    const key = signatureKey(tile.wangId);
+    if (signatureKeys.has(key)) continue;
+    signatureKeys.add(key);
+    signatureGroups.push({ wangId: [...tile.wangId] as WangTile['wangId'] });
+  }
 
   for (const point of points) {
     assertCoordinate(point.x, point.y);
@@ -196,16 +219,65 @@ export function planWangTerrainStroke(
 
   const targetValue = options.erase ? 0 : colorId;
   for (const point of uniquePoints) {
-    const pointDesired = desiredWangTerrainCells(point.x, point.y, targetValue, desiredWangIdAt);
-    for (const entry of pointDesired.values()) {
-      if (!contains(entry.x, entry.y)) continue;
-      const key = keyOf(entry.x, entry.y);
-      affected.add(key);
-      desired.set(key, { x: entry.x, y: entry.y, wangId: [...entry.wangId] as WangTile['wangId'] });
+    const target = ensureCell(point.x, point.y);
+    for (const slot of wangSlots) requireSlot(target, slot, targetValue);
+    for (const neighbor of wangTerrainNeighbors) {
+      const targetX = point.x + neighbor.dx;
+      const targetY = point.y + neighbor.dy;
+      if (!contains(targetX, targetY)) continue;
+      const cell = ensureCell(targetX, targetY);
+      for (const shared of neighbor.sharedSlots) requireSlot(cell, shared.neighbor, targetValue);
+    }
+  }
+
+  const repairSignatureFor = (cell: PlannedCell): WangTile['wangId'] | undefined => {
+    const requiredSlots = wangSlots.filter((slot) => cell.required[slot]);
+    let selected: { group: SignatureGroup; differenceCount: number } | undefined;
+    for (const group of signatureGroups) {
+      if (requiredSlots.some((slot) => group.wangId[slot] !== cell.wangId[slot])) continue;
+      const differenceCount = wangSlots.filter((slot) => group.wangId[slot] !== cell.wangId[slot]).length;
+      if (!selected || differenceCount < selected.differenceCount) selected = { group, differenceCount };
+    }
+    return selected ? [...selected.group.wangId] as WangTile['wangId'] : undefined;
+  };
+
+  const queue: string[] = [];
+  const queued = new Set<string>();
+  const enqueueIfUnmatched = (key: string, cell: PlannedCell): void => {
+    if (signatureKeys.has(signatureKey(cell.wangId)) || queued.has(key)) return;
+    queued.add(key);
+    queue.push(key);
+  };
+  for (const [key, cell] of desired) enqueueIfUnmatched(key, cell);
+
+  for (let queueIndex = 0; queueIndex < queue.length; queueIndex += 1) {
+    const key = queue[queueIndex];
+    queued.delete(key);
+    const cell = desired.get(key);
+    if (!cell || signatureKeys.has(signatureKey(cell.wangId))) continue;
+    const repaired = repairSignatureFor(cell);
+    if (!repaired) {
+      unresolved.set(key, { x: cell.x, y: cell.y, wangId: [...cell.wangId] as WangTile['wangId'] });
+      continue;
+    }
+    unresolved.delete(key);
+    const previous = [...cell.wangId] as WangTile['wangId'];
+    cell.wangId = repaired;
+    for (const slot of wangSlots) {
+      if (previous[slot] === repaired[slot]) continue;
+      cell.required[slot] = true;
+      for (const neighbor of wangTerrainNeighborsBySlot[slot]) {
+        const targetX = cell.x + neighbor.dx;
+        const targetY = cell.y + neighbor.dy;
+        if (!contains(targetX, targetY)) continue;
+        const target = ensureCell(targetX, targetY);
+        if (requireSlot(target, neighbor.neighborSlot, repaired[slot])) enqueueIfUnmatched(keyOf(targetX, targetY), target);
+      }
     }
   }
 
   for (const [key, entry] of desired) {
+    if (unresolved.has(key)) continue;
     const neighborhood = Object.fromEntries(positions.map((position, index) => [position, entry.wangId[index]])) as WangNeighborhood;
     const tile = selectWangTile(set, neighborhood, random);
     if (tile) pending.set(key, tile.tileId);
@@ -233,7 +305,7 @@ export function planWangTerrainStroke(
       unmatched: [...unresolved.values()].sort((left, right) => left.y - right.y || left.x - right.x),
       provisionalChangeCount: changed.length,
       strokePointCount: uniquePoints.length,
-      affectedCellCount: affected.size,
+      affectedCellCount: desired.size,
     };
   }
 
@@ -244,6 +316,6 @@ export function planWangTerrainStroke(
     targetChangeCount,
     repairChangeCount: changed.length - targetChangeCount,
     strokePointCount: uniquePoints.length,
-    affectedCellCount: affected.size,
+    affectedCellCount: desired.size,
   };
 }

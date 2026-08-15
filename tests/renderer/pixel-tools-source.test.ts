@@ -51,6 +51,9 @@ describe('pixel tool renderer wiring', () => {
     expect(end).toBeGreaterThan(start);
     expect(branch).toContain('planWangTerrainStroke(terrainSet, points, terrainColor.id, terrainTileAt');
     expect(branch).toContain("{ erase: terrainErase, contains }");
+    expect(branch).toContain('resolveTilesetForGid(document, tilemap, gid)');
+    expect(branch).toContain('resolved.tileset.id !== terrainTileset.id');
+    expect(branch).not.toContain('decoded.gid - firstGid');
     expect(branch).toContain("if (plan.status === 'unmatched')");
     expect(branch).toContain('entry.wangId.join');
     expect(branch).toContain('No terrain tiles changed; add those mappings');

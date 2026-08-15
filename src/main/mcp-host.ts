@@ -806,7 +806,7 @@ async function expandAgentCanvasOperation(document: AIDrawDocument, value: Recor
       const gid = decodeTiledGid(readTileAt(layer.chunks!, x, y)).gid;
       if (gid === 0) return undefined;
       const resolved = resolveTilesetForGid(document, map, gid);
-      if (!resolved || resolved.tileset.id !== tileset.id) throw new Error(`Terrain stroke cell (${x}, ${y}) contains GID ${gid} outside tileset ${tileset.id}; no terrain tiles changed.`);
+      if (!resolved || resolved.tileset.id !== tileset.id) throw new Error(`Terrain stroke cell (${x}, ${y}) contains GID ${gid} outside tileset ${tileset.id}. No terrain tiles changed.`);
       return resolved.localId;
     };
     const points = [...new Map(operation.points.map((point) => [`${point.x},${point.y}`, point])).values()];

@@ -1264,7 +1264,11 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
           await apply('Place reusable tile stamp', [{ kind: 'pixel.tilemap.set', mapId: tilemap.id, layerId, changes: placedTiles, expectedRevision: layer.revision }]);
         } else if (tool === 'terrain' && terrainTileset?.type === 'tileset' && terrainSet && terrainColor) {
           const terrainTileAt = (x: number, y: number) => {
-            const decoded = decodeTiledGid(readTileAt(layer.chunks!, x, y)); return decoded.gid >= firstGid ? decoded.gid - firstGid : undefined;
+            const gid = decodeTiledGid(readTileAt(layer.chunks!, x, y)).gid;
+            if (gid === 0) return undefined;
+            const resolved = resolveTilesetForGid(document, tilemap, gid);
+            if (!resolved || resolved.tileset.id !== terrainTileset.id) throw new Error(`Terrain stroke cell (${x}, ${y}) contains GID ${gid} outside tileset ${terrainTileset.id}.`);
+            return resolved.localId;
           };
           const contains = (x: number, y: number) => tilemap.infinite || (x >= 0 && y >= 0 && x < tilemap.width && y < tilemap.height);
           let plan: ReturnType<typeof planWangTerrainStroke>;
