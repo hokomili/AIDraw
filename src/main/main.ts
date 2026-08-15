@@ -828,6 +828,7 @@ function registerIpc(): void {
   handle(IPC.orderedDitherPreferencesSet, (_event, value: unknown) => engineRuntime.setOrderedDitherPreferences(value));
   handle(IPC.spriteSymmetryPreferencesSet, (_event, value: unknown) => engineRuntime.setSpriteSymmetryPreferences(value));
   handle(IPC.workspaceLayoutPreferencesSet, (_event, value: unknown) => engineRuntime.setWorkspaceLayoutPreferences(value));
+  handle(IPC.shortcutPreferencesSet, (_event, value: unknown) => engineRuntime.setShortcutPreferences(value));
   handle(IPC.configureAgentClient, (_event, clientId: unknown) => configureAgentClient(clientId));
   handle(IPC.configureCodex, () => configureAgentClient('codex'));
 }

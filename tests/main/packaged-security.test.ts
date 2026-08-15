@@ -56,7 +56,7 @@ function secureSources() {
 
 describe('packaged Electron security verification', () => {
   it('tracks the complete current typed IPC channel set', () => {
-    expect(PACKAGED_PRELOAD_CHANNELS).toHaveLength(64);
+    expect(PACKAGED_PRELOAD_CHANNELS).toHaveLength(65);
     expect([...PACKAGED_PRELOAD_CHANNELS].sort()).toEqual(Object.values(IPC).sort());
   });
 
@@ -84,7 +84,7 @@ describe('packaged Electron security verification', () => {
     expect(assertPackagedSecuritySources(secureSources())).toMatchObject({
       browserWindow: { sandbox: true, contextIsolation: true, nodeIntegration: false },
       denials: { permissions: true, windowOpen: true, navigation: true, webviewAttach: true },
-      preload: { frozenAidrawBridge: true, invokeBindings: 62, eventBindings: 2, fixedChannels: 64 },
+      preload: { frozenAidrawBridge: true, invokeBindings: 62, eventBindings: 2, fixedChannels: 65 },
     });
   });
 

@@ -5,6 +5,7 @@ import { DEFAULT_ONION_SKIN_PREFERENCES, type OnionSkinPreferences } from '../..
 import { DEFAULT_ORDERED_DITHER_PREFERENCES, type OrderedDitherPreferences } from '../../src/common/ordered-dither-preferences';
 import { DEFAULT_SPRITE_SYMMETRY_PREFERENCES, type SpriteSymmetryPreferences } from '../../src/common/sprite-symmetry';
 import { DEFAULT_WORKSPACE_LAYOUT_PREFERENCES, type WorkspaceLayoutPreferences } from '../../src/common/workspace-layout';
+import { assignShortcut, defaultShortcutPreferences, type ShortcutPreferences } from '../../src/common/shortcut-preferences';
 import { reconcileWorkspaceSnapshot, useEditorStore } from '../../src/renderer/store';
 
 function snapshot(workspaceRevision: number, document: AIDrawDocument): WorkspaceSnapshot {
@@ -29,8 +30,9 @@ function bootstrapSnapshot(
   symmetryPreferences: SpriteSymmetryPreferences = { mode: DEFAULT_SPRITE_SYMMETRY_PREFERENCES.mode, bindings: [] },
   orderedDitherPreferences: OrderedDitherPreferences = { current: { ...DEFAULT_ORDERED_DITHER_PREFERENCES.current }, presets: [], activePresetId: null },
   workspaceLayoutPreferences: WorkspaceLayoutPreferences = { ...DEFAULT_WORKSPACE_LAYOUT_PREFERENCES },
+  shortcutPreferences: ShortcutPreferences = defaultShortcutPreferences(),
 ): EditorBootstrapSnapshot {
-  return { ...snapshot(workspaceRevision, document), onionSkinPreferences, orderedDitherPreferences, symmetryPreferences, workspaceLayoutPreferences };
+  return { ...snapshot(workspaceRevision, document), onionSkinPreferences, orderedDitherPreferences, symmetryPreferences, workspaceLayoutPreferences, shortcutPreferences };
 }
 
 const transientState = (current: WorkspaceSnapshot) => ({
@@ -233,6 +235,61 @@ describe('renderer workspace ordering and document isolation', () => {
     await useEditorStore.getState().initialize();
     expect(useEditorStore.getState().workspaceLayoutPreferences).toEqual(durable);
     expect(setWorkspaceLayoutPreferences).toHaveBeenCalledTimes(2);
+  });
+
+  it('hydrates the complete shortcut map before the guide and tools, keeps it across shell replacement, and retries failed persistence without touching artwork', async () => {
+    const document = createPixelDocument('sprite', 'Persistent shortcuts');
+    const durableResult = assignShortcut(defaultShortcutPreferences(), 'tool:pixel:pencil', 'Q');
+    const recoveredResult = assignShortcut(defaultShortcutPreferences(), 'toggle-inspector', 'Primary+B');
+    if (!durableResult.accepted || !recoveredResult.accepted) throw new Error('Shortcut fixture failed.');
+    const durable = durableResult.preferences;
+    const recovered = recoveredResult.preferences;
+    let bootstrapCalls = 0;
+    const setTimeout = vi.fn();
+    const applyTransaction = vi.fn();
+    const setShortcutPreferences = vi.fn()
+      .mockResolvedValueOnce({ saved: false, message: 'Keyboard shortcuts changed in this editor, but AIDraw could not save them. The previous saved mapping remains.' })
+      .mockResolvedValueOnce({ saved: true, preferences: recovered });
+    const api = {
+      bootstrap: vi.fn(async () => bootstrapSnapshot(
+        ++bootstrapCalls,
+        document,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        durable,
+      )),
+      onEvent: vi.fn(() => vi.fn()),
+      setShortcutPreferences,
+      applyTransaction,
+    } as unknown as AIDrawDesktopAPI;
+    Object.defineProperty(globalThis, 'window', { configurable: true, value: { aidraw: api, setTimeout } });
+    useEditorStore.setState({
+      snapshot: undefined,
+      loading: true,
+      shortcutPreferences: defaultShortcutPreferences(),
+      toast: undefined,
+    });
+
+    await useEditorStore.getState().initialize();
+    const canonicalSnapshot = structuredClone(useEditorStore.getState().snapshot);
+    expect(useEditorStore.getState().shortcutPreferences).toEqual(durable);
+    expect(setShortcutPreferences).not.toHaveBeenCalled();
+
+    useEditorStore.getState().setShortcutPreferences(recovered);
+    await vi.waitFor(() => expect(setShortcutPreferences).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(useEditorStore.getState().toast).toMatchObject({ tone: 'warning', message: expect.stringContaining('could not save') }));
+    expect(useEditorStore.getState().shortcutPreferences).toEqual(recovered);
+    expect(useEditorStore.getState().snapshot).toEqual(canonicalSnapshot);
+    expect(applyTransaction).not.toHaveBeenCalled();
+
+    useEditorStore.getState().setShortcutPreferences(recovered);
+    await vi.waitFor(() => expect(setShortcutPreferences).toHaveBeenCalledTimes(2));
+    useEditorStore.setState({ snapshot: undefined, loading: true, shortcutPreferences: defaultShortcutPreferences() });
+    await useEditorStore.getState().initialize();
+    expect(useEditorStore.getState().shortcutPreferences).toEqual(durable);
+    expect(setShortcutPreferences).toHaveBeenCalledTimes(2);
   });
 
   it('hydrates dither configuration and presets before editing, keeps palette context local, and retries after save failure', async () => {

@@ -7,6 +7,7 @@ import { DEFAULT_ONION_SKIN_PREFERENCES } from '../../src/common/onion-skin';
 import { DEFAULT_ORDERED_DITHER_PREFERENCES, type OrderedDitherPreferences } from '../../src/common/ordered-dither-preferences';
 import { DEFAULT_SPRITE_SYMMETRY_PREFERENCES } from '../../src/common/sprite-symmetry';
 import { DEFAULT_WORKSPACE_LAYOUT_PREFERENCES } from '../../src/common/workspace-layout';
+import { assignShortcut, defaultShortcutPreferences } from '../../src/common/shortcut-preferences';
 
 describe('EngineRuntime stop', () => {
   it('binds bootstrap hydration and preference saves through the named trusted-renderer IPC boundary', async () => {
@@ -16,6 +17,7 @@ describe('EngineRuntime stop', () => {
     expect(source).toContain('handle(IPC.orderedDitherPreferencesSet, (_event, value: unknown) => engineRuntime.setOrderedDitherPreferences(value))');
     expect(source).toContain('handle(IPC.spriteSymmetryPreferencesSet, (_event, value: unknown) => engineRuntime.setSpriteSymmetryPreferences(value))');
     expect(source).toContain('handle(IPC.workspaceLayoutPreferencesSet, (_event, value: unknown) => engineRuntime.setWorkspaceLayoutPreferences(value))');
+    expect(source).toContain('handle(IPC.shortcutPreferencesSet, (_event, value: unknown) => engineRuntime.setShortcutPreferences(value))');
   });
 
   it('hydrates onion preferences through bootstrap, merges one advisory, and bounds save failures', async () => {
@@ -126,6 +128,36 @@ describe('EngineRuntime stop', () => {
     await expect(runtime.setWorkspaceLayoutPreferences(durable)).resolves.toEqual({ saved: true, preferences: durable });
   });
 
+  it('hydrates and bounds one complete shortcut mapping without exposing document authority', async () => {
+    const runtime = new EngineRuntime({ userDataPath: '/private/aidraw-engine-shortcut-preference-test', appVersion: 'test' });
+    runtime.service.initialize();
+    const assigned = assignShortcut(defaultShortcutPreferences(), 'toggle-inspector', 'Primary+B');
+    if (!assigned.accepted) throw new Error(assigned.reason);
+    const durable = assigned.preferences;
+    vi.spyOn(runtime.onionSkinPreferences, 'bootstrap').mockResolvedValue({ preferences: { ...DEFAULT_ONION_SKIN_PREFERENCES } });
+    vi.spyOn(runtime.orderedDitherPreferences, 'bootstrap').mockResolvedValue({ preferences: { current: { ...DEFAULT_ORDERED_DITHER_PREFERENCES.current }, presets: [], activePresetId: null } });
+    vi.spyOn(runtime.spriteSymmetryPreferences, 'bootstrap').mockResolvedValue({ preferences: { mode: 'none', bindings: [] } });
+    vi.spyOn(runtime.workspaceLayoutPreferences, 'bootstrap').mockResolvedValue({ preferences: { ...DEFAULT_WORKSPACE_LAYOUT_PREFERENCES } });
+    vi.spyOn(runtime.shortcutPreferences, 'bootstrap').mockResolvedValue({ preferences: durable, warning: 'Shortcut recovery advisory.' });
+    await expect(runtime.editorBootstrap()).resolves.toMatchObject({ shortcutPreferences: durable, recoveryWarnings: ['Shortcut recovery advisory.'] });
+
+    const save = vi.spyOn(runtime.shortcutPreferences, 'save')
+      .mockRejectedValueOnce(new Error('Injected replacement failure.'))
+      .mockResolvedValueOnce(durable);
+    const invalid = structuredClone(durable) as { bindings: Record<string, string> };
+    delete invalid.bindings['tool:pixel:fill'];
+    await expect(runtime.setShortcutPreferences(invalid)).resolves.toEqual({
+      saved: false,
+      message: 'AIDraw rejected invalid shortcut preferences; the saved mapping was not changed.',
+    });
+    expect(save).not.toHaveBeenCalled();
+    await expect(runtime.setShortcutPreferences(durable)).resolves.toEqual({
+      saved: false,
+      message: 'Keyboard shortcuts changed in this editor, but AIDraw could not save them. The previous saved mapping remains.',
+    });
+    await expect(runtime.setShortcutPreferences(durable)).resolves.toEqual({ saved: true, preferences: durable });
+  });
+
   it('coalesces concurrent callers and remains retryable until final recovery succeeds', async () => {
     const runtime = new EngineRuntime({ userDataPath: '/private/aidraw-engine-stop-test', appVersion: 'test' });
     const state = runtime as unknown as { started: boolean };
@@ -137,6 +169,7 @@ describe('EngineRuntime stop', () => {
     const flushDitherPreferences = vi.spyOn(runtime.orderedDitherPreferences, 'flush');
     const flushSymmetryPreferences = vi.spyOn(runtime.spriteSymmetryPreferences, 'flush');
     const flushWorkspaceLayoutPreferences = vi.spyOn(runtime.workspaceLayoutPreferences, 'flush');
+    const flushShortcutPreferences = vi.spyOn(runtime.shortcutPreferences, 'flush');
     vi.spyOn(runtime.rasterUtilities, 'stop').mockImplementation(() => undefined);
     vi.spyOn(runtime.generationUtilities, 'stop').mockImplementation(() => undefined);
     const compactRecovery = vi.spyOn(runtime.service, 'compactRecovery')
@@ -155,6 +188,7 @@ describe('EngineRuntime stop', () => {
     expect(flushDitherPreferences).toHaveBeenCalledOnce();
     expect(flushSymmetryPreferences).toHaveBeenCalledOnce();
     expect(flushWorkspaceLayoutPreferences).toHaveBeenCalledOnce();
+    expect(flushShortcutPreferences).toHaveBeenCalledOnce();
     expect(state.started).toBe(true);
 
     await expect(runtime.stop()).resolves.toBeUndefined();
@@ -163,6 +197,7 @@ describe('EngineRuntime stop', () => {
     expect(flushDitherPreferences).toHaveBeenCalledTimes(2);
     expect(flushSymmetryPreferences).toHaveBeenCalledTimes(2);
     expect(flushWorkspaceLayoutPreferences).toHaveBeenCalledTimes(2);
+    expect(flushShortcutPreferences).toHaveBeenCalledTimes(2);
     expect(compactRecovery).toHaveBeenCalledTimes(2);
     expect(state.started).toBe(false);
 

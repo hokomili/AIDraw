@@ -176,12 +176,18 @@ import { InspectorLayoutControls } from "./components/InspectorLayoutControls";
 import { documentTabFocusIndex } from "./document-tabs";
 import { menuFocusIndex } from "./popover-navigation";
 import { shortcutHelpRequested, toolRailFocusIndex } from "./shortcuts";
+import {
+  shortcutActionForEvent,
+  shortcutActionIdForTool,
+  shortcutAriaKeyShortcuts,
+  shortcutChordForAction,
+  shortcutChordLabel,
+} from "../common/shortcut-preferences";
 import { requireWritableTileObject, requireWritableTileObjectLayer, TILE_OBJECT_ALIGNMENT_OPTIONS } from "../common/tile-object-authoring";
 import {
   DEFAULT_WORKSPACE_LAYOUT_PREFERENCES,
   MAX_INSPECTOR_EXPANDED_WIDTH,
   effectiveInspectorWidth,
-  inspectorToggleShortcutRequested,
 } from "../common/workspace-layout";
 
 type Icon = ComponentType<{ size?: number; strokeWidth?: number }>;
@@ -190,45 +196,44 @@ interface ToolDefinition {
   id: EditorTool;
   label: string;
   icon: Icon;
-  shortcut?: string;
 }
 
 const commonTools: ToolDefinition[] = [
-  { id: "select", label: "Select", icon: MousePointer2, shortcut: "V" },
-  { id: "lasso", label: "Lasso", icon: Lasso, shortcut: "L" },
-  { id: "hand", label: "Pan", icon: Hand, shortcut: "H" },
-  { id: "zoom", label: "Zoom", icon: ZoomIn, shortcut: "Z" },
+  { id: "select", label: "Select", icon: MousePointer2 },
+  { id: "lasso", label: "Lasso", icon: Lasso },
+  { id: "hand", label: "Pan", icon: Hand },
+  { id: "zoom", label: "Zoom", icon: ZoomIn },
 ];
 
 const illustrationTools: ToolDefinition[] = [
   ...commonTools,
-  { id: "pen", label: "Pressure pen", icon: PenTool, shortcut: "P" },
-  { id: "pencil", label: "Vector pencil", icon: Pencil, shortcut: "N" },
-  { id: "bezier", label: "Bézier path", icon: PenTool, shortcut: "A" },
+  { id: "pen", label: "Pressure pen", icon: PenTool },
+  { id: "pencil", label: "Vector pencil", icon: Pencil },
+  { id: "bezier", label: "Bézier path", icon: PenTool },
   { id: "node", label: "Node editor", icon: MousePointer2 },
-  { id: "brush", label: "Raster brush", icon: Brush, shortcut: "B" },
-  { id: "eraser", label: "Eraser", icon: Eraser, shortcut: "E" },
-  { id: "line", label: "Line / arrow", icon: Minus, shortcut: "\\" },
-  { id: "rectangle", label: "Rectangle", icon: Square, shortcut: "R" },
-  { id: "ellipse", label: "Ellipse", icon: Circle, shortcut: "O" },
+  { id: "brush", label: "Raster brush", icon: Brush },
+  { id: "eraser", label: "Eraser", icon: Eraser },
+  { id: "line", label: "Line / arrow", icon: Minus },
+  { id: "rectangle", label: "Rectangle", icon: Square },
+  { id: "ellipse", label: "Ellipse", icon: Circle },
   { id: "polygon", label: "Polygon", icon: Shapes },
   { id: "star", label: "Star", icon: Star },
   { id: "gradient", label: "Gradient", icon: Palette },
   { id: "crop", label: "Image crop", icon: Crop },
-  { id: "text", label: "Text", icon: Type, shortcut: "T" },
-  { id: "eyedropper", label: "Eyedropper", icon: Pipette, shortcut: "I" },
+  { id: "text", label: "Text", icon: Type },
+  { id: "eyedropper", label: "Eyedropper", icon: Pipette },
 ];
 
 const pixelTools: ToolDefinition[] = [
   ...commonTools,
-  { id: "pencil", label: "Pixel-perfect pencil", icon: Pencil, shortcut: "B" },
-  { id: "eraser", label: "Eraser", icon: Eraser, shortcut: "E" },
-  { id: "fill", label: "Fill", icon: PaintBucket, shortcut: "G" },
+  { id: "pencil", label: "Pixel-perfect pencil", icon: Pencil },
+  { id: "eraser", label: "Eraser", icon: Eraser },
+  { id: "fill", label: "Fill", icon: PaintBucket },
   { id: "replace", label: "Replace color", icon: Palette },
   { id: "line", label: "Pixel line", icon: Minus },
   { id: "rectangle", label: "Pixel rectangle", icon: Square },
   { id: "ellipse", label: "Pixel ellipse", icon: Circle },
-  { id: "wand", label: "Magic wand", icon: WandSparkles, shortcut: "W" },
+  { id: "wand", label: "Magic wand", icon: WandSparkles },
   { id: "stamp", label: "Stamp", icon: Stamp },
   { id: "terrain", label: "Wang terrain", icon: Shapes },
   { id: "tile-object", label: "Tile object", icon: Layers3 },
@@ -236,7 +241,7 @@ const pixelTools: ToolDefinition[] = [
   { id: "lighten", label: "Lighten", icon: SunMedium },
   { id: "darken", label: "Darken", icon: Moon },
   { id: "text", label: "Bitmap text", icon: Type },
-  { id: "eyedropper", label: "Palette picker", icon: Pipette, shortcut: "I" },
+  { id: "eyedropper", label: "Palette picker", icon: Pipette },
 ];
 
 function pixelDimension(value: string | number, fallback = 64): number {
@@ -1260,6 +1265,8 @@ function TopBar({
   const snapshot = useEditorStore((state) => state.snapshot);
   const canvasAnimation = useEditorStore((state) => state.canvasAnimation);
   const notify = useEditorStore((state) => state.notify);
+  const shortcutPreferences = useEditorStore((state) => state.shortcutPreferences);
+  const inspectorShortcut = shortcutChordForAction(shortcutPreferences, "toggle-inspector");
   const [exporting, setExporting] = useState(false);
   const [exportScale, setExportScale] = useState(1);
   const [exportTagId, setExportTagId] = useState("");
@@ -1486,9 +1493,9 @@ function TopBar({
           id="inspector-toggle-button"
           type="button"
           className="icon-button"
-          title={`${inspectorCollapsed ? "Open" : "Collapse"} inspector (Ctrl/Cmd+Shift+I)`}
+          title={`${inspectorCollapsed ? "Open" : "Collapse"} inspector (${shortcutChordLabel(inspectorShortcut)})`}
           aria-label={`${inspectorCollapsed ? "Open" : "Collapse"} inspector sidebar`}
-          aria-keyshortcuts="Control+Shift+I Meta+Shift+I"
+          aria-keyshortcuts={shortcutAriaKeyShortcuts(inspectorShortcut)}
           aria-controls="inspector-sidebar"
           aria-expanded={!inspectorCollapsed}
           onClick={onToggleInspector}
@@ -1525,6 +1532,8 @@ function TopBar({
 function ToolRail({ document }: { document: AIDrawDocument }) {
   const selectedTool = useEditorStore((state) => state.selectedTool);
   const setTool = useEditorStore((state) => state.setTool);
+  const shortcutPreferences = useEditorStore((state) => state.shortcutPreferences);
+  const mode = document.kind;
   const tools = document.kind === "pixel" ? pixelTools : illustrationTools;
   const [focusedToolId, setFocusedToolId] = useState<EditorTool>(selectedTool);
   const rovingToolId = tools.some((tool) => tool.id === focusedToolId)
@@ -1546,9 +1555,8 @@ function ToolRail({ document }: { document: AIDrawDocument }) {
         (event.target instanceof HTMLElement && event.target.isContentEditable)
       )
         return;
-      const match = tools.find(
-        (tool) => tool.shortcut?.toLowerCase() === event.key.toLowerCase(),
-      );
+      const action = shortcutActionForEvent(shortcutPreferences, event, mode, "tool");
+      const match = tools.find((tool) => action?.kind === "tool" && tool.id === action.toolId);
       if (match) {
         setFocusedToolId(match.id);
         setTool(match.id);
@@ -1556,7 +1564,7 @@ function ToolRail({ document }: { document: AIDrawDocument }) {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [setTool, tools]);
+  }, [mode, setTool, shortcutPreferences, tools]);
 
   const handleToolRailKeys = (event: React.KeyboardEvent<HTMLElement>) => {
     const buttons = [...event.currentTarget.querySelectorAll<HTMLButtonElement>(".tool-button")];
@@ -1572,6 +1580,10 @@ function ToolRail({ document }: { document: AIDrawDocument }) {
     <aside className="tool-rail" role="toolbar" aria-orientation="vertical" aria-label={`${document.kind} tools`} onKeyDown={handleToolRailKeys}>
       {tools.map((tool, index) => {
         const IconComponent = tool.icon;
+        const shortcutActionId = shortcutActionIdForTool(mode, tool.id);
+        const shortcutChord = shortcutActionId
+          ? shortcutChordForAction(shortcutPreferences, shortcutActionId)
+          : undefined;
         const divider =
           index === commonTools.length ||
           (document.kind === "illustration" && index === 8);
@@ -1580,9 +1592,9 @@ function ToolRail({ document }: { document: AIDrawDocument }) {
             <button
               className={`tool-button ${selectedTool === tool.id ? "is-active" : ""}`}
               onClick={() => setTool(tool.id)}
-              title={`${tool.label}${tool.shortcut ? ` (${tool.shortcut})` : ""}`}
+              title={`${tool.label}${shortcutChord ? ` (${shortcutChordLabel(shortcutChord)})` : ""}`}
               aria-label={tool.label}
-              aria-keyshortcuts={tool.shortcut}
+              aria-keyshortcuts={shortcutChord ? shortcutAriaKeyShortcuts(shortcutChord) : undefined}
               aria-pressed={selectedTool === tool.id}
               tabIndex={rovingToolId === tool.id ? 0 : -1}
               onFocus={() => setFocusedToolId(tool.id)}
@@ -6142,6 +6154,8 @@ export function App() {
   const canvasAnimation = useEditorStore((state) => state.canvasAnimation);
   const workspaceLayoutPreferences = useEditorStore((state) => state.workspaceLayoutPreferences);
   const setWorkspaceLayoutPreferences = useEditorStore((state) => state.setWorkspaceLayoutPreferences);
+  const shortcutPreferences = useEditorStore((state) => state.shortcutPreferences);
+  const setShortcutPreferences = useEditorStore((state) => state.setShortcutPreferences);
   const [shortcutReferenceOpen, setShortcutReferenceOpen] = useState(false);
   const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
   const [inspectorResizePreview, setInspectorResizePreview] = useState<number>();
@@ -6203,7 +6217,9 @@ export function App() {
         (event.target instanceof HTMLElement && event.target.isContentEditable)
       )
         return;
-      if (inspectorToggleShortcutRequested(event)) {
+      const shortcutState = useEditorStore.getState();
+      const shortcutMode = shortcutState.snapshot?.activeDocument?.kind ?? "illustration";
+      if (shortcutActionForEvent(shortcutState.shortcutPreferences, event, shortcutMode, "application")?.id === "toggle-inspector") {
         event.preventDefault();
         cancelInspectorResize();
         toggleInspectorAndMoveFocus();
@@ -6328,9 +6344,6 @@ export function App() {
   }, [title]);
 
   if (loading || !document) return <LoadingScreen />;
-  const shortcutTools = (document.kind === "pixel" ? pixelTools : illustrationTools)
-    .filter((tool): tool is ToolDefinition & { shortcut: string } => Boolean(tool.shortcut))
-    .map((tool) => ({ id: tool.id, label: tool.label, shortcut: tool.shortcut }));
   const requestedInspectorWidth = inspectorResizePreview ?? workspaceLayoutPreferences.inspectorExpandedWidth;
   const shownInspectorWidth = workspaceLayoutPreferences.inspectorCollapsed
     ? 0
@@ -6389,7 +6402,8 @@ export function App() {
       <StatusBar document={document} />
       {shortcutReferenceOpen && <ShortcutReferenceDialog
         mode={document.kind === "illustration" ? "illustration" : "pixel"}
-        tools={shortcutTools}
+        preferences={shortcutPreferences}
+        onChange={setShortcutPreferences}
         onClose={() => setShortcutReferenceOpen(false)}
       />}
       {toast && (

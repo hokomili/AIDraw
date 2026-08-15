@@ -62,6 +62,7 @@ const api: AIDrawDesktopAPI = {
   setOrderedDitherPreferences: (preferences) => ipcRenderer.invoke(IPC.orderedDitherPreferencesSet, preferences),
   setSpriteSymmetryPreferences: (preferences) => ipcRenderer.invoke(IPC.spriteSymmetryPreferencesSet, preferences),
   setWorkspaceLayoutPreferences: (preferences) => ipcRenderer.invoke(IPC.workspaceLayoutPreferencesSet, preferences),
+  setShortcutPreferences: (preferences) => ipcRenderer.invoke(IPC.shortcutPreferencesSet, preferences),
   exportRendererDiagnostics: (detail) => ipcRenderer.invoke(IPC.rendererDiagnosticsExport, detail),
   injectRendererRecoveryTestEvent: () => ipcRenderer.invoke(IPC.rendererRecoveryTestEvent),
   onEvent: (callback) => {

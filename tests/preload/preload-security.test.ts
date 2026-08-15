@@ -80,6 +80,7 @@ const invokeChannels = {
   setOrderedDitherPreferences: IPC.orderedDitherPreferencesSet,
   setSpriteSymmetryPreferences: IPC.spriteSymmetryPreferencesSet,
   setWorkspaceLayoutPreferences: IPC.workspaceLayoutPreferencesSet,
+  setShortcutPreferences: IPC.shortcutPreferencesSet,
   exportRendererDiagnostics: IPC.rendererDiagnosticsExport,
   injectRendererRecoveryTestEvent: IPC.rendererRecoveryTestEvent,
 } as const satisfies Partial<Record<keyof AIDrawDesktopAPI, string>>;
@@ -116,7 +117,7 @@ describe('preload window.aidraw security contract', () => {
 
   it('exposes one frozen, function-only, exact allowlist with no generic primitive', () => {
     const expectedKeys = [...Object.keys(invokeChannels), ...subscriptionMethods].sort();
-    expect(expectedKeys).toHaveLength(64);
+    expect(expectedKeys).toHaveLength(65);
     expect(Object.keys(bridge).sort()).toEqual(expectedKeys);
     expect(Object.getOwnPropertySymbols(bridge)).toEqual([]);
     expect(Object.isFrozen(bridge)).toBe(true);

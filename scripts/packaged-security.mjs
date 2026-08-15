@@ -70,6 +70,7 @@ export const PACKAGED_PRELOAD_CHANNELS = [
   'aidraw:preferences:ordered-dither:set',
   'aidraw:preferences:sprite-symmetry:set',
   'aidraw:preferences:workspace-layout:set',
+  'aidraw:preferences:shortcuts:set',
   'aidraw:renderer-diagnostics:export',
   'aidraw:renderer-recovery:test-event',
   'aidraw:event',

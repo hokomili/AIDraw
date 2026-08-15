@@ -18,6 +18,7 @@ import type { OnionSkinPreferences } from './onion-skin';
 import type { OrderedDitherPreferences } from './ordered-dither-preferences';
 import type { SpriteSymmetryPreferences } from './sprite-symmetry';
 import type { WorkspaceLayoutPreferences } from './workspace-layout';
+import type { ShortcutPreferences } from './shortcut-preferences';
 
 export type NewDocumentKind = 'illustration' | 'sprite' | 'tilemap' | 'project';
 export type ExportFormat = 'png' | 'jpeg' | 'webp' | 'svg' | 'pdf' | 'psd' | 'gif' | 'apng' | 'sprite-sheet' | 'tiled-json' | 'tiled-xml';
@@ -163,6 +164,7 @@ export interface EditorBootstrapSnapshot extends WorkspaceSnapshot {
   orderedDitherPreferences: OrderedDitherPreferences;
   symmetryPreferences: SpriteSymmetryPreferences;
   workspaceLayoutPreferences: WorkspaceLayoutPreferences;
+  shortcutPreferences: ShortcutPreferences;
 }
 
 export type OnionSkinPreferenceSaveResult =
@@ -179,6 +181,10 @@ export type SpriteSymmetryPreferenceSaveResult =
 
 export type WorkspaceLayoutPreferenceSaveResult =
   | { saved: true; preferences: WorkspaceLayoutPreferences }
+  | { saved: false; message: string };
+
+export type ShortcutPreferenceSaveResult =
+  | { saved: true; preferences: ShortcutPreferences }
   | { saved: false; message: string };
 
 export interface ApplyTransactionResponse {
@@ -400,6 +406,7 @@ export interface AIDrawDesktopAPI {
   setOrderedDitherPreferences(preferences: OrderedDitherPreferences): Promise<OrderedDitherPreferenceSaveResult>;
   setSpriteSymmetryPreferences(preferences: SpriteSymmetryPreferences): Promise<SpriteSymmetryPreferenceSaveResult>;
   setWorkspaceLayoutPreferences(preferences: WorkspaceLayoutPreferences): Promise<WorkspaceLayoutPreferenceSaveResult>;
+  setShortcutPreferences(preferences: ShortcutPreferences): Promise<ShortcutPreferenceSaveResult>;
   exportRendererDiagnostics(detail: { message: string; stack?: string; componentStack?: string; userAgent?: string }): Promise<{ saved: boolean; filePath?: string; cancelled?: boolean }>;
   /** Available only to the exact isolated packaged renderer-recovery test profile. */
   injectRendererRecoveryTestEvent(): Promise<{ injected: boolean; byteLength: number }>;
@@ -474,6 +481,7 @@ export const IPC = {
   orderedDitherPreferencesSet: 'aidraw:preferences:ordered-dither:set',
   spriteSymmetryPreferencesSet: 'aidraw:preferences:sprite-symmetry:set',
   workspaceLayoutPreferencesSet: 'aidraw:preferences:workspace-layout:set',
+  shortcutPreferencesSet: 'aidraw:preferences:shortcuts:set',
   rendererDiagnosticsExport: 'aidraw:renderer-diagnostics:export',
   rendererRecoveryTestEvent: 'aidraw:renderer-recovery:test-event',
   event: 'aidraw:event',

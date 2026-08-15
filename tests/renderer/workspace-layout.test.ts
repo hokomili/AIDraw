@@ -64,21 +64,22 @@ describe('customizable inspector workspace', () => {
   });
 
   it('binds bootstrap-owned layout, global reopen, focus recovery, dynamic presentation, and exact density tokens', async () => {
-    const [app, store, styles, shortcuts, preferences] = await Promise.all([
+    const [app, store, styles, shortcuts, preferences, shortcutPreferences] = await Promise.all([
       readFile(new URL('../../src/renderer/App.tsx', import.meta.url), 'utf8'),
       readFile(new URL('../../src/renderer/store.ts', import.meta.url), 'utf8'),
       readFile(new URL('../../src/renderer/styles.css', import.meta.url), 'utf8'),
       readFile(new URL('../../src/renderer/shortcuts.ts', import.meta.url), 'utf8'),
       readFile(new URL('../../src/common/workspace-layout.ts', import.meta.url), 'utf8'),
+      readFile(new URL('../../src/common/shortcut-preferences.ts', import.meta.url), 'utf8'),
     ]);
     expect(store).toContain('workspaceLayoutPreferences: structuredClone(snapshot.workspaceLayoutPreferences)');
     expect(store).not.toContain('setWorkspaceLayoutPreferences(DEFAULT_WORKSPACE_LAYOUT_PREFERENCES)');
     expect(app).toContain('if (loading || !document) return <LoadingScreen />;');
-    expect(app).toContain('inspectorToggleShortcutRequested(event)');
+    expect(app).toContain('shortcutActionForEvent(shortcutState.shortcutPreferences, event, shortcutMode, "application")?.id === "toggle-inspector"');
     expect(app).toContain('id="inspector-toggle-button"');
     expect(app).toContain('aria-controls="inspector-sidebar"');
     expect(app).toContain('aria-label="Inspector sidebar" hidden={collapsed}');
-    expect(app).toContain('aria-keyshortcuts="Control+Shift+I Meta+Shift+I"');
+    expect(app).toContain('aria-keyshortcuts={shortcutAriaKeyShortcuts(inspectorShortcut)}');
     expect(app).toContain('focusActiveInspectorTab()');
     expect(app).toContain('focusInspectorToggle()');
     expect(app).toContain('effectiveInspectorWidth(requestedInspectorWidth, viewportWidth)');
@@ -93,7 +94,8 @@ describe('customizable inspector workspace', () => {
     expect(controls).toContain('inspectorWidthAfterKeyboardMove(effectiveWidth, event.key, event.shiftKey, maximumEffectiveWidth)');
     expect(controls).toContain('if (width !== effectiveWidth) onResizeCommit(width)');
     expect(preferences).not.toContain('@aidraw/core');
-    expect(shortcuts).toContain("label: 'Open or collapse the inspector sidebar'");
+    expect(shortcutPreferences).toContain("label: 'Open or collapse the inspector sidebar'");
+    expect(shortcuts).toContain('preferences.bindings[action.id]');
     expect(styles).toContain('grid-template-columns: var(--shell-tool-rail-width) minmax(0, 1fr) var(--shell-sidebar-effective-width);');
     expect(styles).toContain('.inspector-layout-reset { min-width: var(--ui-hit-secondary); height: var(--ui-hit-secondary);');
     expect(styles).toContain('.inspector-layout-reset svg { width: var(--ui-icon-secondary); height: var(--ui-icon-secondary); }');

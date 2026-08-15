@@ -4,7 +4,8 @@ import { parseOnionSkinPreferences, type OnionSkinPreferences } from '../common/
 import { parseOrderedDitherPreferences, type OrderedDitherPreferences } from '../common/ordered-dither-preferences';
 import { parseSpriteSymmetryPreferences, type SpriteSymmetryPreferences } from '../common/sprite-symmetry';
 import { parseWorkspaceLayoutPreferences, type WorkspaceLayoutPreferences } from '../common/workspace-layout';
-import type { EditorBootstrapSnapshot, OnionSkinPreferenceSaveResult, OrderedDitherPreferenceSaveResult, SpriteSymmetryPreferenceSaveResult, WorkspaceLayoutPreferenceSaveResult } from '../common/contracts';
+import { parseShortcutPreferences, type ShortcutPreferences } from '../common/shortcut-preferences';
+import type { EditorBootstrapSnapshot, OnionSkinPreferenceSaveResult, OrderedDitherPreferenceSaveResult, ShortcutPreferenceSaveResult, SpriteSymmetryPreferenceSaveResult, WorkspaceLayoutPreferenceSaveResult } from '../common/contracts';
 import { LocalCredentialStore } from './credentials';
 import { DocumentService } from './document-service';
 import { GenerationManager } from './generation-manager';
@@ -20,6 +21,7 @@ import { OnionSkinPreferenceStore } from './onion-skin-preference-store';
 import { OrderedDitherPreferenceStore } from './ordered-dither-preference-store';
 import { SpriteSymmetryPreferenceStore } from './sprite-symmetry-preference-store';
 import { WorkspaceLayoutPreferenceStore } from './workspace-layout-preference-store';
+import { ShortcutPreferenceStore } from './shortcut-preference-store';
 
 export interface EngineRuntimeOptions {
   userDataPath: string;
@@ -54,6 +56,7 @@ export class EngineRuntime {
   readonly orderedDitherPreferences: OrderedDitherPreferenceStore;
   readonly spriteSymmetryPreferences: SpriteSymmetryPreferenceStore;
   readonly workspaceLayoutPreferences: WorkspaceLayoutPreferenceStore;
+  readonly shortcutPreferences: ShortcutPreferenceStore;
   private readonly mcpCredentials: LocalCredentialStore;
   private mcpCredentialOperation: Promise<void> = Promise.resolve();
   private recoveryTimer?: NodeJS.Timeout;
@@ -86,6 +89,7 @@ export class EngineRuntime {
     this.orderedDitherPreferences = new OrderedDitherPreferenceStore(join(userDataPath, 'settings', 'ordered-dither.json'));
     this.spriteSymmetryPreferences = new SpriteSymmetryPreferenceStore(join(userDataPath, 'settings', 'sprite-symmetry.json'));
     this.workspaceLayoutPreferences = new WorkspaceLayoutPreferenceStore(join(userDataPath, 'settings', 'workspace-layout.json'));
+    this.shortcutPreferences = new ShortcutPreferenceStore(join(userDataPath, 'settings', 'shortcuts.json'));
     this.interchangeReports = new InterchangeReportStore(join(userDataPath, 'reports', 'interchange.json'));
     this.mcpCredentials = new LocalCredentialStore(join(userDataPath, 'credentials', 'mcp-token.json'));
     this.mcpHost = new McpHost(
@@ -111,6 +115,7 @@ export class EngineRuntime {
       this.orderedDitherPreferences.initialize(),
       this.spriteSymmetryPreferences.initialize(),
       this.workspaceLayoutPreferences.initialize(),
+      this.shortcutPreferences.initialize(),
     ]);
     this.recoveryTimer = setInterval(() => void this.service.compactRecovery(), 60_000);
     this.recoveryTimer.unref();
@@ -131,6 +136,7 @@ export class EngineRuntime {
     const ditherBootstrap = await this.orderedDitherPreferences.bootstrap();
     const symmetryBootstrap = await this.spriteSymmetryPreferences.bootstrap();
     const workspaceLayoutBootstrap = await this.workspaceLayoutPreferences.bootstrap();
+    const shortcutBootstrap = await this.shortcutPreferences.bootstrap();
     const snapshot = this.service.snapshot();
     const recoveryWarnings = [
       ...(snapshot.recoveryWarnings ?? []),
@@ -138,6 +144,7 @@ export class EngineRuntime {
       ...(ditherBootstrap.warning ? [ditherBootstrap.warning] : []),
       ...(symmetryBootstrap.warning ? [symmetryBootstrap.warning] : []),
       ...(workspaceLayoutBootstrap.warning ? [workspaceLayoutBootstrap.warning] : []),
+      ...(shortcutBootstrap.warning ? [shortcutBootstrap.warning] : []),
     ];
     return {
       ...snapshot,
@@ -145,6 +152,7 @@ export class EngineRuntime {
       orderedDitherPreferences: ditherBootstrap.preferences,
       symmetryPreferences: symmetryBootstrap.preferences,
       workspaceLayoutPreferences: workspaceLayoutBootstrap.preferences,
+      shortcutPreferences: shortcutBootstrap.preferences,
       ...(recoveryWarnings.length ? { recoveryWarnings } : {}),
     };
   }
@@ -198,6 +206,19 @@ export class EngineRuntime {
       return { saved: true, preferences: await this.workspaceLayoutPreferences.save(preferences) };
     } catch {
       return { saved: false, message: 'Inspector layout changed in this editor, but AIDraw could not save it. The previous saved layout remains.' };
+    }
+  }
+
+  async setShortcutPreferences(value: unknown): Promise<ShortcutPreferenceSaveResult> {
+    let preferences: ShortcutPreferences;
+    try { preferences = parseShortcutPreferences(value); }
+    catch {
+      return { saved: false, message: 'AIDraw rejected invalid shortcut preferences; the saved mapping was not changed.' };
+    }
+    try {
+      return { saved: true, preferences: await this.shortcutPreferences.save(preferences) };
+    } catch {
+      return { saved: false, message: 'Keyboard shortcuts changed in this editor, but AIDraw could not save them. The previous saved mapping remains.' };
     }
   }
 
@@ -280,6 +301,7 @@ export class EngineRuntime {
       this.orderedDitherPreferences.flush(),
       this.spriteSymmetryPreferences.flush(),
       this.workspaceLayoutPreferences.flush(),
+      this.shortcutPreferences.flush(),
     ]);
     if (this.recoveryTimer) clearInterval(this.recoveryTimer);
     this.recoveryTimer = undefined;
