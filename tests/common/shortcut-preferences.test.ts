@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
   SHORTCUT_ACTIONS,
+  SHORTCUT_ACTION_IDS_V1,
   assignShortcut,
   defaultShortcutPreferences,
+  migrateShortcutPreferencesV1,
   parseShortcutPreferences,
+  shortcutActionIdForTool,
   shortcutActionForEvent,
   shortcutAriaKeyShortcuts,
   shortcutChordFromEvent,
@@ -20,18 +23,103 @@ const keyEvent = (key: string, overrides: Partial<Pick<KeyboardEvent, 'altKey' |
   ...overrides,
 });
 
+function versionOnePreferences(): { bindings: Record<string, string> } {
+  const defaults = defaultShortcutPreferences();
+  return {
+    bindings: Object.fromEntries(SHORTCUT_ACTION_IDS_V1.map((id) => [id, defaults.bindings[id]])),
+  };
+}
+
 describe('human-local shortcut preferences', () => {
   it('admits only one strict complete conflict-free registry map', () => {
     const defaults = defaultShortcutPreferences();
+    expect(SHORTCUT_ACTIONS).toHaveLength(40);
     expect(Object.keys(defaults.bindings)).toHaveLength(SHORTCUT_ACTIONS.length);
     expect(parseShortcutPreferences(defaults)).toEqual(defaults);
 
     const partial = structuredClone(defaults) as { bindings: Record<string, string> };
-    delete partial.bindings['tool:pixel:wand'];
+    delete partial.bindings['tool:pixel:tile-object'];
     expect(() => parseShortcutPreferences(partial)).toThrow('Invalid shortcut preferences.');
     expect(() => parseShortcutPreferences({ bindings: { ...defaults.bindings, unexpected: 'K' } })).toThrow('Invalid shortcut preferences.');
     expect(() => parseShortcutPreferences({ bindings: { ...defaults.bindings, 'tool:pixel:wand': 'Primary+W' } })).toThrow('Invalid shortcut preferences.');
     expect(() => parseShortcutPreferences({ bindings: { ...defaults.bindings, 'tool:pixel:wand': 'E' } })).toThrow('Invalid shortcut preferences.');
+  });
+
+  it('preserves every predecessor default and losslessly migrates valid version-one remaps', () => {
+    const legacy = versionOnePreferences();
+    expect(legacy.bindings).toEqual({
+      'toggle-inspector': 'Primary+Shift+I',
+      'tool:illustration:select': 'V',
+      'tool:illustration:lasso': 'L',
+      'tool:illustration:hand': 'H',
+      'tool:illustration:zoom': 'Z',
+      'tool:illustration:pen': 'P',
+      'tool:illustration:pencil': 'N',
+      'tool:illustration:bezier': 'A',
+      'tool:illustration:brush': 'B',
+      'tool:illustration:eraser': 'E',
+      'tool:illustration:line': 'Backslash',
+      'tool:illustration:rectangle': 'R',
+      'tool:illustration:ellipse': 'O',
+      'tool:illustration:text': 'T',
+      'tool:illustration:eyedropper': 'I',
+      'tool:pixel:select': 'V',
+      'tool:pixel:lasso': 'L',
+      'tool:pixel:hand': 'H',
+      'tool:pixel:zoom': 'Z',
+      'tool:pixel:pencil': 'B',
+      'tool:pixel:eraser': 'E',
+      'tool:pixel:fill': 'G',
+      'tool:pixel:wand': 'W',
+      'tool:pixel:eyedropper': 'I',
+    });
+    expect(migrateShortcutPreferencesV1(legacy)).toEqual(defaultShortcutPreferences());
+
+    legacy.bindings['tool:illustration:brush'] = 'S';
+    legacy.bindings['tool:pixel:wand'] = 'C';
+    const migrated = migrateShortcutPreferencesV1(legacy);
+    for (const id of SHORTCUT_ACTION_IDS_V1) expect(migrated.bindings[id]).toBe(legacy.bindings[id]);
+    expect(migrated.bindings['tool:illustration:star']).toBe('B');
+    expect(migrated.bindings['tool:pixel:replace']).toBe('A');
+    expect(parseShortcutPreferences(migrated)).toEqual(migrated);
+
+    const reservedMnemonic = versionOnePreferences();
+    reservedMnemonic.bindings['tool:illustration:select'] = 'D';
+    const reservedMigration = migrateShortcutPreferencesV1(reservedMnemonic);
+    expect(reservedMigration.bindings['tool:illustration:select']).toBe('D');
+    expect(reservedMigration.bindings['tool:illustration:node']).toBe('F');
+    expect(reservedMigration.bindings['tool:illustration:polygon']).toBe('Y');
+    expect(reservedMigration.bindings['tool:illustration:star']).toBe('S');
+    expect(reservedMigration.bindings['tool:illustration:gradient']).toBe('G');
+    expect(reservedMigration.bindings['tool:illustration:crop']).toBe('C');
+
+    const partial = versionOnePreferences();
+    delete partial.bindings['tool:pixel:wand'];
+    expect(() => migrateShortcutPreferencesV1(partial)).toThrow('Invalid shortcut preferences.');
+    expect(() => migrateShortcutPreferencesV1({ bindings: { ...versionOnePreferences().bindings, unexpected: 'Q' } }))
+      .toThrow('Invalid shortcut preferences.');
+    expect(() => migrateShortcutPreferencesV1({
+      bindings: { ...versionOnePreferences().bindings, 'tool:pixel:wand': 'E' },
+    })).toThrow('Invalid shortcut preferences.');
+  });
+
+  it('routes every displayed-tool action through one complete mode-scoped default map', () => {
+    const defaults = defaultShortcutPreferences();
+    for (const mode of ['illustration', 'pixel'] as const) {
+      const actions = SHORTCUT_ACTIONS.filter((action) => action.kind === 'tool' && action.scope === mode);
+      expect(actions).toHaveLength(mode === 'illustration' ? 19 : 20);
+      expect(new Set(actions.map((action) => defaults.bindings[action.id])).size).toBe(actions.length);
+      for (const action of actions) {
+        if (!('toolId' in action)) throw new Error('Expected a tool action.');
+        expect(shortcutActionIdForTool(mode, action.toolId)).toBe(action.id);
+        const chord = defaults.bindings[action.id];
+        expect(shortcutActionForEvent(defaults, keyEvent(chord === 'Backslash' ? '\\' : chord), mode, 'tool')?.id)
+          .toBe(action.id);
+      }
+    }
+    expect(() => shortcutActionIdForTool('pixel', 'not-displayed')).toThrow(
+      'Missing shortcut action for displayed pixel tool not-displayed.',
+    );
   });
 
   it('refuses collisions and native-menu reservations without swapping or partial mutation', () => {

@@ -2,8 +2,11 @@ import { readFile } from 'node:fs/promises';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
+import { createIllustrationDocument, createPixelDocument } from '@aidraw/core';
+import { ToolRail } from '../../src/renderer/App';
 import { ShortcutReferenceDialog } from '../../src/renderer/components/ShortcutReferenceDialog';
 import { assignShortcut, defaultShortcutPreferences } from '../../src/common/shortcut-preferences';
+import { useEditorStore } from '../../src/renderer/store';
 import {
   filterShortcutSections,
   shortcutHelpRequested,
@@ -33,8 +36,22 @@ describe('keyboard shortcut reference', () => {
     expect(pixelEntries.map((entry) => entry.label)).toContain('Select all finite pixel cells');
     expect(pixelEntries.map((entry) => entry.label)).not.toContain('Edit selected illustration text');
     expect(illustration.at(-1)).toMatchObject({ title: 'Illustration tools' });
-    expect(illustration.at(-1)?.entries.map((entry) => entry.keys[0])).toEqual(['V', 'L', 'H', 'Z', 'P', 'N', 'A', 'B', 'E', '\\', 'R', 'O', 'T', 'I']);
-    expect(pixel.at(-1)?.entries.map((entry) => entry.keys[0])).toEqual(['V', 'L', 'H', 'Z', 'B', 'E', 'G', 'W', 'I']);
+    expect(illustration.at(-1)?.entries.map((entry) => entry.keys[0])).toEqual([
+      'V', 'L', 'H', 'Z', 'P', 'N', 'A', 'D', 'B', 'E', '\\', 'R', 'O', 'Y', 'S', 'G', 'C', 'T', 'I',
+    ]);
+    expect(pixel.at(-1)?.entries.map((entry) => entry.keys[0])).toEqual([
+      'V', 'L', 'H', 'Z', 'B', 'E', 'G', 'C', '\\', 'R', 'O', 'W', 'S', 'T', 'Y', 'D', 'U', 'K', 'X', 'I',
+    ]);
+    expect(illustration.at(-1)?.entries.map((entry) => entry.label)).toEqual([
+      'Select', 'Lasso', 'Pan', 'Zoom', 'Pressure pen', 'Vector pencil', 'Bézier path', 'Node editor',
+      'Raster brush', 'Eraser', 'Line / arrow', 'Rectangle', 'Ellipse', 'Polygon', 'Star', 'Gradient',
+      'Image crop', 'Text', 'Eyedropper',
+    ]);
+    expect(pixel.at(-1)?.entries.map((entry) => entry.label)).toEqual([
+      'Select', 'Lasso', 'Pan', 'Zoom', 'Pixel-perfect pencil', 'Eraser', 'Fill', 'Replace color',
+      'Pixel line', 'Pixel rectangle', 'Pixel ellipse', 'Magic wand', 'Stamp', 'Wang terrain', 'Tile object',
+      'Ordered dither', 'Lighten', 'Darken', 'Bitmap text', 'Palette picker',
+    ]);
     expect(illustrationEntries.map((entry) => entry.label)).toContain('Move through focused document tabs');
     expect(illustrationEntries.map((entry) => entry.label)).toContain('Move through the open All documents menu');
     expect(illustrationEntries.find((entry) => entry.id === 'open')).toMatchObject({ fixedReason: expect.stringContaining('native application menu') });
@@ -90,6 +107,26 @@ describe('keyboard shortcut reference', () => {
     expect(markup).toContain('role="status"');
   });
 
+  it('renders every displayed tool with the same active title and aria-keyshortcuts metadata', () => {
+    useEditorStore.setState({
+      selectedTool: 'select',
+      shortcutPreferences: defaultShortcutPreferences(),
+    });
+    const illustration = renderToStaticMarkup(createElement(ToolRail, {
+      document: createIllustrationDocument('Shortcut rail'),
+    }));
+    const pixel = renderToStaticMarkup(createElement(ToolRail, {
+      document: createPixelDocument('sprite', 'Shortcut rail'),
+    }));
+    expect((illustration.match(/aria-keyshortcuts=/gu) ?? [])).toHaveLength(19);
+    expect((pixel.match(/aria-keyshortcuts=/gu) ?? [])).toHaveLength(20);
+    expect(illustration).toContain('title="Node editor (D)"');
+    expect(illustration).toContain('title="Image crop (C)"');
+    expect(pixel).toContain('title="Replace color (C)"');
+    expect(pixel).toContain('title="Tile object (Y)"');
+    expect(pixel).toContain('title="Bitmap text (X)"');
+  });
+
   it('wires the guide, skip route, tool metadata, and named canvas target into the editor', async () => {
     const [app, main, illustration, pixel] = await Promise.all([
       readFile(new URL('../../src/renderer/App.tsx', import.meta.url), 'utf8'),
@@ -106,7 +143,8 @@ describe('keyboard shortcut reference', () => {
     expect(app).toContain('toolRailFocusIndex(event.key, currentIndex, buttons.length)');
     expect(app).toContain('role="toolbar" aria-orientation="vertical"');
     expect(app).toContain('tabIndex={rovingToolId === tool.id ? 0 : -1}');
-    expect(app).toContain('aria-keyshortcuts={shortcutChord ? shortcutAriaKeyShortcuts(shortcutChord) : undefined}');
+    expect(app).toContain('aria-keyshortcuts={shortcutAriaKeyShortcuts(shortcutChord)}');
+    expect(app).toContain('title={`${tool.label} (${shortcutChordLabel(shortcutChord)})`}');
     expect(app).toContain('shortcutActionForEvent(shortcutPreferences, event, mode, "tool")');
     expect(app).toContain('shortcutActionForEvent(shortcutState.shortcutPreferences, event, shortcutMode, "application")?.id === "toggle-inspector"');
     expect(main).toContain("{ label: 'Open…', accelerator: 'CmdOrCtrl+O'");
@@ -142,14 +180,17 @@ describe('keyboard shortcut reference', () => {
       readFile(new URL('../../docs/FEATURE_TRACKER.md', import.meta.url), 'utf8'),
       readFile(new URL('../../docs/TESTING.md', import.meta.url), 'utf8'),
     ]);
-    expect(readme).toContain('exactly 24 implemented bindings: 23 mode-scoped illustration/pixel tools plus the renderer-owned inspector toggle');
+    expect(readme).toContain('exactly 40 eligible bindings: all 39 tools displayed across the illustration (19) and pixel (20) rails plus the renderer-owned inspector toggle');
+    expect(readme).toContain('Later still-free new mnemonics are reserved before fallback selection');
     expect(readme).toContain('remaining command/native-menu remapping');
-    expect(tracker).toContain('clean and live-synchronized through base `dd0aad0b39652b2af425f7c63fa32aac94f7a5ea`');
-    expect(tracker).toContain('tilemap Map setup disclosure');
-    expect(tracker).toContain('23 already implemented mode-scoped tool bindings plus the renderer-owned inspector toggle');
+    expect(tracker).toContain('clean and live-synchronized through base `32ff9bb1ea858218bd58ba1ec885156e861e5584`');
+    expect(tracker).toContain('all **39 displayed tool activations**—19 illustration and 20 pixel—plus the renderer-owned inspector toggle');
+    expect(tracker).toContain('later still-free new mnemonics remain reserved from earlier fallbacks');
     expect(tracker).toContain('remapping beyond the later bounded UX-08 tool/inspector slice');
     expect(tracker).toContain('packaged/native shortcut-remapping acceptance');
     expect(tracker).not.toContain('This bounded **27-path** source/headless candidate');
+    expect(testing).toContain('Restore defaults replaces all 40 eligible bindings');
+    expect(testing).toContain('Select-`D`/Node-`F`/Crop-`C` migration');
     expect(testing).toContain('remapping beyond the later bounded UX-08 tool/inspector slice');
     expect(testing).toContain('packaged/native shortcut-remapping acceptance');
   });

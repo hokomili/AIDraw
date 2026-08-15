@@ -180,6 +180,7 @@ import { shortcutHelpRequested, toolRailFocusIndex } from "./shortcuts";
 import {
   shortcutActionForEvent,
   shortcutActionIdForTool,
+  shortcutActionsForMode,
   shortcutAriaKeyShortcuts,
   shortcutChordForAction,
   shortcutChordLabel,
@@ -199,51 +200,48 @@ interface ToolDefinition {
   icon: Icon;
 }
 
-const commonTools: ToolDefinition[] = [
-  { id: "select", label: "Select", icon: MousePointer2 },
-  { id: "lasso", label: "Lasso", icon: Lasso },
-  { id: "hand", label: "Pan", icon: Hand },
-  { id: "zoom", label: "Zoom", icon: ZoomIn },
-];
+const TOOL_ICONS: Record<EditorTool, Icon> = {
+  select: MousePointer2,
+  lasso: Lasso,
+  hand: Hand,
+  zoom: ZoomIn,
+  pen: PenTool,
+  pencil: Pencil,
+  bezier: PenTool,
+  node: MousePointer2,
+  brush: Brush,
+  eraser: Eraser,
+  line: Minus,
+  rectangle: Square,
+  ellipse: Circle,
+  polygon: Shapes,
+  star: Star,
+  gradient: Palette,
+  crop: Crop,
+  text: Type,
+  eyedropper: Pipette,
+  fill: PaintBucket,
+  replace: Palette,
+  wand: WandSparkles,
+  stamp: Stamp,
+  terrain: Shapes,
+  "tile-object": Layers3,
+  dither: Grid3X3,
+  lighten: SunMedium,
+  darken: Moon,
+};
 
-const illustrationTools: ToolDefinition[] = [
-  ...commonTools,
-  { id: "pen", label: "Pressure pen", icon: PenTool },
-  { id: "pencil", label: "Vector pencil", icon: Pencil },
-  { id: "bezier", label: "Bézier path", icon: PenTool },
-  { id: "node", label: "Node editor", icon: MousePointer2 },
-  { id: "brush", label: "Raster brush", icon: Brush },
-  { id: "eraser", label: "Eraser", icon: Eraser },
-  { id: "line", label: "Line / arrow", icon: Minus },
-  { id: "rectangle", label: "Rectangle", icon: Square },
-  { id: "ellipse", label: "Ellipse", icon: Circle },
-  { id: "polygon", label: "Polygon", icon: Shapes },
-  { id: "star", label: "Star", icon: Star },
-  { id: "gradient", label: "Gradient", icon: Palette },
-  { id: "crop", label: "Image crop", icon: Crop },
-  { id: "text", label: "Text", icon: Type },
-  { id: "eyedropper", label: "Eyedropper", icon: Pipette },
-];
+function toolDefinitions(mode: "illustration" | "pixel"): ToolDefinition[] {
+  return shortcutActionsForMode(mode).flatMap((action) => {
+    if (action.kind !== "tool" || !("toolId" in action)) return [];
+    const id = action.toolId as EditorTool;
+    return [{ id, label: action.label, icon: TOOL_ICONS[id] }];
+  });
+}
 
-const pixelTools: ToolDefinition[] = [
-  ...commonTools,
-  { id: "pencil", label: "Pixel-perfect pencil", icon: Pencil },
-  { id: "eraser", label: "Eraser", icon: Eraser },
-  { id: "fill", label: "Fill", icon: PaintBucket },
-  { id: "replace", label: "Replace color", icon: Palette },
-  { id: "line", label: "Pixel line", icon: Minus },
-  { id: "rectangle", label: "Pixel rectangle", icon: Square },
-  { id: "ellipse", label: "Pixel ellipse", icon: Circle },
-  { id: "wand", label: "Magic wand", icon: WandSparkles },
-  { id: "stamp", label: "Stamp", icon: Stamp },
-  { id: "terrain", label: "Wang terrain", icon: Shapes },
-  { id: "tile-object", label: "Tile object", icon: Layers3 },
-  { id: "dither", label: "Ordered dither", icon: Grid3X3 },
-  { id: "lighten", label: "Lighten", icon: SunMedium },
-  { id: "darken", label: "Darken", icon: Moon },
-  { id: "text", label: "Bitmap text", icon: Type },
-  { id: "eyedropper", label: "Palette picker", icon: Pipette },
-];
+const COMMON_TOOL_COUNT = 4;
+const illustrationTools = toolDefinitions("illustration");
+const pixelTools = toolDefinitions("pixel");
 
 function pixelDimension(value: string | number, fallback = 64): number {
   const parsed = typeof value === "number" ? value : Number(value);
@@ -1530,7 +1528,7 @@ function TopBar({
   );
 }
 
-function ToolRail({ document }: { document: AIDrawDocument }) {
+export function ToolRail({ document }: { document: AIDrawDocument }) {
   const selectedTool = useEditorStore((state) => state.selectedTool);
   const setTool = useEditorStore((state) => state.setTool);
   const shortcutPreferences = useEditorStore((state) => state.shortcutPreferences);
@@ -1582,20 +1580,18 @@ function ToolRail({ document }: { document: AIDrawDocument }) {
       {tools.map((tool, index) => {
         const IconComponent = tool.icon;
         const shortcutActionId = shortcutActionIdForTool(mode, tool.id);
-        const shortcutChord = shortcutActionId
-          ? shortcutChordForAction(shortcutPreferences, shortcutActionId)
-          : undefined;
+        const shortcutChord = shortcutChordForAction(shortcutPreferences, shortcutActionId);
         const divider =
-          index === commonTools.length ||
+          index === COMMON_TOOL_COUNT ||
           (document.kind === "illustration" && index === 8);
         return (
           <div key={tool.id} className={divider ? "tool-divider" : undefined}>
             <button
               className={`tool-button ${selectedTool === tool.id ? "is-active" : ""}`}
               onClick={() => setTool(tool.id)}
-              title={`${tool.label}${shortcutChord ? ` (${shortcutChordLabel(shortcutChord)})` : ""}`}
+              title={`${tool.label} (${shortcutChordLabel(shortcutChord)})`}
               aria-label={tool.label}
-              aria-keyshortcuts={shortcutChord ? shortcutAriaKeyShortcuts(shortcutChord) : undefined}
+              aria-keyshortcuts={shortcutAriaKeyShortcuts(shortcutChord)}
               aria-pressed={selectedTool === tool.id}
               tabIndex={rovingToolId === tool.id ? 0 : -1}
               onFocus={() => setFocusedToolId(tool.id)}

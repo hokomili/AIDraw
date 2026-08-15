@@ -1,5 +1,6 @@
 import {
   defaultShortcutPreferences,
+  migrateShortcutPreferencesV1,
   parseShortcutPreferences,
   type ShortcutPreferences,
 } from '../common/shortcut-preferences';
@@ -10,7 +11,7 @@ export const MAX_SHORTCUT_PREFERENCE_FILE_BYTES = 16_384;
 export const INVALID_SHORTCUT_PREFERENCE_WARNING = 'Keyboard shortcut preferences were invalid and were ignored; the complete default mapping is active. Change a shortcut or restore defaults to replace the invalid local file.';
 
 interface PersistedShortcutPreferences {
-  version: 1;
+  version: 2;
   preferences: ShortcutPreferences;
 }
 
@@ -30,12 +31,12 @@ function parsePersisted(value: unknown): ShortcutPreferences {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid shortcut preference file.');
   const source = value as Record<string, unknown>;
   const keys = Object.keys(source);
-  if (keys.length !== PERSISTED_KEYS.size
-    || keys.some((key) => !PERSISTED_KEYS.has(key))
-    || source.version !== 1) {
+  if (keys.length !== PERSISTED_KEYS.size || keys.some((key) => !PERSISTED_KEYS.has(key))) {
     throw new Error('Invalid shortcut preference file.');
   }
-  return parseShortcutPreferences(source.preferences);
+  if (source.version === 2) return parseShortcutPreferences(source.preferences);
+  if (source.version === 1) return migrateShortcutPreferencesV1(source.preferences);
+  throw new Error('Invalid shortcut preference file.');
 }
 
 /** Main-owned process-serial persistence for the complete human shortcut map. */
@@ -70,7 +71,7 @@ export class ShortcutPreferenceStore {
     return this.exclusive(async () => {
       await this.loadOnce();
       const preferences = parseShortcutPreferences(value);
-      const persisted: PersistedShortcutPreferences = { version: 1, preferences };
+      const persisted: PersistedShortcutPreferences = { version: 2, preferences };
       await replacePrivateJsonFile(this.filePath, persisted, this.options.replaceFile);
       this.preferences = preferences;
       return structuredClone(preferences);

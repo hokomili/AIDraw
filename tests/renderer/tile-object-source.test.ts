@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 
 const canvas = readFileSync(new URL('../../src/renderer/canvas/PixelCanvas.tsx', import.meta.url), 'utf8');
 const app = readFileSync(new URL('../../src/renderer/App.tsx', import.meta.url), 'utf8');
+const shortcuts = readFileSync(new URL('../../src/common/shortcut-preferences.ts', import.meta.url), 'utf8');
 const headless = readFileSync(new URL('../../src/main/render-document.ts', import.meta.url), 'utf8');
 const store = readFileSync(new URL('../../src/renderer/store.ts', import.meta.url), 'utf8');
 
@@ -37,7 +38,9 @@ describe('tile-object production source wiring', () => {
   });
 
   it('admits one exact selected-layer tile object through the shared planner and layer-aware pointer contract', () => {
-    expect(app).toContain('{ id: "tile-object", label: "Tile object", icon: Layers3 }');
+    expect(shortcuts).toContain("{ id: 'tool:pixel:tile-object', label: 'Tile object', kind: 'tool', scope: 'pixel', section: 'tools', defaultChord: 'Y', toolId: 'tile-object' }");
+    expect(app).toContain('"tile-object": Layers3');
+    expect(app).toContain('const pixelTools = toolDefinitions("pixel")');
     expect(canvas).toContain("tool === 'tile-object'");
     expect(canvas).toContain('planTileObjectCreation(liveDocument');
     expect(canvas).toContain('layerId: liveEntry.layer.id');
