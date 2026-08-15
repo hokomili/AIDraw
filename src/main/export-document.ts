@@ -814,7 +814,7 @@ function tiledObjectIds(active: PixelTilemap | PixelTileset, references: TiledEx
 function tilemapToTiledWithObjectIds(document: PixelDocument, map: PixelTilemap, images: Record<string, string>, objectIds: TiledObjectIdAllocator, plan: TiledMapExportPlan) {
   let nextLayerId = 1;
   const layerJson = (id: string): Record<string, unknown> => {
-    const layer = map.layers[id]; const common = { id: nextLayerId++, name: layer.name, visible: layer.visible, opacity: layer.opacity, parallaxx: layer.parallaxX, parallaxy: layer.parallaxY };
+    const layer = map.layers[id]; const common = { id: nextLayerId++, name: layer.name, visible: layer.visible, opacity: layer.opacity, ...(layer.offsetX ? { offsetx: layer.offsetX } : {}), ...(layer.offsetY ? { offsety: layer.offsetY } : {}), parallaxx: layer.parallaxX, parallaxy: layer.parallaxY };
     if (layer.type === 'group') return { ...common, type: 'group', layers: (layer.childIds ?? []).map(layerJson) };
     if (layer.type === 'object') return { ...common, type: 'objectgroup', objects: (layer.objects ?? []).map((shape) => tiledObjectJson(shape, objectIds)) };
     const data = plan.tileLayers.get(id); if (!data) throw new Error(`Tiled export tile layer ${id} was not planned.`);
@@ -857,7 +857,7 @@ function tilemapXml(document: PixelDocument, map: PixelTilemap, images: Record<s
   let nextLayerId = 1;
   const layerXml = (id: string): string => {
     const layer = map.layers[id]; if (!layer) return '';
-    const common = `id="${nextLayerId++}" name="${xml(layer.name)}" visible="${Number(layer.visible)}" opacity="${layer.opacity}" parallaxx="${layer.parallaxX}" parallaxy="${layer.parallaxY}"`;
+    const common = `id="${nextLayerId++}" name="${xml(layer.name)}" visible="${Number(layer.visible)}" opacity="${layer.opacity}"${layer.offsetX ? ` offsetx="${layer.offsetX}"` : ''}${layer.offsetY ? ` offsety="${layer.offsetY}"` : ''} parallaxx="${layer.parallaxX}" parallaxy="${layer.parallaxY}"`;
     if (layer.type === 'group') return `<group ${common}>${(layer.childIds ?? []).map(layerXml).join('')}</group>`;
     if (layer.type === 'object') return `<objectgroup ${common}>${(layer.objects ?? []).map((shape) => collisionXml(shape, objectIds)).join('')}</objectgroup>`;
     const data = plan.tileLayers.get(id); if (!data) throw new Error(`Tiled export tile layer ${id} was not planned.`);

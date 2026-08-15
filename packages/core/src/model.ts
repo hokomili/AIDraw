@@ -507,6 +507,8 @@ export interface TilemapLayer extends EntityBase {
   childIds?: Id[];
   chunks?: Record<string, TilemapChunk>;
   objects?: CollisionShape[];
+  offsetX: number;
+  offsetY: number;
   parallaxX: number;
   parallaxY: number;
 }

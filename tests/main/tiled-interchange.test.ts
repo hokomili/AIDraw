@@ -172,6 +172,47 @@ describe('representative Tiled JSON interchange', () => {
     await expect(importDocument(sourcePath, true)).rejects.toThrow('Tileset drawing offset x must be an integer from -16777216 to 16777216.');
   });
 
+  it('round-trips signed tile, object, and nested group offsets through TMJ and TMX while omitting zero defaults', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'aidraw-tiled-layer-offsets-')); temporaryDirectories.push(directory);
+    const jsonPath = join(directory, 'offsets.tmj');
+    await writeFile(jsonPath, JSON.stringify({
+      type: 'map', version: '1.10', tiledversion: '1.11.2', orientation: 'orthogonal', infinite: false,
+      width: 2, height: 2, tilewidth: 4, tileheight: 4,
+      layers: [{ id: 1, name: 'World', type: 'group', offsetx: 7, offsety: -5, layers: [
+        { id: 2, name: 'Ground', type: 'tilelayer', width: 2, height: 2, offsetx: -2, offsety: 3, data: [0, 0, 0, 0] },
+        { id: 3, name: 'Objects', type: 'objectgroup', offsetx: 4, offsety: 1, objects: [{ id: 1, name: 'Marker', type: '', x: 0, y: 0, width: 1, height: 1 }] },
+      ] }], tilesets: [],
+    }));
+    const imported = await importDocument(jsonPath, true); const document = imported.documents[0]; if (document.kind !== 'pixel') throw new Error('Expected pixel document'); const map = document.pixelAssets[document.activeAssetId]; if (map.type !== 'tilemap') throw new Error('Expected tilemap');
+    const group = map.layers[map.layerIds[0]]; if (group.type !== 'group') throw new Error('Expected group'); const ground = map.layers[group.childIds![0]]; const objects = map.layers[group.childIds![1]];
+    expect(group).toMatchObject({ offsetX: 7, offsetY: -5 }); expect(ground).toMatchObject({ type: 'tile', offsetX: -2, offsetY: 3 }); expect(objects).toMatchObject({ type: 'object', offsetX: 4, offsetY: 1 });
+
+    const json = await exportDocument(document, 'tiled-json'); const jsonLayers = JSON.parse(json.data.toString()).layers;
+    expect(jsonLayers[0]).toMatchObject({ offsetx: 7, offsety: -5, layers: [expect.objectContaining({ offsetx: -2, offsety: 3 }), expect.objectContaining({ offsetx: 4, offsety: 1 })] });
+    const xml = await exportDocument(document, 'tiled-xml'); const xmlText = xml.data.toString();
+    expect(xmlText).toContain('name="World" visible="1" opacity="1" offsetx="7" offsety="-5"');
+    expect(xmlText).toContain('name="Ground" visible="1" opacity="1" offsetx="-2" offsety="3"');
+    expect(xmlText).toContain('name="Objects" visible="1" opacity="1" offsetx="4" offsety="1"');
+
+    const reopenedJsonPath = join(directory, 'reopened.tmj'); const reopenedXmlPath = join(directory, 'reopened.tmx'); await Promise.all([writeFile(reopenedJsonPath, json.data), writeFile(reopenedXmlPath, xml.data)]);
+    for (const reopenedPath of [reopenedJsonPath, reopenedXmlPath]) {
+      const reopened = await importDocument(reopenedPath, true); const reopenedDocument = reopened.documents[0]; if (reopenedDocument.kind !== 'pixel') throw new Error('Expected pixel document'); const reopenedMap = reopenedDocument.pixelAssets[reopenedDocument.activeAssetId]; if (reopenedMap.type !== 'tilemap') throw new Error('Expected tilemap'); const reopenedGroup = reopenedMap.layers[reopenedMap.layerIds[0]]; if (reopenedGroup.type !== 'group') throw new Error('Expected group');
+      expect(reopenedGroup).toMatchObject({ offsetX: 7, offsetY: -5 }); expect(reopenedMap.layers[reopenedGroup.childIds![0]]).toMatchObject({ offsetX: -2, offsetY: 3 }); expect(reopenedMap.layers[reopenedGroup.childIds![1]]).toMatchObject({ offsetX: 4, offsetY: 1 });
+    }
+
+    const zeroDocument = createPixelDocument('tilemap', 'Zero layer offsets'); const zeroJson = await exportDocument(zeroDocument, 'tiled-json'); const zeroXml = await exportDocument(zeroDocument, 'tiled-xml');
+    expect(JSON.parse(zeroJson.data.toString()).layers[0]).not.toHaveProperty('offsetx'); expect(JSON.parse(zeroJson.data.toString()).layers[0]).not.toHaveProperty('offsety');
+    expect(zeroXml.data.toString()).not.toMatch(/\soffset[xy]=/);
+  });
+
+  it('fails closed on fractional or out-of-policy Tiled layer offsets', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'aidraw-invalid-tiled-layer-offsets-')); temporaryDirectories.push(directory);
+    const jsonPath = join(directory, 'fractional.tmj'); await writeFile(jsonPath, JSON.stringify({ type: 'map', orientation: 'orthogonal', infinite: false, width: 1, height: 1, tilewidth: 1, tileheight: 1, tilesets: [], layers: [{ type: 'tilelayer', width: 1, height: 1, offsetx: 0.5, data: [0] }] }));
+    await expect(importDocument(jsonPath, true)).rejects.toThrow('Tiled layer 1 offset x must be an integer from -16777216 to 16777216.');
+    const xmlPath = join(directory, 'oversized.tmx'); await writeFile(xmlPath, '<?xml version="1.0"?><map orientation="orthogonal" infinite="0" width="1" height="1" tilewidth="1" tileheight="1"><objectgroup id="1" name="Objects" offsety="16777217"/></map>');
+    await expect(importDocument(xmlPath, true)).rejects.toThrow('Tiled layer 1 offset y must be an integer from -16777216 to 16777216.');
+  });
+
   it('preserves signed orthogonal infinite chunks across external TMJ import and current TMJ export', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'aidraw-infinite-tmj-')); temporaryDirectories.push(directory);
     const sourcePath = join(directory, 'signed-sparse.tmj');

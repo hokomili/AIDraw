@@ -224,6 +224,8 @@ function normalizeTilemap(value: Record<string, unknown>, current: PixelTilemap 
       visible: typeof candidate.visible === 'boolean' ? candidate.visible : true,
       locked: typeof candidate.locked === 'boolean' ? candidate.locked : false,
       opacity: Math.max(0, Math.min(1, finite(candidate.opacity, 1))),
+      offsetX: finite(candidate.offsetX, current?.layers[key]?.offsetX ?? 0),
+      offsetY: finite(candidate.offsetY, current?.layers[key]?.offsetY ?? 0),
       parallaxX: finite(candidate.parallaxX, 1),
       parallaxY: finite(candidate.parallaxY, 1),
       ...(typeof candidate.parentId === 'string' ? { parentId: candidate.parentId } : {}),

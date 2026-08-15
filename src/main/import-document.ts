@@ -9,6 +9,7 @@ import {
   HUMAN_ACTOR,
   IDENTITY_TRANSFORM,
   MAX_ILLUSTRATION_TEXT_LENGTH,
+  MAX_TILEMAP_LAYER_OFFSET,
   MAX_TILESET_DRAWING_OFFSET,
   createId,
   createIllustrationDocument,
@@ -733,6 +734,8 @@ function normalizeTiledMapStructure(tiled: any): void {
   const walk = (source: any, depth: number): void => {
     if (depth > MAX_TILED_DEPTH) throw new Error('Tiled group nesting exceeds the 64-level safety limit.');
     layerCount += 1; if (layerCount > MAX_TILED_LAYERS) throw new Error(`Tiled map exceeds the ${MAX_TILED_LAYERS.toLocaleString('en-US')}-layer limit.`);
+    integerInRange(source.offsetx ?? 0, -MAX_TILEMAP_LAYER_OFFSET, MAX_TILEMAP_LAYER_OFFSET, `Tiled layer ${layerCount} offset x`);
+    integerInRange(source.offsety ?? 0, -MAX_TILEMAP_LAYER_OFFSET, MAX_TILEMAP_LAYER_OFFSET, `Tiled layer ${layerCount} offset y`);
     if (source.type === 'group') { for (const child of arrayify(source.layers)) walk(child, depth + 1); return; }
     if (source.type === 'objectgroup') {
       const objects = arrayify(source.objects); objectCount += objects.length; if (objectCount > MAX_TILED_OBJECTS) throw new Error('Tiled map exceeds the 100,000-object limit.'); objects.forEach((object, index) => validateObjectPoints(object, `Map object ${index + 1}`)); return;
@@ -788,7 +791,7 @@ async function importTiled(bytes: Buffer, name: string, filePath: string): Promi
   for (const source of arrayify(tiled.tilesets)) { const tileset = await attachTileset(document, source, filePath, map.tileWidth, map.tileHeight, warnings); map.tilesetIds.push(tileset.id); }
   const addLayer = (source: any, parentId?: string): string => {
     const timestamp = nowIso(); const id = createId('map-layer'); const type = source.type === 'objectgroup' ? 'object' as const : source.type === 'group' ? 'group' as const : 'tile' as const;
-    const layer = { id, revision: 0, name: String(source.name ?? 'Layer'), createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, type, visible: source.visible !== false && source.visible !== 0, locked: false, opacity: Number(source.opacity ?? 1), parentId, childIds: type === 'group' ? [] : undefined, chunks: type === 'tile' ? {} : undefined, objects: type === 'object' ? arrayify(source.objects).map(tiledObject) : undefined, parallaxX: Number(source.parallaxx ?? 1), parallaxY: Number(source.parallaxy ?? 1) };
+    const layer = { id, revision: 0, name: String(source.name ?? 'Layer'), createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, type, visible: source.visible !== false && source.visible !== 0, locked: false, opacity: Number(source.opacity ?? 1), parentId, childIds: type === 'group' ? [] : undefined, chunks: type === 'tile' ? {} : undefined, objects: type === 'object' ? arrayify(source.objects).map(tiledObject) : undefined, offsetX: Number(source.offsetx ?? 0), offsetY: Number(source.offsety ?? 0), parallaxX: Number(source.parallaxx ?? 1), parallaxY: Number(source.parallaxy ?? 1) };
     map.layers[id] = layer; if (parentId) map.layers[parentId].childIds?.push(id); else map.layerIds.push(id);
     if (type === 'tile' && layer.chunks) for (const chunk of source.chunks ?? [{ x: 0, y: 0, width: Number(source.width ?? map.width), height: Number(source.height ?? map.height), data: source.data ?? [] }]) { const width = Number(chunk.width || map.width || 1); const changes = arrayify(chunk.data).map((gid, index) => ({ x: Number(chunk.x ?? 0) + index % width, y: Number(chunk.y ?? 0) + Math.floor(index / width), gid: Number(gid) })); writeTiles(layer.chunks, changes); }
     if (type === 'group') for (const child of arrayify(source.layers)) addLayer(child, id); return id;

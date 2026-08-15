@@ -28,7 +28,7 @@ describe('orthogonal projection source parity', () => {
       expect(source).toContain('resolved.tileset.tileOffset');
     }
     expect(headless).toContain("const sourceIsRenderable = sourceAsset?.type === 'sprite'");
-    expect(headless).toContain(': rect.x + rect.width > region.x && rect.y + rect.height > region.y');
+    expect(headless).toContain(': rect.x + rect.width > layerRegion.x && rect.y + rect.height > layerRegion.y');
     expect(interactive).toContain("const sourceIsRenderable = mapSourceAsset?.type === 'sprite'");
     expect(interactive).toContain(': canonicalRect.x + canonicalRect.width > layerViewportRegion.x');
     expect(interactive.indexOf('const mapSourceAsset =')).toBeLessThan(interactive.indexOf('const canonicalPlacement ='));
@@ -41,9 +41,9 @@ describe('orthogonal projection source parity', () => {
 
   it('uses the rectangular cell for objects, pointers, parallax, and grid rows', async () => {
     const source = await readFile(new URL('../../src/renderer/canvas/PixelCanvas.tsx', import.meta.url), 'utf8');
-    expect(source).toContain('clientPointToOrthogonalTile(event.clientX, event.clientY, bounds, size, view, view.scale * tilemap.tileHeight / tilemap.tileWidth)');
+    expect(source).toContain('clientPointToOrthogonalTile(event.clientX, event.clientY, bounds, size, layerView, view.scale * tilemap.tileHeight / tilemap.tileWidth)');
     expect(source).toContain('clientPointToOrthogonalCoordinate(event.clientX, event.clientY, bounds, size, view, view.scale * tilemap.tileHeight / tilemap.tileWidth)');
-    expect(source).toContain('orthogonalCoordinateDeltaFromScreen(pan.x * (layer.parallaxX - 1), pan.y * (layer.parallaxY - 1), view.scale, view.scale * tilemap.tileHeight / tilemap.tileWidth)');
+    expect(source).toContain('orthogonalCoordinateDeltaFromScreen(translation.x, translation.y, view.scale, view.scale * tilemap.tileHeight / tilemap.tileWidth)');
     expect(source).toContain('orthogonalObjectMatrix(tilemap.tileWidth, tilemap.tileHeight, view.scale, orthogonalCellHeight)');
     expect(source).toContain("const rowHeight = tilemap?.orientation === 'orthogonal' ? orthogonalCellHeight : view.scale");
     expect(source.match(/tilemap\.orientation === 'orthogonal' \? view\.scale \/ tilemap\.tileWidth : view\.scale \/ Math\.max\(tilemap\.tileWidth, tilemap\.tileHeight\)/g)).toHaveLength(3);

@@ -367,7 +367,7 @@ describe('persisted pixel schemas', () => {
     writeTiles(tileLayer.chunks, [{ x: -1, y: 2, gid: 1 }]);
     const objectLayer: TilemapLayer = {
       id: 'persisted-object-layer', revision: 0, name: 'Objects', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
-      type: 'object', visible: true, locked: false, opacity: 1, parallaxX: 1, parallaxY: 1,
+      type: 'object', visible: true, locked: false, opacity: 1, offsetX: 0, offsetY: 0, parallaxX: 1, parallaxY: 1,
       objects: [{ id: 'persisted-map-object', type: 'polygon', x: 2, y: 3, points: [{ x: 0, y: 0 }, { x: 8, y: 0 }, { x: 4, y: 6 }], properties: { role: 'spawn' } }],
     };
     map.layers[objectLayer.id] = objectLayer; map.layerIds.push(objectLayer.id);
@@ -392,6 +392,11 @@ describe('persisted pixel schemas', () => {
     const absentOffset = structuredClone(document); delete (absentOffset.pixelAssets[tileset.id] as unknown as { tileOffset?: unknown }).tileOffset;
     const offsetDefaulted = migrateDocument(absentOffset); if (offsetDefaulted.kind !== 'pixel') throw new Error('Expected pixel document');
     expect(offsetDefaulted.pixelAssets[tileset.id]).toMatchObject({ type: 'tileset', tileOffset: { x: 0, y: 0 } });
+
+    const absentLayerOffsets = structuredClone(document); const absentMap = absentLayerOffsets.pixelAssets[absentLayerOffsets.assetIds[2]]; if (absentMap.type !== 'tilemap') throw new Error('Expected tilemap');
+    for (const layer of Object.values(absentMap.layers)) { delete (layer as unknown as { offsetX?: unknown }).offsetX; delete (layer as unknown as { offsetY?: unknown }).offsetY; }
+    const layerOffsetsDefaulted = migrateDocument(absentLayerOffsets); if (layerOffsetsDefaulted.kind !== 'pixel') throw new Error('Expected pixel document'); const defaultedMap = layerOffsetsDefaulted.pixelAssets[absentMap.id]; if (defaultedMap.type !== 'tilemap') throw new Error('Expected tilemap');
+    expect(Object.values(defaultedMap.layers).every((layer) => layer.offsetX === 0 && layer.offsetY === 0)).toBe(true);
 
     const absent = pixelDocument().document as unknown as Record<string, unknown>;
     delete absent.paletteCycles; delete absent.stamps; delete absent.tileStamps; delete absent.bitmapFonts; delete absent.linkedAssets; delete absent.conversionDefaults;
@@ -425,6 +430,8 @@ describe('persisted pixel schemas', () => {
       ['Invalid persisted pixel asset metadata.', ({ tileset }) => { tileset.tiles[0].id = 1; }],
       ['Invalid persisted pixel asset metadata.', ({ tileset }) => { tileset.tileOffset.x = 16_777_217; }],
       ['Invalid persisted pixel asset metadata.', ({ tileset }) => { tileset.tileOffset.y = 0.5; }],
+      ['Invalid persisted pixel asset metadata.', ({ map }) => { map.layers[map.layerIds[0]].offsetX = 16_777_217; }],
+      ['Invalid persisted pixel asset metadata.', ({ map }) => { map.layers[map.layerIds[0]].offsetY = 0.5; }],
       ['Invalid persisted pixel asset metadata.', ({ tileset }) => { tileset.wangSets[0].tiles[0].wangId[0] = 2; }],
       ['Invalid persisted pixel asset metadata.', ({ objectLayer }) => { delete objectLayer.objects?.[0].points; }],
       ['Invalid persisted pixel asset metadata.', ({ map }) => { const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile' || !layer.chunks) throw new Error('Expected tile layer'); Object.values(layer.chunks)[0].x = 1; }],

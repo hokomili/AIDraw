@@ -30,7 +30,7 @@ function objectLayer(id: string, objects: CollisionShape[] = []): ObjectLayer {
   const timestamp = nowIso();
   return {
     id, revision: 0, name: id, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
-    type: 'object', visible: true, locked: false, opacity: 1, objects, parallaxX: 1, parallaxY: 1,
+    type: 'object', visible: true, locked: false, opacity: 1, objects, offsetX: 0, offsetY: 0, parallaxX: 1, parallaxY: 1,
   };
 }
 
@@ -38,7 +38,7 @@ function groupLayer(id: string, childIds: string[]): GroupLayer {
   const timestamp = nowIso();
   return {
     id, revision: 0, name: id, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
-    type: 'group', visible: true, locked: false, opacity: 1, childIds, parallaxX: 1, parallaxY: 1,
+    type: 'group', visible: true, locked: false, opacity: 1, childIds, offsetX: 0, offsetY: 0, parallaxX: 1, parallaxY: 1,
   };
 }
 

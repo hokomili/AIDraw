@@ -31,6 +31,7 @@ import { renderStyledText } from '../common/text-layout';
 import { tileAnimationFrameAt, tilesetTileSourceRect } from '../common/tile-animation';
 import { isometricTileRenderCells } from '../common/tile-render-order';
 import { tilemapChunksIntersectingRegion } from '../common/tilemap-region';
+import { composedVisibleTilemapLayers } from '../common/tilemap-layer-composition';
 import { ensureBundledNativeCanvasFonts } from './canvas-fonts';
 
 type Context = ReturnType<Canvas['getContext']>;
@@ -373,23 +374,27 @@ function renderTilemapSurface(document: PixelDocument, map: PixelTilemap, region
     const key = `${tileset.id}\0${localId}`; const cached = animatedLocalIds.get(key); if (cached !== undefined) return cached;
     const sampled = tileAnimationFrameAt(tileset.tiles[localId]?.animation ?? [], tileAnimationTimeMs)?.tileId ?? localId; animatedLocalIds.set(key, sampled); return sampled;
   };
-  const visibleLayers: Array<{ layer: PixelTilemap['layers'][string]; opacity: number }> = []; const visit = (id: string, opacity = 1) => { const layer = map.layers[id]; if (!layer?.visible) return; const combined = opacity * layer.opacity; if (layer.type === 'group') for (const childId of layer.childIds ?? []) visit(childId, combined); else visibleLayers.push({ layer, opacity: combined }); }; if (onlyLayerId) visit(onlyLayerId); else for (const id of map.layerIds) visit(id);
+  const visibleLayers = composedVisibleTilemapLayers(map, onlyLayerId);
   try { for (const entry of visibleLayers) {
     const { layer } = entry;
+    const layerRegion = entry.offsetX === 0 && entry.offsetY === 0 ? region : { ...region, x: region.x - entry.offsetX, y: region.y - entry.offsetY };
+    context.save(); context.translate(entry.offsetX, entry.offsetY);
     context.globalAlpha = entry.opacity;
     if (layer.type === 'object') {
       context.save();
       const matrix = isometric
         ? isometricObjectMatrix(map.height, map.tileWidth, map.tileHeight, map.tileWidth, map.tileHeight)
         : orthogonalObjectMatrix(map.tileWidth, map.tileHeight, map.tileWidth, map.tileHeight);
+      const projectedMatrix = { ...matrix, e: matrix.e + entry.offsetX, f: matrix.f + entry.offsetY };
       const unitScale = isometric ? map.tileWidth / Math.max(map.tileWidth, map.tileHeight) : 1;
-      const objects = mapObjectsIntersectingRasterRegion(layer.objects ?? [], matrix, region, { unitScale });
+      const objects = mapObjectsIntersectingRasterRegion(layer.objects ?? [], projectedMatrix, region, { unitScale });
       context.transform(matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f);
       for (const object of objects) drawMapObjectOverlay(context, object, { unitScale });
       context.restore();
+      context.restore();
       continue;
     }
-    if (layer.type !== 'tile' || !layer.chunks) continue;
+    if (layer.type !== 'tile' || !layer.chunks) { context.restore(); continue; }
     const candidateChunks = tilemapChunksIntersectingRegion(Object.values(layer.chunks), {
       orientation: map.orientation,
       rows: map.height,
@@ -397,7 +402,7 @@ function renderTilemapSurface(document: PixelDocument, map: PixelTilemap, region
       tileHeight: map.tileHeight,
       orthogonalArtworkEnvelope,
       isometricArtworkEnvelope,
-    }, region);
+    }, layerRegion);
     const drawCell = (tileX: number, tileY: number, raw: number) => {
       const decoded = decodeTiledGid(raw); if (!decoded.gid) return;
       const rect = isometric
@@ -412,9 +417,9 @@ function renderTilemapSurface(document: PixelDocument, map: PixelTilemap, region
         : undefined;
       const artworkIntersects = artworkPlacement
         ? isometric
-          ? isometricTileArtworkIntersects(artworkPlacement.bounds, region)
-          : orthogonalTileArtworkIntersects(artworkPlacement.bounds, region)
-        : rect.x + rect.width > region.x && rect.y + rect.height > region.y && rect.x < region.x + region.width && rect.y < region.y + region.height;
+          ? isometricTileArtworkIntersects(artworkPlacement.bounds, layerRegion)
+          : orthogonalTileArtworkIntersects(artworkPlacement.bounds, layerRegion)
+        : rect.x + rect.width > layerRegion.x && rect.y + rect.height > layerRegion.y && rect.x < layerRegion.x + layerRegion.width && rect.y < layerRegion.y + layerRegion.height;
       if (!artworkIntersects) return;
       if (resolved && sourceAsset?.type === 'sprite') {
         const sourceRect = tilesetTileSourceRect(resolved.tileset, animatedLocalId(resolved.tileset, resolved.localId));
@@ -432,6 +437,7 @@ function renderTilemapSurface(document: PixelDocument, map: PixelTilemap, region
       const values = decodeTilemapChunk(chunk);
       for (let y = 0; y < 32; y += 1) for (let x = 0; x < 32; x += 1) drawCell(chunk.x + x, chunk.y + y, values[y * 32 + x] ?? 0);
     }
+    context.restore();
   } } finally { sources.clear(); }
   return canvas;
 }

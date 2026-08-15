@@ -82,6 +82,7 @@ import type {
 import {
   HUMAN_ACTOR,
   IDENTITY_TRANSFORM,
+  MAX_TILEMAP_LAYER_OFFSET,
   MAX_TILESET_DRAWING_OFFSET,
   applyTextStyleRange,
   countPaletteIndexUsage,
@@ -3421,6 +3422,37 @@ function PixelCanvasSizeEditor({
   );
 }
 
+function TilemapLayerOffsetEditor({
+  layer,
+  onApply,
+  onInvalid,
+}: {
+  layer: TilemapLayer;
+  onApply: (offsetX: number, offsetY: number) => void;
+  onInvalid: () => void;
+}) {
+  const [x, setX] = useState(String(layer.offsetX));
+  const [y, setY] = useState(String(layer.offsetY));
+  const integer = /^-?\d+$/;
+  const nextX = integer.test(x.trim()) ? Number(x) : Number.NaN;
+  const nextY = integer.test(y.trim()) ? Number(y) : Number.NaN;
+  const valid = [nextX, nextY].every((value) => Number.isSafeInteger(value) && Math.abs(value) <= MAX_TILEMAP_LAYER_OFFSET);
+  const canonicalDraft = x === String(layer.offsetX) && y === String(layer.offsetY);
+  const applyDraft = () => {
+    if (!valid) { onInvalid(); return; }
+    if (nextX === layer.offsetX && nextY === layer.offsetY) { setX(String(layer.offsetX)); setY(String(layer.offsetY)); return; }
+    onApply(nextX, nextY);
+  };
+  return <div className="tilemap-layer-offset-editor">
+    <div className="two-fields">
+      <label className="field"><span>Layer offset X</span><input aria-label="Layer drawing offset X" type="number" step="1" min={-MAX_TILEMAP_LAYER_OFFSET} max={MAX_TILEMAP_LAYER_OFFSET} value={x} onChange={(event) => setX(event.target.value)} /></label>
+      <label className="field"><span>Layer offset Y</span><input aria-label="Layer drawing offset Y" type="number" step="1" min={-MAX_TILEMAP_LAYER_OFFSET} max={MAX_TILEMAP_LAYER_OFFSET} value={y} onChange={(event) => setY(event.target.value)} /></label>
+    </div>
+    <div className="tileset-actions"><button type="button" disabled={canonicalDraft} onClick={applyDraft}>Apply layer offset</button></div>
+    <small>Signed map pixels · +X right · +Y down. Group offsets add to their descendants.</small>
+  </div>;
+}
+
 function PixelLayers({ document }: { document: PixelDocument }) {
   const asset = document.pixelAssets[document.activeAssetId];
   const selected = useEditorStore((state) => state.selectedEntityId);
@@ -3701,6 +3733,12 @@ function PixelLayers({ document }: { document: PixelDocument }) {
               </select>
             </label>
           )}
+          {"offsetX" in selectedLayer && <TilemapLayerOffsetEditor
+            key={`${selectedLayer.id}:${selectedLayer.revision}:${selectedLayer.offsetX}:${selectedLayer.offsetY}`}
+            layer={selectedLayer}
+            onApply={(offsetX, offsetY) => updateLayer(selectedLayer, { offsetX, offsetY }, "Change layer drawing offset")}
+            onInvalid={() => notify(`Layer drawing offsets must be whole map pixels from −${MAX_TILEMAP_LAYER_OFFSET.toLocaleString("en-US")} to ${MAX_TILEMAP_LAYER_OFFSET.toLocaleString("en-US")}.`, "warning")}
+          />}
           {"parallaxX" in selectedLayer && <div className="two-fields"><label className="field"><span>Parallax X</span><input type="number" step="0.1" value={selectedLayer.parallaxX} onChange={(event) => updateLayer(selectedLayer, { parallaxX: Number(event.target.value) }, "Change layer parallax")} /></label><label className="field"><span>Parallax Y</span><input type="number" step="0.1" value={selectedLayer.parallaxY} onChange={(event) => updateLayer(selectedLayer, { parallaxY: Number(event.target.value) }, "Change layer parallax")} /></label></div>}
           {selectedLayer.type === "object" && asset.type === "tilemap" && <div className="map-object-editor">
             <div className="section-heading"><span>Map objects</span><small>{selectedLayer.objects?.length ?? 0}</small></div>
@@ -5582,6 +5620,8 @@ function RightSidebar({ document }: { document: AIDrawDocument }) {
         chunks: mapKind === "tile" ? {} : undefined,
         objects: mapKind === "object" ? [] : undefined,
         childIds: mapKind === "group" ? [] : undefined,
+        offsetX: 0,
+        offsetY: 0,
         parallaxX: 1,
         parallaxY: 1,
       };

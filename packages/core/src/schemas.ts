@@ -393,6 +393,7 @@ const IllustrationGuidesInputSchema = z.array(IllustrationGuideInputSchema).max(
 const IllustrationSnapSettingsInputSchema = z.object({ artboard: z.boolean(), objects: z.boolean(), guides: z.boolean(), grid: z.boolean(), pixel: z.boolean(), gridSize: FiniteNumberSchema.min(1).max(4_096), tolerance: FiniteNumberSchema.min(0).max(128) }).strict();
 const MAX_PIXEL_COORDINATE = 16_777_216;
 export const MAX_TILESET_DRAWING_OFFSET = MAX_PIXEL_COORDINATE;
+export const MAX_TILEMAP_LAYER_OFFSET = MAX_PIXEL_COORDINATE;
 const MAX_PIXEL_DIMENSION = 8_192;
 // Match the established Tiled importer ceilings; this boundary adds no new resource policy.
 const MAX_TILESET_TILES = 1_048_576;
@@ -607,6 +608,8 @@ const TilemapLayerBaseInputShape = {
   locked: z.boolean(),
   opacity: FiniteNumberSchema.min(0).max(1),
   parentId: IdSchema.optional(),
+  offsetX: FiniteNumberSchema.int().min(-MAX_TILEMAP_LAYER_OFFSET).max(MAX_TILEMAP_LAYER_OFFSET).default(0),
+  offsetY: FiniteNumberSchema.int().min(-MAX_TILEMAP_LAYER_OFFSET).max(MAX_TILEMAP_LAYER_OFFSET).default(0),
   parallaxX: FiniteNumberSchema,
   parallaxY: FiniteNumberSchema,
 };

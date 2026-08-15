@@ -275,7 +275,7 @@ describe('native document rendering', () => {
       writeTiles(layer.chunks, [{ x: 0, y: 0, gid: 2 }, { x: 1, y: 1, gid: 4 }, { x: 3, y: 2, gid: 8 }]);
       const timestamp = nowIso(); const objects: typeof map.layers[string] = {
         id: `${orientation}-objects`, revision: 0, name: 'Region object', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
-        type: 'object', visible: true, locked: false, opacity: 0.6, parallaxX: 1, parallaxY: 1,
+        type: 'object', visible: true, locked: false, opacity: 0.6, offsetX: 0, offsetY: 0, parallaxX: 1, parallaxY: 1,
         objects: [{ id: `${orientation}-rectangle`, type: 'rectangle', x: 2, y: 1, width: 4, height: 2, properties: {} }],
       };
       map.layers[objects.id] = objects; map.layerIds.push(objects.id);
@@ -460,7 +460,7 @@ describe('native document rendering', () => {
     writeTiles(tileLayer.chunks, [{ x: 0, y: 0, gid: 1 }]);
     const timestamp = nowIso(); const objectLayer: typeof map.layers[string] = {
       id: 'object-layer', revision: 0, name: 'Visible objects', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
-      type: 'object', visible: true, locked: false, opacity: 1, parallaxX: 1, parallaxY: 1,
+      type: 'object', visible: true, locked: false, opacity: 1, offsetX: 0, offsetY: 0, parallaxX: 1, parallaxY: 1,
       objects: [{ id: 'object-rectangle', type: 'rectangle', x: 2, y: 2, width: 12, height: 12, properties: {} }],
     };
     const basePixel = [...renderTilemap(document, map).getContext('2d').getImageData(8, 8, 1, 1).data];
@@ -485,7 +485,7 @@ describe('native document rendering', () => {
     map.orientation = 'isometric'; map.width = 1; map.height = 1; map.tileWidth = 8; map.tileHeight = 4;
     const timestamp = nowIso(); const objectLayer: typeof map.layers[string] = {
       id: 'isometric-objects', revision: 0, name: 'Isometric objects', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
-      type: 'object', visible: true, locked: false, opacity: 0.5, parallaxX: 1, parallaxY: 1,
+      type: 'object', visible: true, locked: false, opacity: 0.5, offsetX: 0, offsetY: 0, parallaxX: 1, parallaxY: 1,
       objects: [{ id: 'isometric-cell', type: 'rectangle', x: 0, y: 0, width: 8, height: 4, properties: {} }],
     };
     map.layers = { [objectLayer.id]: objectLayer }; map.layerIds = [objectLayer.id];
@@ -506,7 +506,7 @@ describe('native document rendering', () => {
     } as CollisionShape;
     const objectLayer: typeof map.layers[string] = {
       id: 'regional-objects', revision: 0, name: 'Regional objects', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
-      type: 'object', visible: true, locked: false, opacity: 1, parallaxX: 1, parallaxY: 1,
+      type: 'object', visible: true, locked: false, opacity: 1, offsetX: 0, offsetY: 0, parallaxX: 1, parallaxY: 1,
       objects: [farObject, { id: 'near-object', type: 'rectangle', x: 2, y: 2, width: 8, height: 8, properties: {} }],
     };
     map.layers = { [objectLayer.id]: objectLayer }; map.layerIds = [objectLayer.id];
@@ -653,5 +653,48 @@ describe('native document rendering', () => {
     const shape: ShapeObject = { id: 'layer-shape', revision: 0, name: 'Layer shape', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, layerId: layer.id, visible: true, locked: false, opacity: 1, blendMode: 'normal', transform: { ...IDENTITY_TRANSFORM, x: 5, y: 5 }, type: 'shape', shape: 'rectangle', width: 20, height: 20, fill: { kind: 'solid', color: '#55bbff' }, stroke: { paint: { kind: 'none' }, width: 0, opacity: 1, lineCap: 'round', lineJoin: 'round', dash: [] } };
     document.objects[shape.id] = shape; if (layer.type === 'vector') layer.objectIds.push(shape.id);
     expect([...(await renderIllustration(document)).getContext('2d').getImageData(10, 10, 1, 1).data.slice(0, 3)]).toEqual([0, 0, 0]);
+  });
+
+  it('composes orthogonal group and tile-layer offsets in full and requested rasters without changing nominal bounds', () => {
+    const document = createPixelDocument('project', 'Orthogonal layer offsets'); document.assetIds = []; document.pixelAssets = {}; document.palette[2].color = '#ef476fff';
+    const sprite = createPixelSprite('Offset tile pixels', 4, 4); writePixels(Object.values(sprite.cels)[0], Array.from({ length: 16 }, (_, index) => ({ x: index % 4, y: Math.floor(index / 4), index: 2 })));
+    const tileset = createPixelTileset('Offset tiles', sprite.id, 4, 4, 1, 1); tileset.firstGid = 1;
+    const map = createPixelTilemap('Offset map'); map.width = 4; map.height = 4; map.tileWidth = 4; map.tileHeight = 4; map.tilesetIds = [tileset.id];
+    const tile = map.layers[map.layerIds[0]]; if (tile.type !== 'tile' || !tile.chunks) throw new Error('Expected tile layer'); tile.offsetX = 1; tile.offsetY = -1; writeTiles(tile.chunks, [{ x: 0, y: 0, gid: 1 }]);
+    const timestamp = nowIso(); const group = {
+      id: 'offset-group', revision: 0, name: 'Offset group', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
+      type: 'group' as const, visible: true, locked: false, opacity: 1, offsetX: 3, offsetY: 2, parallaxX: 1, parallaxY: 1, childIds: [tile.id],
+    };
+    tile.parentId = group.id; map.layers[group.id] = group; map.layerIds = [group.id];
+    document.pixelAssets = { [sprite.id]: sprite, [tileset.id]: tileset, [map.id]: map }; document.assetIds = [sprite.id, tileset.id, map.id]; document.activeAssetId = map.id;
+
+    const full = renderTilemap(document, map); const region = renderTilemapRegion(document, map, { x: 4, y: 1, width: 4, height: 4 });
+    expect({ width: full.width, height: full.height }).toEqual({ width: 16, height: 16 });
+    expect(full.getContext('2d').getImageData(0, 0, 1, 1).data[3]).toBe(0);
+    expect(full.getContext('2d').getImageData(4, 1, 4, 4).data.every((value, index) => index % 4 === 3 ? value === 255 : true)).toBe(true);
+    expect(Buffer.from(region.getContext('2d').getImageData(0, 0, 4, 4).data)).toEqual(Buffer.from(full.getContext('2d').getImageData(4, 1, 4, 4).data));
+  });
+
+  it('translates isometric tile artwork and object overlays by the same composed map-pixel offset', () => {
+    const document = createPixelDocument('project', 'Isometric layer offsets'); document.assetIds = []; document.pixelAssets = {}; document.palette[3].color = '#36c98fff';
+    const sprite = createPixelSprite('Isometric tile pixels', 4, 2); writePixels(Object.values(sprite.cels)[0], Array.from({ length: 8 }, (_, index) => ({ x: index % 4, y: Math.floor(index / 4), index: 3 })));
+    const tileset = createPixelTileset('Isometric tiles', sprite.id, 4, 2, 1, 1); tileset.firstGid = 1;
+    const map = createPixelTilemap('Isometric map'); map.orientation = 'isometric'; map.width = 3; map.height = 3; map.tileWidth = 4; map.tileHeight = 2; map.tilesetIds = [tileset.id];
+    const tile = map.layers[map.layerIds[0]]; if (tile.type !== 'tile' || !tile.chunks) throw new Error('Expected tile layer'); writeTiles(tile.chunks, [{ x: 1, y: 1, gid: 1 }]);
+    const timestamp = nowIso(); const objectLayer = {
+      id: 'offset-objects', revision: 0, name: 'Offset objects', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
+      type: 'object' as const, visible: true, locked: false, opacity: 1, offsetX: 0, offsetY: 0, parallaxX: 1, parallaxY: 1,
+      objects: [{ id: 'offset-object', type: 'rectangle' as const, x: 4, y: 2, width: 3, height: 2, properties: {} }],
+    };
+    map.layers[objectLayer.id] = objectLayer; map.layerIds.push(objectLayer.id);
+    document.pixelAssets = { [sprite.id]: sprite, [tileset.id]: tileset, [map.id]: map }; document.assetIds = [sprite.id, tileset.id, map.id]; document.activeAssetId = map.id;
+    const beforeTile = renderTilemap(document, map, tile.id); const beforeObject = renderTilemap(document, map, objectLayer.id);
+    tile.offsetX = 2; tile.offsetY = 1; objectLayer.offsetX = 2; objectLayer.offsetY = 1;
+    const afterTile = renderTilemap(document, map, tile.id); const afterObject = renderTilemap(document, map, objectLayer.id);
+    const shiftedExactly = (before: ReturnType<typeof renderTilemap>, after: ReturnType<typeof renderTilemap>) => {
+      const source = before.getContext('2d').getImageData(0, 0, before.width, before.height).data; const target = after.getContext('2d').getImageData(0, 0, after.width, after.height).data;
+      for (let y = 0; y < after.height; y += 1) for (let x = 0; x < after.width; x += 1) for (let channel = 0; channel < 4; channel += 1) expect(target[(y * after.width + x) * 4 + channel]).toBe(x >= 2 && y >= 1 ? source[((y - 1) * before.width + x - 2) * 4 + channel] : 0);
+    };
+    shiftedExactly(beforeTile, afterTile); shiftedExactly(beforeObject, afterObject);
   });
 });

@@ -163,6 +163,8 @@ export function createPixelTilemap(name: string): PixelTilemap {
     locked: false,
     opacity: 1,
     chunks: {},
+    offsetX: 0,
+    offsetY: 0,
     parallaxX: 1,
     parallaxY: 1,
   };

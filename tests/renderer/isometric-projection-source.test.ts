@@ -18,8 +18,8 @@ describe('isometric projection source parity', () => {
     const canvas = await readFile(new URL('../../src/renderer/canvas/PixelCanvas.tsx', import.meta.url), 'utf8');
     const coordinates = await readFile(new URL('../../src/renderer/canvas/pixel-coordinates.ts', import.meta.url), 'utf8');
     expect(coordinates).toContain('isometricCoordinateFromScreen(screenX, screenY, mapHeight, view.scale, cellHeight)');
-    expect(canvas).toContain('clientPointToIsometricTile(event.clientX, event.clientY, bounds, size, view, tilemap.height');
-    expect(canvas).toContain('isometricCoordinateDeltaFromScreen');
+    expect(canvas).toContain('clientPointToIsometricTile(event.clientX, event.clientY, bounds, size, layerView, tilemap.height');
+    expect(canvas).toContain('isometricCoordinateDeltaFromScreen(translation.x, translation.y');
   });
 
   it('shares native sprite placement and exact overhang admission without changing nominal fallback geometry', async () => {

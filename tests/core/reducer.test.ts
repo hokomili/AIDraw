@@ -40,6 +40,21 @@ function shapeTransaction(documentId: string, layerId: string, expectedRevision?
 }
 
 describe('transaction reducer', () => {
+  it('authors a tilemap layer offset through one revisioned replacement with an exact inverse', () => {
+    const document = createPixelDocument('tilemap', 'Layer offset history'); const map = document.pixelAssets[document.activeAssetId];
+    if (map.type !== 'tilemap') throw new Error('Expected tilemap'); const layer = map.layers[map.layerIds[0]];
+    const replacement = structuredClone(map); replacement.layers[layer.id] = { ...replacement.layers[layer.id], offsetX: -8, offsetY: 13 };
+    const transaction: CanvasTransaction = {
+      id: createId('tx'), clientOperationId: createId('op'), documentId: document.id, actor: HUMAN_ACTOR, label: 'Change layer drawing offset', createdAt: nowIso(),
+      operations: [{ kind: 'pixel.asset.replace', asset: replacement, expectedRevision: map.revision }],
+    };
+    const applied = applyTransaction(document, transaction); if (applied.document.kind !== 'pixel') throw new Error('Expected pixel document'); const appliedMap = applied.document.pixelAssets[map.id]; if (appliedMap.type !== 'tilemap') throw new Error('Expected tilemap');
+    expect(appliedMap.layers[layer.id]).toMatchObject({ offsetX: -8, offsetY: 13 });
+    expect(applied.document).toMatchObject({ revision: 1, dirty: true, activity: [expect.objectContaining({ label: 'Change layer drawing offset', actor: HUMAN_ACTOR, operationCount: 1 })] });
+    const restored = applyTransaction(applied.document, applied.inverse, { recordActivity: false }).document; if (restored.kind !== 'pixel') throw new Error('Expected pixel document'); const restoredMap = restored.pixelAssets[map.id]; if (restoredMap.type !== 'tilemap') throw new Error('Expected tilemap');
+    expect(restoredMap.layers[layer.id]).toMatchObject({ offsetX: 0, offsetY: 0 });
+  });
+
   it('authors a tileset drawing offset through one revisioned replacement with an exact inverse', () => {
     const document = createPixelDocument('project', 'Tileset offset history'); const sprite = document.pixelAssets[document.activeAssetId];
     if (sprite.type !== 'sprite') throw new Error('Expected sprite');

@@ -686,7 +686,7 @@ describe('authenticated stateful MCP contract', () => {
     expect(readTileAt(placedLayer.chunks ?? {}, 1, 2)).toBe(3);
 
     const timestamp = nowIso();
-    const objectLayer = { id: 'agent-object-layer', revision: 0, name: 'Objects', createdAt: timestamp, updatedAt: timestamp, createdBy: 'tile-stamp-client', type: 'object' as const, visible: true, locked: false, opacity: 1, objects: [], parallaxX: 1, parallaxY: 1 };
+    const objectLayer = { id: 'agent-object-layer', revision: 0, name: 'Objects', createdAt: timestamp, updatedAt: timestamp, createdBy: 'tile-stamp-client', type: 'object' as const, visible: true, locked: false, opacity: 1, objects: [], offsetX: 0, offsetY: 0, parallaxX: 1, parallaxY: 1 };
     const mapWithObjectLayer = structuredClone(placedMap);
     mapWithObjectLayer.layers[objectLayer.id] = objectLayer;
     mapWithObjectLayer.layerIds.push(objectLayer.id);

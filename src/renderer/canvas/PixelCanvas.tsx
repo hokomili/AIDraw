@@ -88,6 +88,7 @@ import { coveringRasterViewportRegion, createGridRasterRegionFilter, tilemapChun
 import { onionSkinLayers } from '../../common/onion-skin';
 import { tileAnimationFrameAt, tilesetTileSourceRect } from '../../common/tile-animation';
 import { parseBitmapFontJson } from '../../common/bitmap-font-interchange';
+import { composedVisibleTilemapLayers, tilemapLayerScreenTranslation, type ComposedTilemapLayer } from '../../common/tilemap-layer-composition';
 import { cancelPixelGesture, releasePendingPixelLocks } from '../../common/pixel-gesture';
 import { BoundedResourceCache } from '../../common/bounded-resource-cache';
 import { drawPixelSpriteRegion, pixelSpriteRegionPlan } from '../../common/pixel-sprite-render';
@@ -325,6 +326,11 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const notify = useEditorStore((state) => state.notify);
   const selectedEntityId = useEditorStore((state) => state.selectedEntityId);
   const setSelectedEntity = useEditorStore((state) => state.setSelectedEntity);
+  const visibleMapLayers = useMemo(() => tilemap ? composedVisibleTilemapLayers(tilemap) : [], [tilemap]);
+  const activeTileLayerEntry = useMemo(() => {
+    const selectedLayer = visibleMapLayers.find((entry) => entry.layer.id === selectedEntityId && entry.layer.type === 'tile' && !entry.layer.locked);
+    return selectedLayer ?? visibleMapLayers.find((entry) => entry.layer.type === 'tile' && !entry.layer.locked);
+  }, [selectedEntityId, visibleMapLayers]);
   const playbackMap = useEditorStore((state) => state.playbacks);
   const playbacks = Object.values(playbackMap).filter((entry) => entry.documentId === document.id);
   const activeFrameId = sprite?.frameIds.includes(frameId ?? '') ? frameId : sprite?.frameIds[0];
@@ -470,6 +476,11 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     };
   }, [logical, pan, size, zoom]);
 
+  const mapLayerTranslations = useMemo(() => new Map(visibleMapLayers.map((entry) => [
+    entry.layer.id,
+    tilemapLayerScreenTranslation(entry, pan, tilemap ? view.scale / tilemap.tileWidth : 1),
+  ])), [pan, tilemap, view.scale, visibleMapLayers]);
+
   useEffect(() => {
     setCanvasViewport({ x: -view.offsetX / view.scale, y: -view.offsetY / view.scale, width: size.width / view.scale, height: size.height / view.scale });
   }, [setCanvasViewport, size.height, size.width, view.offsetX, view.offsetY, view.scale]);
@@ -523,18 +534,31 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       layerOffsetY: 0,
       projectionScale: sprite ? view.scale : view.scale / tilemap!.tileWidth,
     }) : undefined;
+    const rasterViewportRegionForLayer = (entry: ComposedTilemapLayer) => {
+      const translation = mapLayerTranslations.get(entry.layer.id) ?? { x: 0, y: 0 };
+      return translation.x === 0 && translation.y === 0 ? baseRasterViewportRegion! : coveringRasterViewportRegion({
+        viewportWidth: size.width,
+        viewportHeight: size.height,
+        viewOffsetX: view.offsetX,
+        viewOffsetY: view.offsetY,
+        layerOffsetX: translation.x,
+        layerOffsetY: translation.y,
+        projectionScale: view.scale / tilemap!.tileWidth,
+      });
+    };
+    const activeRasterViewportRegion = tilemap && activeTileLayerEntry ? rasterViewportRegionForLayer(activeTileLayerEntry) : baseRasterViewportRegion;
     const overlayGeometry = sprite
       ? { orientation: 'orthogonal' as const, rows: sprite.height, tileWidth: 1, tileHeight: 1 }
       : tilemap
         ? { orientation: tilemap.orientation, rows: tilemap.height, tileWidth: tilemap.tileWidth, tileHeight: tilemap.tileHeight }
         : undefined;
-    const overlayRegionFilter = overlayGeometry && baseRasterViewportRegion
-      ? createGridRasterRegionFilter(overlayGeometry, baseRasterViewportRegion)
+    const overlayRegionFilter = overlayGeometry && activeRasterViewportRegion
+      ? createGridRasterRegionFilter(overlayGeometry, activeRasterViewportRegion)
       : undefined;
     const selectionStrokeWidth = Math.max(1, view.scale / 8);
     const overlayProjectionScale = sprite ? view.scale : tilemap ? view.scale / tilemap.tileWidth : 1;
-    const selectionRegionFilter = overlayGeometry && baseRasterViewportRegion
-      ? createGridRasterRegionFilter(overlayGeometry, baseRasterViewportRegion, Math.ceil((selectionStrokeWidth / 2 + 1) / overlayProjectionScale))
+    const selectionRegionFilter = overlayGeometry && activeRasterViewportRegion
+      ? createGridRasterRegionFilter(overlayGeometry, activeRasterViewportRegion, Math.ceil((selectionStrokeWidth / 2 + 1) / overlayProjectionScale))
       : undefined;
     const gridCellRect = (point: PixelPoint): IsometricCellRect => tilemap?.orientation === 'isometric'
       ? isometricCellRect(point.x, point.y, tilemap.height, view.scale, isometricCellHeight)
@@ -607,10 +631,9 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
         const key = `${resolved.tileset.id}\0${resolved.localId}`; const cached = animatedLocalIds.get(key); if (cached !== undefined) return cached;
         const sampled = tileAnimationFrameAt(resolved.tileset.tiles[resolved.localId]?.animation ?? [], tileAnimationTimeMs)?.tileId ?? resolved.localId; animatedLocalIds.set(key, sampled); return sampled;
       };
-      const visibleLayers: Array<{ layer: typeof tilemap.layers[string]; opacity: number }> = []; const visit = (id: string, opacity = 1) => { const layer = tilemap.layers[id]; if (!layer?.visible) return; const combined = opacity * layer.opacity; if (layer.type === 'group') for (const childId of layer.childIds ?? []) visit(childId, combined); else visibleLayers.push({ layer, opacity: combined }); }; for (const id of tilemap.layerIds) visit(id);
-      try { for (const entry of visibleLayers) {
+      try { for (const entry of visibleMapLayers) {
         const { layer } = entry;
-        const layerOffsetX = pan.x * (layer.parallaxX - 1); const layerOffsetY = pan.y * (layer.parallaxY - 1);
+        const { x: layerOffsetX, y: layerOffsetY } = mapLayerTranslations.get(layer.id) ?? { x: 0, y: 0 };
         context.save(); context.translate(layerOffsetX, layerOffsetY);
         if (layer.type === 'object') {
           context.globalAlpha = entry.opacity;
@@ -632,15 +655,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
         }
         if (layer.type !== 'tile' || !layer.chunks) { context.restore(); continue; }
         const hiddenCells = replayMasks.tileCells.get(replayTileLayerKey(tilemap.id, layer.id));
-        const layerViewportRegion = layerOffsetX === 0 && layerOffsetY === 0 ? baseRasterViewportRegion! : coveringRasterViewportRegion({
-          viewportWidth: size.width,
-          viewportHeight: size.height,
-          viewOffsetX: view.offsetX,
-          viewOffsetY: view.offsetY,
-          layerOffsetX,
-          layerOffsetY,
-          projectionScale: view.scale / tilemap.tileWidth,
-        });
+        const layerViewportRegion = rasterViewportRegionForLayer(entry);
         const candidateChunks = tilemapChunksIntersectingRegion(Object.values(layer.chunks), {
           orientation: tilemap.orientation,
           rows: tilemap.height,
@@ -715,6 +730,8 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       } } finally { mapSources.clear(); }
     }
 
+    const activeTileLayerTranslation = activeTileLayerEntry ? mapLayerTranslations.get(activeTileLayerEntry.layer.id) ?? { x: 0, y: 0 } : { x: 0, y: 0 };
+    if (tilemap) { context.save(); context.translate(activeTileLayerTranslation.x, activeTileLayerTranslation.y); }
     if (preview.length || bulkPreview.length) {
       context.globalAlpha = 0.78;
       if (bulkPreview.length) {
@@ -765,6 +782,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       for (const point of selectedPoints) strokeGridCell(point);
       context.strokeStyle = '#4f3f68'; context.lineDashOffset += Math.max(2, view.scale / 3); for (const point of selectedPoints) strokeGridCell(point); context.setLineDash([]);
     }
+    if (tilemap) context.restore();
 
     for (const playback of playbacks) {
       context.globalAlpha = 1;
@@ -790,21 +808,33 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
             context.fillRect((run.x + range.start) * view.scale, run.y * view.scale, (range.end - range.start) * view.scale, view.scale);
           }
         } else if (operation.kind === 'pixel.tilemap.set' && tilemap && operation.mapId === tilemap.id) {
+          const replayEntry = visibleMapLayers.find((entry) => entry.layer.id === operation.layerId);
+          if (!replayEntry) continue;
+          const replayTranslation = mapLayerTranslations.get(operation.layerId) ?? { x: 0, y: 0 };
+          const replayFilter = createGridRasterRegionFilter(overlayGeometry!, rasterViewportRegionForLayer(replayEntry));
+          context.save(); context.translate(replayTranslation.x, replayTranslation.y);
           const changes = Array.isArray(operation.changes) ? operation.changes : [];
           for (const change of changes) {
             if (![change.x, change.y, change.gid].every(Number.isFinite)) continue;
-            if (overlayRegionFilter && !overlayRegionFilter.cellIntersects(change.x, change.y)) continue;
+            if (!replayFilter.cellIntersects(change.x, change.y)) continue;
             context.fillStyle = change.gid === 0 ? '#ffffff80' : `hsl(${(change.gid * 47) % 360} 52% 62%)`;
             fillGridCell(change);
           }
+          context.restore();
         } else if (operation.kind === 'pixel.tilemap.region' && tilemap && operation.mapId === tilemap.id) {
+          const replayEntry = visibleMapLayers.find((entry) => entry.layer.id === operation.layerId);
+          if (!replayEntry) continue;
+          const replayTranslation = mapLayerTranslations.get(operation.layerId) ?? { x: 0, y: 0 };
+          const replayFilter = createGridRasterRegionFilter(overlayGeometry!, rasterViewportRegionForLayer(replayEntry));
+          context.save(); context.translate(replayTranslation.x, replayTranslation.y);
           for (const run of operation.runs) {
             if (![run.x, run.y, run.length, run.gid].every(Number.isFinite)) continue;
-            const range = overlayRegionFilter?.runOffsets(run.x, run.y, run.length) ?? { start: 0, end: run.length };
+            const range = replayFilter.runOffsets(run.x, run.y, run.length);
             if (range.end <= range.start) continue;
             context.fillStyle = run.gid === 0 ? '#ffffff80' : `hsl(${(run.gid * 47) % 360} 52% 62%)`;
             for (let offset = range.start; offset < range.end; offset += 1) fillGridCell({ x: run.x + offset, y: run.y });
           }
+          context.restore();
         }
       }
     }
@@ -822,12 +852,14 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       context.stroke();
     }
     context.restore();
-  }, [activeFrameId, activePaletteCycle, activePaletteOverride, bulkPreview, ditherCoverage, ditherMatrixSize, ditherMixIndex, document, lassoPath, logical, mapObjectGesture, onionSettings, onionSkin, paletteCycling, paletteOffset, pan.x, pan.y, pixelIndex, playbacks, preview, selectedEntityId, selection, selectionOffset, size, sprite, stampPreview, tileAnimationTimeMs, tilemap, tileStampPreview, tileset, tool, view, wrapEditing]);
+  }, [activeFrameId, activePaletteCycle, activePaletteOverride, activeTileLayerEntry, bulkPreview, ditherCoverage, ditherMatrixSize, ditherMixIndex, document, lassoPath, logical, mapLayerTranslations, mapObjectGesture, onionSettings, onionSkin, paletteCycling, paletteOffset, pixelIndex, playbacks, preview, selectedEntityId, selection, selectionOffset, size, sprite, stampPreview, tileAnimationTimeMs, tilemap, tileStampPreview, tileset, tool, view, visibleMapLayers, wrapEditing]);
 
   const toPixel = (event: ReactPointerEvent<HTMLCanvasElement>): PixelPoint => {
     const bounds = event.currentTarget.getBoundingClientRect();
-    if (tilemap?.orientation === 'isometric') return clientPointToIsometricTile(event.clientX, event.clientY, bounds, size, view, tilemap.height, view.scale * tilemap.tileHeight / tilemap.tileWidth);
-    if (tilemap?.orientation === 'orthogonal') return clientPointToOrthogonalTile(event.clientX, event.clientY, bounds, size, view, view.scale * tilemap.tileHeight / tilemap.tileWidth);
+    const translation = activeTileLayerEntry ? mapLayerTranslations.get(activeTileLayerEntry.layer.id) ?? { x: 0, y: 0 } : { x: 0, y: 0 };
+    const layerView = { ...view, offsetX: view.offsetX + translation.x, offsetY: view.offsetY + translation.y };
+    if (tilemap?.orientation === 'isometric') return clientPointToIsometricTile(event.clientX, event.clientY, bounds, size, layerView, tilemap.height, view.scale * tilemap.tileHeight / tilemap.tileWidth);
+    if (tilemap?.orientation === 'orthogonal') return clientPointToOrthogonalTile(event.clientX, event.clientY, bounds, size, layerView, view.scale * tilemap.tileHeight / tilemap.tileWidth);
     return clientPointToPixel(event.clientX, event.clientY, bounds, size, view);
   };
 
@@ -838,10 +870,11 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     return { x: point.x * tilemap.tileWidth, y: point.y * tilemap.tileHeight };
   };
 
-  const toLayerMapObjectPoint = (event: ReactPointerEvent<HTMLCanvasElement>, layer: NonNullable<typeof tilemap>['layers'][string]): PixelPoint => {
+  const toLayerMapObjectPoint = (event: ReactPointerEvent<HTMLCanvasElement>, entry: ComposedTilemapLayer): PixelPoint => {
     const point = toMapObjectPoint(event); if (!tilemap) return point;
-    if (tilemap.orientation === 'isometric') { const delta = isometricCoordinateDeltaFromScreen(pan.x * (layer.parallaxX - 1), pan.y * (layer.parallaxY - 1), view.scale, view.scale * tilemap.tileHeight / tilemap.tileWidth); return { x: point.x - delta.x * tilemap.tileWidth, y: point.y - delta.y * tilemap.tileHeight }; }
-    const delta = orthogonalCoordinateDeltaFromScreen(pan.x * (layer.parallaxX - 1), pan.y * (layer.parallaxY - 1), view.scale, view.scale * tilemap.tileHeight / tilemap.tileWidth);
+    const translation = mapLayerTranslations.get(entry.layer.id) ?? { x: 0, y: 0 };
+    if (tilemap.orientation === 'isometric') { const delta = isometricCoordinateDeltaFromScreen(translation.x, translation.y, view.scale, view.scale * tilemap.tileHeight / tilemap.tileWidth); return { x: point.x - delta.x * tilemap.tileWidth, y: point.y - delta.y * tilemap.tileHeight }; }
+    const delta = orthogonalCoordinateDeltaFromScreen(translation.x, translation.y, view.scale, view.scale * tilemap.tileHeight / tilemap.tileWidth);
     return { x: point.x - delta.x * tilemap.tileWidth, y: point.y - delta.y * tilemap.tileHeight };
   };
 
@@ -859,7 +892,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const transformSelection = async (transform: PixelSelectionTransform, offset: PixelPoint = { x: 0, y: 0 }) => {
     if (!selection.length) return;
     if (tilemap) {
-      const layer = Object.values(tilemap.layers).find((entry) => entry.type === 'tile' && entry.visible && !entry.locked);
+      const layer = activeTileLayerEntry?.layer;
       if (!layer || layer.type !== 'tile' || !layer.chunks) return;
       const result = transformGridSelection(selection, (x, y) => readTileAt(layer.chunks!, x, y), transform, tilemap.infinite ? undefined : { width: tilemap.width, height: tilemap.height }, offset, 0);
       const bounds = pixelSelectionBounds([...selection, ...result.selection]); if (!bounds) return;
@@ -897,7 +930,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const deleteSelection = async () => {
     if (!selection.length) return;
     if (tilemap) {
-      const layer = Object.values(tilemap.layers).find((entry) => entry.type === 'tile' && entry.visible && !entry.locked); const bounds = pixelSelectionBounds(selection);
+      const layer = activeTileLayerEntry?.layer; const bounds = pixelSelectionBounds(selection);
       if (!layer || layer.type !== 'tile' || !bounds) return;
       const lock = await window.aidraw.acquireHumanLock({ documentId: document.id, region: { kind: 'tile', assetId: tilemap.id, ...bounds } }); if (!lock.acquired) return;
       try { if (await apply('Delete selected tiles', [{ kind: 'pixel.tilemap.set', mapId: tilemap.id, layerId: layer.id, changes: selection.map((point) => ({ ...point, gid: 0 })), expectedRevision: layer.revision }])) setSelection([]); }
@@ -916,7 +949,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const copyLocalSelection = async (): Promise<boolean> => {
     if (!selection.length) { notify('Select pixels or tiles before copying.', 'warning'); return false; }
     if (tilemap) {
-      const layer = Object.values(tilemap.layers).find((entry) => entry.type === 'tile' && entry.visible && !entry.locked);
+      const layer = activeTileLayerEntry?.layer;
       if (!layer || layer.type !== 'tile' || !layer.chunks) return false;
       localSelectionClipboard = { kind: 'tile', sourceDocumentId: document.id, grid: captureGridSelection(selection, (x, y) => readTileAt(layer.chunks!, x, y)) };
       setClipboardAvailable(true);
@@ -949,7 +982,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       if (!clipboard) { notify('This project has no copied tile selection.', 'warning'); return; }
       const origin = cursor ?? { x: clipboard.grid.originX, y: clipboard.grid.originY };
       if (clipboard.sourceDocumentId !== document.id) { notify('Tile selections keep project-local GIDs and can only be pasted inside their source project.', 'warning'); return; }
-      const layer = Object.values(tilemap.layers).find((entry) => entry.type === 'tile' && entry.visible && !entry.locked); if (!layer || layer.type !== 'tile') return;
+      const layer = activeTileLayerEntry?.layer; if (!layer || layer.type !== 'tile') return;
       const placed = placeGridClipboard(clipboard.grid, origin, tilemap.infinite ? undefined : { width: tilemap.width, height: tilemap.height }); const bounds = pixelSelectionBounds(placed.selection);
       if (!bounds) { notify('The pasted tile selection falls outside this finite map.', 'warning'); return; }
       const lock = await window.aidraw.acquireHumanLock({ documentId: document.id, region: { kind: 'tile', assetId: tilemap.id, ...bounds } }); if (!lock.acquired) return;
@@ -988,7 +1021,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const scaleSelection = async (scaleX: number, scaleY: number) => {
     if (!selection.length || (scaleX === 1 && scaleY === 1)) { setSelectionScaleOpen(false); return; }
     if (tilemap) {
-      const layer = Object.values(tilemap.layers).find((entry) => entry.type === 'tile' && entry.visible && !entry.locked); if (!layer || layer.type !== 'tile' || !layer.chunks) return;
+      const layer = activeTileLayerEntry?.layer; if (!layer || layer.type !== 'tile' || !layer.chunks) return;
       const result = scaleGridSelection(selection, (x, y) => readTileAt(layer.chunks!, x, y), scaleX, scaleY, tilemap.infinite ? undefined : { width: tilemap.width, height: tilemap.height }, 0); const bounds = pixelSelectionBounds([...selection, ...result.selection]); if (!bounds) return;
       const lock = await window.aidraw.acquireHumanLock({ documentId: document.id, region: { kind: 'tile', assetId: tilemap.id, ...bounds } }); if (!lock.acquired) return;
       try { if (await apply(`Scale tile selection ${scaleX}×${scaleY}`, [{ kind: 'pixel.tilemap.set', mapId: tilemap.id, layerId: layer.id, changes: result.changes.map((entry) => ({ x: entry.x, y: entry.y, gid: entry.value })), expectedRevision: layer.revision }])) { setSelection(result.selection); setSelectionScaleOpen(false); } }
@@ -1006,7 +1039,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const captureSelectionAsStamp = async (name: string) => {
     if (!selection.length) return;
     if (tilemap) {
-      const layer = Object.values(tilemap.layers).find((entry) => entry.type === 'tile' && entry.visible && !entry.locked);
+      const layer = activeTileLayerEntry?.layer;
       if (!layer || layer.type !== 'tile' || !layer.chunks) return;
       const stamp = captureTileStamp(createId('tile-stamp'), name, selection, (x, y) => readTileAt(layer.chunks!, x, y));
       if (await apply('Save reusable tile stamp', [{ kind: 'pixel.tile-stamps.replace', stamps: [...document.tileStamps, stamp] }])) { setActiveTileStampId(stamp.id); setStampCaptureOpen(false); }
@@ -1085,8 +1118,8 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     if (tool === 'hand' || event.button === 1) { setStart(point); setCursor(point); return; }
     if (!sprite && !tilemap) return;
     if (tilemap && tool === 'select') {
-      const objectLayers: typeof tilemap.layers[string][] = []; const visit = (id: string) => { const layer = tilemap.layers[id]; if (!layer?.visible) return; if (layer.type === 'group') for (const childId of layer.childIds ?? []) visit(childId); else if (layer.type === 'object' && !layer.locked) objectLayers.push(layer); }; for (const id of tilemap.layerIds) visit(id);
-      let hit: { layer: typeof tilemap.layers[string]; object: CollisionShape; point: PixelPoint } | undefined; for (const layer of [...objectLayers].reverse()) { const mapPoint = toLayerMapObjectPoint(event, layer); const unitScale = tilemap.orientation === 'orthogonal' ? view.scale / tilemap.tileWidth : view.scale / Math.max(tilemap.tileWidth, tilemap.tileHeight); const tolerance = 9 / Math.max(0.001, unitScale); const object = [...(layer.objects ?? [])].reverse().find((entry) => mapObjectAtPoint(entry, mapPoint, tolerance)); if (object) { hit = { layer, object, point: mapPoint }; break; } }
+      const objectLayers = visibleMapLayers.filter((entry) => entry.layer.type === 'object' && !entry.layer.locked);
+      let hit: { layer: typeof tilemap.layers[string]; object: CollisionShape; point: PixelPoint } | undefined; for (const entry of [...objectLayers].reverse()) { const layer = entry.layer; const mapPoint = toLayerMapObjectPoint(event, entry); const unitScale = tilemap.orientation === 'orthogonal' ? view.scale / tilemap.tileWidth : view.scale / Math.max(tilemap.tileWidth, tilemap.tileHeight); const tolerance = 9 / Math.max(0.001, unitScale); const object = [...(layer.objects ?? [])].reverse().find((candidate) => mapObjectAtPoint(candidate, mapPoint, tolerance)); if (object) { hit = { layer, object, point: mapPoint }; break; } }
       if (hit) {
         const objectBounds = mapObjectBounds(hit.object); const unitScale = tilemap.orientation === 'orthogonal' ? view.scale / tilemap.tileWidth : view.scale / Math.max(tilemap.tileWidth, tilemap.tileHeight); const handleThreshold = 9 / Math.max(0.001, unitScale); const pointIndex = selectedEntityId === hit.object.id && hit.object.points ? hit.object.points.findIndex((entry) => Math.hypot(hit.object.x + entry.x - hit.point.x, hit.object.y + entry.y - hit.point.y) <= handleThreshold) : -1; const atHandle = selectedEntityId === hit.object.id && (hit.object.type === 'rectangle' || hit.object.type === 'ellipse') && Math.hypot(hit.point.x - (objectBounds.x + objectBounds.width), hit.point.y - (objectBounds.y + objectBounds.height)) <= handleThreshold;
         if (selectedEntityId === hit.object.id && pointIndex >= 0 && event.ctrlKey) { const minimum = hit.object.type === 'polygon' ? 3 : 2; if (!hit.object.points || hit.object.points.length <= minimum) return; const next = structuredClone(tilemap); const layer = next.layers[hit.layer.id]; if (layer.type === 'object') { const object = deleteMapObjectPoint(hit.object, pointIndex); layer.objects = (layer.objects ?? []).map((entry) => entry.id === object.id ? object : entry); void (async () => { const lock = await window.aidraw.acquireHumanLock({ documentId: document.id, objectIds: [tilemap.id] }); try { if (lock.acquired) await apply('Delete map object point', [{ kind: 'pixel.asset.replace', asset: next, expectedRevision: tilemap.revision }]); } finally { if (lock.lockId) await window.aidraw.releaseHumanLock(lock.lockId); } })(); } return; }
@@ -1144,7 +1177,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
 
   const onPointerMove = (event: ReactPointerEvent<HTMLCanvasElement>) => {
     const point = toPixel(event);
-    if (mapObjectGesture && tilemap) { setMapObjectGesture({ ...mapObjectGesture, current: toLayerMapObjectPoint(event, tilemap.layers[mapObjectGesture.layerId]) }); setCursor(point); return; }
+    if (mapObjectGesture && tilemap) { const entry = visibleMapLayers.find((candidate) => candidate.layer.id === mapObjectGesture.layerId); if (entry) setMapObjectGesture({ ...mapObjectGesture, current: toLayerMapObjectPoint(event, entry) }); setCursor(point); return; }
     if (!start) { setCursor(point); return; }
     if (tool === 'hand' || event.button === 1) {
       setPan((current) => ({ x: current.x + event.movementX, y: current.y + event.movementY }));
@@ -1223,8 +1256,8 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
         }
       }
     } else if (tilemap) {
-      const layerId = Object.values(tilemap.layers).find((entry) => entry.type === 'tile' && entry.visible && !entry.locked)?.id;
-      const layer = layerId ? tilemap.layers[layerId] : undefined;
+      const layer = activeTileLayerEntry?.layer;
+      const layerId = layer?.type === 'tile' ? layer.id : undefined;
       const firstGid = terrainTileset?.type === 'tileset' ? terrainTileset.firstGid : 1;
       if (layerId && layer?.type === 'tile' && layer.chunks) {
         if (tool === 'stamp' && placedTiles.length) {
