@@ -183,11 +183,12 @@ describe('keyboard shortcut reference', () => {
     expect(readme).toContain('exactly 40 eligible bindings: all 39 tools displayed across the illustration (19) and pixel (20) rails plus the renderer-owned inspector toggle');
     expect(readme).toContain('Later still-free new mnemonics are reserved before fallback selection');
     expect(readme).toContain('remaining command/native-menu remapping');
-    expect(tracker).toContain('clean and live-synchronized through base `32ff9bb1ea858218bd58ba1ec885156e861e5584`');
+    expect(tracker).toContain('clean and live-synchronized through base `2f1423ed1953a62af53e82233a2b9921b4b1f969`');
     expect(tracker).toContain('all **39 displayed tool activations**—19 illustration and 20 pixel—plus the renderer-owned inspector toggle');
     expect(tracker).toContain('later still-free new mnemonics remain reserved from earlier fallbacks');
     expect(tracker).toContain('remapping beyond the later bounded UX-08 tool/inspector slice');
     expect(tracker).toContain('packaged/native shortcut-remapping acceptance');
+    expect(tracker).toContain('do not negate the exact 16 px→32 px root reflow evidence now recorded in UX-09');
     expect(tracker).not.toContain('This bounded **27-path** source/headless candidate');
     expect(testing).toContain('Restore defaults replaces all 40 eligible bindings');
     expect(testing).toContain('Select-`D`/Node-`F`/Crop-`C` migration');

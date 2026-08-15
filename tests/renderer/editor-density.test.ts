@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   EDITOR_CONTENT_VIEWPORT,
   EDITOR_DENSITY,
+  EDITOR_TEXT_REFLOW,
   MACOS_EDITOR_WINDOW_CHROME,
   editorOuterMinimumSize,
 } from '../../src/common/editor-layout';
@@ -74,10 +75,13 @@ describe('professional editor density contract', () => {
     expect(electronTypes).toContain("The `width` and `height` would be used as web page's size");
     expect(styles).toMatch(/html, body, #root \{[^}]*width: 100%;[^}]*height: 100%;[^}]*overflow: hidden;/);
     expect(styles).toMatch(/\.app-shell \{[^}]*width: 100%; height: 100%; display: grid;[^}]*minmax\(0, 1fr\)/);
+    const cssTypeTokens: Array<[string, number]> = [
+      ['ui-type-body', EDITOR_TEXT_REFLOW.typeRem.body],
+      ['ui-type-label', EDITOR_TEXT_REFLOW.typeRem.label],
+      ['ui-type-caption', EDITOR_TEXT_REFLOW.typeRem.caption],
+    ];
+    for (const [name, value] of cssTypeTokens) expect(styles).toContain(`--${name}: ${value}rem;`);
     const cssTokens: Array<[string, number]> = [
-      ['ui-type-body', EDITOR_DENSITY.bodyType],
-      ['ui-type-label', EDITOR_DENSITY.labelType],
-      ['ui-type-caption', EDITOR_DENSITY.captionType],
       ['ui-icon-secondary', EDITOR_DENSITY.secondaryIcon],
       ['ui-hit-primary', EDITOR_DENSITY.primaryHitTarget],
       ['ui-hit-secondary', EDITOR_DENSITY.secondaryHitTarget],
@@ -96,7 +100,7 @@ describe('professional editor density contract', () => {
     expect(MINIMUM_EDITOR_CANVAS_WIDTH).toBe(EDITOR_CONTENT_VIEWPORT.minimumWidth - EDITOR_DENSITY.toolRailWidth - EDITOR_DENSITY.compactSidebarWidth);
     expect(styles).toContain('html[data-native-titlebar="hidden-inset"] .topbar { -webkit-app-region: drag; }');
     expect(styles).toContain(`--macos-traffic-light-inset: ${MACOS_EDITOR_WINDOW_CHROME.trafficLightReservedWidth}px;`);
-    expect(styles).toContain('html[data-native-titlebar="hidden-inset"] .brand { width: calc(118px + var(--macos-traffic-light-inset)); padding-left: var(--macos-traffic-light-inset); }');
+    expect(styles).toContain('html[data-native-titlebar="hidden-inset"] .brand { width: max(calc(118px + var(--macos-traffic-light-inset)), calc(5.5rem + var(--macos-traffic-light-inset))); padding-left: var(--macos-traffic-light-inset); }');
     expect(styles).toContain('html[data-native-titlebar="hidden-inset"] .topbar button,');
     expect(styles).toContain('-webkit-app-region: no-drag;');
   });
@@ -136,7 +140,7 @@ describe('professional editor density contract', () => {
     expect(styles).toMatch(/\.tool-button \{[^}]*width: 42px;[^}]*var\(--ui-hit-primary\)/);
     expect(styles).toMatch(/\.color-pair input \{[^}]*width: var\(--ui-hit-secondary\);[^}]*height: var\(--ui-hit-secondary\)/);
     expect(styles).toMatch(/\.range-field input \{[^}]*height: var\(--ui-hit-secondary\)/);
-    expect(styles).toMatch(/\.panel-tabs \{[^}]*height: 52px/);
+    expect(styles).toMatch(/\.panel-tabs \{[^}]*height: max\(52px, calc\(31px \+ 1\.25rem\)\)/);
     expect(styles).toMatch(/\.object-quick-actions button \{[^}]*var\(--ui-hit-secondary\)/);
     expect(styles).toMatch(/\.statusbar \{[^}]*var\(--shell-status-height\)/);
     expect(styles).toMatch(/\.timeline \{[^}]*var\(--timeline-height\)/);
@@ -144,7 +148,7 @@ describe('professional editor density contract', () => {
     expect(styles).toMatch(/\.context-bar \{[^}]*overflow-x: auto/);
     expect(styles).toMatch(/\.tool-rail \{[^}]*overflow-y: auto/);
     expect(styles).toMatch(/\.document-tab-viewport \{[^}]*overflow-x: auto/);
-    expect(styles).toMatch(/\.panel-content \{[^}]*overflow-y: auto/);
+    expect(styles).toMatch(/\.panel-content \{[^}]*overflow: auto/);
     expect(styles).toMatch(/\.pixel-floating-controls \{[^}]*overflow-x: auto/);
     expect(styles).toMatch(/\.timeline-tags \{[^}]*overflow-x: auto/);
     expect(styles).toMatch(/\.frame-strip \{[^}]*overflow-x: auto/);

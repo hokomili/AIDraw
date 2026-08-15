@@ -1793,7 +1793,7 @@ function ContextBar({ document }: { document: AIDrawDocument }) {
 
   return (
     <>
-    <div className="context-bar">
+    <section className="context-bar" aria-label="Active tool settings">
       <span className="context-tool-name">
         {(document.kind === "pixel" ? pixelTools : illustrationTools).find(
           (entry) => entry.id === tool,
@@ -1877,7 +1877,7 @@ function ContextBar({ document }: { document: AIDrawDocument }) {
           <Grid3X3 size={13} /> Pixel rules on
         </span>
       )}
-    </div>
+    </section>
     {ditherPresetsOpen && document.kind === "pixel" && <DitherPresetDialog
       preferences={orderedDitherPreferences}
       onSave={saveDitherPreset}
@@ -6038,7 +6038,7 @@ function StatusBar({ document }: { document: AIDrawDocument }) {
   const setZoom = useEditorStore((state) => state.setZoom);
   const agents = useEditorStore((state) => state.snapshot?.mcp.sessions ?? []);
   return (
-    <footer className="statusbar">
+    <footer className="statusbar" aria-label="Document status and canvas zoom">
       <div className="status-mode">
         <span className={`mode-dot ${document.kind}`} />
         {document.kind === "pixel" ? "Pixel Art" : "Illustration"}
