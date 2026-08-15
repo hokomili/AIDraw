@@ -434,6 +434,38 @@ export interface CollisionShape {
   properties: Record<string, string | number | boolean>;
 }
 
+export interface TileMapObject {
+  id: Id;
+  type: 'tile';
+  /** Exact unsigned Tiled GID, including supported H/V/diagonal flags. */
+  gid: number;
+  /** Tiled object anchor in canonical map pixels. */
+  x: number;
+  y: number;
+  /** Explicit rendered tile-object dimensions in pixels. */
+  width: number;
+  height: number;
+  /** Clockwise Tiled rotation around the object anchor, in degrees. */
+  rotation: number;
+  name: string;
+  className: string;
+  properties: Record<string, string | number | boolean>;
+}
+
+export type MapObject = CollisionShape | TileMapObject;
+
+export type TileObjectAlignment =
+  | 'unspecified'
+  | 'topleft'
+  | 'top'
+  | 'topright'
+  | 'left'
+  | 'center'
+  | 'right'
+  | 'bottomleft'
+  | 'bottom'
+  | 'bottomright';
+
 export interface TileDefinition {
   id: number;
   sourceX: number;
@@ -478,6 +510,8 @@ export interface PixelTileset extends EntityBase {
     x: number;
     y: number;
   };
+  /** Tiled-compatible anchor for tile objects; omitted Tiled input defaults to unspecified. */
+  objectAlignment: TileObjectAlignment;
   columns: number;
   rows: number;
   spriteAssetId: Id;
@@ -506,7 +540,7 @@ export interface TilemapLayer extends EntityBase {
   parentId?: Id;
   childIds?: Id[];
   chunks?: Record<string, TilemapChunk>;
-  objects?: CollisionShape[];
+  objects?: MapObject[];
   offsetX: number;
   offsetY: number;
   parallaxX: number;

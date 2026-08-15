@@ -11,6 +11,7 @@ import {
   MAX_ILLUSTRATION_TEXT_LENGTH,
   MAX_TILEMAP_LAYER_OFFSET,
   MAX_TILESET_DRAWING_OFFSET,
+  decodeTiledGid,
   createId,
   createIllustrationDocument,
   createPixelDocument,
@@ -18,6 +19,7 @@ import {
   createPixelTileset,
   migrateDocument,
   nowIso,
+  resolveTilesetForGid,
   writePixels,
   writeTiles,
   type AIDrawDocument,
@@ -26,10 +28,12 @@ import {
   type BlendMode,
   type IllustrationLayer,
   type ImageObject,
+  type MapObject,
   type PaletteEntry,
   type PixelCel,
   type PixelLayer,
   type PixelSprite,
+  type PixelTilemap,
   type TextObject,
   type TextStyleRange,
   type TileDefinition,
@@ -622,11 +626,36 @@ function tiledProperties(value: any): Record<string, string | number | boolean> 
   return result;
 }
 
-function tiledObject(source: any): CollisionShape {
+function tiledCollisionShape(source: any): CollisionShape {
   const polygon = source.polygon?.points ?? source.polygon; const polyline = source.polyline?.points ?? source.polyline;
   const explicitType = ['rectangle', 'ellipse', 'polygon', 'polyline'].includes(source.type) ? source.type as CollisionShape['type'] : undefined;
   const parsePoints = (value: unknown): Array<{ x: number; y: number }> | undefined => typeof value === 'string' ? value.split(/\s+/).filter(Boolean).map((point) => { const [x, y] = point.split(',').map(Number); return { x, y }; }) : Array.isArray(value) ? value.map((point: any) => ({ x: Number(point.x), y: Number(point.y) })) : undefined;
   return { id: String(source.id ?? createId('collision')), type: explicitType ?? (polygon ? 'polygon' : polyline ? 'polyline' : source.ellipse ? 'ellipse' : 'rectangle'), x: Number(source.x ?? 0), y: Number(source.y ?? 0), width: Number(source.width ?? 0), height: Number(source.height ?? 0), points: parsePoints(polygon ?? polyline) ?? parsePoints(source.points), properties: { name: String(source.name ?? ''), class: String(source.class ?? (explicitType ? '' : source.type) ?? ''), ...tiledProperties(source.properties) } };
+}
+
+function tiledMapObject(source: any, document: ReturnType<typeof createPixelDocument>, map: PixelTilemap): MapObject {
+  if (source.gid === undefined) return tiledCollisionShape(source);
+  if (source.template !== undefined) throw new Error('Tiled object templates are not supported.');
+  const gid = integerInRange(source.gid, 1, 0xffff_ffff, 'Tiled tile-object GID');
+  const decoded = decodeTiledGid(gid);
+  if (!decoded.gid || (gid & 0x1000_0000) !== 0) throw new Error('Tiled tile objects require a nonzero orthogonal/isometric GID with only H/V/diagonal flags.');
+  const resolved = resolveTilesetForGid(document, map, decoded.gid);
+  const width = Number(source.width ?? 0) || resolved?.tileset.tileWidth;
+  const height = Number(source.height ?? 0) || resolved?.tileset.tileHeight;
+  if (!width || !height) throw new Error(`Tiled tile object ${String(source.id ?? '') || '(unnamed)'} needs explicit positive dimensions when its GID is unresolved.`);
+  return {
+    id: String(source.id ?? createId('tile-object')),
+    type: 'tile',
+    gid,
+    x: Number(source.x ?? 0),
+    y: Number(source.y ?? 0),
+    width,
+    height,
+    rotation: Number(source.rotation ?? 0),
+    name: String(source.name ?? ''),
+    className: String(source.class ?? source.type ?? ''),
+    properties: tiledProperties(source.properties),
+  };
 }
 
 function tiledCellCount(width: number, height: number, label: string): number {
@@ -661,7 +690,7 @@ function tiledData(source: any, width: number, height: number): number[] {
 
 function xmlTileset(source: any): Record<string, any> {
   if (source.source) return { firstgid: source.firstgid, source: source.source };
-  const tiles = arrayify(source.tile).map((tile: any) => ({ id: Number(tile.id), probability: Number(tile.probability ?? 1), properties: tiledProperties(tile.properties), animation: arrayify(tile.animation?.frame).map((frame: any) => ({ tileid: Number(frame.tileid), duration: Number(frame.duration ?? 100) })), objectgroup: tile.objectgroup ? { objects: arrayify(tile.objectgroup.object).map(tiledObject) } : undefined }));
+  const tiles = arrayify(source.tile).map((tile: any) => ({ id: Number(tile.id), probability: Number(tile.probability ?? 1), properties: tiledProperties(tile.properties), animation: arrayify(tile.animation?.frame).map((frame: any) => ({ tileid: Number(frame.tileid), duration: Number(frame.duration ?? 100) })), objectgroup: tile.objectgroup ? { objects: arrayify(tile.objectgroup.object) } : undefined }));
   const wangsets = arrayify(source.wangsets?.wangset).map((set: any) => ({ name: set.name, type: set.type, wangcolors: arrayify(set.wangcolor).map((color: any) => ({ name: color.name, color: color.color, tile: Number(color.tile ?? -1), probability: Number(color.probability ?? 1) })), wangtiles: arrayify(set.wangtile).map((tile: any) => ({ tileid: Number(tile.tileid), wangid: String(tile.wangid ?? '').split(',').map(Number) })) }));
   return { ...source, type: 'tileset', image: source.image?.source, imagewidth: source.image?.width, imageheight: source.image?.height, tiles, wangsets, properties: tiledProperties(source.properties), transformations: source.transformations };
 }
@@ -670,7 +699,7 @@ function xmlLayer(source: any, type: 'tilelayer' | 'objectgroup' | 'group', dept
   if (depth > MAX_TILED_DEPTH) throw new Error('Tiled group nesting exceeds the 64-level safety limit.');
   budget.layers += 1; if (budget.layers > MAX_TILED_LAYERS) throw new Error(`Tiled map exceeds the ${MAX_TILED_LAYERS.toLocaleString('en-US')}-layer limit.`);
   if (type === 'group') return { ...source, type, layers: [...arrayify(source.layer).map((entry) => xmlLayer(entry, 'tilelayer', depth + 1, budget)), ...arrayify(source.objectgroup).map((entry) => xmlLayer(entry, 'objectgroup', depth + 1, budget)), ...arrayify(source.group).map((entry) => xmlLayer(entry, 'group', depth + 1, budget))] };
-  if (type === 'objectgroup') return { ...source, type, objects: arrayify(source.object).map(tiledObject) };
+  if (type === 'objectgroup') return { ...source, type, objects: arrayify(source.object) };
   const data = source.data ?? {}; const chunks = arrayify(data.chunk).map((chunk: any) => ({ x: Number(chunk.x), y: Number(chunk.y), width: Number(chunk.width), height: Number(chunk.height), data: tiledData({ ...chunk, encoding: data.encoding, compression: data.compression }, Number(chunk.width), Number(chunk.height)) }));
   const normalizedData = chunks.length ? undefined : tiledData(data, Number(source.width ?? 0), Number(source.height ?? 0)); budget.cells += chunks.length ? chunks.reduce((total, chunk) => total + chunk.data.length, 0) : normalizedData!.length;
   if (budget.cells > MAX_TILED_TOTAL_CELLS) throw new Error('Tiled layer data exceeds the 16,777,216-cell total import budget.');
@@ -713,12 +742,19 @@ function validateTilesetStructure(source: any, fallbackTileWidth: number, fallba
     integerInRange(source.tileoffset.x ?? 0, -MAX_TILESET_DRAWING_OFFSET, MAX_TILESET_DRAWING_OFFSET, 'Tileset drawing offset x');
     integerInRange(source.tileoffset.y ?? 0, -MAX_TILESET_DRAWING_OFFSET, MAX_TILESET_DRAWING_OFFSET, 'Tileset drawing offset y');
   }
+  if (source.objectalignment !== undefined && ![
+    'unspecified', 'topleft', 'top', 'topright', 'left', 'center', 'right', 'bottomleft', 'bottom', 'bottomright',
+  ].includes(String(source.objectalignment))) throw new Error(`Unsupported Tiled tile-object alignment: ${String(source.objectalignment)}`);
   const tiles = arrayify(source.tiles ?? source.tile); if (tiles.length > MAX_TILESET_TILES) throw new Error('Tileset metadata exceeds the one-million-tile limit.');
   let animationFrames = 0; let collisionObjects = 0;
   for (const tile of tiles) {
     animationFrames += arrayify(tile.animation).length; if (animationFrames > MAX_TILESET_TILES) throw new Error('Tileset animation metadata exceeds the one-million-frame limit.');
     const collisions = arrayify(tile.objectgroup?.objects ?? tile.objectgroup?.object ?? tile.collisions); collisionObjects += collisions.length; if (collisionObjects > MAX_TILED_OBJECTS) throw new Error('Tileset collision metadata exceeds the 100,000-object limit.');
-    collisions.forEach((object, index) => validateObjectPoints(object, `Tileset collision ${index + 1}`));
+    collisions.forEach((object, index) => {
+      if (object?.gid !== undefined) throw new Error('Tiled tile objects inside tileset collision groups are not supported.');
+      if (object?.template !== undefined) throw new Error('Tiled object templates inside tileset collision groups are not supported.');
+      validateObjectPoints(object, `Tileset collision ${index + 1}`);
+    });
   }
   const wangSets = arrayify(source.wangsets); if (wangSets.length > 1_024) throw new Error('Tileset exceeds the 1,024-Wang-set limit.');
   let wangTiles = 0; for (const set of wangSets) { if (arrayify(set.colors ?? set.wangcolors).length > 256) throw new Error('A Wang set exceeds the 256-color limit.'); wangTiles += arrayify(set.wangtiles).length; }
@@ -738,7 +774,15 @@ function normalizeTiledMapStructure(tiled: any): void {
     integerInRange(source.offsety ?? 0, -MAX_TILEMAP_LAYER_OFFSET, MAX_TILEMAP_LAYER_OFFSET, `Tiled layer ${layerCount} offset y`);
     if (source.type === 'group') { for (const child of arrayify(source.layers)) walk(child, depth + 1); return; }
     if (source.type === 'objectgroup') {
-      const objects = arrayify(source.objects); objectCount += objects.length; if (objectCount > MAX_TILED_OBJECTS) throw new Error('Tiled map exceeds the 100,000-object limit.'); objects.forEach((object, index) => validateObjectPoints(object, `Map object ${index + 1}`)); return;
+      const objects = arrayify(source.objects); objectCount += objects.length; if (objectCount > MAX_TILED_OBJECTS) throw new Error('Tiled map exceeds the 100,000-object limit.'); objects.forEach((object, index) => {
+        validateObjectPoints(object, `Map object ${index + 1}`);
+        if (object.template !== undefined) throw new Error('Tiled object templates are not supported.');
+        if (object.gid !== undefined) {
+          integerInRange(object.gid, 1, 0xffff_ffff, `Tiled tile object ${index + 1} GID`);
+          const values = [object.x ?? 0, object.y ?? 0, object.width ?? 0, object.height ?? 0, object.rotation ?? 0].map(Number);
+          if (!values.every(Number.isFinite) || Math.abs(values[0]) > 16_777_216 || Math.abs(values[1]) > 16_777_216 || values[2] < 0 || values[2] > 16_777_216 || values[3] < 0 || values[3] > 16_777_216 || Math.abs(values[4]) > 16_777_216) throw new Error(`Tiled tile object ${index + 1} has geometry outside the supported bounds.`);
+        }
+      }); return;
     }
     const chunks = arrayify(source.chunks);
     if (chunks.length) {
@@ -774,8 +818,8 @@ async function attachTileset(document: ReturnType<typeof createPixelDocument>, s
   }
   const columns = Math.max(1, Number(source.columns ?? (Math.floor(imageWidth / tileWidth) || 1))); const tileCount = Math.max(1, Number(source.tilecount ?? columns * Math.max(1, Math.floor(imageHeight / tileHeight)))); const rows = Math.max(1, Math.ceil(tileCount / columns)); const spriteWidth = Math.max(tileWidth, imageWidth || columns * tileWidth); const spriteHeight = Math.max(tileHeight, imageHeight || rows * tileHeight); assertImageDimensions(spriteWidth, spriteHeight, 'Tileset pixel source'); const sprite = createPixelSprite(String(source.name ?? 'Tileset pixels'), spriteWidth, spriteHeight);
   if (imageBytes) { const cel = Object.values(sprite.cels)[0]; writePixels(cel, await quantizeImageToPalette(imageBytes, sprite.width, sprite.height, document.palette, { alphaThreshold: document.conversionDefaults.alphaThreshold, dithering: document.conversionDefaults.dithering })); const embedded = imageAsset(basename(imagePath!), `image/${extname(imagePath!).slice(1).replace('jpg', 'jpeg') || 'png'}`, imageBytes); document.assets[embedded.id] = embedded; document.linkedAssets.push({ id: createId('link'), name: basename(imagePath!), mode: 'linked', relativePath: relative(dirname(rootFilePath), imagePath!).replace(/\\/g, '/'), sha256: embedded.sha256, cachedPreviewAssetId: embedded.id }); }
-  const tileset = createPixelTileset(String(source.name ?? 'Tileset'), sprite.id, tileWidth, tileHeight, columns, rows); tileset.firstGid = Math.max(1, Number(sourceReference.firstgid ?? 1)); const margin = Number(source.margin ?? 0); const spacing = Number(source.spacing ?? 0); tileset.margin = margin; tileset.spacing = spacing; tileset.tileOffset = { x: Number(source.tileoffset?.x ?? 0), y: Number(source.tileoffset?.y ?? 0) }; const metadata = new Map(arrayify(source.tiles ?? source.tile).map((tile: any) => [Number(tile.id), tile]));
-  for (let id = 0; id < tileCount; id += 1) { const tile = metadata.get(id); const definition: TileDefinition = { id, sourceX: margin + id % columns * (tileWidth + spacing), sourceY: margin + Math.floor(id / columns) * (tileHeight + spacing), probability: Number(tile?.probability ?? 1), animation: arrayify(tile?.animation).map((frame: any) => ({ tileId: Number(frame.tileid ?? frame.tileId), durationMs: Number(frame.duration ?? frame.durationMs ?? 100) })), collisions: arrayify(tile?.objectgroup?.objects ?? tile?.collisions).map(tiledObject), properties: tiledProperties(tile?.properties) }; tileset.tiles[id] = definition; }
+  const tileset = createPixelTileset(String(source.name ?? 'Tileset'), sprite.id, tileWidth, tileHeight, columns, rows); tileset.firstGid = Math.max(1, Number(sourceReference.firstgid ?? 1)); const margin = Number(source.margin ?? 0); const spacing = Number(source.spacing ?? 0); tileset.margin = margin; tileset.spacing = spacing; tileset.tileOffset = { x: Number(source.tileoffset?.x ?? 0), y: Number(source.tileoffset?.y ?? 0) }; tileset.objectAlignment = String(source.objectalignment ?? 'unspecified') as typeof tileset.objectAlignment; const metadata = new Map(arrayify(source.tiles ?? source.tile).map((tile: any) => [Number(tile.id), tile]));
+  for (let id = 0; id < tileCount; id += 1) { const tile = metadata.get(id); const definition: TileDefinition = { id, sourceX: margin + id % columns * (tileWidth + spacing), sourceY: margin + Math.floor(id / columns) * (tileHeight + spacing), probability: Number(tile?.probability ?? 1), animation: arrayify(tile?.animation).map((frame: any) => ({ tileId: Number(frame.tileid ?? frame.tileId), durationMs: Number(frame.duration ?? frame.durationMs ?? 100) })), collisions: arrayify(tile?.objectgroup?.objects ?? tile?.collisions).map(tiledCollisionShape), properties: tiledProperties(tile?.properties) }; tileset.tiles[id] = definition; }
   tileset.wangSets = arrayify(source.wangsets).map((set: any): WangSet => ({ id: createId('wang'), name: String(set.name ?? 'Terrain'), type: set.type === 'corner' || set.type === 'edge' ? set.type : 'mixed', colors: arrayify(set.colors ?? set.wangcolors).map((color: any, index) => ({ id: index + 1, name: String(color.name ?? `Terrain ${index + 1}`), color: String(color.color ?? '#ff00ff'), tileId: Number(color.tile ?? -1), probability: Number(color.probability ?? 1) })), tiles: arrayify(set.wangtiles).map((tile: any) => ({ tileId: Number(tile.tileid), wangId: wangId(tile.wangid) })) }));
   const transforms = source.transformations; if (transforms) tileset.transformations = { hFlip: transforms.hflip !== false && transforms.hflip !== 0, vFlip: transforms.vflip !== false && transforms.vflip !== 0, rotate: transforms.rotate !== false && transforms.rotate !== 0 };
   document.pixelAssets[sprite.id] = sprite; document.assetIds.push(sprite.id); document.pixelAssets[tileset.id] = tileset; document.assetIds.push(tileset.id); return tileset;
@@ -791,7 +835,7 @@ async function importTiled(bytes: Buffer, name: string, filePath: string): Promi
   for (const source of arrayify(tiled.tilesets)) { const tileset = await attachTileset(document, source, filePath, map.tileWidth, map.tileHeight, warnings); map.tilesetIds.push(tileset.id); }
   const addLayer = (source: any, parentId?: string): string => {
     const timestamp = nowIso(); const id = createId('map-layer'); const type = source.type === 'objectgroup' ? 'object' as const : source.type === 'group' ? 'group' as const : 'tile' as const;
-    const layer = { id, revision: 0, name: String(source.name ?? 'Layer'), createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, type, visible: source.visible !== false && source.visible !== 0, locked: false, opacity: Number(source.opacity ?? 1), parentId, childIds: type === 'group' ? [] : undefined, chunks: type === 'tile' ? {} : undefined, objects: type === 'object' ? arrayify(source.objects).map(tiledObject) : undefined, offsetX: Number(source.offsetx ?? 0), offsetY: Number(source.offsety ?? 0), parallaxX: Number(source.parallaxx ?? 1), parallaxY: Number(source.parallaxy ?? 1) };
+    const layer = { id, revision: 0, name: String(source.name ?? 'Layer'), createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, type, visible: source.visible !== false && source.visible !== 0, locked: false, opacity: Number(source.opacity ?? 1), parentId, childIds: type === 'group' ? [] : undefined, chunks: type === 'tile' ? {} : undefined, objects: type === 'object' ? arrayify(source.objects).map((object) => tiledMapObject(object, document, map)) : undefined, offsetX: Number(source.offsetx ?? 0), offsetY: Number(source.offsety ?? 0), parallaxX: Number(source.parallaxx ?? 1), parallaxY: Number(source.parallaxy ?? 1) };
     map.layers[id] = layer; if (parentId) map.layers[parentId].childIds?.push(id); else map.layerIds.push(id);
     if (type === 'tile' && layer.chunks) for (const chunk of source.chunks ?? [{ x: 0, y: 0, width: Number(source.width ?? map.width), height: Number(source.height ?? map.height), data: source.data ?? [] }]) { const width = Number(chunk.width || map.width || 1); const changes = arrayify(chunk.data).map((gid, index) => ({ x: Number(chunk.x ?? 0) + index % width, y: Number(chunk.y ?? 0) + Math.floor(index / width), gid: Number(gid) })); writeTiles(layer.chunks, changes); }
     if (type === 'group') for (const child of arrayify(source.layers)) addLayer(child, id); return id;

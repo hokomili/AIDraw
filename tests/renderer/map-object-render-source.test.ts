@@ -7,9 +7,10 @@ describe('map-object render source parity', () => {
     const headless = await readFile(new URL('../../src/main/render-document.ts', import.meta.url), 'utf8');
     expect(interactive).toContain("import { drawMapObjectOverlay, mapObjectIntersectsRasterRegion } from '../../common/map-object-render'");
     expect(headless).toContain("import { drawMapObjectOverlay, mapObjectsIntersectingRasterRegion } from '../common/map-object-render'");
-    expect(interactive).toContain('if (!mapObjectIntersectsRasterRegion(object, projectedMatrix, viewport, { selected, unitScale })) continue');
-    expect(headless).toContain('const projectedMatrix = { ...matrix, e: matrix.e + entry.offsetX, f: matrix.f + entry.offsetY }');
-    expect(headless).toContain('const objects = mapObjectsIntersectingRasterRegion(layer.objects ?? [], projectedMatrix, region, { unitScale })');
+    expect(interactive).toContain("if (object.type !== 'tile')");
+    expect(interactive).toContain('if (!mapObjectIntersectsRasterRegion(object, matrix, viewport, { selected, unitScale })) continue');
+    expect(headless).toContain("if (object.type !== 'tile')");
+    expect(headless).toContain('if (!mapObjectsIntersectingRasterRegion([object], matrix, layerRegion, { unitScale }).length) continue');
     expect(interactive).toContain('drawMapObjectOverlay(context, object, { selected, unitScale })');
     expect(headless).toContain('drawMapObjectOverlay(context, object, { unitScale })');
   });

@@ -14,6 +14,7 @@ import {
   type AIDrawDocument,
   type IllustrationDocument,
   type IllustrationObject,
+  type MapObject,
   type PaintStyle,
   type PaletteCycle,
   type PixelDocument,
@@ -777,11 +778,28 @@ function tiledObjectJson(shape: PixelTileset['tiles'][number]['collisions'][numb
   return { id: objectIds.next(shape.id), name: typeof name === 'string' ? name : '', type: typeof className === 'string' ? className : '', x: shape.x, y: shape.y, width: shape.width ?? 0, height: shape.height ?? 0, ellipse: shape.type === 'ellipse' || undefined, polygon: shape.type === 'polygon' ? shape.points : undefined, polyline: shape.type === 'polyline' ? shape.points : undefined, properties: tiledPropertyJson(properties) };
 }
 
+function tiledMapObjectJson(object: MapObject, objectIds: TiledObjectIdAllocator) {
+  if (object.type !== 'tile') return tiledObjectJson(object, objectIds);
+  return {
+    id: objectIds.next(object.id),
+    name: object.name,
+    type: object.className,
+    gid: object.gid,
+    x: object.x,
+    y: object.y,
+    width: object.width,
+    height: object.height,
+    rotation: object.rotation || undefined,
+    properties: tiledPropertyJson(object.properties),
+  };
+}
+
 function tilesetJson(document: PixelDocument, tileset: PixelTileset, image: string | undefined, objectIds: TiledObjectIdAllocator) {
   const sprite = document.pixelAssets[tileset.spriteAssetId];
   return {
     type: 'tileset', version: '1.10', tiledversion: '1.11.2', name: tileset.name, tilewidth: tileset.tileWidth, tileheight: tileset.tileHeight, margin: tileset.margin, spacing: tileset.spacing,
     tileoffset: tileset.tileOffset.x || tileset.tileOffset.y ? { x: tileset.tileOffset.x, y: tileset.tileOffset.y } : undefined,
+    objectalignment: tileset.objectAlignment === 'unspecified' ? undefined : tileset.objectAlignment,
     tilecount: tileset.columns * tileset.rows, columns: tileset.columns,
     image, imagewidth: sprite?.type === 'sprite' ? sprite.width : undefined, imageheight: sprite?.type === 'sprite' ? sprite.height : undefined,
     transformations: { hflip: tileset.transformations.hFlip, vflip: tileset.transformations.vFlip, rotate: tileset.transformations.rotate, preferuntransformed: false },
@@ -795,7 +813,7 @@ function *tiledTilesetObjects(tileset: PixelTileset) {
 }
 
 function *tiledMapObjects(map: PixelTilemap) {
-  function *walk(id: string): Generator<PixelTileset['tiles'][number]['collisions'][number]> {
+  function *walk(id: string): Generator<MapObject> {
     const layer = map.layers[id];
     if (layer.type === 'group') { for (const childId of layer.childIds ?? []) yield* walk(childId); }
     else if (layer.type === 'object') for (const shape of layer.objects ?? []) yield shape;
@@ -816,7 +834,7 @@ function tilemapToTiledWithObjectIds(document: PixelDocument, map: PixelTilemap,
   const layerJson = (id: string): Record<string, unknown> => {
     const layer = map.layers[id]; const common = { id: nextLayerId++, name: layer.name, visible: layer.visible, opacity: layer.opacity, ...(layer.offsetX ? { offsetx: layer.offsetX } : {}), ...(layer.offsetY ? { offsety: layer.offsetY } : {}), parallaxx: layer.parallaxX, parallaxy: layer.parallaxY };
     if (layer.type === 'group') return { ...common, type: 'group', layers: (layer.childIds ?? []).map(layerJson) };
-    if (layer.type === 'object') return { ...common, type: 'objectgroup', objects: (layer.objects ?? []).map((shape) => tiledObjectJson(shape, objectIds)) };
+    if (layer.type === 'object') return { ...common, type: 'objectgroup', objects: (layer.objects ?? []).map((object) => tiledMapObjectJson(object, objectIds)) };
     const data = plan.tileLayers.get(id); if (!data) throw new Error(`Tiled export tile layer ${id} was not planned.`);
     return { ...common, type: 'tilelayer', ...(data.infinite ? { chunks: data.chunks } : { width: map.width, height: map.height, data: data.data }) };
   };
@@ -845,12 +863,17 @@ function collisionXml(shape: PixelTileset['tiles'][number]['collisions'][number]
   return `<object id="${objectIds.next(shape.id)}" name="${xml(typeof name === 'string' ? name : '')}" type="${xml(typeof className === 'string' ? className : '')}" x="${shape.x}" y="${shape.y}" width="${shape.width ?? 0}" height="${shape.height ?? 0}">${geometry}${tiledPropertyXml(properties)}</object>`;
 }
 
+function mapObjectXml(object: MapObject, objectIds: TiledObjectIdAllocator): string {
+  if (object.type !== 'tile') return collisionXml(object, objectIds);
+  return `<object id="${objectIds.next(object.id)}" name="${xml(object.name)}" type="${xml(object.className)}" gid="${object.gid}" x="${object.x}" y="${object.y}" width="${object.width}" height="${object.height}"${object.rotation ? ` rotation="${object.rotation}"` : ''}>${tiledPropertyXml(object.properties)}</object>`;
+}
+
 function tilesetXml(document: PixelDocument, tileset: PixelTileset, image: string, objectIds: TiledObjectIdAllocator): string {
   const sprite = document.pixelAssets[tileset.spriteAssetId];
   const tiles = Object.values(tileset.tiles).filter((tile) => tile.probability !== 1 || tile.animation.length || tile.collisions.length || Object.keys(tile.properties).length).map((tile) => `<tile id="${tile.id}" probability="${tile.probability}">${tiledPropertyXml(tile.properties)}${tile.animation.length ? `<animation>${tile.animation.map((frame) => `<frame tileid="${frame.tileId}" duration="${frame.durationMs}"/>`).join('')}</animation>` : ''}${tile.collisions.length ? `<objectgroup>${tile.collisions.map((shape) => collisionXml(shape, objectIds)).join('')}</objectgroup>` : ''}</tile>`).join('');
   const wangsets = tileset.wangSets.length ? `<wangsets>${tileset.wangSets.map((set) => `<wangset name="${xml(set.name)}" type="${set.type}">${set.colors.map((color) => `<wangcolor name="${xml(color.name)}" color="${xml(color.color)}" tile="${color.tileId}" probability="${color.probability}"/>`).join('')}${set.tiles.map((tile) => `<wangtile tileid="${tile.tileId}" wangid="${tile.wangId.join(',')}"/>`).join('')}</wangset>`).join('')}</wangsets>` : '';
   const tileOffset = tileset.tileOffset.x || tileset.tileOffset.y ? `<tileoffset x="${tileset.tileOffset.x}" y="${tileset.tileOffset.y}"/>` : '';
-  return `<tileset version="1.10" tiledversion="1.11.2" name="${xml(tileset.name)}" tilewidth="${tileset.tileWidth}" tileheight="${tileset.tileHeight}" margin="${tileset.margin}" spacing="${tileset.spacing}" tilecount="${tileset.columns * tileset.rows}" columns="${tileset.columns}">${tileOffset}<image source="${xml(image)}" width="${sprite?.type === 'sprite' ? sprite.width : tileset.columns * tileset.tileWidth}" height="${sprite?.type === 'sprite' ? sprite.height : tileset.rows * tileset.tileHeight}"/><transformations hflip="${Number(tileset.transformations.hFlip)}" vflip="${Number(tileset.transformations.vFlip)}" rotate="${Number(tileset.transformations.rotate)}" preferuntransformed="0"/>${tiles}${wangsets}</tileset>`;
+  return `<tileset version="1.10" tiledversion="1.11.2" name="${xml(tileset.name)}" tilewidth="${tileset.tileWidth}" tileheight="${tileset.tileHeight}" margin="${tileset.margin}" spacing="${tileset.spacing}" tilecount="${tileset.columns * tileset.rows}" columns="${tileset.columns}"${tileset.objectAlignment === 'unspecified' ? '' : ` objectalignment="${tileset.objectAlignment}"`}>${tileOffset}<image source="${xml(image)}" width="${sprite?.type === 'sprite' ? sprite.width : tileset.columns * tileset.tileWidth}" height="${sprite?.type === 'sprite' ? sprite.height : tileset.rows * tileset.tileHeight}"/><transformations hflip="${Number(tileset.transformations.hFlip)}" vflip="${Number(tileset.transformations.vFlip)}" rotate="${Number(tileset.transformations.rotate)}" preferuntransformed="0"/>${tiles}${wangsets}</tileset>`;
 }
 
 function tilemapXml(document: PixelDocument, map: PixelTilemap, images: Record<string, string>, objectIds: TiledObjectIdAllocator, plan: TiledMapExportPlan): string {
@@ -859,7 +882,7 @@ function tilemapXml(document: PixelDocument, map: PixelTilemap, images: Record<s
     const layer = map.layers[id]; if (!layer) return '';
     const common = `id="${nextLayerId++}" name="${xml(layer.name)}" visible="${Number(layer.visible)}" opacity="${layer.opacity}"${layer.offsetX ? ` offsetx="${layer.offsetX}"` : ''}${layer.offsetY ? ` offsety="${layer.offsetY}"` : ''} parallaxx="${layer.parallaxX}" parallaxy="${layer.parallaxY}"`;
     if (layer.type === 'group') return `<group ${common}>${(layer.childIds ?? []).map(layerXml).join('')}</group>`;
-    if (layer.type === 'object') return `<objectgroup ${common}>${(layer.objects ?? []).map((shape) => collisionXml(shape, objectIds)).join('')}</objectgroup>`;
+    if (layer.type === 'object') return `<objectgroup ${common}>${(layer.objects ?? []).map((object) => mapObjectXml(object, objectIds)).join('')}</objectgroup>`;
     const data = plan.tileLayers.get(id); if (!data) throw new Error(`Tiled export tile layer ${id} was not planned.`);
     if (data.infinite) return `<layer ${common} width="${map.width}" height="${map.height}"><data encoding="csv">${data.chunks.map((chunk) => `<chunk x="${chunk.x}" y="${chunk.y}" width="${chunk.width}" height="${chunk.height}">${chunk.data.join(',')}</chunk>`).join('')}</data></layer>`;
     return `<layer ${common} width="${map.width}" height="${map.height}"><data encoding="csv">${data.data.join(',')}</data></layer>`;

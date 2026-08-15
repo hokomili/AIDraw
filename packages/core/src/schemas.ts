@@ -562,6 +562,22 @@ const CollisionShapeInputSchema = z.object({
   if ((object.type === 'polygon' || object.type === 'polyline') && (!object.points || object.points.length < 2)) context.addIssue({ code: 'custom', path: ['points'], message: 'Polygon and polyline map objects require at least two points' });
 });
 const CollisionShapesInputSchema = z.array(CollisionShapeInputSchema).max(100_000).superRefine((objects, context) => validateUniqueStringIds(objects, context, 'Map object IDs must be unique'));
+const TileMapObjectInputSchema = z.object({
+  id: IdSchema,
+  type: z.literal('tile'),
+  gid: FiniteNumberSchema.int().min(1).max(0xffff_ffff)
+    .refine((value) => (value & 0x0fff_ffff) !== 0 && (value & 0x1000_0000) === 0, 'Tile objects require a nonzero orthogonal/isometric Tiled GID'),
+  x: FiniteNumberSchema.min(-MAX_PIXEL_COORDINATE).max(MAX_PIXEL_COORDINATE),
+  y: FiniteNumberSchema.min(-MAX_PIXEL_COORDINATE).max(MAX_PIXEL_COORDINATE),
+  width: FiniteNumberSchema.min(1).max(MAX_PIXEL_COORDINATE),
+  height: FiniteNumberSchema.min(1).max(MAX_PIXEL_COORDINATE),
+  rotation: FiniteNumberSchema.min(-MAX_PIXEL_COORDINATE).max(MAX_PIXEL_COORDINATE),
+  name: z.string().max(200),
+  className: z.string().max(200),
+  properties: PropertiesInputSchema,
+}).strict();
+const MapObjectsInputSchema = z.array(z.union([CollisionShapeInputSchema, TileMapObjectInputSchema])).max(100_000)
+  .superRefine((objects, context) => validateUniqueStringIds(objects, context, 'Map object IDs must be unique'));
 const TileDefinitionInputSchema = z.object({
   id: FiniteNumberSchema.int().nonnegative(),
   sourceX: FiniteNumberSchema.nonnegative().max(MAX_PIXEL_COORDINATE),
@@ -615,7 +631,7 @@ const TilemapLayerBaseInputShape = {
 };
 const TilemapLayerInputSchema = z.discriminatedUnion('type', [
   z.object({ ...TilemapLayerBaseInputShape, type: z.literal('tile'), chunks: TilemapChunksInputSchema }).strict(),
-  z.object({ ...TilemapLayerBaseInputShape, type: z.literal('object'), objects: CollisionShapesInputSchema }).strict(),
+  z.object({ ...TilemapLayerBaseInputShape, type: z.literal('object'), objects: MapObjectsInputSchema }).strict(),
   z.object({ ...TilemapLayerBaseInputShape, type: z.literal('group'), childIds: OrderedEntityIdsInputSchema }).strict(),
 ]);
 const TilemapLayersInputSchema = z.record(z.string(), TilemapLayerInputSchema).superRefine((layers, context) => {
@@ -658,6 +674,9 @@ const PixelTilesetInputSchema = z.object({
     x: FiniteNumberSchema.int().min(-MAX_TILESET_DRAWING_OFFSET).max(MAX_TILESET_DRAWING_OFFSET),
     y: FiniteNumberSchema.int().min(-MAX_TILESET_DRAWING_OFFSET).max(MAX_TILESET_DRAWING_OFFSET),
   }).strict().default({ x: 0, y: 0 }),
+  objectAlignment: z.enum([
+    'unspecified', 'topleft', 'top', 'topright', 'left', 'center', 'right', 'bottomleft', 'bottom', 'bottomright',
+  ]).default('unspecified'),
   columns: FiniteNumberSchema.int().min(1).max(MAX_TILESET_TILES),
   rows: FiniteNumberSchema.int().min(1).max(MAX_TILESET_TILES),
   spriteAssetId: IdSchema,

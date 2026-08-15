@@ -32,7 +32,9 @@ describe('orthogonal projection source parity', () => {
     expect(interactive).toContain("const sourceIsRenderable = mapSourceAsset?.type === 'sprite'");
     expect(interactive).toContain(': canonicalRect.x + canonicalRect.width > layerViewportRegion.x');
     expect(interactive.indexOf('const mapSourceAsset =')).toBeLessThan(interactive.indexOf('const canonicalPlacement ='));
-    expect(interactive.indexOf('const canonicalIntersects = canonicalPlacement')).toBeLessThan(interactive.indexOf('const sourcePlan ='));
+    const canonicalIntersectsIndex = interactive.indexOf('const canonicalIntersects = canonicalPlacement');
+    expect(canonicalIntersectsIndex).toBeGreaterThan(-1);
+    expect(canonicalIntersectsIndex).toBeLessThan(interactive.indexOf('const sourcePlan = mapSourceAsset', canonicalIntersectsIndex));
     expect(interactive).toContain('const placement = resolved && sourceIsRenderable ? orthogonalTileArtworkPlacement(');
     expect(interactive).toContain('decoded, resolved.tileset.tileOffset)');
     expect(interactive).toContain("const gridCellRect = (point: PixelPoint): IsometricCellRect => tilemap?.orientation === 'isometric'");

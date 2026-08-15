@@ -8,6 +8,11 @@ describe('tilemap object geometry', () => {
   it('uses polygon edges and interiors instead of accepting the entire bounding box', () => { const polygon = { id: 'p', type: 'polygon' as const, x: 0, y: 0, points: [{ x: 0, y: 0 }, { x: 12, y: 0 }, { x: 0, y: 12 }], properties: {} }; expect(mapObjectAtPoint(polygon, { x: 2, y: 2 })).toBe(true); expect(mapObjectAtPoint(polygon, { x: 11, y: 11 }, 0)).toBe(false); });
   it('hit-tests polylines by segment tolerance', () => { const polyline = { id: 'l', type: 'polyline' as const, x: 4, y: 5, points: [{ x: 0, y: 0 }, { x: 10, y: 0 }], properties: {} }; expect(mapObjectAtPoint(polyline, { x: 9, y: 6 }, 2)).toBe(true); expect(mapObjectAtPoint(polyline, { x: 9, y: 10 }, 2)).toBe(false); });
   it('moves all shapes and integer-resizes bounded shapes', () => { const rectangle = { id: 'r', type: 'rectangle' as const, x: 4, y: 5, width: 8, height: 9, properties: {} }; expect(transformMapObject(rectangle, 'move', { x: 2.4, y: -3.6 })).toMatchObject({ x: 6, y: 1 }); expect(transformMapObject(rectangle, 'resize', { x: -20, y: 2 })).toMatchObject({ width: 1, height: 11 }); });
+  it('moves and compatibly resizes tile objects without changing raw GID identity or rotation', () => {
+    const tile = { id: 'tile', type: 'tile' as const, gid: 0xe000_0011, x: 12, y: 18, width: 16, height: 24, rotation: 30, name: 'Chest', className: 'loot', properties: { locked: true } };
+    expect(transformMapObject(tile, 'move', { x: 2.4, y: -3.6 })).toEqual({ ...tile, x: 14, y: 14 });
+    expect(transformMapObject(tile, 'resize', { x: 5.6, y: -40 })).toEqual({ ...tile, width: 22, height: 1 });
+  });
   it('moves an exact multi-selection together without changing order, local points, or unselected shapes', () => {
     const source: CollisionShape[] = [
       { id: 'rectangle', type: 'rectangle' as const, x: 4, y: 5, width: 8, height: 9, properties: { solid: true } },

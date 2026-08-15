@@ -231,6 +231,63 @@ describe('native document rendering', () => {
     expect(Buffer.from(requested.getContext('2d').getImageData(0, 0, 1, 1).data)).toEqual(Buffer.from(expected));
   });
 
+  it('renders and region-culls aligned sprite-backed tile objects without changing nominal orthogonal output bounds', () => {
+    const document = createPixelDocument('project', 'Orthogonal tile objects'); document.assetIds = []; document.pixelAssets = {}; document.palette[2].color = '#ed3f5fff';
+    const sprite = createPixelSprite('Object source', 2, 2); writePixels(Object.values(sprite.cels)[0], Array.from({ length: 4 }, (_, index) => ({ x: index % 2, y: Math.floor(index / 2), index: 2 })));
+    const tileset = createPixelTileset('Object tiles', sprite.id, 2, 2, 1, 1); tileset.firstGid = 1; tileset.objectAlignment = 'bottomright'; tileset.tileOffset = { x: 1, y: -1 };
+    const map = createPixelTilemap('Object map'); map.width = 4; map.height = 4; map.tileWidth = 4; map.tileHeight = 4; map.tilesetIds = [tileset.id]; const layer = map.layers[map.layerIds[0]]; layer.type = 'object'; delete layer.chunks; layer.offsetX = 2; layer.objects = [{ id: 'chest', type: 'tile', gid: 1, x: 8, y: 8, width: 4, height: 4, rotation: 0, name: 'Chest', className: 'loot', properties: { coins: 3 } }];
+    document.pixelAssets = { [sprite.id]: sprite, [tileset.id]: tileset, [map.id]: map }; document.assetIds = [sprite.id, tileset.id, map.id]; document.activeAssetId = map.id; const canonical = structuredClone(document);
+
+    const full = renderTilemap(document, map); const requested = renderTilemapRegion(document, map, { x: 10, y: 3, width: 1, height: 1 });
+    expect({ width: full.width, height: full.height }).toEqual({ width: 16, height: 16 });
+    expect([...full.getContext('2d').getImageData(10, 3, 1, 1).data]).toEqual([237, 63, 95, 255]);
+    expect(Buffer.from(requested.getContext('2d').getImageData(0, 0, 1, 1).data)).toEqual(Buffer.from(full.getContext('2d').getImageData(10, 3, 1, 1).data));
+    expect([...full.getContext('2d').getImageData(4, 4, 1, 1).data]).toEqual([0, 0, 0, 0]);
+    expect(document).toEqual(canonical);
+  });
+
+  it('uses the same bounded alignment and culling contract for a resolved tile object with no sprite source', () => {
+    const document = createPixelDocument('project', 'Missing tile-object source'); document.assetIds = []; document.pixelAssets = {};
+    const tileset = createPixelTileset('Missing object tiles', 'missing-sprite', 2, 2, 1, 1); tileset.firstGid = 1; tileset.objectAlignment = 'bottomright'; tileset.tileOffset = { x: 1, y: -1 };
+    const map = createPixelTilemap('Object fallback map'); map.width = 4; map.height = 4; map.tileWidth = 4; map.tileHeight = 4; map.tilesetIds = [tileset.id]; const layer = map.layers[map.layerIds[0]]; layer.type = 'object'; delete layer.chunks; layer.objects = [{ id: 'fallback', type: 'tile', gid: 1, x: 8, y: 8, width: 4, height: 4, rotation: 0, name: 'Fallback', className: '', properties: {} }];
+    document.pixelAssets = { [tileset.id]: tileset, [map.id]: map }; document.assetIds = [tileset.id, map.id]; document.activeAssetId = map.id;
+    const full = renderTilemap(document, map); const requested = renderTilemapRegion(document, map, { x: 8, y: 3, width: 1, height: 1 });
+    expect([...full.getContext('2d').getImageData(8, 3, 1, 1).data][3]).toBe(255);
+    expect([...full.getContext('2d').getImageData(4, 4, 1, 1).data]).toEqual([0, 0, 0, 0]);
+    expect(Buffer.from(requested.getContext('2d').getImageData(0, 0, 1, 1).data)).toEqual(Buffer.from(full.getContext('2d').getImageData(8, 3, 1, 1).data));
+  });
+
+  it('shares isometric tile-object placement for sprite artwork and a bounded unresolved fallback', () => {
+    const document = createPixelDocument('project', 'Isometric tile objects'); document.assetIds = []; document.pixelAssets = {}; document.palette[2].color = '#06d6a0ff';
+    const sprite = createPixelSprite('Iso object source', 2, 3); writePixels(Object.values(sprite.cels)[0], Array.from({ length: 6 }, (_, index) => ({ x: index % 2, y: Math.floor(index / 2), index: 2 })));
+    const tileset = createPixelTileset('Iso object tiles', sprite.id, 2, 3, 1, 1); tileset.firstGid = 1;
+    const map = createPixelTilemap('Iso object map'); map.orientation = 'isometric'; map.width = 4; map.height = 4; map.tileWidth = 4; map.tileHeight = 2; map.tilesetIds = [tileset.id]; const layer = map.layers[map.layerIds[0]]; layer.type = 'object'; delete layer.chunks; layer.objects = [
+      { id: 'sprite-object', type: 'tile', gid: 1, x: 8, y: 8, width: 4, height: 6, rotation: 0, name: 'Actor', className: 'npc', properties: {} },
+      { id: 'fallback-object', type: 'tile', gid: 77, x: 12, y: 4, width: 2, height: 2, rotation: 0, name: 'Unknown', className: '', properties: {} },
+    ];
+    document.pixelAssets = { [sprite.id]: sprite, [tileset.id]: tileset, [map.id]: map }; document.assetIds = [sprite.id, tileset.id, map.id]; document.activeAssetId = map.id;
+    const full = renderTilemap(document, map);
+    expect({ width: full.width, height: full.height }).toEqual({ width: 16, height: 8 });
+    expect([...full.getContext('2d').getImageData(3, 1, 1, 1).data]).toEqual([6, 214, 160, 255]);
+    expect([...full.getContext('2d').getImageData(9, 3, 1, 1).data][3]).toBe(255);
+  });
+
+  it('applies raw diagonal tile-object pixels and samples the existing tile animation timeline', () => {
+    const document = createPixelDocument('project', 'Transformed animated tile object'); document.assetIds = []; document.pixelAssets = {};
+    const colors = ['#ef476fff', '#ffd166ff', '#06d6a0ff', '#118ab2ff', '#8338ecff', '#fb5607ff', '#3a86ffff', '#8ac926ff', '#31a6a0ff']; colors.forEach((color, index) => { document.palette[index + 2].color = color; });
+    const sprite = createPixelSprite('Object animation source', 8, 2); const cel = Object.values(sprite.cels)[0]; writePixels(cel, [
+      ...Array.from({ length: 8 }, (_, index) => ({ x: index % 4, y: Math.floor(index / 4), index: index + 2 })),
+      ...Array.from({ length: 8 }, (_, index) => ({ x: 4 + index % 4, y: Math.floor(index / 4), index: 10 })),
+    ]);
+    const tileset = createPixelTileset('Animated object tiles', sprite.id, 4, 2, 2, 1); tileset.firstGid = 1; tileset.objectAlignment = 'center'; tileset.tiles[0] = { id: 0, sourceX: 0, sourceY: 0, probability: 1, animation: [{ tileId: 0, durationMs: 50 }, { tileId: 1, durationMs: 50 }], collisions: [], properties: {} }; tileset.tiles[1] = { id: 1, sourceX: 4, sourceY: 0, probability: 1, animation: [], collisions: [], properties: {} };
+    const map = createPixelTilemap('Object transform map'); map.width = 2; map.height = 2; map.tileWidth = 4; map.tileHeight = 4; map.tilesetIds = [tileset.id]; const layer = map.layers[map.layerIds[0]]; layer.type = 'object'; delete layer.chunks; layer.objects = [{ id: 'animated', type: 'tile', gid: encodeTiledGid(1, { diagonal: true }), x: 4, y: 4, width: 4, height: 2, rotation: 0, name: 'Animated', className: '', properties: {} }];
+    document.pixelAssets = { [sprite.id]: sprite, [tileset.id]: tileset, [map.id]: map }; document.assetIds = [sprite.id, tileset.id, map.id]; document.activeAssetId = map.id;
+    const first = renderTilemap(document, map, undefined, 0); const second = renderTilemap(document, map, undefined, 60);
+    expect([...first.getContext('2d').getImageData(3, 4, 1, 1).data]).toEqual([239, 71, 111, 255]);
+    expect([...first.getContext('2d').getImageData(2, 1, 1, 1).data]).toEqual([138, 201, 38, 255]);
+    expect([...second.getContext('2d').getImageData(3, 4, 1, 1).data]).toEqual([49, 166, 160, 255]);
+  });
+
   it('preserves all eight Tiled transforms inside a native rectangular orthogonal footprint', () => {
     const document = createPixelDocument('project', 'Native rectangular transforms'); document.assetIds = []; document.pixelAssets = {};
     const colors = ['#ef476fff', '#ffd166ff', '#06d6a0ff', '#118ab2ff', '#8338ecff', '#fb5607ff', '#3a86ffff', '#8ac926ff'];

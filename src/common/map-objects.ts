@@ -1,4 +1,4 @@
-import type { CollisionShape } from '@aidraw/core';
+import type { CollisionShape, MapObject } from '@aidraw/core';
 
 export interface MapPoint { x: number; y: number }
 export type MapObjectTransformMode = 'move' | 'resize';
@@ -36,14 +36,14 @@ export function mapObjectAtPoint(object: CollisionShape, point: MapPoint, tolera
   return false;
 }
 
-export function transformMapObject(source: CollisionShape, mode: MapObjectTransformMode, delta: MapPoint): CollisionShape {
+export function transformMapObject<T extends MapObject>(source: T, mode: MapObjectTransformMode, delta: MapPoint): T {
   const object = structuredClone(source); const deltaX = Math.round(delta.x); const deltaY = Math.round(delta.y);
   if (mode === 'move') { object.x += deltaX; object.y += deltaY; }
-  else { if (object.type !== 'rectangle' && object.type !== 'ellipse') throw new Error('Only rectangle and ellipse map objects have width/height resize handles.'); object.width = Math.max(1, (object.width ?? 1) + deltaX); object.height = Math.max(1, (object.height ?? 1) + deltaY); }
+  else { if (object.type !== 'rectangle' && object.type !== 'ellipse' && object.type !== 'tile') throw new Error('Only rectangle, ellipse, and tile map objects have width/height resize handles.'); object.width = Math.max(1, (object.width ?? 1) + deltaX); object.height = Math.max(1, (object.height ?? 1) + deltaY); }
   return object;
 }
 
-export function moveMapObjectSelection(source: readonly CollisionShape[], selectedIds: readonly string[], delta: MapPoint): CollisionShape[] {
+export function moveMapObjectSelection<T extends MapObject>(source: readonly T[], selectedIds: readonly string[], delta: MapPoint): T[] {
   const selected = new Set(selectedIds);
   if (selected.size !== selectedIds.length) throw new Error('Map object selection IDs must be unique.');
   let matched = 0;

@@ -193,7 +193,7 @@ export function createPixelTileset(name: string, spriteAssetId: string, tileWidt
   const timestamp = nowIso();
   return {
     id: createId('tileset'), revision: 0, name, type: 'tileset', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
-    firstGid: 1, tileWidth, tileHeight, margin: 0, spacing: 0, tileOffset: { x: 0, y: 0 }, columns, rows, spriteAssetId, tiles: {}, wangSets: [], transformations: { hFlip: true, vFlip: true, rotate: true },
+    firstGid: 1, tileWidth, tileHeight, margin: 0, spacing: 0, tileOffset: { x: 0, y: 0 }, objectAlignment: 'unspecified', columns, rows, spriteAssetId, tiles: {}, wangSets: [], transformations: { hFlip: true, vFlip: true, rotate: true },
   };
 }
 

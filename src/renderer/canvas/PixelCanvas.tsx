@@ -45,7 +45,7 @@ import {
   wrapPixelPoint,
   wrapPixelPoints,
   type CanvasOperation,
-  type CollisionShape,
+  type MapObject,
   type BitmapFont,
   type BitmapGlyphCapture,
   type PixelIndexRun,
@@ -80,6 +80,7 @@ import { deleteMapObjectPoint, insertMapObjectPoint, mapObjectAtPoint, mapObject
 import { isometricCellRect, isometricCoordinateDeltaFromScreen, isometricObjectMatrix, isometricProjectionExtent, type IsometricCellRect } from '../../common/isometric-projection';
 import { isometricMapTileArtworkEnvelope, isometricTileArtworkIntersects, isometricTileArtworkPlacement, type IsometricTileArtworkPlacement } from '../../common/isometric-tile-artwork';
 import { drawMapObjectOverlay, mapObjectIntersectsRasterRegion } from '../../common/map-object-render';
+import { tileObjectArtworkContainsPoint, tileObjectArtworkIntersects, tileObjectArtworkPlacement, tileObjectFallbackColor } from '../../common/tile-object-artwork';
 import { orthogonalCellRect, orthogonalCoordinateDeltaFromScreen, orthogonalObjectMatrix, orthogonalProjectionExtent } from '../../common/orthogonal-projection';
 import { orthogonalMapTileArtworkEnvelope, orthogonalTileArtworkIntersects, orthogonalTileArtworkPlacement, type OrthogonalTileArtworkPlacement } from '../../common/orthogonal-tile-artwork';
 import { TILE_VARIANT_SEED_PROPERTY, chooseTileVariant, nextTileVariantSeed, tileVariantCandidates, tileVariantGroup } from '../../common/tile-variants';
@@ -99,7 +100,7 @@ import { editableSpriteLayer, spriteRegionBitmap, visibleSpriteLayers, type Spri
 interface PixelPoint { x: number; y: number }
 interface PixelView { scale: number; offsetX: number; offsetY: number; logicalWidth: number; logicalHeight: number }
 interface TagDraft { id?: string; name: string; fromFrameId: string; toFrameId: string; direction: 'forward' | 'reverse' | 'ping-pong'; color: string }
-interface MapObjectGesture { layerId: string; objectId: string; mode: 'move' | 'resize' | 'point'; pointIndex?: number; start: PixelPoint; current: PixelPoint; original: CollisionShape; lockPromise: Promise<{ acquired: boolean; lockId?: string }> }
+interface MapObjectGesture { layerId: string; objectId: string; mode: 'move' | 'resize' | 'point'; pointIndex?: number; start: PixelPoint; current: PixelPoint; original: MapObject; lockPromise: Promise<{ acquired: boolean; lockId?: string }> }
 type SelectionCombination = 'replace' | 'add' | 'subtract' | 'intersect';
 type PixelSelectionCommand = 'copy' | 'cut' | 'paste' | 'delete' | 'clear' | 'select-all';
 type LocalSelectionClipboard = { kind: 'tile'; sourceDocumentId: string; grid: GridSelectionClipboard<number> };
@@ -116,9 +117,11 @@ function parseIntegerScale(value: string): { x: number; y: number } | undefined 
   return Number.isInteger(x) && Number.isInteger(y) && x >= 1 && x <= 64 && y >= 1 && y <= 64 ? { x, y } : undefined;
 }
 
-function previewMapObject(gesture: MapObjectGesture): CollisionShape {
+function previewMapObject(gesture: MapObjectGesture): MapObject {
   const delta = { x: gesture.current.x - gesture.start.x, y: gesture.current.y - gesture.start.y };
-  return gesture.mode === 'point' ? moveMapObjectPoint(gesture.original, gesture.pointIndex ?? -1, delta) : transformMapObject(gesture.original, gesture.mode, delta);
+  if (gesture.mode !== 'point') return transformMapObject(gesture.original, gesture.mode, delta);
+  if (gesture.original.type === 'tile') throw new Error('Tile objects do not expose polygon-point editing.');
+  return moveMapObjectPoint(gesture.original, gesture.pointIndex ?? -1, delta);
 }
 
 const celFor = pixelCelForFrame;
@@ -640,16 +643,35 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
           const matrix = tilemap.orientation === 'isometric'
             ? isometricObjectMatrix(tilemap.height, tilemap.tileWidth, tilemap.tileHeight, view.scale, isometricCellHeight)
             : orthogonalObjectMatrix(tilemap.tileWidth, tilemap.tileHeight, view.scale, orthogonalCellHeight);
-          const projectedMatrix = { ...matrix, e: matrix.e + layerOffsetX, f: matrix.f + layerOffsetY };
-          const viewport = { x: -view.offsetX, y: -view.offsetY, width: size.width, height: size.height };
+          const viewport = { x: -view.offsetX - layerOffsetX, y: -view.offsetY - layerOffsetY, width: size.width, height: size.height };
           const unitScale = tilemap.orientation === 'orthogonal' ? view.scale / tilemap.tileWidth : view.scale / Math.max(tilemap.tileWidth, tilemap.tileHeight);
           for (const source of layer.objects ?? []) {
             const object = mapObjectGesture?.layerId === layer.id && mapObjectGesture.objectId === source.id ? previewMapObject(mapObjectGesture) : source; const selected = selectedEntityId === object.id;
-            if (!mapObjectIntersectsRasterRegion(object, projectedMatrix, viewport, { selected, unitScale })) continue;
-            context.save();
-            context.transform(matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f);
-            drawMapObjectOverlay(context, object, { selected, unitScale });
-            context.restore();
+            if (object.type !== 'tile') {
+              if (!mapObjectIntersectsRasterRegion(object, matrix, viewport, { selected, unitScale })) continue;
+              context.save(); context.transform(matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f); drawMapObjectOverlay(context, object, { selected, unitScale }); context.restore();
+              continue;
+            }
+            const decoded = decodeTiledGid(object.gid);
+            const resolved = resolveTilesetForGid(document, tilemap, decoded.gid);
+            const sourceAsset = resolved ? document.pixelAssets[resolved.tileset.spriteAssetId] : undefined;
+            const placement = tileObjectArtworkPlacement(object, tilemap.orientation, matrix, view.scale / tilemap.tileWidth, resolved?.tileset);
+            if (!tileObjectArtworkIntersects(placement, viewport, selected ? 5 : 0)) continue;
+            const visibleLocalId = resolved ? animatedLocalId(resolved) : undefined;
+            const sourceRect = resolved && visibleLocalId !== undefined ? tilesetTileSourceRect(resolved.tileset, visibleLocalId) : undefined;
+            const sourcePlan = sourceAsset?.type === 'sprite' && sourceRect ? pixelSpriteRegionPlan(sourceAsset, sourceRect) : undefined; const frameId = sourceAsset?.type === 'sprite' ? sourceAsset.frameIds[0] : undefined;
+            const mapSource = sourceAsset?.type === 'sprite' && sourceRect && sourcePlan && frameId
+              ? mapSources.acquire(`${sourceAsset.id}\0${frameId}\0${sourceRect.x},${sourceRect.y},${sourceRect.width},${sourceRect.height}`, sourcePlan.render.width * sourcePlan.render.height * 4, () => spriteRegionBitmap(sourceAsset, frameId, document.palette, sourceRect))
+              : undefined;
+            try {
+              context.save(); context.translate(placement.center.x, placement.center.y); context.transform(placement.transform.a, placement.transform.b, placement.transform.c, placement.transform.d, 0, 0);
+              if (mapSource) { const sampled = mapSource.value; context.drawImage(sampled.canvas, sampled.sample.x, sampled.sample.y, sampled.sample.width, sampled.sample.height, -placement.width / 2, -placement.height / 2, placement.width, placement.height); }
+              else { context.fillStyle = tileObjectFallbackColor(decoded.gid); context.fillRect(-placement.width / 2, -placement.height / 2, placement.width, placement.height); }
+              context.restore();
+            } finally { mapSource?.release(); }
+            if (selected) {
+              context.save(); context.strokeStyle = '#7454d8'; context.fillStyle = '#fff'; context.lineWidth = 2; context.setLineDash([]); context.beginPath(); context.moveTo(placement.corners[0].x, placement.corners[0].y); for (const corner of placement.corners.slice(1)) context.lineTo(corner.x, corner.y); context.closePath(); context.stroke(); context.fillRect(placement.resizeHandle.x - 4, placement.resizeHandle.y - 4, 8, 8); context.strokeRect(placement.resizeHandle.x - 4, placement.resizeHandle.y - 4, 8, 8); context.restore();
+            }
           }
           context.restore(); continue;
         }
@@ -876,6 +898,15 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     if (tilemap.orientation === 'isometric') { const delta = isometricCoordinateDeltaFromScreen(translation.x, translation.y, view.scale, view.scale * tilemap.tileHeight / tilemap.tileWidth); return { x: point.x - delta.x * tilemap.tileWidth, y: point.y - delta.y * tilemap.tileHeight }; }
     const delta = orthogonalCoordinateDeltaFromScreen(translation.x, translation.y, view.scale, view.scale * tilemap.tileHeight / tilemap.tileWidth);
     return { x: point.x - delta.x * tilemap.tileWidth, y: point.y - delta.y * tilemap.tileHeight };
+  };
+
+  const toLayerRasterPoint = (event: ReactPointerEvent<HTMLCanvasElement>, entry: ComposedTilemapLayer): PixelPoint => {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const translation = mapLayerTranslations.get(entry.layer.id) ?? { x: 0, y: 0 };
+    return {
+      x: (event.clientX - bounds.left) * size.width / bounds.width - view.offsetX - translation.x,
+      y: (event.clientY - bounds.top) * size.height / bounds.height - view.offsetY - translation.y,
+    };
   };
 
   const withSymmetry = (points: PixelPoint[]): PixelPoint[] => {
@@ -1119,11 +1150,28 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     if (!sprite && !tilemap) return;
     if (tilemap && tool === 'select') {
       const objectLayers = visibleMapLayers.filter((entry) => entry.layer.type === 'object' && !entry.layer.locked);
-      let hit: { layer: typeof tilemap.layers[string]; object: CollisionShape; point: PixelPoint } | undefined; for (const entry of [...objectLayers].reverse()) { const layer = entry.layer; const mapPoint = toLayerMapObjectPoint(event, entry); const unitScale = tilemap.orientation === 'orthogonal' ? view.scale / tilemap.tileWidth : view.scale / Math.max(tilemap.tileWidth, tilemap.tileHeight); const tolerance = 9 / Math.max(0.001, unitScale); const object = [...(layer.objects ?? [])].reverse().find((candidate) => mapObjectAtPoint(candidate, mapPoint, tolerance)); if (object) { hit = { layer, object, point: mapPoint }; break; } }
+      let hit: { layer: typeof tilemap.layers[string]; object: MapObject; point: PixelPoint; rasterPoint: PixelPoint; tilePlacement?: ReturnType<typeof tileObjectArtworkPlacement> } | undefined;
+      for (const entry of [...objectLayers].reverse()) {
+        const layer = entry.layer; const mapPoint = toLayerMapObjectPoint(event, entry); const rasterPoint = toLayerRasterPoint(event, entry);
+        const matrix = tilemap.orientation === 'isometric'
+          ? isometricObjectMatrix(tilemap.height, tilemap.tileWidth, tilemap.tileHeight, view.scale, view.scale * tilemap.tileHeight / tilemap.tileWidth)
+          : orthogonalObjectMatrix(tilemap.tileWidth, tilemap.tileHeight, view.scale, view.scale * tilemap.tileHeight / tilemap.tileWidth);
+        const unitScale = tilemap.orientation === 'orthogonal' ? view.scale / tilemap.tileWidth : view.scale / Math.max(tilemap.tileWidth, tilemap.tileHeight); const tolerance = 9 / Math.max(0.001, unitScale);
+        for (const candidate of [...(layer.objects ?? [])].reverse()) {
+          if (candidate.type !== 'tile') {
+            if (mapObjectAtPoint(candidate, mapPoint, tolerance)) { hit = { layer, object: candidate, point: mapPoint, rasterPoint }; break; }
+            continue;
+          }
+          const resolved = resolveTilesetForGid(document, tilemap, decodeTiledGid(candidate.gid).gid);
+          const placement = tileObjectArtworkPlacement(candidate, tilemap.orientation, matrix, view.scale / tilemap.tileWidth, resolved?.tileset);
+          if (tileObjectArtworkContainsPoint(placement, rasterPoint, 9)) { hit = { layer, object: candidate, point: mapPoint, rasterPoint, tilePlacement: placement }; break; }
+        }
+        if (hit) break;
+      }
       if (hit) {
-        const objectBounds = mapObjectBounds(hit.object); const unitScale = tilemap.orientation === 'orthogonal' ? view.scale / tilemap.tileWidth : view.scale / Math.max(tilemap.tileWidth, tilemap.tileHeight); const handleThreshold = 9 / Math.max(0.001, unitScale); const pointIndex = selectedEntityId === hit.object.id && hit.object.points ? hit.object.points.findIndex((entry) => Math.hypot(hit.object.x + entry.x - hit.point.x, hit.object.y + entry.y - hit.point.y) <= handleThreshold) : -1; const atHandle = selectedEntityId === hit.object.id && (hit.object.type === 'rectangle' || hit.object.type === 'ellipse') && Math.hypot(hit.point.x - (objectBounds.x + objectBounds.width), hit.point.y - (objectBounds.y + objectBounds.height)) <= handleThreshold;
-        if (selectedEntityId === hit.object.id && pointIndex >= 0 && event.ctrlKey) { const minimum = hit.object.type === 'polygon' ? 3 : 2; if (!hit.object.points || hit.object.points.length <= minimum) return; const next = structuredClone(tilemap); const layer = next.layers[hit.layer.id]; if (layer.type === 'object') { const object = deleteMapObjectPoint(hit.object, pointIndex); layer.objects = (layer.objects ?? []).map((entry) => entry.id === object.id ? object : entry); void (async () => { const lock = await window.aidraw.acquireHumanLock({ documentId: document.id, objectIds: [tilemap.id] }); try { if (lock.acquired) await apply('Delete map object point', [{ kind: 'pixel.asset.replace', asset: next, expectedRevision: tilemap.revision }]); } finally { if (lock.lockId) await window.aidraw.releaseHumanLock(lock.lockId); } })(); } return; }
-        if (selectedEntityId === hit.object.id && pointIndex < 0 && event.altKey && hit.object.points) { const nearest = nearestMapObjectSegment(hit.object, hit.point); if (nearest && nearest.distance <= handleThreshold) { const next = structuredClone(tilemap); const layer = next.layers[hit.layer.id]; if (layer.type === 'object') { const object = insertMapObjectPoint(hit.object, nearest.segmentIndex, nearest.point); layer.objects = (layer.objects ?? []).map((entry) => entry.id === object.id ? object : entry); void (async () => { const lock = await window.aidraw.acquireHumanLock({ documentId: document.id, objectIds: [tilemap.id] }); try { if (lock.acquired) await apply('Insert map object point', [{ kind: 'pixel.asset.replace', asset: next, expectedRevision: tilemap.revision }]); } finally { if (lock.lockId) await window.aidraw.releaseHumanLock(lock.lockId); } })(); } return; } }
+        const objectBounds = hit.object.type === 'tile' ? { x: hit.object.x - hit.object.width, y: hit.object.y - hit.object.height, width: hit.object.width * 2, height: hit.object.height * 2 } : mapObjectBounds(hit.object); const unitScale = tilemap.orientation === 'orthogonal' ? view.scale / tilemap.tileWidth : view.scale / Math.max(tilemap.tileWidth, tilemap.tileHeight); const handleThreshold = 9 / Math.max(0.001, unitScale); const pointIndex = selectedEntityId === hit.object.id && hit.object.type !== 'tile' && hit.object.points ? hit.object.points.findIndex((entry) => Math.hypot(hit.object.x + entry.x - hit.point.x, hit.object.y + entry.y - hit.point.y) <= handleThreshold) : -1; const atHandle = selectedEntityId === hit.object.id && (hit.object.type === 'tile' ? Boolean(hit.tilePlacement && Math.hypot(hit.rasterPoint.x - hit.tilePlacement.resizeHandle.x, hit.rasterPoint.y - hit.tilePlacement.resizeHandle.y) <= 9) : (hit.object.type === 'rectangle' || hit.object.type === 'ellipse') && Math.hypot(hit.point.x - (objectBounds.x + objectBounds.width), hit.point.y - (objectBounds.y + objectBounds.height)) <= handleThreshold);
+        if (hit.object.type !== 'tile' && selectedEntityId === hit.object.id && pointIndex >= 0 && event.ctrlKey) { const minimum = hit.object.type === 'polygon' ? 3 : 2; if (!hit.object.points || hit.object.points.length <= minimum) return; const next = structuredClone(tilemap); const layer = next.layers[hit.layer.id]; if (layer.type === 'object') { const object = deleteMapObjectPoint(hit.object, pointIndex); layer.objects = (layer.objects ?? []).map((entry) => entry.id === object.id ? object : entry); void (async () => { const lock = await window.aidraw.acquireHumanLock({ documentId: document.id, objectIds: [tilemap.id] }); try { if (lock.acquired) await apply('Delete map object point', [{ kind: 'pixel.asset.replace', asset: next, expectedRevision: tilemap.revision }]); } finally { if (lock.lockId) await window.aidraw.releaseHumanLock(lock.lockId); } })(); } return; }
+        if (hit.object.type !== 'tile' && selectedEntityId === hit.object.id && pointIndex < 0 && event.altKey && hit.object.points) { const nearest = nearestMapObjectSegment(hit.object, hit.point); if (nearest && nearest.distance <= handleThreshold) { const next = structuredClone(tilemap); const layer = next.layers[hit.layer.id]; if (layer.type === 'object') { const object = insertMapObjectPoint(hit.object, nearest.segmentIndex, nearest.point); layer.objects = (layer.objects ?? []).map((entry) => entry.id === object.id ? object : entry); void (async () => { const lock = await window.aidraw.acquireHumanLock({ documentId: document.id, objectIds: [tilemap.id] }); try { if (lock.acquired) await apply('Insert map object point', [{ kind: 'pixel.asset.replace', asset: next, expectedRevision: tilemap.revision }]); } finally { if (lock.lockId) await window.aidraw.releaseHumanLock(lock.lockId); } })(); } return; } }
         const region = { x: Math.floor(objectBounds.x / tilemap.tileWidth), y: Math.floor(objectBounds.y / tilemap.tileHeight), width: Math.max(1, Math.ceil(objectBounds.width / tilemap.tileWidth)), height: Math.max(1, Math.ceil(objectBounds.height / tilemap.tileHeight)) };
         setMapObjectGesture({ layerId: hit.layer.id, objectId: hit.object.id, mode: pointIndex >= 0 ? 'point' : atHandle ? 'resize' : 'move', pointIndex: pointIndex >= 0 ? pointIndex : undefined, start: hit.point, current: hit.point, original: structuredClone(hit.object), lockPromise: window.aidraw.acquireHumanLock({ documentId: document.id, objectIds: [tilemap.id], region: { kind: 'tile', assetId: tilemap.id, ...region } }) }); setSelectedEntity(hit.object.id); setSelection([]); setCursor(point); return;
       }

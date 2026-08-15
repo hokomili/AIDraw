@@ -7,6 +7,7 @@ import {
   createId,
   createIllustrationDocument,
   createPixelDocument,
+  createPixelTilemap,
   createPixelTileset,
   duplicatePixelFrame,
   findDocumentAssetReferences,
@@ -68,6 +69,16 @@ describe('transaction reducer', () => {
     expect(applied.document).toMatchObject({ revision: 1, dirty: true, activity: [expect.objectContaining({ label: 'Change tileset drawing offset', actor: HUMAN_ACTOR, operationCount: 1 })] });
     const restored = applyTransaction(applied.document, applied.inverse, { recordActivity: false }).document; if (restored.kind !== 'pixel') throw new Error('Expected pixel document');
     expect(restored.pixelAssets[tileset.id]).toMatchObject({ tileOffset: { x: 0, y: 0 } });
+  });
+
+  it('moves and resizes a canonical tile object through one map replacement with exact inverse restoration', () => {
+    const document = createPixelDocument('project', 'Tile object history'); const map = createPixelTilemap('Objects'); const layer = map.layers[map.layerIds[0]];
+    layer.type = 'object'; delete layer.chunks; layer.objects = [{ id: 'chest', type: 'tile', gid: 0xa000_0001, x: 12, y: 24, width: 16, height: 20, rotation: 30, name: 'Chest', className: 'loot', properties: { coins: 3 } }];
+    document.pixelAssets[map.id] = map; document.assetIds.push(map.id); document.activeAssetId = map.id;
+    const replacement = structuredClone(map); const objectLayer = replacement.layers[layer.id]; if (objectLayer.type !== 'object') throw new Error('Expected object layer'); objectLayer.objects![0] = { ...objectLayer.objects![0], x: 20, y: 32, width: 24, height: 28 };
+    const transaction: CanvasTransaction = { id: createId('tx'), clientOperationId: createId('op'), documentId: document.id, actor: HUMAN_ACTOR, label: 'Move tile object', createdAt: nowIso(), operations: [{ kind: 'pixel.asset.replace', asset: replacement, expectedRevision: map.revision }] };
+    const applied = applyTransaction(document, transaction); if (applied.document.kind !== 'pixel') throw new Error('Expected pixel document'); const changed = applied.document.pixelAssets[map.id]; if (changed.type !== 'tilemap') throw new Error('Expected tilemap'); expect(changed.layers[layer.id].objects?.[0]).toMatchObject({ type: 'tile', gid: 0xa000_0001, x: 20, y: 32, width: 24, height: 28, rotation: 30 });
+    const restored = applyTransaction(applied.document, applied.inverse, { recordActivity: false }).document; if (restored.kind !== 'pixel') throw new Error('Expected pixel document'); const restoredMap = restored.pixelAssets[map.id]; if (restoredMap.type !== 'tilemap') throw new Error('Expected tilemap'); expect(restoredMap.layers[layer.id].objects?.[0]).toEqual(layer.objects[0]);
   });
 
   it('replaces and exactly restores illustration artboard geometry', () => {

@@ -161,6 +161,51 @@ describe('representative Tiled JSON interchange', () => {
     expect(zeroXml.data.toString()).not.toContain('<tileoffset');
   });
 
+  it.each([
+    { tilesetFormat: 'tiled-json' as const, tilesetName: 'objects.tsj', mapName: 'objects.tmj' },
+    { tilesetFormat: 'tiled-xml' as const, tilesetName: 'objects.tsx', mapName: 'objects.tmx' },
+  ])('round-trips external $tilesetName object alignment and transformed tile objects', async ({ tilesetFormat, tilesetName, mapName }) => {
+    const directory = await mkdtemp(join(tmpdir(), 'aidraw-tiled-tile-objects-')); temporaryDirectories.push(directory);
+    const source = createPixelDocument('project', 'Tile object source'); const sprite = source.pixelAssets[source.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('Expected sprite'); sprite.width = 2; sprite.height = 3; writePixels(Object.values(sprite.cels)[0], [{ x: 0, y: 0, index: 2 }, { x: 1, y: 2, index: 4 }]);
+    const tileset = createPixelTileset('Object artwork', sprite.id, 2, 3, 1, 1); tileset.firstGid = 17; tileset.objectAlignment = 'topright'; tileset.tileOffset = { x: 2, y: -1 }; source.pixelAssets[tileset.id] = tileset; source.assetIds.push(tileset.id); source.activeAssetId = tileset.id;
+    const tilesetArtifact = await exportDocument(source, tilesetFormat);
+    await Promise.all([writeFile(join(directory, tilesetName), tilesetArtifact.data), ...(tilesetArtifact.companions ?? []).map((companion) => writeFile(join(directory, companion.name), companion.data))]);
+
+    const gid = encodeTiledGid(17, { hFlip: true, diagonal: true });
+    const mapPath = join(directory, mapName);
+    if (mapName.endsWith('.tmj')) await writeFile(mapPath, JSON.stringify({ type: 'map', orientation: 'orthogonal', infinite: false, width: 4, height: 4, tilewidth: 2, tileheight: 3, tilesets: [{ firstgid: 17, source: tilesetName }], layers: [{ id: 1, type: 'objectgroup', name: 'Actors', objects: [{ id: 8, name: 'Gate', class: 'portal', gid, x: 7, y: 11, width: 6, height: 8, rotation: 30, properties: [{ name: 'target', type: 'string', value: 'north' }] }] }] }));
+    else await writeFile(mapPath, `<?xml version="1.0"?><map orientation="orthogonal" infinite="0" width="4" height="4" tilewidth="2" tileheight="3"><tileset firstgid="17" source="${tilesetName}"/><objectgroup id="1" name="Actors"><object id="8" name="Gate" type="portal" gid="${gid}" x="7" y="11" width="6" height="8" rotation="30"><properties><property name="target" value="north"/></properties></object></objectgroup></map>`);
+
+    const imported = await importDocument(mapPath, true); expect(imported.warnings).toEqual([]); const document = imported.documents[0]; if (document.kind !== 'pixel') throw new Error('Expected pixel document'); const map = document.pixelAssets[document.activeAssetId]; if (map.type !== 'tilemap') throw new Error('Expected tilemap'); const importedTileset = document.pixelAssets[map.tilesetIds[0]]; if (importedTileset.type !== 'tileset') throw new Error('Expected tileset'); const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'object') throw new Error('Expected object layer');
+    expect(importedTileset).toMatchObject({ firstGid: 17, objectAlignment: 'topright', tileOffset: { x: 2, y: -1 } });
+    expect(layer.objects?.[0]).toEqual({ id: '8', type: 'tile', gid, x: 7, y: 11, width: 6, height: 8, rotation: 30, name: 'Gate', className: 'portal', properties: { target: 'north' } });
+
+    const output = await exportDocument(document, mapName.endsWith('.tmj') ? 'tiled-json' : 'tiled-xml');
+    if (mapName.endsWith('.tmj')) {
+      const value = JSON.parse(output.data.toString()); expect(value.tilesets[0].objectalignment).toBe('topright'); expect(value.layers[0].objects[0]).toMatchObject({ gid, x: 7, y: 11, width: 6, height: 8, rotation: 30, name: 'Gate', type: 'portal', properties: [expect.objectContaining({ name: 'target', value: 'north' })] });
+    } else {
+      expect(output.data.toString()).toContain('objectalignment="topright"'); expect(output.data.toString()).toContain(`name="Gate" type="portal" gid="${gid}" x="7" y="11" width="6" height="8" rotation="30"`);
+    }
+  });
+
+  it('omits unspecified object alignment from predecessor-compatible TSJ and TSX output and rejects unknown values', async () => {
+    const document = createPixelDocument('project', 'Object alignment omission'); const sprite = document.pixelAssets[document.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('Expected sprite'); const tileset = createPixelTileset('Default alignment', sprite.id, 1, 1, 1, 1); document.pixelAssets[tileset.id] = tileset; document.assetIds.push(tileset.id); document.activeAssetId = tileset.id;
+    expect(JSON.parse((await exportDocument(document, 'tiled-json')).data.toString()).objectalignment).toBeUndefined();
+    expect((await exportDocument(document, 'tiled-xml')).data.toString()).not.toContain('objectalignment=');
+    const directory = await mkdtemp(join(tmpdir(), 'aidraw-tiled-object-alignment-')); temporaryDirectories.push(directory); const sourcePath = join(directory, 'invalid.tsj'); await writeFile(sourcePath, JSON.stringify({ type: 'tileset', name: 'Invalid', tilewidth: 1, tileheight: 1, tilecount: 1, columns: 1, objectalignment: 'baseline' }));
+    await expect(importDocument(sourcePath, true)).rejects.toThrow('Unsupported Tiled tile-object alignment: baseline');
+  });
+
+  it('does not flatten tile objects nested in tileset collision groups into vector collision geometry', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'aidraw-tiled-collision-tile-object-')); temporaryDirectories.push(directory);
+    const sourcePath = join(directory, 'collision-tile-object.tsj');
+    await writeFile(sourcePath, JSON.stringify({
+      type: 'tileset', name: 'Collision boundary', tilewidth: 1, tileheight: 1, tilecount: 1, columns: 1,
+      tiles: [{ id: 0, objectgroup: { objects: [{ id: 1, gid: 1, x: 0, y: 1, width: 1, height: 1 }] } }],
+    }));
+    await expect(importDocument(sourcePath, true)).rejects.toThrow('Tiled tile objects inside tileset collision groups are not supported.');
+  });
+
   it('rejects an external tileset drawing offset outside the canonical signed-integer bound', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'aidraw-tiled-offset-bound-')); temporaryDirectories.push(directory);
     const sourcePath = join(directory, 'oversized-offset.tsj');

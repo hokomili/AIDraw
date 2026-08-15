@@ -495,12 +495,16 @@ describe('.aidraw persistence', () => {
     const cel = Object.values(sprite.cels)[0]; writePixels(cel, [{ x: 2, y: 3, index: 4 }]);
     const tileset = createPixelTileset('Native terrain', sprite.id, 16, 16, 2, 1);
     tileset.tileOffset = { x: -9, y: 14 };
+    tileset.objectAlignment = 'topright';
     tileset.tiles[0] = { id: 0, sourceX: 0, sourceY: 0, probability: 1, animation: [], collisions: [], properties: { terrain: 'grass' } };
     const map = createPixelTilemap('Native map'); map.tilesetIds = [tileset.id]; const tileLayer = map.layers[map.layerIds[0]]; if (tileLayer.type !== 'tile' || !tileLayer.chunks) throw new Error('Expected tile layer'); writeTiles(tileLayer.chunks, [{ x: -1, y: 2, gid: 1 }]);
     const timestamp = nowIso(); const objectLayer: TilemapLayer = {
       id: 'native-pixel-object-layer', revision: 0, name: 'Objects', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
       type: 'object', visible: true, locked: false, opacity: 1, offsetX: 0, offsetY: 0, parallaxX: 1, parallaxY: 1,
-      objects: [{ id: 'native-pixel-object', type: 'polygon', x: 1, y: 2, points: [{ x: 0, y: 0 }, { x: 8, y: 0 }, { x: 4, y: 6 }], properties: { role: 'spawn' } }],
+      objects: [
+        { id: 'native-pixel-object', type: 'polygon', x: 1, y: 2, points: [{ x: 0, y: 0 }, { x: 8, y: 0 }, { x: 4, y: 6 }], properties: { role: 'spawn' } },
+        { id: 'native-tile-object', type: 'tile', gid: 0xa000_0001, x: 20, y: 30, width: 24, height: 18, rotation: 15, name: 'Door', className: 'exit', properties: { target: 'next' } },
+      ],
     };
     map.layers[objectLayer.id] = objectLayer; map.layerIds.push(objectLayer.id);
     document.pixelAssets[tileset.id] = tileset; document.pixelAssets[map.id] = map; document.assetIds.push(tileset.id, map.id); document.activeAssetId = map.id;
@@ -511,8 +515,11 @@ describe('.aidraw persistence', () => {
     const validSprite = valid.document.pixelAssets[sprite.id]; const validMap = valid.document.pixelAssets[map.id];
     expect(validSprite.type === 'sprite' ? readPixel(Object.values(validSprite.cels)[0], 2, 3) : undefined).toBe(4);
     expect(validMap.type === 'tilemap' ? readTileAt((validMap.layers[validMap.layerIds[0]] as TilemapLayer).chunks ?? {}, -1, 2) : undefined).toBe(1);
-    expect(validMap.type === 'tilemap' ? validMap.layers[objectLayer.id] : undefined).toMatchObject({ type: 'object', objects: [{ id: 'native-pixel-object', properties: { role: 'spawn' } }] });
-    expect(valid.document.pixelAssets[tileset.id]).toMatchObject({ type: 'tileset', tileOffset: { x: -9, y: 14 } });
+    expect(validMap.type === 'tilemap' ? validMap.layers[objectLayer.id] : undefined).toMatchObject({ type: 'object', objects: [
+      { id: 'native-pixel-object', properties: { role: 'spawn' } },
+      { id: 'native-tile-object', type: 'tile', gid: 0xa000_0001, rotation: 15, properties: { target: 'next' } },
+    ] });
+    expect(valid.document.pixelAssets[tileset.id]).toMatchObject({ type: 'tileset', tileOffset: { x: -9, y: 14 }, objectAlignment: 'topright' });
 
     const mutations: Array<[string, string, (value: Record<string, unknown>) => void]> = [
       ['invalid-palette', 'Invalid persisted pixel palette metadata.', (value) => { ((value.palette as Array<Record<string, unknown>>)[0]).color = '#000000ff'; }],
@@ -528,8 +535,14 @@ describe('.aidraw persistence', () => {
       ['invalid-tileset-offset', 'Invalid persisted pixel asset metadata.', (value) => {
         const assets = value.pixelAssets as Record<string, Record<string, unknown>>; (assets[tileset.id].tileOffset as Record<string, unknown>).x = 16_777_217;
       }],
+      ['invalid-object-alignment', 'Invalid persisted pixel asset metadata.', (value) => {
+        const assets = value.pixelAssets as Record<string, Record<string, unknown>>; assets[tileset.id].objectAlignment = 'baseline';
+      }],
       ['invalid-map-object', 'Invalid persisted pixel asset metadata.', (value) => {
         const assets = value.pixelAssets as Record<string, Record<string, unknown>>; const layers = assets[map.id].layers as Record<string, Record<string, unknown>>; const objects = layers[objectLayer.id].objects as Array<Record<string, unknown>>; delete objects[0].points;
+      }],
+      ['invalid-tile-object', 'Invalid persisted pixel asset metadata.', (value) => {
+        const assets = value.pixelAssets as Record<string, Record<string, unknown>>; const layers = assets[map.id].layers as Record<string, Record<string, unknown>>; const objects = layers[objectLayer.id].objects as Array<Record<string, unknown>>; objects[1].gid = 0;
       }],
       ['duplicate-asset-identity', 'Duplicate persisted pixel asset ID:', (value) => {
         const assets = value.pixelAssets as Record<string, Record<string, unknown>>; assets['duplicate-native-key'] = structuredClone(assets[sprite.id]);

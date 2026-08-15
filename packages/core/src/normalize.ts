@@ -196,6 +196,9 @@ function normalizeTileset(value: Record<string, unknown>, current: PixelTileset 
       x: finite(tileOffset.x, current?.tileOffset?.x ?? 0),
       y: finite(tileOffset.y, current?.tileOffset?.y ?? 0),
     },
+    objectAlignment: value.objectAlignment === undefined
+      ? current?.objectAlignment ?? 'unspecified'
+      : value.objectAlignment as PixelTileset['objectAlignment'],
     columns: positiveInteger(value.columns, current?.columns ?? 1),
     rows: positiveInteger(value.rows, current?.rows ?? 1),
     spriteAssetId: text(value.spriteAssetId, current?.spriteAssetId ?? ''),

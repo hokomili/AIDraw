@@ -27,7 +27,7 @@ describe('MAP-09 layer offset production wiring', () => {
     expect(interactive).toContain('activeTileLayerEntry?.layer');
     expect(headless).toContain('context.save(); context.translate(entry.offsetX, entry.offsetY)');
     expect(headless).toContain('x: region.x - entry.offsetX');
-    expect(headless).toContain('e: matrix.e + entry.offsetX');
+    expect(headless).toContain('mapObjectsIntersectingRasterRegion([object], matrix, layerRegion, { unitScale })');
   });
 
   it('keeps layer offsets distinct from tileset artwork offsets and parallax', async () => {

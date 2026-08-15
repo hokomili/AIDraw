@@ -351,6 +351,7 @@ describe('persisted pixel schemas', () => {
 
     const tileset = createPixelTileset('Persisted terrain', sprite.id, 16, 16, 2, 1);
     tileset.tileOffset = { x: -12, y: 34 };
+    tileset.objectAlignment = 'bottomright';
     tileset.tiles[0] = {
       id: 0, sourceX: 0, sourceY: 0, probability: 1, animation: [{ tileId: 1, durationMs: 120 }],
       collisions: [{ id: 'persisted-collision', type: 'rectangle', x: 0, y: 0, width: 16, height: 16, properties: { solid: true } }],
@@ -368,7 +369,10 @@ describe('persisted pixel schemas', () => {
     const objectLayer: TilemapLayer = {
       id: 'persisted-object-layer', revision: 0, name: 'Objects', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
       type: 'object', visible: true, locked: false, opacity: 1, offsetX: 0, offsetY: 0, parallaxX: 1, parallaxY: 1,
-      objects: [{ id: 'persisted-map-object', type: 'polygon', x: 2, y: 3, points: [{ x: 0, y: 0 }, { x: 8, y: 0 }, { x: 4, y: 6 }], properties: { role: 'spawn' } }],
+      objects: [
+        { id: 'persisted-map-object', type: 'polygon', x: 2, y: 3, points: [{ x: 0, y: 0 }, { x: 8, y: 0 }, { x: 4, y: 6 }], properties: { role: 'spawn' } },
+        { id: 'persisted-tile-object', type: 'tile', gid: 0xe000_0001, x: 16, y: 32, width: 24, height: 40, rotation: 45, name: 'Chest', className: 'loot', properties: { coins: 3 } },
+      ],
     };
     map.layers[objectLayer.id] = objectLayer; map.layerIds.push(objectLayer.id);
     document.pixelAssets[tileset.id] = tileset; document.pixelAssets[map.id] = map; document.assetIds.push(tileset.id, map.id); document.activeAssetId = map.id;
@@ -392,6 +396,10 @@ describe('persisted pixel schemas', () => {
     const absentOffset = structuredClone(document); delete (absentOffset.pixelAssets[tileset.id] as unknown as { tileOffset?: unknown }).tileOffset;
     const offsetDefaulted = migrateDocument(absentOffset); if (offsetDefaulted.kind !== 'pixel') throw new Error('Expected pixel document');
     expect(offsetDefaulted.pixelAssets[tileset.id]).toMatchObject({ type: 'tileset', tileOffset: { x: 0, y: 0 } });
+
+    const absentAlignment = structuredClone(document); delete (absentAlignment.pixelAssets[tileset.id] as unknown as { objectAlignment?: unknown }).objectAlignment;
+    const alignmentDefaulted = migrateDocument(absentAlignment); if (alignmentDefaulted.kind !== 'pixel') throw new Error('Expected pixel document');
+    expect(alignmentDefaulted.pixelAssets[tileset.id]).toMatchObject({ type: 'tileset', objectAlignment: 'unspecified' });
 
     const absentLayerOffsets = structuredClone(document); const absentMap = absentLayerOffsets.pixelAssets[absentLayerOffsets.assetIds[2]]; if (absentMap.type !== 'tilemap') throw new Error('Expected tilemap');
     for (const layer of Object.values(absentMap.layers)) { delete (layer as unknown as { offsetX?: unknown }).offsetX; delete (layer as unknown as { offsetY?: unknown }).offsetY; }
@@ -430,10 +438,13 @@ describe('persisted pixel schemas', () => {
       ['Invalid persisted pixel asset metadata.', ({ tileset }) => { tileset.tiles[0].id = 1; }],
       ['Invalid persisted pixel asset metadata.', ({ tileset }) => { tileset.tileOffset.x = 16_777_217; }],
       ['Invalid persisted pixel asset metadata.', ({ tileset }) => { tileset.tileOffset.y = 0.5; }],
+      ['Invalid persisted pixel asset metadata.', ({ tileset }) => { (tileset as unknown as { objectAlignment: string }).objectAlignment = 'baseline'; }],
       ['Invalid persisted pixel asset metadata.', ({ map }) => { map.layers[map.layerIds[0]].offsetX = 16_777_217; }],
       ['Invalid persisted pixel asset metadata.', ({ map }) => { map.layers[map.layerIds[0]].offsetY = 0.5; }],
       ['Invalid persisted pixel asset metadata.', ({ tileset }) => { tileset.wangSets[0].tiles[0].wangId[0] = 2; }],
-      ['Invalid persisted pixel asset metadata.', ({ objectLayer }) => { delete objectLayer.objects?.[0].points; }],
+      ['Invalid persisted pixel asset metadata.', ({ objectLayer }) => { const object = objectLayer.objects?.[0]; if (object?.type !== 'polygon' && object?.type !== 'polyline') throw new Error('Expected point object'); delete object.points; }],
+      ['Invalid persisted pixel asset metadata.', ({ objectLayer }) => { const object = objectLayer.objects?.[1]; if (object?.type !== 'tile') throw new Error('Expected tile object'); object.gid = 0; }],
+      ['Invalid persisted pixel asset metadata.', ({ objectLayer }) => { const object = objectLayer.objects?.[1]; if (object?.type !== 'tile') throw new Error('Expected tile object'); object.rotation = Number.POSITIVE_INFINITY; }],
       ['Invalid persisted pixel asset metadata.', ({ map }) => { const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile' || !layer.chunks) throw new Error('Expected tile layer'); Object.values(layer.chunks)[0].x = 1; }],
       ['Invalid persisted pixel asset metadata.', ({ document }) => { (document as unknown as Record<string, unknown>).scope = 'archive'; }],
       ['Invalid persisted pixel link metadata.', ({ document }) => { (document as unknown as Record<string, unknown>).linkedAssets = 'not-a-link-list'; }],

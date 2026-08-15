@@ -21,6 +21,7 @@ import { illustrationRegionBacking, illustrationRegionCanRenderLocally, paintTil
 import { isometricCellRect, isometricObjectMatrix, isometricProjectionExtent } from '../common/isometric-projection';
 import { isometricMapTileArtworkEnvelope, isometricTileArtworkIntersects, isometricTileArtworkPlacement } from '../common/isometric-tile-artwork';
 import { drawMapObjectOverlay, mapObjectsIntersectingRasterRegion } from '../common/map-object-render';
+import { tileObjectArtworkIntersects, tileObjectArtworkPlacement, tileObjectFallbackColor } from '../common/tile-object-artwork';
 import { orthogonalCellRect, orthogonalObjectMatrix, orthogonalProjectionExtent } from '../common/orthogonal-projection';
 import { orthogonalMapTileArtworkEnvelope, orthogonalTileArtworkIntersects, orthogonalTileArtworkPlacement } from '../common/orthogonal-tile-artwork';
 import { paintTileCachePlan } from '../common/paint-tile-cache';
@@ -381,16 +382,33 @@ function renderTilemapSurface(document: PixelDocument, map: PixelTilemap, region
     context.save(); context.translate(entry.offsetX, entry.offsetY);
     context.globalAlpha = entry.opacity;
     if (layer.type === 'object') {
-      context.save();
       const matrix = isometric
         ? isometricObjectMatrix(map.height, map.tileWidth, map.tileHeight, map.tileWidth, map.tileHeight)
         : orthogonalObjectMatrix(map.tileWidth, map.tileHeight, map.tileWidth, map.tileHeight);
-      const projectedMatrix = { ...matrix, e: matrix.e + entry.offsetX, f: matrix.f + entry.offsetY };
       const unitScale = isometric ? map.tileWidth / Math.max(map.tileWidth, map.tileHeight) : 1;
-      const objects = mapObjectsIntersectingRasterRegion(layer.objects ?? [], projectedMatrix, region, { unitScale });
-      context.transform(matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f);
-      for (const object of objects) drawMapObjectOverlay(context, object, { unitScale });
-      context.restore();
+      for (const object of layer.objects ?? []) {
+        if (object.type !== 'tile') {
+          if (!mapObjectsIntersectingRasterRegion([object], matrix, layerRegion, { unitScale }).length) continue;
+          context.save(); context.transform(matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f); drawMapObjectOverlay(context, object, { unitScale }); context.restore();
+          continue;
+        }
+        const decoded = decodeTiledGid(object.gid);
+        const resolved = resolveTilesetForGid(document, map, decoded.gid);
+        const sourceAsset = resolved ? document.pixelAssets[resolved.tileset.spriteAssetId] : undefined;
+        const placement = tileObjectArtworkPlacement(object, map.orientation, matrix, 1, resolved?.tileset);
+        if (!tileObjectArtworkIntersects(placement, layerRegion)) continue;
+        if (resolved && sourceAsset?.type === 'sprite') {
+          const sourceRect = tilesetTileSourceRect(resolved.tileset, animatedLocalId(resolved.tileset, resolved.localId));
+          const plan = pixelSpriteRegionPlan(sourceAsset, sourceRect); const frameId = sourceAsset.frameIds[0]; const cacheKey = `${sourceAsset.id}\0${frameId}\0${sourceRect.x},${sourceRect.y},${sourceRect.width},${sourceRect.height}`;
+          const source = sources.acquire(cacheKey, plan.render.width * plan.render.height * 4, () => renderSpriteRegion(document, sourceAsset, sourceRect, frameId));
+          try {
+            const sampled = source.value;
+            context.save(); context.translate(placement.center.x, placement.center.y); context.transform(placement.transform.a, placement.transform.b, placement.transform.c, placement.transform.d, 0, 0); context.drawImage(sampled.canvas, sampled.sample.x, sampled.sample.y, sampled.sample.width, sampled.sample.height, -placement.width / 2, -placement.height / 2, placement.width, placement.height); context.restore();
+          } finally { source.release(); }
+        } else {
+          context.save(); context.translate(placement.center.x, placement.center.y); context.transform(placement.transform.a, placement.transform.b, placement.transform.c, placement.transform.d, 0, 0); context.fillStyle = tileObjectFallbackColor(decoded.gid); context.fillRect(-placement.width / 2, -placement.height / 2, placement.width, placement.height); context.restore();
+        }
+      }
       context.restore();
       continue;
     }
