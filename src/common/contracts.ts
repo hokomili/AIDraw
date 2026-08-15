@@ -15,6 +15,7 @@ import type { DesktopPlatformInfo } from './platform';
 import type { InterchangeFidelityEntry } from './interchange-fidelity';
 import type { PixelSelectionFragment } from './document-fragment';
 import type { OnionSkinPreferences } from './onion-skin';
+import type { SpriteSymmetryPreferences } from './sprite-symmetry';
 
 export type NewDocumentKind = 'illustration' | 'sprite' | 'tilemap' | 'project';
 export type ExportFormat = 'png' | 'jpeg' | 'webp' | 'svg' | 'pdf' | 'psd' | 'gif' | 'apng' | 'sprite-sheet' | 'tiled-json' | 'tiled-xml';
@@ -157,10 +158,15 @@ export interface WorkspaceSnapshot {
 export interface EditorBootstrapSnapshot extends WorkspaceSnapshot {
   /** Main-owned human-local preferences, hydrated before the editor canvas mounts. */
   onionSkinPreferences: OnionSkinPreferences;
+  symmetryPreferences: SpriteSymmetryPreferences;
 }
 
 export type OnionSkinPreferenceSaveResult =
   | { saved: true; preferences: OnionSkinPreferences }
+  | { saved: false; message: string };
+
+export type SpriteSymmetryPreferenceSaveResult =
+  | { saved: true; preferences: SpriteSymmetryPreferences }
   | { saved: false; message: string };
 
 export interface ApplyTransactionResponse {
@@ -379,6 +385,7 @@ export interface AIDrawDesktopAPI {
   replayTrace(documentId: Id, transactionId: Id): Promise<{ replaying: boolean; reason?: string }>;
   updateEditorAdvisory(state: EditorAdvisoryInput): Promise<void>;
   setOnionSkinPreferences(preferences: OnionSkinPreferences): Promise<OnionSkinPreferenceSaveResult>;
+  setSpriteSymmetryPreferences(preferences: SpriteSymmetryPreferences): Promise<SpriteSymmetryPreferenceSaveResult>;
   exportRendererDiagnostics(detail: { message: string; stack?: string; componentStack?: string; userAgent?: string }): Promise<{ saved: boolean; filePath?: string; cancelled?: boolean }>;
   /** Available only to the exact isolated packaged renderer-recovery test profile. */
   injectRendererRecoveryTestEvent(): Promise<{ injected: boolean; byteLength: number }>;
@@ -450,6 +457,7 @@ export const IPC = {
   replayTrace: 'aidraw:trace:replay',
   editorAdvisory: 'aidraw:editor:advisory',
   onionSkinPreferencesSet: 'aidraw:preferences:onion-skin:set',
+  spriteSymmetryPreferencesSet: 'aidraw:preferences:sprite-symmetry:set',
   rendererDiagnosticsExport: 'aidraw:renderer-diagnostics:export',
   rendererRecoveryTestEvent: 'aidraw:renderer-recovery:test-event',
   event: 'aidraw:event',

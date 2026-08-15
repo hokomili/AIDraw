@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createIllustrationDocument, createPixelDocument, type AIDrawDocument } from '@aidraw/core';
 import type { AIDrawDesktopAPI, EditorBootstrapSnapshot, WorkspaceEvent, WorkspaceSnapshot } from '../../src/common/contracts';
 import { DEFAULT_ONION_SKIN_PREFERENCES, type OnionSkinPreferences } from '../../src/common/onion-skin';
+import { DEFAULT_SPRITE_SYMMETRY_PREFERENCES, type SpriteSymmetryPreferences } from '../../src/common/sprite-symmetry';
 import { reconcileWorkspaceSnapshot, useEditorStore } from '../../src/renderer/store';
 
 function snapshot(workspaceRevision: number, document: AIDrawDocument): WorkspaceSnapshot {
@@ -19,8 +20,8 @@ function snapshot(workspaceRevision: number, document: AIDrawDocument): Workspac
   };
 }
 
-function bootstrapSnapshot(workspaceRevision: number, document: AIDrawDocument, onionSkinPreferences: OnionSkinPreferences = { ...DEFAULT_ONION_SKIN_PREFERENCES }): EditorBootstrapSnapshot {
-  return { ...snapshot(workspaceRevision, document), onionSkinPreferences };
+function bootstrapSnapshot(workspaceRevision: number, document: AIDrawDocument, onionSkinPreferences: OnionSkinPreferences = { ...DEFAULT_ONION_SKIN_PREFERENCES }, symmetryPreferences: SpriteSymmetryPreferences = { mode: DEFAULT_SPRITE_SYMMETRY_PREFERENCES.mode, bindings: [] }): EditorBootstrapSnapshot {
+  return { ...snapshot(workspaceRevision, document), onionSkinPreferences, symmetryPreferences };
 }
 
 const transientState = (current: WorkspaceSnapshot) => ({
@@ -163,6 +164,39 @@ describe('renderer workspace ordering and document isolation', () => {
     expect(useEditorStore.getState().onionSkinPreferences).toEqual(recoveredIntent);
     expect(useEditorStore.getState().snapshot).toEqual(before);
     expect(applyTransaction).not.toHaveBeenCalled();
+  });
+
+  it('hydrates exact symmetry bindings before canvas mount across shell replacement and keeps failed live intent retryable', async () => {
+    const document = createPixelDocument('sprite', 'Persistent symmetry preferences');
+    const durable: SpriteSymmetryPreferences = { mode: 'both', bindings: [{ documentId: document.id, spriteId: document.activeAssetId, width: 64, height: 64, horizontalAxis: 12.5, verticalAxis: 31.5 }] };
+    const replacement: SpriteSymmetryPreferences = { ...durable, mode: 'horizontal', bindings: [{ ...durable.bindings[0], horizontalAxis: 20 }] };
+    let bootstrapCalls = 0;
+    const setTimeout = vi.fn();
+    const setSpriteSymmetryPreferences = vi.fn()
+      .mockResolvedValueOnce({ saved: false, message: 'Sprite symmetry changed in this editor, but AIDraw could not save it. The previous saved preference remains.' })
+      .mockResolvedValueOnce({ saved: true, preferences: replacement });
+    const api = {
+      bootstrap: vi.fn(async () => bootstrapSnapshot(++bootstrapCalls, document, { ...DEFAULT_ONION_SKIN_PREFERENCES }, durable)),
+      onEvent: vi.fn(() => vi.fn()),
+      setSpriteSymmetryPreferences,
+    } as unknown as AIDrawDesktopAPI;
+    Object.defineProperty(globalThis, 'window', { configurable: true, value: { aidraw: api, setTimeout } });
+    useEditorStore.setState({ snapshot: undefined, loading: true, symmetryPreferences: { mode: 'none', bindings: [] }, toast: undefined });
+
+    await useEditorStore.getState().initialize();
+    expect(useEditorStore.getState().symmetryPreferences).toEqual(durable);
+    expect(setSpriteSymmetryPreferences).not.toHaveBeenCalled();
+
+    useEditorStore.getState().setSpriteSymmetryPreferences(replacement);
+    await vi.waitFor(() => expect(setSpriteSymmetryPreferences).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(useEditorStore.getState().toast).toMatchObject({ tone: 'warning', message: expect.stringContaining('could not save') }));
+    expect(useEditorStore.getState().symmetryPreferences).toEqual(replacement);
+
+    useEditorStore.getState().setSpriteSymmetryPreferences(replacement);
+    await vi.waitFor(() => expect(setSpriteSymmetryPreferences).toHaveBeenCalledTimes(2));
+    useEditorStore.setState({ snapshot: undefined, loading: true, symmetryPreferences: { mode: 'none', bindings: [] } });
+    await useEditorStore.getState().initialize();
+    expect(useEditorStore.getState().symmetryPreferences).toEqual(durable);
   });
 
   it('cancels a late canvas gesture instead of routing old-document operations into the new active tab', async () => {

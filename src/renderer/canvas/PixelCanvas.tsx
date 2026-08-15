@@ -64,6 +64,7 @@ import { BitmapGlyphMapperDialog } from '../components/BitmapGlyphMapperDialog';
 import { BitmapGlyphSheetMapperDialog } from '../components/BitmapGlyphSheetMapperDialog';
 import { BitmapFontLibraryDialog } from '../components/BitmapFontLibraryDialog';
 import { OnionSkinSettingsPanel } from '../components/OnionSkinSettingsPanel';
+import { SpriteSymmetrySettingsPanel } from '../components/SpriteSymmetrySettingsPanel';
 import { PlaybackLanes } from '../components/PlaybackLanes';
 import { StampLibraryDialog } from '../components/StampLibraryDialog';
 import { TileTransformPicker } from '../components/TileTransformPicker';
@@ -87,6 +88,7 @@ import { TILE_VARIANT_SEED_PROPERTY, chooseTileVariant, nextTileVariantSeed, til
 import { isometricTileRenderCells } from '../../common/tile-render-order';
 import { coveringRasterViewportRegion, createGridRasterRegionFilter, tilemapChunksIntersectingRegion, tilemapGridLineRange } from '../../common/tilemap-region';
 import { onionSkinLayers } from '../../common/onion-skin';
+import { effectiveSpriteSymmetry, expandSpriteSymmetry, withSpriteSymmetryAxes, withSpriteSymmetryMode } from '../../common/sprite-symmetry';
 import { tileAnimationFrameAt, tilesetTileSourceRect } from '../../common/tile-animation';
 import { parseBitmapFontJson } from '../../common/bitmap-font-interchange';
 import { composedVisibleTilemapLayers, tilemapLayerScreenTranslation, type ComposedTilemapLayer } from '../../common/tilemap-layer-composition';
@@ -291,8 +293,8 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const [pingPong, setPingPong] = useState(false);
   const [playDirection, setPlayDirection] = useState<1 | -1>(1);
   const [onionSettingsOpen, setOnionSettingsOpen] = useState(false);
+  const [symmetrySettingsOpen, setSymmetrySettingsOpen] = useState(false);
   const [wrapEditing, setWrapEditing] = useState(false);
-  const [symmetry, setSymmetry] = useState<'none' | 'horizontal' | 'vertical' | 'both'>('none');
   const [paletteCycling, setPaletteCycling] = useState(false);
   const [paletteOffset, setPaletteOffset] = useState(0);
   const [activePaletteCycleId, setActivePaletteCycleId] = useState<string>();
@@ -312,7 +314,13 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const setCanvasAnimation = useEditorStore((state) => state.setCanvasAnimation);
   const onionSettings = useEditorStore((state) => state.onionSkinPreferences);
   const setOnionSkinPreferences = useEditorStore((state) => state.setOnionSkinPreferences);
+  const symmetryPreferences = useEditorStore((state) => state.symmetryPreferences);
+  const setSpriteSymmetryPreferences = useEditorStore((state) => state.setSpriteSymmetryPreferences);
   const onionSkin = onionSettings.enabled;
+  const symmetry = useMemo(() => sprite
+    ? effectiveSpriteSymmetry(symmetryPreferences, { documentId: document.id, spriteId: sprite.id, width: sprite.width, height: sprite.height })
+    : { mode: 'none' as const, horizontalAxis: 0, verticalAxis: 0, source: 'centered-default' as const },
+  [document.id, sprite, symmetryPreferences]);
   const tool = useEditorStore((state) => state.selectedTool);
   const setTool = useEditorStore((state) => state.setTool);
   const zoom = useEditorStore((state) => state.zoom);
@@ -640,6 +648,24 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
         for (let y = 0; y <= sprite.height; y += tileset.tileHeight) { context.moveTo(0, y * view.scale + 0.5); context.lineTo(sprite.width * view.scale, y * view.scale + 0.5); }
         context.stroke();
       }
+      if (symmetry.mode !== 'none') {
+        context.save();
+        context.globalAlpha = 1;
+        context.strokeStyle = '#ff5c93';
+        context.lineWidth = 1.5;
+        context.setLineDash([5, 3]);
+        context.beginPath();
+        if (symmetry.mode === 'horizontal' || symmetry.mode === 'both') {
+          const x = (symmetry.horizontalAxis + 0.5) * view.scale;
+          context.moveTo(x, 0); context.lineTo(x, sprite.height * view.scale);
+        }
+        if (symmetry.mode === 'vertical' || symmetry.mode === 'both') {
+          const y = (symmetry.verticalAxis + 0.5) * view.scale;
+          context.moveTo(0, y); context.lineTo(sprite.width * view.scale, y);
+        }
+        context.stroke();
+        context.restore();
+      }
     } else if (tilemap) {
       const mapSources = new BoundedResourceCache<SpriteRegionBitmap>(MAX_MAP_TILE_SOURCE_CACHE_ENTRIES, MAX_MAP_TILE_SOURCE_CACHE_BYTES, (source) => { source.canvas.width = 1; source.canvas.height = 1; });
       const orthogonalArtworkEnvelope = tilemap.orientation === 'orthogonal' ? orthogonalMapTileArtworkEnvelope(document, tilemap) : undefined;
@@ -889,7 +915,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       context.stroke();
     }
     context.restore();
-  }, [activeFrameId, activePaletteCycle, activePaletteOverride, activeTileLayerEntry, bulkPreview, ditherCoverage, ditherMatrixSize, ditherMixIndex, document, lassoPath, logical, mapLayerTranslations, mapObjectGesture, onionSettings, onionSkin, paletteCycling, paletteOffset, pixelIndex, playbacks, preview, selectedEntityId, selection, selectionOffset, size, sprite, stampPreview, tileAnimationTimeMs, tilemap, tileStampPreview, tileset, tool, view, visibleMapLayers, wrapEditing]);
+  }, [activeFrameId, activePaletteCycle, activePaletteOverride, activeTileLayerEntry, bulkPreview, ditherCoverage, ditherMatrixSize, ditherMixIndex, document, lassoPath, logical, mapLayerTranslations, mapObjectGesture, onionSettings, onionSkin, paletteCycling, paletteOffset, pixelIndex, playbacks, preview, selectedEntityId, selection, selectionOffset, size, sprite, stampPreview, symmetry, tileAnimationTimeMs, tilemap, tileStampPreview, tileset, tool, view, visibleMapLayers, wrapEditing]);
 
   const toPixel = (event: ReactPointerEvent<HTMLCanvasElement>): PixelPoint => {
     const bounds = event.currentTarget.getBoundingClientRect();
@@ -918,15 +944,21 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     };
   };
 
-  const withSymmetry = (points: PixelPoint[]): PixelPoint[] => {
-    if (!sprite || symmetry === 'none') return points;
-    return points.flatMap((point) => {
-      const variants = [point];
-      if (symmetry === 'horizontal' || symmetry === 'both') variants.push({ x: sprite.width - 1 - point.x, y: point.y });
-      if (symmetry === 'vertical' || symmetry === 'both') variants.push({ x: point.x, y: sprite.height - 1 - point.y });
-      if (symmetry === 'both') variants.push({ x: sprite.width - 1 - point.x, y: sprite.height - 1 - point.y });
-      return variants;
-    });
+  const withSymmetry = <T extends PixelPoint>(points: readonly T[]): T[] => expandSpriteSymmetry(points, symmetry);
+  const saveSymmetryAxes = (horizontalAxis: number, verticalAxis: number): void => {
+    if (!sprite) return;
+    try {
+      setSpriteSymmetryPreferences(withSpriteSymmetryAxes(symmetryPreferences, {
+        documentId: document.id,
+        spriteId: sprite.id,
+        width: sprite.width,
+        height: sprite.height,
+        horizontalAxis,
+        verticalAxis,
+      }));
+    } catch {
+      notify('This sprite identity cannot be stored in the bounded local symmetry settings; centered axes remain active.', 'warning');
+    }
   };
 
   const transformSelection = async (transform: PixelSelectionTransform, offset: PixelPoint = { x: 0, y: 0 }) => {
@@ -1179,7 +1211,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     else {
       const line = cursor ? bresenham(cursor.x, cursor.y, point.x, point.y) : [point];
       if (tool === 'stamp' && sprite) {
-        const placed = line.flatMap((entry) => placePixelStamp(placementStamp, entry.x, entry.y, wrapEditing ? undefined : { width: sprite.width, height: sprite.height }).changes);
+        const placed = withSymmetry(line.flatMap((entry) => placePixelStamp(placementStamp, entry.x, entry.y, wrapEditing ? undefined : { width: sprite.width, height: sprite.height }).changes));
         setStampPreview((current) => [...new Map([...current, ...placed].map((entry) => [`${entry.x},${entry.y}`, entry])).values()]);
         setPreview((current) => [...new Map([...current, ...placed].map((entry) => [`${entry.x},${entry.y}`, { x: entry.x, y: entry.y }])).values()]);
         return;
@@ -1499,7 +1531,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     const frame = activeFrameId;
     const font = document.bitmapFonts.find((entry) => entry.id === request.fontId);
     if (!sprite || !point || !frame || !request.text.trim() || !font) return;
-    const authoredPoints = bitmapTextCells(font, request.text, { x: point.x, y: point.y, letterSpacing: request.letterSpacing, lineSpacing: request.lineSpacing, scale: request.scale, align: request.align });
+    const authoredPoints = withSymmetry(bitmapTextCells(font, request.text, { x: point.x, y: point.y, letterSpacing: request.letterSpacing, lineSpacing: request.lineSpacing, scale: request.scale, align: request.align }));
     const points = wrapEditing ? wrapPixelPoints(authoredPoints, sprite.width, sprite.height) : authoredPoints.filter((entry) => entry.x >= 0 && entry.y >= 0 && entry.x < sprite.width && entry.y < sprite.height);
     if (!points.length) return;
     const xs = points.map((entry) => entry.x); const ys = points.map((entry) => entry.y);
@@ -1617,7 +1649,8 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
         {hasTimeline && <button className={onionSkin ? 'is-active' : ''} onClick={() => setOnionSkinPreferences({ ...onionSettings, enabled: !onionSkin })} title="Onion skin"><Eye size={14} /> Onion</button>}
         {hasTimeline && <button className={onionSettingsOpen ? 'is-active' : ''} aria-expanded={onionSettingsOpen} aria-controls="onion-skin-settings" onClick={() => { setOnionSettingsOpen((open) => !open); setExposureGridOpen(false); }} title="Configure bounded onion skin frames, tint, and opacity"><SlidersHorizontal size={13} /> Onion setup</button>}
         {sprite && <button className={wrapEditing ? 'is-active' : ''} aria-pressed={wrapEditing} onClick={() => setWrapEditing((value) => !value)} title="Preview and edit through repeated copies across opposite sprite edges"><Repeat2 size={14} /> Wrap edit</button>}
-        {sprite && <button className={symmetry !== 'none' ? 'is-active' : ''} onClick={() => setSymmetry((value) => value === 'none' ? 'horizontal' : value === 'horizontal' ? 'vertical' : value === 'vertical' ? 'both' : 'none')} title="Cycle symmetry: none, horizontal, vertical, both"><FlipHorizontal2 size={14} /> {symmetry === 'none' ? 'Sym' : symmetry[0].toUpperCase()}</button>}
+        {sprite && <label className="symmetry-mode-control"><FlipHorizontal2 size={14} /><span>Symmetry</span><select aria-label="Sprite symmetry mode" value={symmetry.mode} onChange={(event) => setSpriteSymmetryPreferences(withSpriteSymmetryMode(symmetryPreferences, event.target.value as typeof symmetry.mode))}><option value="none">None</option><option value="horizontal">Horizontal</option><option value="vertical">Vertical</option><option value="both">Both</option></select></label>}
+        {sprite && <button className={symmetrySettingsOpen ? 'is-active' : ''} aria-expanded={symmetrySettingsOpen} aria-controls="sprite-symmetry-settings" onClick={() => { setSymmetrySettingsOpen((open) => !open); setOnionSettingsOpen(false); }} title="Set exact half-pixel symmetry axes for this sprite"><SlidersHorizontal size={13} /> Symmetry setup</button>}
         {sprite && <button className={paletteCycling ? 'is-active' : ''} onClick={() => { if (paletteCycling) setPaletteOffset(0); setPaletteCycling(!paletteCycling); }} title="Palette cycling preview"><Repeat2 size={14} /> Cycle</button>}
         {paletteCycling && document.paletteCycles.length > 0 && <select aria-label="Active palette cycle" value={activePaletteCycle?.id} onChange={(event) => { setActivePaletteCycleId(event.target.value); setPaletteOffset(0); }} title="Named palette cycle">{document.paletteCycles.map((cycle) => <option key={cycle.id} value={cycle.id}>{cycle.name}</option>)}</select>}
         {tool === 'terrain' && terrainTileset?.type === 'tileset' && <><select aria-label="Active Wang set" value={terrainSet?.id ?? ''} onChange={(event) => { setTerrainSetId(event.target.value); setTerrainColorId(undefined); }}><option value="" disabled>Wang set</option>{terrainTileset.wangSets.map((set) => <option key={set.id} value={set.id}>{set.name}</option>)}</select><select aria-label="Active Wang color" value={terrainColor?.id ?? ''} onChange={(event) => setTerrainColorId(Number(event.target.value))}><option value="" disabled>Terrain color</option>{terrainSet?.colors.map((color) => <option key={color.id} value={color.id}>{color.name}</option>)}</select><button className={terrainErase ? 'is-active' : ''} onClick={() => setTerrainErase((value) => !value)} title="Toggle terrain erase and neighbor repair"><Eraser size={13} /> {terrainErase ? 'Erase' : 'Paint'}</button></>}
@@ -1668,6 +1701,17 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
         value={activeTileTransforms}
         onChange={setTileTransforms}
         onClose={() => setTileTransformPickerOpen(false)}
+      />}
+      {symmetrySettingsOpen && sprite && <SpriteSymmetrySettingsPanel
+        mode={symmetry.mode}
+        horizontalAxis={symmetry.horizontalAxis}
+        verticalAxis={symmetry.verticalAxis}
+        width={sprite.width}
+        height={sprite.height}
+        source={symmetry.source}
+        onModeChange={(mode) => setSpriteSymmetryPreferences(withSpriteSymmetryMode(symmetryPreferences, mode))}
+        onAxesChange={saveSymmetryAxes}
+        onClose={() => setSymmetrySettingsOpen(false)}
       />}
       {hasTimeline && sprite && (
         <div className="timeline">

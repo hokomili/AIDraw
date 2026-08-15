@@ -1,7 +1,8 @@
 import { join } from 'node:path';
 import type { AsyncJob } from '@aidraw/core';
 import { parseOnionSkinPreferences, type OnionSkinPreferences } from '../common/onion-skin';
-import type { EditorBootstrapSnapshot, OnionSkinPreferenceSaveResult } from '../common/contracts';
+import { parseSpriteSymmetryPreferences, type SpriteSymmetryPreferences } from '../common/sprite-symmetry';
+import type { EditorBootstrapSnapshot, OnionSkinPreferenceSaveResult, SpriteSymmetryPreferenceSaveResult } from '../common/contracts';
 import { LocalCredentialStore } from './credentials';
 import { DocumentService } from './document-service';
 import { GenerationManager } from './generation-manager';
@@ -14,6 +15,7 @@ import { DocumentPresetStore } from './document-preset-store';
 import { InterchangeReportStore } from './interchange-report-store';
 import type { GenerationProviderRunner } from './generation-provider-runner';
 import { OnionSkinPreferenceStore } from './onion-skin-preference-store';
+import { SpriteSymmetryPreferenceStore } from './sprite-symmetry-preference-store';
 
 export interface EngineRuntimeOptions {
   userDataPath: string;
@@ -45,6 +47,7 @@ export class EngineRuntime {
   readonly documentPresets: DocumentPresetStore;
   readonly interchangeReports: InterchangeReportStore;
   readonly onionSkinPreferences: OnionSkinPreferenceStore;
+  readonly spriteSymmetryPreferences: SpriteSymmetryPreferenceStore;
   private readonly mcpCredentials: LocalCredentialStore;
   private mcpCredentialOperation: Promise<void> = Promise.resolve();
   private recoveryTimer?: NodeJS.Timeout;
@@ -74,6 +77,7 @@ export class EngineRuntime {
     );
     this.documentPresets = new DocumentPresetStore(join(userDataPath, 'settings', 'document-presets.json'));
     this.onionSkinPreferences = new OnionSkinPreferenceStore(join(userDataPath, 'settings', 'onion-skin.json'));
+    this.spriteSymmetryPreferences = new SpriteSymmetryPreferenceStore(join(userDataPath, 'settings', 'sprite-symmetry.json'));
     this.interchangeReports = new InterchangeReportStore(join(userDataPath, 'reports', 'interchange.json'));
     this.mcpCredentials = new LocalCredentialStore(join(userDataPath, 'credentials', 'mcp-token.json'));
     this.mcpHost = new McpHost(
@@ -94,7 +98,7 @@ export class EngineRuntime {
     this.started = true;
     await this.service.recover();
     this.service.initialize();
-    await this.onionSkinPreferences.initialize();
+    await Promise.all([this.onionSkinPreferences.initialize(), this.spriteSymmetryPreferences.initialize()]);
     this.recoveryTimer = setInterval(() => void this.service.compactRecovery(), 60_000);
     this.recoveryTimer.unref();
     try {
@@ -111,14 +115,17 @@ export class EngineRuntime {
 
   async editorBootstrap(): Promise<EditorBootstrapSnapshot> {
     const preferenceBootstrap = await this.onionSkinPreferences.bootstrap();
+    const symmetryBootstrap = await this.spriteSymmetryPreferences.bootstrap();
     const snapshot = this.service.snapshot();
     const recoveryWarnings = [
       ...(snapshot.recoveryWarnings ?? []),
       ...(preferenceBootstrap.warning ? [preferenceBootstrap.warning] : []),
+      ...(symmetryBootstrap.warning ? [symmetryBootstrap.warning] : []),
     ];
     return {
       ...snapshot,
       onionSkinPreferences: preferenceBootstrap.preferences,
+      symmetryPreferences: symmetryBootstrap.preferences,
       ...(recoveryWarnings.length ? { recoveryWarnings } : {}),
     };
   }
@@ -133,6 +140,19 @@ export class EngineRuntime {
       return { saved: true, preferences: await this.onionSkinPreferences.save(preferences) };
     } catch {
       return { saved: false, message: 'Onion skin changed in this editor, but AIDraw could not save it. The previous saved preference remains.' };
+    }
+  }
+
+  async setSpriteSymmetryPreferences(value: unknown): Promise<SpriteSymmetryPreferenceSaveResult> {
+    let preferences: SpriteSymmetryPreferences;
+    try { preferences = parseSpriteSymmetryPreferences(value); }
+    catch {
+      return { saved: false, message: 'AIDraw rejected invalid sprite symmetry preferences; the saved preference was not changed.' };
+    }
+    try {
+      return { saved: true, preferences: await this.spriteSymmetryPreferences.save(preferences) };
+    } catch {
+      return { saved: false, message: 'Sprite symmetry changed in this editor, but AIDraw could not save it. The previous saved preference remains.' };
     }
   }
 
@@ -210,7 +230,7 @@ export class EngineRuntime {
 
   private async stopStartedRuntime(): Promise<void> {
     await this.mcpCredentialOperation;
-    await this.onionSkinPreferences.flush();
+    await Promise.all([this.onionSkinPreferences.flush(), this.spriteSymmetryPreferences.flush()]);
     if (this.recoveryTimer) clearInterval(this.recoveryTimer);
     this.recoveryTimer = undefined;
     await this.mcpHost.stop();

@@ -4,12 +4,14 @@ import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { EngineRuntime } from '@main/engine-runtime';
 import { DEFAULT_ONION_SKIN_PREFERENCES } from '../../src/common/onion-skin';
+import { DEFAULT_SPRITE_SYMMETRY_PREFERENCES } from '../../src/common/sprite-symmetry';
 
 describe('EngineRuntime stop', () => {
   it('binds bootstrap hydration and preference saves through the named trusted-renderer IPC boundary', async () => {
     const source = await readFile(new URL('../../src/main/main.ts', import.meta.url), 'utf8');
     expect(source).toContain('handle(IPC.bootstrap, () => engineRuntime.editorBootstrap())');
     expect(source).toContain('handle(IPC.onionSkinPreferencesSet, (_event, value: unknown) => engineRuntime.setOnionSkinPreferences(value))');
+    expect(source).toContain('handle(IPC.spriteSymmetryPreferencesSet, (_event, value: unknown) => engineRuntime.setSpriteSymmetryPreferences(value))');
   });
 
   it('hydrates onion preferences through bootstrap, merges one advisory, and bounds save failures', async () => {
@@ -19,6 +21,9 @@ describe('EngineRuntime stop', () => {
     vi.spyOn(runtime.onionSkinPreferences, 'bootstrap').mockResolvedValue({
       preferences: durable,
       warning: 'Onion preference recovery advisory.',
+    });
+    vi.spyOn(runtime.spriteSymmetryPreferences, 'bootstrap').mockResolvedValue({
+      preferences: { mode: DEFAULT_SPRITE_SYMMETRY_PREFERENCES.mode, bindings: [] },
     });
 
     await expect(runtime.editorBootstrap()).resolves.toMatchObject({
@@ -42,6 +47,25 @@ describe('EngineRuntime stop', () => {
     expect(save).toHaveBeenCalledTimes(2);
   });
 
+  it('hydrates and bounds complete sprite symmetry preference saves without exposing document mutation authority', async () => {
+    const runtime = new EngineRuntime({ userDataPath: '/private/aidraw-engine-symmetry-preference-test', appVersion: 'test' });
+    runtime.service.initialize();
+    const durable = { mode: 'both' as const, bindings: [{ documentId: 'doc', spriteId: 'sprite', width: 8, height: 6, horizontalAxis: 2.5, verticalAxis: 3 }] };
+    vi.spyOn(runtime.onionSkinPreferences, 'bootstrap').mockResolvedValue({ preferences: { ...DEFAULT_ONION_SKIN_PREFERENCES } });
+    vi.spyOn(runtime.spriteSymmetryPreferences, 'bootstrap').mockResolvedValue({ preferences: durable, warning: 'Symmetry preference recovery advisory.' });
+    await expect(runtime.editorBootstrap()).resolves.toMatchObject({ symmetryPreferences: durable, recoveryWarnings: ['Symmetry preference recovery advisory.'] });
+
+    const save = vi.spyOn(runtime.spriteSymmetryPreferences, 'save').mockRejectedValueOnce(new Error('Injected replacement failure.')).mockResolvedValueOnce(durable);
+    await expect(runtime.setSpriteSymmetryPreferences({ ...durable, bindings: [{ ...durable.bindings[0], horizontalAxis: 2.25 }] })).resolves.toEqual({
+      saved: false, message: 'AIDraw rejected invalid sprite symmetry preferences; the saved preference was not changed.',
+    });
+    expect(save).not.toHaveBeenCalled();
+    await expect(runtime.setSpriteSymmetryPreferences(durable)).resolves.toEqual({
+      saved: false, message: 'Sprite symmetry changed in this editor, but AIDraw could not save it. The previous saved preference remains.',
+    });
+    await expect(runtime.setSpriteSymmetryPreferences(durable)).resolves.toEqual({ saved: true, preferences: durable });
+  });
+
   it('coalesces concurrent callers and remains retryable until final recovery succeeds', async () => {
     const runtime = new EngineRuntime({ userDataPath: '/private/aidraw-engine-stop-test', appVersion: 'test' });
     const state = runtime as unknown as { started: boolean };
@@ -50,6 +74,7 @@ describe('EngineRuntime stop', () => {
     const mcpStopRelease = new Promise<void>((resolve) => { releaseMcpStop = resolve; });
     const mcpStop = vi.spyOn(runtime.mcpHost, 'stop').mockImplementationOnce(async () => { await mcpStopRelease; }).mockResolvedValue(undefined);
     const flushPreferences = vi.spyOn(runtime.onionSkinPreferences, 'flush');
+    const flushSymmetryPreferences = vi.spyOn(runtime.spriteSymmetryPreferences, 'flush');
     vi.spyOn(runtime.rasterUtilities, 'stop').mockImplementation(() => undefined);
     vi.spyOn(runtime.generationUtilities, 'stop').mockImplementation(() => undefined);
     const compactRecovery = vi.spyOn(runtime.service, 'compactRecovery')
@@ -65,11 +90,13 @@ describe('EngineRuntime stop', () => {
     expect(failed.map((entry) => entry.status)).toEqual(['rejected', 'rejected']);
     expect(compactRecovery).toHaveBeenCalledOnce();
     expect(flushPreferences).toHaveBeenCalledOnce();
+    expect(flushSymmetryPreferences).toHaveBeenCalledOnce();
     expect(state.started).toBe(true);
 
     await expect(runtime.stop()).resolves.toBeUndefined();
     expect(mcpStop).toHaveBeenCalledTimes(2);
     expect(flushPreferences).toHaveBeenCalledTimes(2);
+    expect(flushSymmetryPreferences).toHaveBeenCalledTimes(2);
     expect(compactRecovery).toHaveBeenCalledTimes(2);
     expect(state.started).toBe(false);
 
