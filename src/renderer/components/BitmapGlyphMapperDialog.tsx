@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
-import { bitmapFontCharacterError, minimumBitmapFontLineHeight, type BitmapFont, type BitmapGlyphCapture } from '@aidraw/core';
+import { bitmapFontCharacterError, minimumBitmapFontLineHeight, resolveBitmapFontId, type BitmapFont, type BitmapGlyphCapture } from '@aidraw/core';
 import { EditorDialog } from './EditorDialog';
 
 export interface BitmapGlyphMappingRequest {
@@ -13,24 +13,34 @@ export function BitmapGlyphMapperDialog({
   fonts,
   capture,
   captureError,
+  selectedFontId,
+  onSelectedFontChange,
+  onManageFonts,
   onSubmit,
   onClose,
 }: {
   fonts: BitmapFont[];
   capture?: BitmapGlyphCapture;
   captureError?: string;
+  selectedFontId?: string;
+  onSelectedFontChange?: (fontId: string) => void;
+  onManageFonts?: () => void;
   onSubmit: (request: BitmapGlyphMappingRequest) => boolean | Promise<boolean>;
   onClose: () => void;
 }) {
-  const initialFont = fonts[0];
-  const [fontId, setFontId] = useState(fonts[0]?.id ?? '');
+  const resolvedFontId = resolveBitmapFontId(fonts, selectedFontId);
+  const initialFont = fonts.find((entry) => entry.id === resolvedFontId);
   const [character, setCharacter] = useState('A');
   const [advance, setAdvance] = useState(String(capture?.glyph.advance ?? 1));
   const [lineHeight, setLineHeight] = useState(String(initialFont ? Math.max(initialFont.lineHeight, minimumBitmapFontLineHeight(initialFont, capture?.glyph)) : capture?.glyph.rows.length ?? 1));
   const [busy, setBusy] = useState(false);
   const [submitError, setSubmitError] = useState<string>();
-  const font = fonts.find((entry) => entry.id === fontId) ?? fonts[0];
+  const font = fonts.find((entry) => entry.id === resolvedFontId);
   const minimumLineHeight = font ? minimumBitmapFontLineHeight(font, capture?.glyph) : capture?.glyph.rows.length ?? 1;
+
+  useEffect(() => {
+    if (resolvedFontId && resolvedFontId !== selectedFontId) onSelectedFontChange?.(resolvedFontId);
+  }, [onSelectedFontChange, resolvedFontId, selectedFontId]);
 
   useEffect(() => {
     if (!capture) return;
@@ -74,7 +84,7 @@ export function BitmapGlyphMapperDialog({
       <form onSubmit={(event) => void submit(event)}>
         <div className="entry-dialog-body bitmap-glyph-mapper-body">
           <div className="bitmap-glyph-map-fields">
-            <label className="dialog-field"><span>Font asset</span><select autoFocus value={font?.id ?? ''} onChange={(event) => { setFontId(event.target.value); setSubmitError(undefined); }}>{fonts.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}</select></label>
+            <label className="dialog-field"><span>Font asset</span><select autoFocus value={font?.id ?? ''} onChange={(event) => { onSelectedFontChange?.(event.target.value); setSubmitError(undefined); }}>{fonts.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}</select></label>
             <label className="dialog-field"><span>Character</span><input aria-label="Bitmap glyph character" value={character} maxLength={4} onChange={(event) => { setCharacter(event.target.value); setSubmitError(undefined); }} aria-invalid={Boolean(bitmapFontCharacterError(character))} /></label>
             <label className="dialog-field"><span>Advance</span><input aria-label="Bitmap glyph advance" type="number" min={1} max={128} value={advance} onChange={(event) => { setAdvance(event.target.value); setSubmitError(undefined); }} /></label>
             <label className="dialog-field"><span>Line height</span><input aria-label="Bitmap font line height" type="number" min={minimumLineHeight} max={128} value={lineHeight} onChange={(event) => { setLineHeight(event.target.value); setSubmitError(undefined); }} /></label>
@@ -90,6 +100,7 @@ export function BitmapGlyphMapperDialog({
           {(validationError || submitError) && <p className="entry-dialog-error" role="alert">{validationError ?? submitError}</p>}
         </div>
         <footer className="modal-footer">
+          {onManageFonts && <button type="button" className="secondary-modal-button" onClick={onManageFonts}>Manage fonts</button>}
           <button type="button" className="secondary-modal-button" onClick={onClose}>Cancel</button>
           <button type="submit" className="primary-modal-button" disabled={busy || Boolean(validationError)}>{busy ? 'Mapping…' : replacing ? 'Replace glyph' : 'Map glyph'}</button>
         </footer>

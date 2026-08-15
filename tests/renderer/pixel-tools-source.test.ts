@@ -108,6 +108,31 @@ describe('pixel tool renderer wiring', () => {
     expect(component).not.toContain("kind: 'pixel.cel.set'");
   });
 
+  it('creates or deletes one document font from current state while all font selectors recover together', async () => {
+    const source = await readFile(new URL('../../src/renderer/canvas/PixelCanvas.tsx', import.meta.url), 'utf8');
+    const start = source.indexOf('const createBitmapFont = async');
+    const end = source.indexOf('const changeFrameDuration = async', start);
+    const lifecycle = source.slice(start, end);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    expect(source).toContain('Create or delete document-owned bitmap font assets');
+    expect(source).toContain('<BitmapFontLibraryDialog');
+    expect(source).toContain('selectedFontId={selectedBitmapFontId}');
+    expect(source).toContain('onSelectedFontChange={setBitmapFontId}');
+    expect(source).toContain('onManageFonts');
+    expect(source).toContain('The selected font has no mapped ink for this text. Use Glyph or Glyph sheet to add characters.');
+    expect(source).toContain('resolveBitmapFontId(document.bitmapFonts, bitmapFontId)');
+    expect(source).toContain('useEditorStore.getState().snapshot?.activeDocument');
+    expect(lifecycle).toContain("createEmptyBitmapFont(currentBitmapFonts(), { id: createId('bitmap-font'), ...request })");
+    expect(lifecycle).toContain('deleteBitmapFont(currentBitmapFonts(), fontId)');
+    expect(lifecycle).toContain("apply('Create bitmap font', [{ kind: 'pixel.bitmap-fonts.replace'");
+    expect(lifecycle).toContain("apply('Delete bitmap font', [{ kind: 'pixel.bitmap-fonts.replace'");
+    expect(lifecycle.match(/kind: 'pixel\.bitmap-fonts\.replace'/gu)).toHaveLength(2);
+    expect(lifecycle).not.toContain("kind: 'pixel.cel.set'");
+    expect(lifecycle).not.toContain('setSelection(');
+    expect(lifecycle).toContain('Existing bitmap text remains rasterized in its cels.');
+  });
+
   it('publishes pixel selections cross-process while retaining the project-local tile clipboard fail closed', async () => {
     const source = await readFile(new URL('../../src/renderer/canvas/PixelCanvas.tsx', import.meta.url), 'utf8');
     expect(source).toContain("type LocalSelectionClipboard = { kind: 'tile'");

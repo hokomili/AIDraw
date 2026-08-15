@@ -1,5 +1,5 @@
-import { useMemo, useState, type FormEvent } from 'react';
-import { mapBitmapFontGlyphSheet, type BitmapFont, type BitmapGlyphSheetMapping } from '@aidraw/core';
+import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { mapBitmapFontGlyphSheet, resolveBitmapFontId, type BitmapFont, type BitmapGlyphSheetMapping } from '@aidraw/core';
 import { EditorDialog } from './EditorDialog';
 
 export interface BitmapGlyphSheetMappingRequest {
@@ -20,23 +20,33 @@ export function BitmapGlyphSheetMapperDialog({
   fonts,
   points,
   readIndex,
+  selectedFontId,
+  onSelectedFontChange,
+  onManageFonts,
   onSubmit,
   onClose,
 }: {
   fonts: BitmapFont[];
   points: ReadonlyArray<{ x: number; y: number }>;
   readIndex: (x: number, y: number) => number;
+  selectedFontId?: string;
+  onSelectedFontChange?: (fontId: string) => void;
+  onManageFonts?: () => void;
   onSubmit: (request: BitmapGlyphSheetMappingRequest) => boolean | Promise<boolean>;
   onClose: () => void;
 }) {
-  const [fontId, setFontId] = useState(fonts[0]?.id ?? '');
+  const resolvedFontId = resolveBitmapFontId(fonts, selectedFontId);
   const [characters, setCharacters] = useState('AB');
   const [columns, setColumns] = useState('2');
   const [advance, setAdvance] = useState('');
   const [lineHeight, setLineHeight] = useState('');
   const [busy, setBusy] = useState(false);
   const [submitError, setSubmitError] = useState<string>();
-  const font = fonts.find((entry) => entry.id === fontId) ?? fonts[0];
+  const font = fonts.find((entry) => entry.id === resolvedFontId);
+
+  useEffect(() => {
+    if (resolvedFontId && resolvedFontId !== selectedFontId) onSelectedFontChange?.(resolvedFontId);
+  }, [onSelectedFontChange, resolvedFontId, selectedFontId]);
   const result = useMemo<{ mapping?: BitmapGlyphSheetMapping; error?: string }>(() => {
     if (!font) return { error: 'The document has no bitmap font asset.' };
     try {
@@ -84,7 +94,7 @@ export function BitmapGlyphSheetMapperDialog({
       <form onSubmit={(event) => void submit(event)}>
         <div className="entry-dialog-body bitmap-glyph-mapper-body">
           <div className="bitmap-glyph-map-fields">
-            <label className="dialog-field"><span>Font asset</span><select autoFocus value={font?.id ?? ''} onChange={(event) => { setFontId(event.target.value); setSubmitError(undefined); }}>{fonts.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}</select></label>
+            <label className="dialog-field"><span>Font asset</span><select autoFocus value={font?.id ?? ''} onChange={(event) => { onSelectedFontChange?.(event.target.value); setSubmitError(undefined); }}>{fonts.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}</select></label>
             <label className="dialog-field"><span>Columns</span><input aria-label="Bitmap glyph sheet columns" type="number" min={1} max={Math.max(1, [...characters].length)} value={columns} onChange={(event) => { setColumns(event.target.value); setSubmitError(undefined); }} /></label>
             <label className="dialog-field bitmap-glyph-sheet-order"><span>Characters in row-major order</span><textarea aria-label="Bitmap glyph sheet character order" rows={2} maxLength={512} value={characters} onChange={(event) => { setCharacters(event.target.value); setSubmitError(undefined); }} /></label>
             <label className="dialog-field"><span>Shared advance <small>blank = cell width</small></span><input aria-label="Bitmap glyph sheet advance" type="number" min={1} max={128} placeholder="Cell width" value={advance} onChange={(event) => { setAdvance(event.target.value); setSubmitError(undefined); }} /></label>
@@ -109,6 +119,7 @@ export function BitmapGlyphSheetMapperDialog({
           {(result.error || submitError) && <p className="entry-dialog-error" role="alert">{result.error ?? submitError}</p>}
         </div>
         <footer className="modal-footer">
+          {onManageFonts && <button type="button" className="secondary-modal-button" onClick={onManageFonts}>Manage fonts</button>}
           <button type="button" className="secondary-modal-button" onClick={onClose}>Cancel</button>
           <button type="submit" className="primary-modal-button" disabled={busy || !result.mapping}>{busy ? 'Mapping…' : result.mapping ? `Map ${result.mapping.characterCount} glyphs` : 'Map glyph sheet'}</button>
         </footer>

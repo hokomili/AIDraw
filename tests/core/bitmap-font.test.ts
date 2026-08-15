@@ -4,15 +4,20 @@ import {
   HUMAN_ACTOR,
   applyTransaction,
   bitmapFontCharacterError,
+  bitmapFontCreationError,
+  bitmapFontDeletionError,
   bitmapTextCells,
   captureBitmapGlyph,
   createDefaultBitmapFont,
+  createEmptyBitmapFont,
   createId,
   createPixelDocument,
+  deleteBitmapFont,
   mapBitmapFontGlyphSheet,
   measureBitmapText,
   minimumBitmapFontLineHeight,
   nowIso,
+  resolveBitmapFontId,
   upsertBitmapFontGlyph,
 } from '@aidraw/core';
 
@@ -29,6 +34,74 @@ describe('bitmap fonts', () => {
     expect(Object.values(font.glyphs).every((glyph) => glyph.rows.every((row) => row.length === glyph.width))).toBe(true);
     expect(CanvasOperationSchema.parse({ kind: 'pixel.bitmap-fonts.replace', fonts: [font] })).toBeTruthy();
     expect(() => CanvasOperationSchema.parse({ kind: 'pixel.bitmap-fonts.replace', fonts: [{ ...font, glyphs: { A: { width: 5, advance: 6, rows: ['###'] } } }] })).toThrow();
+  });
+
+  it('plans explicitly named empty fonts and deterministic selection recovery without cloning bundled glyphs', () => {
+    const source = [createDefaultBitmapFont()]; const before = structuredClone(source);
+    const creation = createEmptyBitmapFont(source, { id: 'bitmap-font-empty', name: '  Dialogue  ', lineHeight: 12 });
+    expect(creation.font).toEqual({ id: 'bitmap-font-empty', name: 'Dialogue', lineHeight: 12, glyphs: {} });
+    expect(creation.font.glyphs).not.toEqual(source[0].glyphs);
+    expect(creation.fonts).toEqual([source[0], creation.font]);
+    expect(source).toEqual(before);
+    expect(CanvasOperationSchema.parse({ kind: 'pixel.bitmap-fonts.replace', fonts: creation.fonts })).toBeTruthy();
+    expect(bitmapTextCells(creation.font, 'AIDraw')).toEqual([]);
+    expect(resolveBitmapFontId(creation.fonts, creation.font.id)).toBe(creation.font.id);
+    expect(resolveBitmapFontId(creation.fonts, 'deleted-font')).toBe(source[0].id);
+
+    const deletion = deleteBitmapFont(creation.fonts, source[0].id);
+    expect(deletion).toEqual({ font: source[0], fonts: [creation.font], selectedFontId: creation.font.id });
+    expect(creation.fonts).toEqual([source[0], creation.font]);
+  });
+
+  it('refuses invalid, full, stale, or last-font lifecycle requests before mutation', () => {
+    const source = [createDefaultBitmapFont()];
+    expect(bitmapFontCreationError(source, ' ', 8)).toMatch(/Enter a bitmap font name/);
+    expect(bitmapFontCreationError(source, 'x'.repeat(201), 8)).toMatch(/200 characters/);
+    expect(bitmapFontCreationError(source, 'Font', 0)).toMatch(/1 through 128/);
+    expect(bitmapFontCreationError(source, 'Font', 129)).toMatch(/1 through 128/);
+    expect(() => createEmptyBitmapFont(source, { id: '', name: 'Font', lineHeight: 8 })).toThrow(/needs an ID/);
+    expect(() => createEmptyBitmapFont(source, { id: source[0].id, name: 'Font', lineHeight: 8 })).toThrow(/already in use/);
+    const full = Array.from({ length: 64 }, (_, index) => ({ ...createDefaultBitmapFont(), id: `bitmap-font-${index}` }));
+    expect(bitmapFontCreationError(full, 'Font 65', 8)).toMatch(/limited to 64 fonts/);
+    expect(() => createEmptyBitmapFont(full, { id: 'bitmap-font-65', name: 'Font 65', lineHeight: 8 })).toThrow(/Delete one/);
+    expect(bitmapFontDeletionError(source, 'missing')).toMatch(/no longer exists/);
+    expect(bitmapFontDeletionError(source, source[0].id)).toMatch(/Keep at least one/);
+    expect(() => deleteBitmapFont(source, source[0].id)).toThrow(/Create another font/);
+    expect(source).toHaveLength(1);
+  });
+
+  it('creates and deletes font assets through one-operation inverses without changing raster document state', () => {
+    const document = createPixelDocument('sprite', 'Font lifecycle');
+    const visualState = { pixelAssets: structuredClone(document.pixelAssets), palette: structuredClone(document.palette), activeAssetId: document.activeAssetId };
+    const creation = createEmptyBitmapFont(document.bitmapFonts, { id: 'bitmap-font-dialogue', name: 'Dialogue', lineHeight: 10 });
+    const created = applyTransaction(document, {
+      id: createId('tx'), clientOperationId: createId('op'), documentId: document.id, actor: HUMAN_ACTOR,
+      label: 'Create bitmap font', createdAt: nowIso(), playback: { mode: 'instant', speed: 1 },
+      operations: [{ kind: 'pixel.bitmap-fonts.replace', fonts: creation.fonts }],
+    });
+    if (created.document.kind !== 'pixel') throw new Error('Expected pixel document');
+    expect(created.document.bitmapFonts).toEqual(creation.fonts);
+    expect(created.document).toMatchObject(visualState);
+    expect(created.document.activity.at(-1)).toMatchObject({ label: 'Create bitmap font', operationCount: 1 });
+    const createRestored = applyTransaction(created.document, created.inverse, { recordActivity: false }).document;
+    if (createRestored.kind !== 'pixel') throw new Error('Expected pixel document');
+    expect(createRestored.bitmapFonts).toEqual(document.bitmapFonts);
+
+    const deletion = deleteBitmapFont(created.document.bitmapFonts, creation.font.id);
+    const deleted = applyTransaction(created.document, {
+      id: createId('tx'), clientOperationId: createId('op'), documentId: document.id, actor: HUMAN_ACTOR,
+      label: 'Delete bitmap font', createdAt: nowIso(), playback: { mode: 'instant', speed: 1 },
+      operations: [{ kind: 'pixel.bitmap-fonts.replace', fonts: deletion.fonts }],
+    });
+    if (deleted.document.kind !== 'pixel') throw new Error('Expected pixel document');
+    expect(deleted.document.bitmapFonts).toEqual(document.bitmapFonts);
+    expect(deleted.document).toMatchObject(visualState);
+    expect(deleted.document.revision).toBe(document.revision + 2);
+    expect(deleted.document.activity.at(-1)).toMatchObject({ label: 'Delete bitmap font', operationCount: 1 });
+    const deleteRestored = applyTransaction(deleted.document, deleted.inverse, { recordActivity: false }).document;
+    if (deleteRestored.kind !== 'pixel') throw new Error('Expected pixel document');
+    expect(deleteRestored.bitmapFonts).toEqual(creation.fonts);
+    expect(deleteRestored).toMatchObject(visualState);
   });
 
   it('captures only selected nonzero indexed cells inside bounded glyph geometry', () => {

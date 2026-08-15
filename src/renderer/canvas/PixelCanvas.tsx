@@ -7,9 +7,11 @@ import {
   captureBitmapGlyph,
   captureTileStamp,
   bitmapTextCells,
+  createEmptyBitmapFont,
   measureBitmapText,
   createPixelCelReader,
   cycledPaletteIndex,
+  deleteBitmapFont,
   deletePixelAnimationTag,
   duplicatePixelFrame,
   ellipsePixels,
@@ -29,6 +31,7 @@ import {
   readPixel,
   readTileAt,
   replacePixelRegion,
+  resolveBitmapFontId,
   reorderPixelFrame,
   resolveTilesetForGid,
   setPixelCelLinked,
@@ -60,6 +63,7 @@ import { useEditorStore } from '../store';
 import { CelExposureGrid } from '../components/CelExposureGrid';
 import { BitmapGlyphMapperDialog } from '../components/BitmapGlyphMapperDialog';
 import { BitmapGlyphSheetMapperDialog } from '../components/BitmapGlyphSheetMapperDialog';
+import { BitmapFontLibraryDialog } from '../components/BitmapFontLibraryDialog';
 import { OnionSkinSettingsPanel } from '../components/OnionSkinSettingsPanel';
 import { PlaybackLanes } from '../components/PlaybackLanes';
 import { StampLibraryDialog } from '../components/StampLibraryDialog';
@@ -212,26 +216,27 @@ function rectangleFill(start: PixelPoint, end: PixelPoint): PixelPoint[] {
 
 interface BitmapTextRequest { text: string; fontId: string; letterSpacing: number; lineSpacing: number; scale: number; align: 'left' | 'center' | 'right' }
 
-function BitmapTextDialog({ fonts, origin, spriteSize, paletteIndex, wrap, onSubmit, onFontsReplace, onClose }: { fonts: BitmapFont[]; origin: PixelPoint; spriteSize: { width: number; height: number }; paletteIndex: number; wrap: boolean; onSubmit: (request: BitmapTextRequest) => Promise<void>; onFontsReplace: (fonts: BitmapFont[]) => Promise<boolean>; onClose: () => void }) {
-  const [text, setText] = useState('PIXEL'); const [fontId, setFontId] = useState(fonts[0]?.id ?? ''); const [letterSpacing, setLetterSpacing] = useState(0); const [lineSpacing, setLineSpacing] = useState(0); const [scale, setScale] = useState(1); const [align, setAlign] = useState<BitmapTextRequest['align']>('left'); const [busy, setBusy] = useState(false); const [importError, setImportError] = useState<string>(); const font = fonts.find((entry) => entry.id === fontId) ?? fonts[0];
-  const options = { x: origin.x, y: origin.y, letterSpacing, lineSpacing, scale, align }; const authoredPoints = font ? bitmapTextCells(font, text, options) : []; const points = wrap ? wrapPixelPoints(authoredPoints, spriteSize.width, spriteSize.height) : authoredPoints; const footprint = font ? measureBitmapText(font, text, options) : { width: 0, height: 0 }; const visible = points.some((point) => point.x >= 0 && point.y >= 0 && point.x < spriteSize.width && point.y < spriteSize.height); const local = points.length ? { minX: Math.min(...points.map((point) => point.x)), minY: Math.min(...points.map((point) => point.y)), maxX: Math.max(...points.map((point) => point.x)), maxY: Math.max(...points.map((point) => point.y)) } : { minX: 0, minY: 0, maxX: 1, maxY: 1 };
+function BitmapTextDialog({ fonts, selectedFontId, origin, spriteSize, paletteIndex, wrap, onSelectedFontChange, onManageFonts, onSubmit, onFontsReplace, onClose }: { fonts: BitmapFont[]; selectedFontId?: string; origin: PixelPoint; spriteSize: { width: number; height: number }; paletteIndex: number; wrap: boolean; onSelectedFontChange: (fontId: string) => void; onManageFonts: () => void; onSubmit: (request: BitmapTextRequest) => Promise<void>; onFontsReplace: (fonts: BitmapFont[]) => Promise<boolean>; onClose: () => void }) {
+  const [text, setText] = useState('PIXEL'); const [letterSpacing, setLetterSpacing] = useState(0); const [lineSpacing, setLineSpacing] = useState(0); const [scale, setScale] = useState(1); const [align, setAlign] = useState<BitmapTextRequest['align']>('left'); const [busy, setBusy] = useState(false); const [importError, setImportError] = useState<string>(); const resolvedFontId = resolveBitmapFontId(fonts, selectedFontId); const font = fonts.find((entry) => entry.id === resolvedFontId);
+  useEffect(() => { if (resolvedFontId && resolvedFontId !== selectedFontId) onSelectedFontChange(resolvedFontId); }, [onSelectedFontChange, resolvedFontId, selectedFontId]);
+  const options = { x: origin.x, y: origin.y, letterSpacing, lineSpacing, scale, align }; const authoredPoints = font ? bitmapTextCells(font, text, options) : []; const points = wrap ? wrapPixelPoints(authoredPoints, spriteSize.width, spriteSize.height) : authoredPoints; const footprint = font ? measureBitmapText(font, text, options) : { width: 0, height: 0 }; const hasInk = authoredPoints.length > 0; const visible = points.some((point) => point.x >= 0 && point.y >= 0 && point.x < spriteSize.width && point.y < spriteSize.height); const local = points.length ? { minX: Math.min(...points.map((point) => point.x)), minY: Math.min(...points.map((point) => point.y)), maxX: Math.max(...points.map((point) => point.x)), maxY: Math.max(...points.map((point) => point.y)) } : { minX: 0, minY: 0, maxX: 1, maxY: 1 };
   const importFont = async (file: File) => {
     setImportError(undefined);
     try {
       if (file.size > 1024 * 1024) throw new Error('Bitmap font JSON is limited to 1 MiB.');
       const next = parseBitmapFontJson(await file.text(), fonts.map((entry) => entry.id));
       if (!(await onFontsReplace([...fonts, next]))) throw new Error('The bitmap font could not be added to this document.');
-      setFontId(next.id);
+      onSelectedFontChange(next.id);
     } catch (error) { setImportError(error instanceof Error ? error.message : String(error)); }
   };
   return <EditorDialog title="Add bitmap text" description="Document-owned glyphs render identically in the editor, headless MCP, replay, and export." className="bitmap-text-dialog" onClose={onClose}>
     <div className="bitmap-text-body">
       <label className="dialog-field"><span>Text</span><textarea autoFocus rows={3} maxLength={2_000} value={text} onChange={(event) => setText(event.target.value)} /></label>
-      <div className="bitmap-font-row"><label className="dialog-field"><span>Bitmap font asset</span><select value={font?.id ?? ''} onChange={(event) => setFontId(event.target.value)}>{fonts.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}</select></label><button type="button" onClick={() => void navigator.clipboard.writeText(JSON.stringify({ version: 1, font }, null, 2))}>Copy font JSON</button><label className="bitmap-font-import">Import JSON<input type="file" accept="application/json,.json" onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ''; if (file) void importFont(file); }} /></label></div>
+      <div className="bitmap-font-row"><label className="dialog-field"><span>Bitmap font asset</span><select value={font?.id ?? ''} onChange={(event) => onSelectedFontChange(event.target.value)}>{fonts.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}</select></label><button type="button" onClick={onManageFonts}>Manage fonts</button><button type="button" onClick={() => void navigator.clipboard.writeText(JSON.stringify({ version: 1, font }, null, 2))}>Copy font JSON</button><label className="bitmap-font-import">Import JSON<input type="file" accept="application/json,.json" onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ''; if (file) void importFont(file); }} /></label></div>
       {importError && <p className="entry-dialog-error" role="alert">{importError}</p>}
       <div className="bitmap-text-options"><label><span>Scale</span><input type="number" min="1" max="16" value={scale} onChange={(event) => setScale(Math.max(1, Math.min(16, Number(event.target.value) || 1)))} /></label><label><span>Letter gap</span><input type="number" min="0" max="32" value={letterSpacing} onChange={(event) => setLetterSpacing(Math.max(0, Math.min(32, Number(event.target.value) || 0)))} /></label><label><span>Line gap</span><input type="number" min="0" max="64" value={lineSpacing} onChange={(event) => setLineSpacing(Math.max(0, Math.min(64, Number(event.target.value) || 0)))} /></label><label><span>Anchor</span><select value={align} onChange={(event) => setAlign(event.target.value as BitmapTextRequest['align'])}><option value="left">Left</option><option value="center">Center</option><option value="right">Right</option></select></label></div>
       <div className="bitmap-glyph-preview"><svg viewBox={`${local.minX} ${local.minY} ${Math.max(1, local.maxX - local.minX + 1)} ${Math.max(1, local.maxY - local.minY + 1)}`} preserveAspectRatio="xMidYMid meet" aria-label="Bitmap text glyph preview">{points.slice(0, 20_000).map((point) => <rect key={`${point.x},${point.y}`} x={point.x} y={point.y} width="1" height="1" />)}</svg><span><strong>{footprint.width} × {footprint.height}px</strong><small>palette index {paletteIndex} · anchor {origin.x}, {origin.y}</small></span></div>
-      {!visible && <div className="entry-dialog-error">The text falls completely outside the sprite.</div>}
+      {!hasInk ? <div className="entry-dialog-error">The selected font has no mapped ink for this text. Use Glyph or Glyph sheet to add characters.</div> : !visible && <div className="entry-dialog-error">The text falls completely outside the sprite.</div>}
     </div>
     <footer className="modal-footer"><button type="button" onClick={onClose}>Cancel</button><button type="button" className="primary-modal-button" disabled={busy || !font || !text.trim() || !visible} onClick={async () => { if (!font) return; setBusy(true); try { await onSubmit({ text, fontId: font.id, letterSpacing, lineSpacing, scale, align }); } finally { setBusy(false); } }}>{busy ? 'Painting…' : 'Paint editable pixels'}</button></footer>
   </EditorDialog>;
@@ -259,6 +264,8 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const [selectionScaleOpen, setSelectionScaleOpen] = useState(false);
   const [glyphMapperOpen, setGlyphMapperOpen] = useState(false);
   const [glyphSheetMapperOpen, setGlyphSheetMapperOpen] = useState(false);
+  const [fontLibraryOpen, setFontLibraryOpen] = useState(false);
+  const [bitmapFontId, setBitmapFontId] = useState(document.bitmapFonts[0]?.id ?? '');
   const [clipboardAvailable, setClipboardAvailable] = useState(Boolean(localSelectionClipboard));
   const [mapObjectGesture, setMapObjectGesture] = useState<MapObjectGesture>();
   const mapObjectGestureRef = useRef<MapObjectGesture | undefined>(undefined);
@@ -309,12 +316,18 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const ditherMixIndex = Math.min(document.palette.length - 1, useEditorStore((state) => state.ditherMixIndex));
   const applyToActiveDocument = useEditorStore((state) => state.apply);
   const apply = useCallback((label: string, operations: CanvasOperation[]) => mountedRef.current ? applyToActiveDocument(label, operations, document.id) : Promise.resolve(false), [applyToActiveDocument, document.id]);
+  const currentBitmapFonts = useCallback((): BitmapFont[] => {
+    const activeDocument = useEditorStore.getState().snapshot?.activeDocument;
+    if (!activeDocument || activeDocument.id !== document.id || activeDocument.kind !== 'pixel') throw new Error('The active pixel document changed. Reopen Bitmap font assets and try again.');
+    return activeDocument.bitmapFonts;
+  }, [document.id]);
   const notify = useEditorStore((state) => state.notify);
   const selectedEntityId = useEditorStore((state) => state.selectedEntityId);
   const setSelectedEntity = useEditorStore((state) => state.setSelectedEntity);
   const playbackMap = useEditorStore((state) => state.playbacks);
   const playbacks = Object.values(playbackMap).filter((entry) => entry.documentId === document.id);
   const activeFrameId = sprite?.frameIds.includes(frameId ?? '') ? frameId : sprite?.frameIds[0];
+  const selectedBitmapFontId = resolveBitmapFontId(document.bitmapFonts, bitmapFontId);
   const selectedGlyphCapture = useMemo<{ capture?: BitmapGlyphCapture; error?: string }>(() => {
     if (!glyphMapperOpen || !sprite || !activeFrameId || !selection.length) return {};
     try { return { capture: captureBitmapGlyph(selection, compositePixelReader(sprite, activeFrameId)) }; }
@@ -361,6 +374,10 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       void releasePendingPixelLocks(pendingLocks, (lockId) => window.aidraw.releaseHumanLock(lockId));
     };
   }, []);
+
+  useEffect(() => {
+    if (selectedBitmapFontId && selectedBitmapFontId !== bitmapFontId) setBitmapFontId(selectedBitmapFontId);
+  }, [bitmapFontId, selectedBitmapFontId]);
 
   useEffect(() => {
     if (tilemap) { setClipboardAvailable(Boolean(localSelectionClipboard)); return; }
@@ -1294,6 +1311,26 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     }
   };
 
+  const createBitmapFont = async (request: { name: string; lineHeight: number }): Promise<boolean> => {
+    const creation = createEmptyBitmapFont(currentBitmapFonts(), { id: createId('bitmap-font'), ...request });
+    const applied = await apply('Create bitmap font', [{ kind: 'pixel.bitmap-fonts.replace', fonts: creation.fonts }]);
+    if (applied) {
+      setBitmapFontId(creation.font.id);
+      notify(`Created empty bitmap font ${creation.font.name}. Map characters with Glyph or Glyph sheet before painting text.`, 'success');
+    }
+    return applied;
+  };
+
+  const removeBitmapFont = async (fontId: string): Promise<boolean> => {
+    const deletion = deleteBitmapFont(currentBitmapFonts(), fontId);
+    const applied = await apply('Delete bitmap font', [{ kind: 'pixel.bitmap-fonts.replace', fonts: deletion.fonts }]);
+    if (applied) {
+      setBitmapFontId(deletion.selectedFontId);
+      notify(`Deleted bitmap font ${deletion.font.name}. Existing bitmap text remains rasterized in its cels.`, 'success');
+    }
+    return applied;
+  };
+
   const changeFrameDuration = async (value: string) => {
     if (!sprite || !durationFrameId) return;
     const current = sprite.frames[durationFrameId];
@@ -1373,6 +1410,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       <PlaybackLanes playbacks={playbacks} />
       {tileset && <div className="tileset-canvas-label"><Grid3X3 size={14} /><span><strong>Tileset source</strong><small>{tileset.tileWidth} × {tileset.tileHeight}px cells · metadata in Layers</small></span></div>}
       <div className="pixel-floating-controls">
+        <button className={fontLibraryOpen ? 'is-active' : ''} aria-expanded={fontLibraryOpen} onClick={() => { setFontLibraryOpen(true); setGlyphMapperOpen(false); setGlyphSheetMapperOpen(false); setBitmapTextPoint(undefined); }} title="Create or delete document-owned bitmap font assets"><CaseUpper size={EDITOR_DENSITY.secondaryIcon} /> Fonts</button>
         {hasTimeline && <button className={onionSkin ? 'is-active' : ''} onClick={() => setOnionSkinPreferences({ ...onionSettings, enabled: !onionSkin })} title="Onion skin"><Eye size={14} /> Onion</button>}
         {hasTimeline && <button className={onionSettingsOpen ? 'is-active' : ''} aria-expanded={onionSettingsOpen} aria-controls="onion-skin-settings" onClick={() => { setOnionSettingsOpen((open) => !open); setExposureGridOpen(false); }} title="Configure bounded onion skin frames, tint, and opacity"><SlidersHorizontal size={13} /> Onion setup</button>}
         {sprite && <button className={wrapEditing ? 'is-active' : ''} aria-pressed={wrapEditing} onClick={() => setWrapEditing((value) => !value)} title="Preview and edit through repeated copies across opposite sprite edges"><Repeat2 size={14} /> Wrap edit</button>}
@@ -1446,10 +1484,21 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       )}
       {exposureGridOpen && sprite && activeFrameId && <CelExposureGrid key={`${sprite.id}:${sprite.revision}:${activeFrameId}:${selectedEntityId ?? ''}`} sprite={sprite} activeFrameId={activeFrameId} activeLayerId={selectedEntityId} onSelect={(nextFrameId, layerId) => { setFrameId(nextFrameId); setSelectedEntity(layerId); }} onToggleLink={(layerId, nextFrameId) => void toggleCelExposureLink(layerId, nextFrameId)} onClose={() => setExposureGridOpen(false)} />}
       {onionSettingsOpen && hasTimeline && sprite && <OnionSkinSettingsPanel settings={onionSettings} onChange={(settings) => setOnionSkinPreferences({ ...settings, enabled: onionSkin })} onClose={() => setOnionSettingsOpen(false)} />}
+      {fontLibraryOpen && <BitmapFontLibraryDialog
+        fonts={document.bitmapFonts}
+        selectedFontId={selectedBitmapFontId}
+        onSelectedFontChange={setBitmapFontId}
+        onCreate={createBitmapFont}
+        onDelete={removeBitmapFont}
+        onClose={() => setFontLibraryOpen(false)}
+      />}
       {glyphMapperOpen && sprite && <BitmapGlyphMapperDialog
         fonts={document.bitmapFonts}
         capture={selectedGlyphCapture.capture}
         captureError={selectedGlyphCapture.error}
+        selectedFontId={selectedBitmapFontId}
+        onSelectedFontChange={setBitmapFontId}
+        onManageFonts={() => { setGlyphMapperOpen(false); setFontLibraryOpen(true); }}
         onSubmit={async ({ fontId, character, advance, lineHeight }) => {
           const font = document.bitmapFonts.find((entry) => entry.id === fontId);
           const capture = selectedGlyphCapture.capture;
@@ -1465,6 +1514,9 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
         fonts={document.bitmapFonts}
         points={selection}
         readIndex={compositePixelReader(sprite, activeFrameId)}
+        selectedFontId={selectedBitmapFontId}
+        onSelectedFontChange={setBitmapFontId}
+        onManageFonts={() => { setGlyphSheetMapperOpen(false); setFontLibraryOpen(true); }}
         onSubmit={async ({ fontId, characters, columns, advance, lineHeight }) => {
           const font = document.bitmapFonts.find((entry) => entry.id === fontId);
           if (!font) return false;
@@ -1478,7 +1530,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
         }}
         onClose={() => setGlyphSheetMapperOpen(false)}
       />}
-      {bitmapTextPoint && sprite && <BitmapTextDialog fonts={document.bitmapFonts} origin={bitmapTextPoint} spriteSize={{ width: sprite.width, height: sprite.height }} paletteIndex={pixelIndex} wrap={wrapEditing} onSubmit={addBitmapText} onFontsReplace={(fonts) => apply('Replace bitmap font library', [{ kind: 'pixel.bitmap-fonts.replace', fonts }])} onClose={() => setBitmapTextPoint(undefined)} />}
+      {bitmapTextPoint && sprite && <BitmapTextDialog fonts={document.bitmapFonts} selectedFontId={selectedBitmapFontId} origin={bitmapTextPoint} spriteSize={{ width: sprite.width, height: sprite.height }} paletteIndex={pixelIndex} wrap={wrapEditing} onSelectedFontChange={setBitmapFontId} onManageFonts={() => { setBitmapTextPoint(undefined); setFontLibraryOpen(true); }} onSubmit={addBitmapText} onFontsReplace={(fonts) => apply('Replace bitmap font library', [{ kind: 'pixel.bitmap-fonts.replace', fonts }])} onClose={() => setBitmapTextPoint(undefined)} />}
       {stampCaptureOpen && (sprite || tilemap) && <EntryDialog
         title="Save reusable stamp"
         description={sprite ? "The current selection is captured with exact palette indices, including transparent cells and its center anchor." : "The current map selection is captured with exact 32-bit GIDs, transformations, empty cells, and its center anchor."}

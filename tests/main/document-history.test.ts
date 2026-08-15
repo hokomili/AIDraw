@@ -5,13 +5,16 @@ import { join } from 'node:path';
 import {
   HUMAN_ACTOR,
   IDENTITY_TRANSFORM,
+  createEmptyBitmapFont,
   createId,
+  deleteBitmapFont,
   nowIso,
   readPixel,
   type Actor,
   type CanvasOperation,
   type CanvasTransaction,
   type IllustrationDocument,
+  type PixelDocument,
   type ShapeObject,
 } from '@aidraw/core';
 import { DocumentService } from '@main/document-service';
@@ -79,12 +82,58 @@ function illustration(service: DocumentService, documentId: string): Illustratio
   return document;
 }
 
+function pixel(service: DocumentService, documentId: string): PixelDocument {
+  const document = service.getDocument(documentId);
+  if (!document || document.kind !== 'pixel') throw new Error('Expected pixel document');
+  return document;
+}
+
 function replaceName(document: IllustrationDocument, objectId: string, name: string): CanvasOperation {
   const object = document.objects[objectId];
   return { kind: 'illustration.object.replace', object: { ...object, name }, expectedRevision: object.revision };
 }
 
 describe('per-actor document history lineage', () => {
+  it('undoes font creation and deletion as exact whole-library changes without rewriting rasterized cels', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-history-fonts-'));
+    temporaryPaths.push(root);
+    const service = new DocumentService(new RecoveryJournal(root), '1.0.0');
+    services.push(service);
+    const created = service.create({ kind: 'sprite', name: 'Font history', width: 8, height: 8 }).activeDocument;
+    if (!created || created.kind !== 'pixel') throw new Error('Expected pixel document');
+    const sprite = created.pixelAssets[created.activeAssetId];
+    if (sprite.type !== 'sprite') throw new Error('Expected sprite');
+    const cel = Object.values(sprite.cels)[0];
+    expect((await service.apply(transaction(created.id, HUMAN_ACTOR, 'Seed rasterized text pixel', [{ kind: 'pixel.cel.set', spriteId: sprite.id, celId: cel.id, changes: [{ x: 2, y: 3, index: 4 }], expectedRevision: cel.revision }]), { recordHistory: false })).status).toBe('committed');
+    const baseline = pixel(service, created.id);
+    const originalFonts = structuredClone(baseline.bitmapFonts);
+    const originalAssets = structuredClone(baseline.pixelAssets);
+    const originalPalette = structuredClone(baseline.palette);
+    const creation = createEmptyBitmapFont(baseline.bitmapFonts, { id: 'bitmap-font-history-empty', name: 'History empty', lineHeight: 11 });
+
+    expect((await service.apply(transaction(created.id, HUMAN_ACTOR, 'Create bitmap font', [{ kind: 'pixel.bitmap-fonts.replace', fonts: creation.fonts }]))).status).toBe('committed');
+    let current = pixel(service, created.id);
+    expect(current.bitmapFonts).toEqual(creation.fonts);
+    expect(current.pixelAssets).toEqual(originalAssets);
+    expect(current.palette).toEqual(originalPalette);
+    const deletion = deleteBitmapFont(current.bitmapFonts, originalFonts[0].id);
+    expect((await service.apply(transaction(created.id, HUMAN_ACTOR, 'Delete bitmap font', [{ kind: 'pixel.bitmap-fonts.replace', fonts: deletion.fonts }]))).status).toBe('committed');
+    current = pixel(service, created.id);
+    expect(current.bitmapFonts).toEqual([creation.font]);
+    expect(current.pixelAssets).toEqual(originalAssets);
+    expect(readPixel((current.pixelAssets[sprite.id] as typeof sprite).cels[cel.id], 2, 3)).toBe(4);
+
+    expect((await service.undo(created.id, HUMAN_ACTOR)).status).toBe('committed');
+    current = pixel(service, created.id);
+    expect(current.bitmapFonts).toEqual(creation.fonts);
+    expect(current.pixelAssets).toEqual(originalAssets);
+    expect((await service.undo(created.id, HUMAN_ACTOR)).status).toBe('committed');
+    current = pixel(service, created.id);
+    expect(current.bitmapFonts).toEqual(originalFonts);
+    expect(current.pixelAssets).toEqual(originalAssets);
+    expect(current.palette).toEqual(originalPalette);
+  });
+
   it('rebases consecutive same-actor revisions through complete undo and redo stacks', async () => {
     const { service, document, first } = await serviceFixture();
     const baselineRevision = document.revision;

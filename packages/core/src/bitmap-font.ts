@@ -4,6 +4,9 @@ const MAX_BITMAP_GLYPH_AXIS = 64;
 const MAX_BITMAP_GLYPH_CELLS = MAX_BITMAP_GLYPH_AXIS * MAX_BITMAP_GLYPH_AXIS;
 const MAX_BITMAP_GLYPH_SHEET_CHARACTERS = 256;
 const MAX_BITMAP_GLYPH_SHEET_CELLS = 65_536;
+export const MAX_BITMAP_FONTS = 64;
+export const MAX_BITMAP_FONT_NAME_LENGTH = 200;
+export const MAX_BITMAP_FONT_LINE_HEIGHT = 128;
 
 export interface BitmapGlyphCapture {
   glyph: BitmapGlyph;
@@ -30,6 +33,17 @@ export interface BitmapGlyphSheetMapping {
   mappings: Array<{ character: string; glyph: BitmapGlyph; inkCellCount: number; replaced: boolean }>;
 }
 
+export interface EmptyBitmapFontCreation {
+  font: BitmapFont;
+  fonts: BitmapFont[];
+}
+
+export interface BitmapFontDeletion {
+  font: BitmapFont;
+  fonts: BitmapFont[];
+  selectedFontId: string;
+}
+
 const PATTERNS: Record<string, string> = {
   ' ': '.../.../.../.../.../.../...', '!': '.#./.#./.#./.#./.#./.../.#.', '?': '.###./#...#/....#/...#./..#../...../..#..',
   '.': '.../.../.../.../.../.../.#.', ',': '.../.../.../.../.../.#./#..', ':': '.../.#./.../.../.#./.../...', '-': '...../...../...../.###./...../...../.....', '+': '...../..#../..#../#####/..#../..#../.....',
@@ -47,6 +61,48 @@ function glyph(pattern: string): BitmapGlyph {
 
 export function createDefaultBitmapFont(): BitmapFont {
   return { id: 'bitmap-font-tiny-5x7', name: 'Tiny 5×7', lineHeight: 8, glyphs: Object.fromEntries(Object.entries(PATTERNS).map(([character, pattern]) => [character, glyph(pattern)])) };
+}
+
+export function bitmapFontCreationError(fonts: ReadonlyArray<BitmapFont>, name: string, lineHeight: number): string | undefined {
+  if (fonts.length >= MAX_BITMAP_FONTS) return `Bitmap font libraries are limited to ${MAX_BITMAP_FONTS} fonts. Delete one before creating another.`;
+  const trimmedName = name.trim();
+  if (!trimmedName) return 'Enter a bitmap font name.';
+  if (trimmedName.length > MAX_BITMAP_FONT_NAME_LENGTH) return `Bitmap font names are limited to ${MAX_BITMAP_FONT_NAME_LENGTH} characters.`;
+  if (!Number.isInteger(lineHeight) || lineHeight < 1 || lineHeight > MAX_BITMAP_FONT_LINE_HEIGHT) return `Bitmap font line height must be a whole number from 1 through ${MAX_BITMAP_FONT_LINE_HEIGHT}.`;
+  return undefined;
+}
+
+/** Plan one empty document-owned font without mutating the current library. */
+export function createEmptyBitmapFont(
+  fonts: ReadonlyArray<BitmapFont>,
+  input: { id: string; name: string; lineHeight: number },
+): EmptyBitmapFontCreation {
+  const validationError = bitmapFontCreationError(fonts, input.name, input.lineHeight);
+  if (validationError) throw new Error(validationError);
+  if (!input.id) throw new Error('The new bitmap font needs an ID. Try creating it again.');
+  if (fonts.some((font) => font.id === input.id)) throw new Error('The new bitmap font ID is already in use. Try creating it again.');
+  const font: BitmapFont = { id: input.id, name: input.name.trim(), lineHeight: input.lineHeight, glyphs: {} };
+  return { font, fonts: [...fonts, font] };
+}
+
+export function bitmapFontDeletionError(fonts: ReadonlyArray<BitmapFont>, fontId: string): string | undefined {
+  if (!fonts.some((font) => font.id === fontId)) return 'The selected bitmap font no longer exists. Choose an available font and try again.';
+  if (fonts.length <= 1) return 'Keep at least one bitmap font. Create another font before deleting this one.';
+  return undefined;
+}
+
+/** Plan removal of one future font asset; already-rasterized cel pixels are outside this library. */
+export function deleteBitmapFont(fonts: ReadonlyArray<BitmapFont>, fontId: string): BitmapFontDeletion {
+  const validationError = bitmapFontDeletionError(fonts, fontId);
+  if (validationError) throw new Error(validationError);
+  const font = fonts.find((entry) => entry.id === fontId)!;
+  const remaining = fonts.filter((entry) => entry.id !== fontId);
+  return { font, fonts: remaining, selectedFontId: remaining[0].id };
+}
+
+/** Keep an existing selection or recover deterministically to document order. */
+export function resolveBitmapFontId(fonts: ReadonlyArray<BitmapFont>, selectedFontId?: string): string {
+  return fonts.some((font) => font.id === selectedFontId) ? selectedFontId! : fonts[0]?.id ?? '';
 }
 
 /**

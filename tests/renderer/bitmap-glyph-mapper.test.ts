@@ -18,6 +18,9 @@ describe('bitmap glyph mapper', () => {
     const markup = renderToStaticMarkup(createElement(BitmapGlyphMapperDialog, {
       fonts: [createDefaultBitmapFont()],
       capture,
+      selectedFontId: 'removed-font',
+      onSelectedFontChange: () => undefined,
+      onManageFonts: () => undefined,
       onSubmit: async () => true,
       onClose: () => undefined,
     }));
@@ -30,6 +33,7 @@ describe('bitmap glyph mapper', () => {
     expect(markup).toContain('5 selected · 3 ink · active-frame indices');
     expect(markup).toContain('Only selected cells participate');
     expect(markup).toContain('Replace glyph');
+    expect(markup).toContain('Manage fonts');
     expect(markup.match(/bitmap-glyph-preview-ink/g)).toHaveLength(3);
   });
 
@@ -54,8 +58,12 @@ describe('bitmap glyph mapper', () => {
     expect(component).toContain('className="secondary-modal-button"');
     expect(component).toContain('className="primary-modal-button"');
     expect(component).toContain('className="dialog-field"');
+    expect(component).toContain('resolveBitmapFontId(fonts, selectedFontId)');
+    expect(component).toContain('onManageFonts');
     expect(sheetComponent).toContain('className="secondary-modal-button"');
     expect(sheetComponent).toContain('className="primary-modal-button"');
+    expect(sheetComponent).toContain('resolveBitmapFontId(fonts, selectedFontId)');
+    expect(sheetComponent).toContain('onManageFonts');
     expect(styles).toContain('.secondary-modal-button, .primary-modal-button { min-height: 38px;');
     expect(styles).toMatch(/\.bitmap-glyph-capture-preview strong \{[^}]*font-size: var\(--ui-type-label\)/);
     expect(styles).toMatch(/\.bitmap-glyph-capture-preview small, \.bitmap-glyph-map-note \{[^}]*font-size: var\(--ui-type-caption\)/);
