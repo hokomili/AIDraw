@@ -73,6 +73,22 @@ describe('pixel tool renderer wiring', () => {
     expect(source).not.toContain("kind: 'pixel.cel.set', spriteId: sprite.id, celId: cel.id, changes: capture");
   });
 
+  it('maps a reviewed uniform glyph sheet through one current-state font-library transaction', async () => {
+    const source = await readFile(new URL('../../src/renderer/canvas/PixelCanvas.tsx', import.meta.url), 'utf8');
+    const component = await readFile(new URL('../../src/renderer/components/BitmapGlyphSheetMapperDialog.tsx', import.meta.url), 'utf8');
+    expect(source).toContain('Divide the indexed selection into uniform row-major bitmap-font glyph cells');
+    expect(source).toContain('<Table2 size={EDITOR_DENSITY.secondaryIcon} /> Glyph sheet');
+    expect(source).toContain('<BitmapGlyphSheetMapperDialog');
+    expect(source).toContain('points={selection}');
+    expect(source).toContain('readIndex={compositePixelReader(sprite, activeFrameId)}');
+    expect(source).toContain('mapBitmapFontGlyphSheet(font, selection, compositePixelReader(sprite, activeFrameId), characters, columns, advance, lineHeight)');
+    expect(source).toContain("apply('Map bitmap font glyph sheet', [{ kind: 'pixel.bitmap-fonts.replace'");
+    expect(source).toContain('Use the Text tool to paint them as editable indexed pixels.');
+    expect(component).toContain('The source sprite, palette, frame, and selection stay unchanged.');
+    expect(component).toContain('Selected nonzero indices become ink; index 0 and unselected cells are clear.');
+    expect(component).not.toContain("kind: 'pixel.cel.set'");
+  });
+
   it('publishes pixel selections cross-process while retaining the project-local tile clipboard fail closed', async () => {
     const source = await readFile(new URL('../../src/renderer/canvas/PixelCanvas.tsx', import.meta.url), 'utf8');
     expect(source).toContain("type LocalSelectionClipboard = { kind: 'tile'");

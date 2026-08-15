@@ -16,6 +16,7 @@ import {
   floodPixelRegion,
   HUMAN_ACTOR,
   createId,
+  mapBitmapFontGlyphSheet,
   nowIso,
   orderedDitherIndex,
   paintWangTerrain,
@@ -58,6 +59,7 @@ import { ArrowLeft, ArrowRight, CaseUpper, ChevronLeft, ChevronRight, ClipboardP
 import { useEditorStore } from '../store';
 import { CelExposureGrid } from '../components/CelExposureGrid';
 import { BitmapGlyphMapperDialog } from '../components/BitmapGlyphMapperDialog';
+import { BitmapGlyphSheetMapperDialog } from '../components/BitmapGlyphSheetMapperDialog';
 import { OnionSkinSettingsPanel } from '../components/OnionSkinSettingsPanel';
 import { PlaybackLanes } from '../components/PlaybackLanes';
 import { StampLibraryDialog } from '../components/StampLibraryDialog';
@@ -256,6 +258,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const selectionCombination = useRef<SelectionCombination>('replace');
   const [selectionScaleOpen, setSelectionScaleOpen] = useState(false);
   const [glyphMapperOpen, setGlyphMapperOpen] = useState(false);
+  const [glyphSheetMapperOpen, setGlyphSheetMapperOpen] = useState(false);
   const [clipboardAvailable, setClipboardAvailable] = useState(Boolean(localSelectionClipboard));
   const [mapObjectGesture, setMapObjectGesture] = useState<MapObjectGesture>();
   const mapObjectGestureRef = useRef<MapObjectGesture | undefined>(undefined);
@@ -1393,7 +1396,8 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
           <button onClick={() => void transformSelection('rotate-clockwise')} title="Rotate selected cells 90° clockwise"><RotateCw size={13} /> CW</button>
           <button onClick={() => void transformSelection('rotate-counterclockwise')} title="Rotate selected cells 90° counterclockwise"><RotateCcw size={13} /> CCW</button>
           <button onClick={() => setSelectionScaleOpen(true)} title="Scale selected cells by independent integer factors"><Scaling size={13} /> Scale</button>
-          {sprite && <button onClick={() => setGlyphMapperOpen(true)} title="Map selected nonzero indexed cells to a reusable bitmap-font character"><CaseUpper size={EDITOR_DENSITY.secondaryIcon} /> Glyph</button>}
+          {sprite && <button onClick={() => { setGlyphMapperOpen(true); setGlyphSheetMapperOpen(false); }} title="Map selected nonzero indexed cells to a reusable bitmap-font character"><CaseUpper size={EDITOR_DENSITY.secondaryIcon} /> Glyph</button>}
+          {sprite && <button onClick={() => { setGlyphSheetMapperOpen(true); setGlyphMapperOpen(false); }} title="Divide the indexed selection into uniform row-major bitmap-font glyph cells"><Table2 size={EDITOR_DENSITY.secondaryIcon} /> Glyph sheet</button>}
           <button onClick={() => void deleteSelection()} title="Delete selected pixels"><Trash2 size={13} /></button>
           <button onClick={() => { setSelection([]); setSelectionOffset(undefined); }} title="Clear selection">Clear</button>
         </>}
@@ -1446,6 +1450,23 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
           return applied;
         }}
         onClose={() => setGlyphMapperOpen(false)}
+      />}
+      {glyphSheetMapperOpen && sprite && activeFrameId && <BitmapGlyphSheetMapperDialog
+        fonts={document.bitmapFonts}
+        points={selection}
+        readIndex={compositePixelReader(sprite, activeFrameId)}
+        onSubmit={async ({ fontId, characters, columns, advance, lineHeight }) => {
+          const font = document.bitmapFonts.find((entry) => entry.id === fontId);
+          if (!font) return false;
+          const mapping = mapBitmapFontGlyphSheet(font, selection, compositePixelReader(sprite, activeFrameId), characters, columns, advance, lineHeight);
+          const applied = await apply('Map bitmap font glyph sheet', [{ kind: 'pixel.bitmap-fonts.replace', fonts: document.bitmapFonts.map((entry) => entry.id === fontId ? mapping.font : entry) }]);
+          if (applied) {
+            notify(`Mapped ${mapping.characterCount} glyphs in ${font.name}: ${mapping.newGlyphCount} new, ${mapping.replacedGlyphCount} replaced, ${mapping.blankGlyphCount} blank. Use the Text tool to paint them as editable indexed pixels.`, 'success');
+            setGlyphSheetMapperOpen(false);
+          }
+          return applied;
+        }}
+        onClose={() => setGlyphSheetMapperOpen(false)}
       />}
       {bitmapTextPoint && sprite && <BitmapTextDialog fonts={document.bitmapFonts} origin={bitmapTextPoint} spriteSize={{ width: sprite.width, height: sprite.height }} paletteIndex={pixelIndex} wrap={wrapEditing} onSubmit={addBitmapText} onFontsReplace={(fonts) => apply('Replace bitmap font library', [{ kind: 'pixel.bitmap-fonts.replace', fonts }])} onClose={() => setBitmapTextPoint(undefined)} />}
       {stampCaptureOpen && (sprite || tilemap) && <EntryDialog

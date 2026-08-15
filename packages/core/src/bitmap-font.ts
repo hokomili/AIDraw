@@ -2,12 +2,32 @@ import type { BitmapFont, BitmapGlyph } from './model';
 
 const MAX_BITMAP_GLYPH_AXIS = 64;
 const MAX_BITMAP_GLYPH_CELLS = MAX_BITMAP_GLYPH_AXIS * MAX_BITMAP_GLYPH_AXIS;
+const MAX_BITMAP_GLYPH_SHEET_CHARACTERS = 256;
+const MAX_BITMAP_GLYPH_SHEET_CELLS = 65_536;
 
 export interface BitmapGlyphCapture {
   glyph: BitmapGlyph;
   bounds: { x: number; y: number; width: number; height: number };
   selectedCellCount: number;
   inkCellCount: number;
+}
+
+export interface BitmapGlyphSheetMapping {
+  font: BitmapFont;
+  bounds: { x: number; y: number; width: number; height: number };
+  characterCount: number;
+  columns: number;
+  rows: number;
+  cellWidth: number;
+  cellHeight: number;
+  advance: number;
+  lineHeight: number;
+  selectedCellCount: number;
+  inkCellCount: number;
+  blankGlyphCount: number;
+  newGlyphCount: number;
+  replacedGlyphCount: number;
+  mappings: Array<{ character: string; glyph: BitmapGlyph; inkCellCount: number; replaced: boolean }>;
 }
 
 const PATTERNS: Record<string, string> = {
@@ -97,6 +117,105 @@ export function upsertBitmapFontGlyph(font: BitmapFont, character: string, glyph
     ...font,
     lineHeight,
     glyphs: { ...font.glyphs, [character]: structuredClone(glyphValue) },
+  };
+}
+
+/**
+ * Map one exact indexed selection as a uniform row-major bitmap-glyph sheet.
+ * Selected nonzero indices become ink; index 0 and unselected cells are clear.
+ * The ordered character string and explicit column count are the only grid
+ * interpretation inputs: no character order or trimming is inferred.
+ */
+export function mapBitmapFontGlyphSheet(
+  font: BitmapFont,
+  points: ReadonlyArray<{ x: number; y: number }>,
+  readIndex: (x: number, y: number) => number,
+  characters: string,
+  columns: number,
+  advance?: number,
+  lineHeight?: number,
+): BitmapGlyphSheetMapping {
+  if (!points.length) throw new Error('Select at least one sprite cell to map a glyph sheet.');
+  if (points.length > MAX_BITMAP_GLYPH_SHEET_CELLS) throw new Error(`Bitmap glyph sheets are limited to ${MAX_BITMAP_GLYPH_SHEET_CELLS.toLocaleString('en-US')} selected cells.`);
+  const orderedCharacters = [...characters];
+  if (!orderedCharacters.length) throw new Error('Enter at least one character in row-major sheet order.');
+  if (orderedCharacters.length > MAX_BITMAP_GLYPH_SHEET_CHARACTERS) throw new Error(`Bitmap glyph sheets are limited to ${MAX_BITMAP_GLYPH_SHEET_CHARACTERS} characters.`);
+  for (const character of orderedCharacters) {
+    const characterError = bitmapFontCharacterError(character);
+    if (characterError) throw new Error('Glyph-sheet order must contain individual Unicode characters without line breaks.');
+  }
+  if (new Set(orderedCharacters).size !== orderedCharacters.length) throw new Error('Glyph-sheet character order cannot contain duplicates.');
+  if (!Number.isInteger(columns) || columns < 1 || columns > orderedCharacters.length) throw new Error(`Glyph-sheet columns must be a whole number from 1 through ${orderedCharacters.length}.`);
+
+  const selected = new Map<string, { x: number; y: number }>();
+  let minX = Number.POSITIVE_INFINITY; let maxX = Number.NEGATIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY; let maxY = Number.NEGATIVE_INFINITY;
+  for (const point of points) {
+    if (!Number.isSafeInteger(point.x) || !Number.isSafeInteger(point.y)) throw new Error('Bitmap glyph-sheet selection coordinates must be safe integers.');
+    const key = `${point.x},${point.y}`;
+    if (selected.has(key)) continue;
+    selected.set(key, { x: point.x, y: point.y });
+    minX = Math.min(minX, point.x); maxX = Math.max(maxX, point.x);
+    minY = Math.min(minY, point.y); maxY = Math.max(maxY, point.y);
+  }
+  const width = maxX - minX + 1; const height = maxY - minY + 1;
+  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height)) throw new Error('Bitmap glyph-sheet bounds must use safe integer geometry.');
+  if (width * height > MAX_BITMAP_GLYPH_SHEET_CELLS) throw new Error(`Bitmap glyph-sheet bounds are limited to ${MAX_BITMAP_GLYPH_SHEET_CELLS.toLocaleString('en-US')} cells.`);
+  const rowCount = Math.ceil(orderedCharacters.length / columns);
+  if (width % columns !== 0 || height % rowCount !== 0) throw new Error(`Selection bounds ${width} × ${height} must divide evenly into ${columns} columns and ${rowCount} ${rowCount === 1 ? 'row' : 'rows'}.`);
+  const cellWidth = width / columns; const cellHeight = height / rowCount;
+  if (cellWidth < 1 || cellHeight < 1 || cellWidth > MAX_BITMAP_GLYPH_AXIS || cellHeight > MAX_BITMAP_GLYPH_AXIS) throw new Error(`Every glyph-sheet cell must be from 1 × 1 through ${MAX_BITMAP_GLYPH_AXIS} × ${MAX_BITMAP_GLYPH_AXIS} cells.`);
+  const resolvedAdvance = advance ?? cellWidth;
+  if (!Number.isInteger(resolvedAdvance) || resolvedAdvance < 1 || resolvedAdvance > 128) throw new Error('Bitmap glyph-sheet advance must be a whole number from 1 through 128.');
+  const minimumLineHeight = Math.max(minimumBitmapFontLineHeight(font), cellHeight);
+  const resolvedLineHeight = lineHeight ?? Math.max(font.lineHeight, cellHeight);
+  if (!Number.isInteger(resolvedLineHeight) || resolvedLineHeight < minimumLineHeight || resolvedLineHeight > 128) throw new Error(`Bitmap glyph-sheet line height must be a whole number from ${minimumLineHeight} through 128.`);
+
+  const selectedIndices = new Map<string, number>();
+  let inkCellCount = 0;
+  for (const point of selected.values()) {
+    const index = readIndex(point.x, point.y);
+    if (!Number.isInteger(index) || index < 0 || index > 255) throw new Error('Bitmap glyph-sheet capture requires palette indices from 0 through 255.');
+    selectedIndices.set(`${point.x},${point.y}`, index);
+    if (index === 0) continue;
+    inkCellCount += 1;
+    const column = Math.floor((point.x - minX) / cellWidth); const row = Math.floor((point.y - minY) / cellHeight);
+    if (row * columns + column >= orderedCharacters.length) throw new Error('Unused trailing glyph-sheet cells must contain no selected nonzero palette indices.');
+  }
+  if (!inkCellCount) throw new Error('The selected glyph sheet contains no nonzero palette indices.');
+
+  let mappedFont = font;
+  const mappings = orderedCharacters.map((character, characterIndex) => {
+    const cellColumn = characterIndex % columns; const cellRow = Math.floor(characterIndex / columns);
+    let glyphInkCellCount = 0;
+    const rows = Array.from({ length: cellHeight }, (_, y) => Array.from({ length: cellWidth }, (_, x) => {
+      const index = selectedIndices.get(`${minX + cellColumn * cellWidth + x},${minY + cellRow * cellHeight + y}`) ?? 0;
+      if (index === 0) return '.';
+      glyphInkCellCount += 1;
+      return '#';
+    }).join(''));
+    const glyphValue = { width: cellWidth, advance: resolvedAdvance, rows };
+    const replaced = Boolean(font.glyphs[character]);
+    mappedFont = upsertBitmapFontGlyph(mappedFont, character, glyphValue, resolvedLineHeight);
+    return { character, glyph: glyphValue, inkCellCount: glyphInkCellCount, replaced };
+  });
+  const replacedGlyphCount = mappings.filter((mapping) => mapping.replaced).length;
+  return {
+    font: mappedFont,
+    bounds: { x: minX, y: minY, width, height },
+    characterCount: orderedCharacters.length,
+    columns,
+    rows: rowCount,
+    cellWidth,
+    cellHeight,
+    advance: resolvedAdvance,
+    lineHeight: resolvedLineHeight,
+    selectedCellCount: selected.size,
+    inkCellCount,
+    blankGlyphCount: mappings.filter((mapping) => mapping.inkCellCount === 0).length,
+    newGlyphCount: mappings.length - replacedGlyphCount,
+    replacedGlyphCount,
+    mappings,
   };
 }
 
