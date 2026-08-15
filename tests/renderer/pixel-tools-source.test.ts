@@ -42,6 +42,25 @@ describe('pixel tool renderer wiring', () => {
     expect(source).toContain("kind: 'pixel.asset.replace', asset: map, expectedRevision: tilemap.revision");
   });
 
+  it('plans a complete Wang terrain drag before one canonical commit and fails closed with exact transition diagnostics', async () => {
+    const source = await readFile(new URL('../../src/renderer/canvas/PixelCanvas.tsx', import.meta.url), 'utf8');
+    const start = source.indexOf("} else if (tool === 'terrain'");
+    const end = source.indexOf("        } else {\n          const changes = points.map", start);
+    const branch = source.slice(start, end);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    expect(branch).toContain('planWangTerrainStroke(terrainSet, points, terrainColor.id, terrainTileAt');
+    expect(branch).toContain("{ erase: terrainErase, contains }");
+    expect(branch).toContain("if (plan.status === 'unmatched')");
+    expect(branch).toContain('entry.wangId.join');
+    expect(branch).toContain('No terrain tiles changed; add those mappings');
+    expect(branch.indexOf("if (plan.status === 'unmatched')")).toBeLessThan(branch.indexOf("kind: 'pixel.tilemap.set'"));
+    expect(branch.match(/kind: 'pixel\.tilemap\.set'/gu)).toHaveLength(1);
+    expect(branch).toContain('expectedRevision: layer.revision');
+    expect(branch).toContain('in one undoable change');
+    expect(branch).not.toContain('terrain neighbor');
+  });
+
   it('turns repeated sprite copies into exact wrapped edits through the ordinary cel transaction', async () => {
     const source = await readFile(new URL('../../src/renderer/canvas/PixelCanvas.tsx', import.meta.url), 'utf8');
     expect(source).toContain('wrapPixelPoint');

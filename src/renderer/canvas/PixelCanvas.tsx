@@ -19,7 +19,7 @@ import {
   mapBitmapFontGlyphSheet,
   nowIso,
   orderedDitherIndex,
-  paintWangTerrain,
+  planWangTerrainStroke,
   pixelAnimationFrames,
   pixelCelForFrame,
   pixelRawCelForFrame,
@@ -1172,19 +1172,28 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
         if (tool === 'stamp' && placedTiles.length) {
           await apply('Place reusable tile stamp', [{ kind: 'pixel.tilemap.set', mapId: tilemap.id, layerId, changes: placedTiles, expectedRevision: layer.revision }]);
         } else if (tool === 'terrain' && terrainTileset?.type === 'tileset' && terrainSet && terrainColor) {
-          const pending = new Map<string, number>(); let unmatched = 0;
-          const localTileAt = (x: number, y: number) => {
-            const queued = pending.get(x + ',' + y); if (queued !== undefined) return queued;
+          const terrainTileAt = (x: number, y: number) => {
             const decoded = decodeTiledGid(readTileAt(layer.chunks!, x, y)); return decoded.gid >= firstGid ? decoded.gid - firstGid : undefined;
           };
-          for (const point of points) {
-            const painted = paintWangTerrain(terrainSet, point.x, point.y, terrainColor.id, localTileAt, terrainErase);
-            unmatched += painted.unmatched.length;
-            for (const change of painted.changes) if (tilemap.infinite || (change.x >= 0 && change.y >= 0 && change.x < tilemap.width && change.y < tilemap.height)) pending.set(change.x + ',' + change.y, change.tileId);
+          const contains = (x: number, y: number) => tilemap.infinite || (x >= 0 && y >= 0 && x < tilemap.width && y < tilemap.height);
+          let plan: ReturnType<typeof planWangTerrainStroke>;
+          try {
+            plan = planWangTerrainStroke(terrainSet, points, terrainColor.id, terrainTileAt, { erase: terrainErase, contains });
+          } catch (error) {
+            notify(`${error instanceof Error ? error.message : 'The Wang terrain stroke could not be planned.'} No terrain tiles changed.`, 'warning');
+            return;
           }
-          const changes = [...pending.entries()].map(([key, tileId]) => { const [x, y] = key.split(',').map(Number); return { x, y, gid: tileId + firstGid }; });
-          if (changes.length) await apply(terrainErase ? 'Erase Wang terrain' : 'Paint Wang terrain', [{ kind: 'pixel.tilemap.set', mapId: tilemap.id, layerId, changes, expectedRevision: layer.revision }]);
-          if (unmatched) notify(unmatched + ' terrain neighbor' + (unmatched === 1 ? '' : 's') + ' had no exact Wang tile mapping.', 'warning');
+          if (plan.status === 'unmatched') {
+            const examples = plan.unmatched.slice(0, 3).map((entry) => `(${entry.x}, ${entry.y}) [${entry.wangId.join(',')}]`).join('; ');
+            const remainder = plan.unmatched.length > 3 ? `; +${plan.unmatched.length - 3} more` : '';
+            notify(`Terrain stroke was not applied: ${plan.unmatched.length} in-map cell${plan.unmatched.length === 1 ? '' : 's'} need exact Wang mappings: ${examples}${remainder}. No terrain tiles changed; add those mappings to “${terrainSet.name}” and retry.`, 'warning');
+            return;
+          }
+          const changes = plan.changes.map((change) => ({ x: change.x, y: change.y, gid: change.tileId + firstGid }));
+          if (!changes.length) notify('The terrain stroke already matches the selected terrain; no tiles changed.', 'info');
+          else if (await apply(terrainErase ? 'Erase Wang terrain' : 'Paint Wang terrain', [{ kind: 'pixel.tilemap.set', mapId: tilemap.id, layerId, changes, expectedRevision: layer.revision }]) && plan.strokePointCount > 1) {
+            notify(`${terrainErase ? 'Erased' : 'Painted'} ${plan.strokePointCount} terrain stroke cells with ${plan.repairChangeCount} neighboring repair${plan.repairChangeCount === 1 ? '' : 's'} in one undoable change.`, 'info');
+          }
         } else {
           const changes = points.map((point) => ({ ...point, gid: tool === 'eraser' ? 0 : encodeTiledGid(firstGid + (terrainTileset?.type === 'tileset' ? chooseTileVariant(terrainTileset, selectedTileId, point.x, point.y, variantSeed) : selectedTileId), activeTileTransforms) }));
           await apply(selectedVariantGroup ? `Paint ${selectedVariantGroup} variants` : 'Paint tiles', [{ kind: 'pixel.tilemap.set', mapId: tilemap.id, layerId, changes, expectedRevision: layer.revision }]);
