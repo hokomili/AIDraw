@@ -76,7 +76,8 @@ describe('pixel tool renderer wiring', () => {
     expect(source).toContain('start: spritePoint, read: compositePixelReader(sprite, activeFrameId)');
     expect(source).toContain('wrapPixelPoints(authoredPoints, sprite.width, sprite.height)');
     expect(source).toContain('wrap={wrapEditing}');
-    expect(source).toContain('orderedDitherIndex(sample.x, sample.y');
+    expect(source).toContain('orderedDitherIndex(sample.x, sample.y, ditherMixIndex, pixelIndex, ditherCoverage, ditherMatrixSize, ditherPhaseX, ditherPhaseY)');
+    expect(source).toContain('orderedDitherIndex(point.x, point.y, ditherMixIndex, pixelIndex, ditherCoverage, ditherMatrixSize, ditherPhaseX, ditherPhaseY)');
     expect(source).toContain('Preview and edit through repeated copies across opposite sprite edges');
     expect(source).toContain('aria-pressed={wrapEditing}');
     expect(source).toContain("kind: 'pixel.cel.set'");

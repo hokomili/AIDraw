@@ -23,6 +23,12 @@ function positiveModulo(value: number, divisor: number): number {
   return ((value % divisor) + divisor) % divisor;
 }
 
+/** Normalize a whole-cell phase into the selected Bayer matrix's local coordinates. */
+export function normalizeOrderedDitherPhase(value: number, matrixSize: OrderedDitherMatrixSize): number {
+  if (!Number.isSafeInteger(value)) throw new Error('Ordered dither phase must be a whole-cell integer.');
+  return positiveModulo(value, matrixSize);
+}
+
 export function orderedDitherUsesMix(x: number, y: number, coverage: number, matrixSize: OrderedDitherMatrixSize = 4, phaseX = 0, phaseY = 0): boolean {
   const size = matrixSize; const matrix = BAYER_MATRICES[size]; const clamped = Math.max(0, Math.min(1, coverage));
   return matrix[positiveModulo(y - phaseY, size)][positiveModulo(x - phaseX, size)] < clamped * size * size;

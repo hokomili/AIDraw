@@ -1,8 +1,9 @@
 import { create } from 'zustand';
-import type { Actor, CanvasOperation, Id, OrderedDitherMatrixSize } from '@aidraw/core';
+import type { Actor, CanvasOperation, Id } from '@aidraw/core';
 import { CanvasOperationSchema, HUMAN_ACTOR, createId, nowIso } from '@aidraw/core';
 import type { NewDocumentOptions, WorkspaceSnapshot } from '../common/contracts';
 import { DEFAULT_ONION_SKIN_PREFERENCES, parseOnionSkinPreferences, type OnionSkinPreferences } from '../common/onion-skin';
+import { DEFAULT_ORDERED_DITHER_PREFERENCES, parseOrderedDitherPreferences, type OrderedDitherPreferences } from '../common/ordered-dither-preferences';
 import { DEFAULT_SPRITE_SYMMETRY_PREFERENCES, parseSpriteSymmetryPreferences, type SpriteSymmetryPreferences } from '../common/sprite-symmetry';
 import type { ReplaySource } from './replay';
 
@@ -24,8 +25,7 @@ interface EditorState {
   opacity: number;
   zoom: number;
   pixelIndex: number;
-  ditherMatrixSize: OrderedDitherMatrixSize;
-  ditherCoverage: number;
+  orderedDitherPreferences: OrderedDitherPreferences;
   ditherMixIndex: number;
   onionSkinPreferences: OnionSkinPreferences;
   symmetryPreferences: SpriteSymmetryPreferences;
@@ -48,8 +48,7 @@ interface EditorState {
   setOpacity(value: number): void;
   setZoom(value: number): void;
   setPixelIndex(value: number): void;
-  setDitherMatrixSize(value: OrderedDitherMatrixSize): void;
-  setDitherCoverage(value: number): void;
+  setOrderedDitherPreferences(preferences: OrderedDitherPreferences): void;
   setDitherMixIndex(value: number): void;
   setOnionSkinPreferences(preferences: OnionSkinPreferences): void;
   setSpriteSymmetryPreferences(preferences: SpriteSymmetryPreferences): void;
@@ -113,8 +112,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   opacity: 1,
   zoom: 1,
   pixelIndex: 1,
-  ditherMatrixSize: 4,
-  ditherCoverage: 0.5,
+  orderedDitherPreferences: {
+    current: { ...DEFAULT_ORDERED_DITHER_PREFERENCES.current },
+    presets: [],
+    activePresetId: null,
+  },
   ditherMixIndex: 0,
   onionSkinPreferences: { ...DEFAULT_ONION_SKIN_PREFERENCES },
   symmetryPreferences: { mode: DEFAULT_SPRITE_SYMMETRY_PREFERENCES.mode, bindings: [] },
@@ -153,6 +155,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     set((state) => ({
       ...reconcileWorkspaceSnapshot(state, snapshot),
       onionSkinPreferences: structuredClone(snapshot.onionSkinPreferences),
+      orderedDitherPreferences: structuredClone(snapshot.orderedDitherPreferences),
       symmetryPreferences: structuredClone(snapshot.symmetryPreferences),
       loading: false,
     }));
@@ -167,8 +170,13 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   setOpacity: (opacity) => set({ opacity: Math.max(0.01, Math.min(1, opacity)) }),
   setZoom: (zoom) => set({ zoom: Math.max(0.05, Math.min(64, zoom)) }),
   setPixelIndex: (pixelIndex) => set({ pixelIndex }),
-  setDitherMatrixSize: (ditherMatrixSize) => set({ ditherMatrixSize }),
-  setDitherCoverage: (ditherCoverage) => set({ ditherCoverage: Math.max(0, Math.min(1, ditherCoverage)) }),
+  setOrderedDitherPreferences: (value) => {
+    const orderedDitherPreferences = parseOrderedDitherPreferences(value);
+    set({ orderedDitherPreferences });
+    void window.aidraw.setOrderedDitherPreferences(orderedDitherPreferences)
+      .then((result) => { if (!result.saved) get().notify(result.message, 'warning'); })
+      .catch(() => get().notify('Ordered dither settings changed in this editor, but AIDraw could not save them. The previous saved preference remains.', 'warning'));
+  },
   setDitherMixIndex: (ditherMixIndex) => set({ ditherMixIndex: Math.max(0, Math.min(255, Math.trunc(ditherMixIndex))) }),
   setOnionSkinPreferences: (value) => {
     const onionSkinPreferences = parseOnionSkinPreferences(value);

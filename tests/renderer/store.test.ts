@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createIllustrationDocument, createPixelDocument, type AIDrawDocument } from '@aidraw/core';
 import type { AIDrawDesktopAPI, EditorBootstrapSnapshot, WorkspaceEvent, WorkspaceSnapshot } from '../../src/common/contracts';
 import { DEFAULT_ONION_SKIN_PREFERENCES, type OnionSkinPreferences } from '../../src/common/onion-skin';
+import { DEFAULT_ORDERED_DITHER_PREFERENCES, type OrderedDitherPreferences } from '../../src/common/ordered-dither-preferences';
 import { DEFAULT_SPRITE_SYMMETRY_PREFERENCES, type SpriteSymmetryPreferences } from '../../src/common/sprite-symmetry';
 import { reconcileWorkspaceSnapshot, useEditorStore } from '../../src/renderer/store';
 
@@ -20,8 +21,14 @@ function snapshot(workspaceRevision: number, document: AIDrawDocument): Workspac
   };
 }
 
-function bootstrapSnapshot(workspaceRevision: number, document: AIDrawDocument, onionSkinPreferences: OnionSkinPreferences = { ...DEFAULT_ONION_SKIN_PREFERENCES }, symmetryPreferences: SpriteSymmetryPreferences = { mode: DEFAULT_SPRITE_SYMMETRY_PREFERENCES.mode, bindings: [] }): EditorBootstrapSnapshot {
-  return { ...snapshot(workspaceRevision, document), onionSkinPreferences, symmetryPreferences };
+function bootstrapSnapshot(
+  workspaceRevision: number,
+  document: AIDrawDocument,
+  onionSkinPreferences: OnionSkinPreferences = { ...DEFAULT_ONION_SKIN_PREFERENCES },
+  symmetryPreferences: SpriteSymmetryPreferences = { mode: DEFAULT_SPRITE_SYMMETRY_PREFERENCES.mode, bindings: [] },
+  orderedDitherPreferences: OrderedDitherPreferences = { current: { ...DEFAULT_ORDERED_DITHER_PREFERENCES.current }, presets: [], activePresetId: null },
+): EditorBootstrapSnapshot {
+  return { ...snapshot(workspaceRevision, document), onionSkinPreferences, orderedDitherPreferences, symmetryPreferences };
 }
 
 const transientState = (current: WorkspaceSnapshot) => ({
@@ -164,6 +171,57 @@ describe('renderer workspace ordering and document isolation', () => {
     expect(useEditorStore.getState().onionSkinPreferences).toEqual(recoveredIntent);
     expect(useEditorStore.getState().snapshot).toEqual(before);
     expect(applyTransaction).not.toHaveBeenCalled();
+  });
+
+  it('hydrates dither configuration and presets before editing, keeps palette context local, and retries after save failure', async () => {
+    const document = createPixelDocument('sprite', 'Persistent dither preferences');
+    const durable: OrderedDitherPreferences = {
+      current: { matrixSize: 8, coverage: 0.375, phaseX: 7, phaseY: 2 },
+      presets: [{ id: 'preset-a', name: 'Fine shade', matrixSize: 8, coverage: 0.375, phaseX: 7, phaseY: 2 }],
+      activePresetId: 'preset-a',
+    };
+    const replacement: OrderedDitherPreferences = { ...durable, current: { ...durable.current, coverage: 0.5 }, activePresetId: null };
+    let bootstrapCalls = 0;
+    const setTimeout = vi.fn();
+    const applyTransaction = vi.fn();
+    const setOrderedDitherPreferences = vi.fn()
+      .mockResolvedValueOnce({ saved: false, message: 'Ordered dither settings changed in this editor, but AIDraw could not save them. The previous saved preference remains.' })
+      .mockResolvedValueOnce({ saved: true, preferences: replacement });
+    const api = {
+      bootstrap: vi.fn(async () => bootstrapSnapshot(++bootstrapCalls, document, { ...DEFAULT_ONION_SKIN_PREFERENCES }, { mode: 'none', bindings: [] }, durable)),
+      onEvent: vi.fn(() => vi.fn()),
+      setOrderedDitherPreferences,
+      applyTransaction,
+    } as unknown as AIDrawDesktopAPI;
+    Object.defineProperty(globalThis, 'window', { configurable: true, value: { aidraw: api, setTimeout } });
+    useEditorStore.setState({
+      snapshot: undefined,
+      loading: true,
+      ditherMixIndex: 6,
+      orderedDitherPreferences: { current: { ...DEFAULT_ORDERED_DITHER_PREFERENCES.current }, presets: [], activePresetId: null },
+      toast: undefined,
+    });
+
+    await useEditorStore.getState().initialize();
+    const hydratedSnapshot = structuredClone(useEditorStore.getState().snapshot);
+    expect(useEditorStore.getState().orderedDitherPreferences).toEqual(durable);
+    expect(useEditorStore.getState().ditherMixIndex).toBe(6);
+    expect(setOrderedDitherPreferences).not.toHaveBeenCalled();
+
+    useEditorStore.getState().setOrderedDitherPreferences(replacement);
+    await vi.waitFor(() => expect(setOrderedDitherPreferences).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(useEditorStore.getState().toast).toMatchObject({ tone: 'warning', message: expect.stringContaining('could not save') }));
+    expect(useEditorStore.getState().orderedDitherPreferences).toEqual(replacement);
+    expect(useEditorStore.getState().ditherMixIndex).toBe(6);
+    expect(useEditorStore.getState().snapshot).toEqual(hydratedSnapshot);
+    expect(applyTransaction).not.toHaveBeenCalled();
+
+    useEditorStore.getState().setOrderedDitherPreferences(replacement);
+    await vi.waitFor(() => expect(setOrderedDitherPreferences).toHaveBeenCalledTimes(2));
+    useEditorStore.setState({ snapshot: undefined, loading: true, orderedDitherPreferences: { current: { ...DEFAULT_ORDERED_DITHER_PREFERENCES.current }, presets: [], activePresetId: null } });
+    await useEditorStore.getState().initialize();
+    expect(useEditorStore.getState().orderedDitherPreferences).toEqual(durable);
+    expect(useEditorStore.getState().ditherMixIndex).toBe(6);
   });
 
   it('hydrates exact symmetry bindings before canvas mount across shell replacement and keeps failed live intent retryable', async () => {

@@ -1,8 +1,9 @@
 import { join } from 'node:path';
 import type { AsyncJob } from '@aidraw/core';
 import { parseOnionSkinPreferences, type OnionSkinPreferences } from '../common/onion-skin';
+import { parseOrderedDitherPreferences, type OrderedDitherPreferences } from '../common/ordered-dither-preferences';
 import { parseSpriteSymmetryPreferences, type SpriteSymmetryPreferences } from '../common/sprite-symmetry';
-import type { EditorBootstrapSnapshot, OnionSkinPreferenceSaveResult, SpriteSymmetryPreferenceSaveResult } from '../common/contracts';
+import type { EditorBootstrapSnapshot, OnionSkinPreferenceSaveResult, OrderedDitherPreferenceSaveResult, SpriteSymmetryPreferenceSaveResult } from '../common/contracts';
 import { LocalCredentialStore } from './credentials';
 import { DocumentService } from './document-service';
 import { GenerationManager } from './generation-manager';
@@ -15,6 +16,7 @@ import { DocumentPresetStore } from './document-preset-store';
 import { InterchangeReportStore } from './interchange-report-store';
 import type { GenerationProviderRunner } from './generation-provider-runner';
 import { OnionSkinPreferenceStore } from './onion-skin-preference-store';
+import { OrderedDitherPreferenceStore } from './ordered-dither-preference-store';
 import { SpriteSymmetryPreferenceStore } from './sprite-symmetry-preference-store';
 
 export interface EngineRuntimeOptions {
@@ -47,6 +49,7 @@ export class EngineRuntime {
   readonly documentPresets: DocumentPresetStore;
   readonly interchangeReports: InterchangeReportStore;
   readonly onionSkinPreferences: OnionSkinPreferenceStore;
+  readonly orderedDitherPreferences: OrderedDitherPreferenceStore;
   readonly spriteSymmetryPreferences: SpriteSymmetryPreferenceStore;
   private readonly mcpCredentials: LocalCredentialStore;
   private mcpCredentialOperation: Promise<void> = Promise.resolve();
@@ -77,6 +80,7 @@ export class EngineRuntime {
     );
     this.documentPresets = new DocumentPresetStore(join(userDataPath, 'settings', 'document-presets.json'));
     this.onionSkinPreferences = new OnionSkinPreferenceStore(join(userDataPath, 'settings', 'onion-skin.json'));
+    this.orderedDitherPreferences = new OrderedDitherPreferenceStore(join(userDataPath, 'settings', 'ordered-dither.json'));
     this.spriteSymmetryPreferences = new SpriteSymmetryPreferenceStore(join(userDataPath, 'settings', 'sprite-symmetry.json'));
     this.interchangeReports = new InterchangeReportStore(join(userDataPath, 'reports', 'interchange.json'));
     this.mcpCredentials = new LocalCredentialStore(join(userDataPath, 'credentials', 'mcp-token.json'));
@@ -98,7 +102,7 @@ export class EngineRuntime {
     this.started = true;
     await this.service.recover();
     this.service.initialize();
-    await Promise.all([this.onionSkinPreferences.initialize(), this.spriteSymmetryPreferences.initialize()]);
+    await Promise.all([this.onionSkinPreferences.initialize(), this.orderedDitherPreferences.initialize(), this.spriteSymmetryPreferences.initialize()]);
     this.recoveryTimer = setInterval(() => void this.service.compactRecovery(), 60_000);
     this.recoveryTimer.unref();
     try {
@@ -115,16 +119,19 @@ export class EngineRuntime {
 
   async editorBootstrap(): Promise<EditorBootstrapSnapshot> {
     const preferenceBootstrap = await this.onionSkinPreferences.bootstrap();
+    const ditherBootstrap = await this.orderedDitherPreferences.bootstrap();
     const symmetryBootstrap = await this.spriteSymmetryPreferences.bootstrap();
     const snapshot = this.service.snapshot();
     const recoveryWarnings = [
       ...(snapshot.recoveryWarnings ?? []),
       ...(preferenceBootstrap.warning ? [preferenceBootstrap.warning] : []),
+      ...(ditherBootstrap.warning ? [ditherBootstrap.warning] : []),
       ...(symmetryBootstrap.warning ? [symmetryBootstrap.warning] : []),
     ];
     return {
       ...snapshot,
       onionSkinPreferences: preferenceBootstrap.preferences,
+      orderedDitherPreferences: ditherBootstrap.preferences,
       symmetryPreferences: symmetryBootstrap.preferences,
       ...(recoveryWarnings.length ? { recoveryWarnings } : {}),
     };
@@ -140,6 +147,19 @@ export class EngineRuntime {
       return { saved: true, preferences: await this.onionSkinPreferences.save(preferences) };
     } catch {
       return { saved: false, message: 'Onion skin changed in this editor, but AIDraw could not save it. The previous saved preference remains.' };
+    }
+  }
+
+  async setOrderedDitherPreferences(value: unknown): Promise<OrderedDitherPreferenceSaveResult> {
+    let preferences: OrderedDitherPreferences;
+    try { preferences = parseOrderedDitherPreferences(value); }
+    catch {
+      return { saved: false, message: 'AIDraw rejected invalid ordered dither preferences; the saved preference was not changed.' };
+    }
+    try {
+      return { saved: true, preferences: await this.orderedDitherPreferences.save(preferences) };
+    } catch {
+      return { saved: false, message: 'Ordered dither settings changed in this editor, but AIDraw could not save them. The previous saved preference remains.' };
     }
   }
 
@@ -230,7 +250,7 @@ export class EngineRuntime {
 
   private async stopStartedRuntime(): Promise<void> {
     await this.mcpCredentialOperation;
-    await Promise.all([this.onionSkinPreferences.flush(), this.spriteSymmetryPreferences.flush()]);
+    await Promise.all([this.onionSkinPreferences.flush(), this.orderedDitherPreferences.flush(), this.spriteSymmetryPreferences.flush()]);
     if (this.recoveryTimer) clearInterval(this.recoveryTimer);
     this.recoveryTimer = undefined;
     await this.mcpHost.stop();

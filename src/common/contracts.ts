@@ -15,6 +15,7 @@ import type { DesktopPlatformInfo } from './platform';
 import type { InterchangeFidelityEntry } from './interchange-fidelity';
 import type { PixelSelectionFragment } from './document-fragment';
 import type { OnionSkinPreferences } from './onion-skin';
+import type { OrderedDitherPreferences } from './ordered-dither-preferences';
 import type { SpriteSymmetryPreferences } from './sprite-symmetry';
 
 export type NewDocumentKind = 'illustration' | 'sprite' | 'tilemap' | 'project';
@@ -158,11 +159,16 @@ export interface WorkspaceSnapshot {
 export interface EditorBootstrapSnapshot extends WorkspaceSnapshot {
   /** Main-owned human-local preferences, hydrated before the editor canvas mounts. */
   onionSkinPreferences: OnionSkinPreferences;
+  orderedDitherPreferences: OrderedDitherPreferences;
   symmetryPreferences: SpriteSymmetryPreferences;
 }
 
 export type OnionSkinPreferenceSaveResult =
   | { saved: true; preferences: OnionSkinPreferences }
+  | { saved: false; message: string };
+
+export type OrderedDitherPreferenceSaveResult =
+  | { saved: true; preferences: OrderedDitherPreferences }
   | { saved: false; message: string };
 
 export type SpriteSymmetryPreferenceSaveResult =
@@ -385,6 +391,7 @@ export interface AIDrawDesktopAPI {
   replayTrace(documentId: Id, transactionId: Id): Promise<{ replaying: boolean; reason?: string }>;
   updateEditorAdvisory(state: EditorAdvisoryInput): Promise<void>;
   setOnionSkinPreferences(preferences: OnionSkinPreferences): Promise<OnionSkinPreferenceSaveResult>;
+  setOrderedDitherPreferences(preferences: OrderedDitherPreferences): Promise<OrderedDitherPreferenceSaveResult>;
   setSpriteSymmetryPreferences(preferences: SpriteSymmetryPreferences): Promise<SpriteSymmetryPreferenceSaveResult>;
   exportRendererDiagnostics(detail: { message: string; stack?: string; componentStack?: string; userAgent?: string }): Promise<{ saved: boolean; filePath?: string; cancelled?: boolean }>;
   /** Available only to the exact isolated packaged renderer-recovery test profile. */
@@ -457,6 +464,7 @@ export const IPC = {
   replayTrace: 'aidraw:trace:replay',
   editorAdvisory: 'aidraw:editor:advisory',
   onionSkinPreferencesSet: 'aidraw:preferences:onion-skin:set',
+  orderedDitherPreferencesSet: 'aidraw:preferences:ordered-dither:set',
   spriteSymmetryPreferencesSet: 'aidraw:preferences:sprite-symmetry:set',
   rendererDiagnosticsExport: 'aidraw:renderer-diagnostics:export',
   rendererRecoveryTestEvent: 'aidraw:renderer-recovery:test-event',

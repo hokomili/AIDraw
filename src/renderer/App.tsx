@@ -116,6 +116,19 @@ import {
 import { GENERATION_PROVIDER_MODES, generationRequestError } from "../common/generation-capabilities";
 import { packPixelLinks, pixelLinkHealth } from "../common/pixel-links";
 import type { PaletteImportMode } from "../common/palette-interchange";
+import {
+  commitOrderedDitherPhaseDraft,
+  createOrderedDitherPhaseDraft,
+  orderedDitherConfigurationsEqual,
+  reconcileOrderedDitherPhaseDraft,
+  withAppliedOrderedDitherPreset,
+  withOrderedDitherPhaseDraftText,
+  withOrderedDitherConfiguration,
+  withSavedOrderedDitherPreset,
+  withoutOrderedDitherPreset,
+  type OrderedDitherConfiguration,
+  type OrderedDitherPhaseDraft,
+} from "../common/ordered-dither-preferences";
 import { approximateLocalObjectBounds } from "../common/illustration-geometry";
 import { buildPolishedGoldMaterial } from "../common/material-presets";
 import { inspectPathNodes, setPathClosed, splitPathAtNode } from "../common/path-nodes";
@@ -127,6 +140,7 @@ import { interchangeFidelityCodeLabel } from "../common/interchange-fidelity";
 import { AGENT_CLIENTS, type AgentClientId, type AgentClientSetupResult } from "../common/agent-clients";
 import { cropImageToAspect, resetImageCrop } from "../common/image-crop";
 import { BrushLibraryDialog } from "./components/BrushLibraryDialog";
+import { DitherPresetDialog, OrderedDitherPhaseInput } from "./components/DitherPresetDialog";
 import { ImageCropFields } from "./components/ImageCropFields";
 import { flattenLayerTree, layerTreeDescendants, moveLayerTreeEntry } from "../common/layer-tree";
 import { assignWangTile, deleteWangColor, deleteWangSet, upsertWangColor, upsertWangSet } from "../common/wang-authoring";
@@ -1623,16 +1637,25 @@ function ContextBar({ document }: { document: AIDrawDocument }) {
   const secondary = useEditorStore((state) => state.secondaryColor);
   const setColor = useEditorStore((state) => state.setColor);
   const setSecondary = useEditorStore((state) => state.setSecondaryColor);
-  const ditherMatrixSize = useEditorStore((state) => state.ditherMatrixSize);
-  const setDitherMatrixSize = useEditorStore((state) => state.setDitherMatrixSize);
-  const ditherCoverage = useEditorStore((state) => state.ditherCoverage);
-  const setDitherCoverage = useEditorStore((state) => state.setDitherCoverage);
+  const orderedDitherPreferences = useEditorStore((state) => state.orderedDitherPreferences);
+  const setOrderedDitherPreferences = useEditorStore((state) => state.setOrderedDitherPreferences);
+  const { matrixSize: ditherMatrixSize, coverage: ditherCoverage, phaseX: ditherPhaseX, phaseY: ditherPhaseY } = orderedDitherPreferences.current;
+  const [ditherPhaseDraftState, setDitherPhaseDraftState] = useState<Record<'phaseX' | 'phaseY', OrderedDitherPhaseDraft>>(() => ({
+    phaseX: createOrderedDitherPhaseDraft(ditherPhaseX, ditherMatrixSize),
+    phaseY: createOrderedDitherPhaseDraft(ditherPhaseY, ditherMatrixSize),
+  }));
+  const ditherPhaseDrafts = {
+    phaseX: reconcileOrderedDitherPhaseDraft(ditherPhaseDraftState.phaseX, ditherPhaseX, ditherMatrixSize),
+    phaseY: reconcileOrderedDitherPhaseDraft(ditherPhaseDraftState.phaseY, ditherPhaseY, ditherMatrixSize),
+  };
   const ditherMixIndex = useEditorStore((state) => state.ditherMixIndex);
   const setDitherMixIndex = useEditorStore((state) => state.setDitherMixIndex);
   const currentPixelIndex = useEditorStore((state) => state.pixelIndex);
   const apply = useEditorStore((state) => state.apply);
+  const notify = useEditorStore((state) => state.notify);
   const [brushEditor, setBrushEditor] = useState<{ preset: RasterBrushPreset; existing: boolean }>();
   const [brushLibraryOpen, setBrushLibraryOpen] = useState(false);
+  const [ditherPresetsOpen, setDitherPresetsOpen] = useState(false);
   const isBrush = [
     "pen",
     "pencil",
@@ -1660,6 +1683,72 @@ function ContextBar({ document }: { document: AIDrawDocument }) {
       ? { preset: source, existing: true }
       : { preset: { ...source, id: createId("brush-preset"), name: `${source.name} custom` }, existing: false });
   };
+  const updateDitherConfiguration = (update: Partial<OrderedDitherConfiguration>): boolean => {
+    try {
+      setOrderedDitherPreferences(withOrderedDitherConfiguration(orderedDitherPreferences, update));
+      return true;
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "The ordered dither setting is invalid.", "warning");
+      return false;
+    }
+  };
+  const setDitherPhaseDraft = (axis: 'phaseX' | 'phaseY', value: string) => {
+    setDitherPhaseDraftState((current) => ({
+      ...current,
+      [axis]: withOrderedDitherPhaseDraftText(
+        reconcileOrderedDitherPhaseDraft(
+          current[axis],
+          axis === 'phaseX' ? ditherPhaseX : ditherPhaseY,
+          ditherMatrixSize,
+        ),
+        value,
+      ),
+    }));
+  };
+  const resetDitherPhaseDraft = (axis: 'phaseX' | 'phaseY') => {
+    setDitherPhaseDraftState((current) => ({
+      ...current,
+      [axis]: createOrderedDitherPhaseDraft(
+        axis === 'phaseX' ? ditherPhaseX : ditherPhaseY,
+        ditherMatrixSize,
+      ),
+    }));
+  };
+  const commitDitherPhase = (axis: 'phaseX' | 'phaseY') => {
+    try {
+      const result = commitOrderedDitherPhaseDraft(orderedDitherPreferences, axis, ditherPhaseDrafts[axis]);
+      setDitherPhaseDraftState((current) => ({ ...current, [axis]: result.draft }));
+      if (result.status === 'invalid') {
+        notify(result.message, 'warning');
+      } else if (result.status === 'committed'
+        && !orderedDitherConfigurationsEqual(result.preferences.current, orderedDitherPreferences.current)) {
+        setOrderedDitherPreferences(result.preferences);
+      }
+    } catch (error) {
+      resetDitherPhaseDraft(axis);
+      notify(error instanceof Error ? error.message : 'The ordered dither phase is invalid.', 'warning');
+    }
+  };
+  const saveDitherPreset = (name: string): boolean => {
+    try {
+      setOrderedDitherPreferences(withSavedOrderedDitherPreset(orderedDitherPreferences, { id: createId("dither-preset"), name }));
+      return true;
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "The ordered dither preset could not be saved.", "warning");
+      return false;
+    }
+  };
+  const applyDitherPreset = (presetId: string) => {
+    try { setOrderedDitherPreferences(withAppliedOrderedDitherPreset(orderedDitherPreferences, presetId)); }
+    catch (error) { notify(error instanceof Error ? error.message : "The ordered dither preset could not be applied.", "warning"); }
+  };
+  const deleteDitherPreset = (presetId: string) => {
+    try { setOrderedDitherPreferences(withoutOrderedDitherPreset(orderedDitherPreferences, presetId)); }
+    catch (error) { notify(error instanceof Error ? error.message : "The ordered dither preset could not be deleted.", "warning"); }
+  };
+  const activeDitherPreset = orderedDitherPreferences.activePresetId === null
+    ? undefined
+    : orderedDitherPreferences.presets.find((preset) => preset.id === orderedDitherPreferences.activePresetId);
 
   return (
     <>
@@ -1732,10 +1821,13 @@ function ContextBar({ document }: { document: AIDrawDocument }) {
             />
           </div>
           {document.kind === "pixel" && tool === "dither" && <>
-            <label className="compact-field"><span>Matrix</span><select value={ditherMatrixSize} onChange={(event) => setDitherMatrixSize(Number(event.target.value) as 2 | 4 | 8)}><option value={2}>2×2</option><option value={4}>4×4</option><option value={8}>8×8</option></select></label>
-            <label className="range-field"><span>Mix</span><input type="range" min="0" max="100" value={Math.round(ditherCoverage * 100)} onChange={(event) => setDitherCoverage(Number(event.target.value) / 100)} /><output>{Math.round(ditherCoverage * 100)}%</output></label>
+            <label className="compact-field"><span>Matrix</span><select aria-label="Ordered dither matrix" value={ditherMatrixSize} onChange={(event) => updateDitherConfiguration({ matrixSize: Number(event.target.value) as 2 | 4 | 8 })}><option value={2}>2×2</option><option value={4}>4×4</option><option value={8}>8×8</option></select></label>
+            <label className="range-field"><span>Mix</span><input aria-label="Ordered dither coverage" type="range" min="0" max="100" value={Math.round(ditherCoverage * 100)} onChange={(event) => updateDitherConfiguration({ coverage: Number(event.target.value) / 100 })} /><output>{Math.round(ditherCoverage * 100)}%</output></label>
+            <OrderedDitherPhaseInput axis="X" draft={ditherPhaseDrafts.phaseX.text} onDraftChange={(value) => setDitherPhaseDraft('phaseX', value)} onCommit={() => commitDitherPhase('phaseX')} onCancel={() => resetDitherPhaseDraft('phaseX')} />
+            <OrderedDitherPhaseInput axis="Y" draft={ditherPhaseDrafts.phaseY.text} onDraftChange={(value) => setDitherPhaseDraft('phaseY', value)} onCommit={() => commitDitherPhase('phaseY')} onCancel={() => resetDitherPhaseDraft('phaseY')} />
             <label className="compact-field"><span>Base</span><select value={Math.min(ditherMixIndex, document.palette.length - 1)} onChange={(event) => setDitherMixIndex(Number(event.target.value))}>{document.palette.map((entry, index) => <option key={entry.id} value={index}>{index}: {entry.name}</option>)}</select></label>
-            <span className="mode-chip">Mixes into index {currentPixelIndex}</span>
+            <button type="button" className="context-action-button" aria-haspopup="dialog" aria-expanded={ditherPresetsOpen} onClick={() => setDitherPresetsOpen(true)}>Dither presets</button>
+            <span className="mode-chip">{activeDitherPreset ? activeDitherPreset.name : "Custom"} · mixes into index {currentPixelIndex}</span>
           </>}
         </>
       )}
@@ -1745,6 +1837,13 @@ function ContextBar({ document }: { document: AIDrawDocument }) {
         </span>
       )}
     </div>
+    {ditherPresetsOpen && document.kind === "pixel" && <DitherPresetDialog
+      preferences={orderedDitherPreferences}
+      onSave={saveDitherPreset}
+      onApply={applyDitherPreset}
+      onDelete={deleteDitherPreset}
+      onClose={() => setDitherPresetsOpen(false)}
+    />}
     {brushEditor && document.kind === "illustration" && <BrushPresetDialog
       key={brushEditor.preset.id}
       initial={brushEditor.preset}

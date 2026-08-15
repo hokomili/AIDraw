@@ -77,6 +77,7 @@ const invokeChannels = {
   replayTrace: IPC.replayTrace,
   updateEditorAdvisory: IPC.editorAdvisory,
   setOnionSkinPreferences: IPC.onionSkinPreferencesSet,
+  setOrderedDitherPreferences: IPC.orderedDitherPreferencesSet,
   setSpriteSymmetryPreferences: IPC.spriteSymmetryPreferencesSet,
   exportRendererDiagnostics: IPC.rendererDiagnosticsExport,
   injectRendererRecoveryTestEvent: IPC.rendererRecoveryTestEvent,
@@ -114,7 +115,7 @@ describe('preload window.aidraw security contract', () => {
 
   it('exposes one frozen, function-only, exact allowlist with no generic primitive', () => {
     const expectedKeys = [...Object.keys(invokeChannels), ...subscriptionMethods].sort();
-    expect(expectedKeys).toHaveLength(62);
+    expect(expectedKeys).toHaveLength(63);
     expect(Object.keys(bridge).sort()).toEqual(expectedKeys);
     expect(Object.getOwnPropertySymbols(bridge)).toEqual([]);
     expect(Object.isFrozen(bridge)).toBe(true);

@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { EngineRuntime } from '@main/engine-runtime';
 import { DEFAULT_ONION_SKIN_PREFERENCES } from '../../src/common/onion-skin';
+import { DEFAULT_ORDERED_DITHER_PREFERENCES, type OrderedDitherPreferences } from '../../src/common/ordered-dither-preferences';
 import { DEFAULT_SPRITE_SYMMETRY_PREFERENCES } from '../../src/common/sprite-symmetry';
 
 describe('EngineRuntime stop', () => {
@@ -11,6 +12,7 @@ describe('EngineRuntime stop', () => {
     const source = await readFile(new URL('../../src/main/main.ts', import.meta.url), 'utf8');
     expect(source).toContain('handle(IPC.bootstrap, () => engineRuntime.editorBootstrap())');
     expect(source).toContain('handle(IPC.onionSkinPreferencesSet, (_event, value: unknown) => engineRuntime.setOnionSkinPreferences(value))');
+    expect(source).toContain('handle(IPC.orderedDitherPreferencesSet, (_event, value: unknown) => engineRuntime.setOrderedDitherPreferences(value))');
     expect(source).toContain('handle(IPC.spriteSymmetryPreferencesSet, (_event, value: unknown) => engineRuntime.setSpriteSymmetryPreferences(value))');
   });
 
@@ -24,6 +26,9 @@ describe('EngineRuntime stop', () => {
     });
     vi.spyOn(runtime.spriteSymmetryPreferences, 'bootstrap').mockResolvedValue({
       preferences: { mode: DEFAULT_SPRITE_SYMMETRY_PREFERENCES.mode, bindings: [] },
+    });
+    vi.spyOn(runtime.orderedDitherPreferences, 'bootstrap').mockResolvedValue({
+      preferences: { current: { ...DEFAULT_ORDERED_DITHER_PREFERENCES.current }, presets: [], activePresetId: null },
     });
 
     await expect(runtime.editorBootstrap()).resolves.toMatchObject({
@@ -52,6 +57,7 @@ describe('EngineRuntime stop', () => {
     runtime.service.initialize();
     const durable = { mode: 'both' as const, bindings: [{ documentId: 'doc', spriteId: 'sprite', width: 8, height: 6, horizontalAxis: 2.5, verticalAxis: 3 }] };
     vi.spyOn(runtime.onionSkinPreferences, 'bootstrap').mockResolvedValue({ preferences: { ...DEFAULT_ONION_SKIN_PREFERENCES } });
+    vi.spyOn(runtime.orderedDitherPreferences, 'bootstrap').mockResolvedValue({ preferences: { current: { ...DEFAULT_ORDERED_DITHER_PREFERENCES.current }, presets: [], activePresetId: null } });
     vi.spyOn(runtime.spriteSymmetryPreferences, 'bootstrap').mockResolvedValue({ preferences: durable, warning: 'Symmetry preference recovery advisory.' });
     await expect(runtime.editorBootstrap()).resolves.toMatchObject({ symmetryPreferences: durable, recoveryWarnings: ['Symmetry preference recovery advisory.'] });
 
@@ -66,6 +72,30 @@ describe('EngineRuntime stop', () => {
     await expect(runtime.setSpriteSymmetryPreferences(durable)).resolves.toEqual({ saved: true, preferences: durable });
   });
 
+  it('hydrates and bounds complete ordered dither preference saves without exposing palette or document authority', async () => {
+    const runtime = new EngineRuntime({ userDataPath: '/private/aidraw-engine-dither-preference-test', appVersion: 'test' });
+    runtime.service.initialize();
+    const durable: OrderedDitherPreferences = {
+      current: { matrixSize: 8, coverage: 0.375, phaseX: 7, phaseY: 2 },
+      presets: [{ id: 'preset-a', name: 'Fine shade', matrixSize: 8, coverage: 0.375, phaseX: 7, phaseY: 2 }],
+      activePresetId: 'preset-a',
+    };
+    vi.spyOn(runtime.onionSkinPreferences, 'bootstrap').mockResolvedValue({ preferences: { ...DEFAULT_ONION_SKIN_PREFERENCES } });
+    vi.spyOn(runtime.orderedDitherPreferences, 'bootstrap').mockResolvedValue({ preferences: durable, warning: 'Dither preference recovery advisory.' });
+    vi.spyOn(runtime.spriteSymmetryPreferences, 'bootstrap').mockResolvedValue({ preferences: { mode: 'none', bindings: [] } });
+    await expect(runtime.editorBootstrap()).resolves.toMatchObject({ orderedDitherPreferences: durable, recoveryWarnings: ['Dither preference recovery advisory.'] });
+
+    const save = vi.spyOn(runtime.orderedDitherPreferences, 'save').mockRejectedValueOnce(new Error('Injected replacement failure.')).mockResolvedValueOnce(durable);
+    await expect(runtime.setOrderedDitherPreferences({ ...durable, current: { ...durable.current, phaseX: -1 } })).resolves.toEqual({
+      saved: false, message: 'AIDraw rejected invalid ordered dither preferences; the saved preference was not changed.',
+    });
+    expect(save).not.toHaveBeenCalled();
+    await expect(runtime.setOrderedDitherPreferences(durable)).resolves.toEqual({
+      saved: false, message: 'Ordered dither settings changed in this editor, but AIDraw could not save them. The previous saved preference remains.',
+    });
+    await expect(runtime.setOrderedDitherPreferences(durable)).resolves.toEqual({ saved: true, preferences: durable });
+  });
+
   it('coalesces concurrent callers and remains retryable until final recovery succeeds', async () => {
     const runtime = new EngineRuntime({ userDataPath: '/private/aidraw-engine-stop-test', appVersion: 'test' });
     const state = runtime as unknown as { started: boolean };
@@ -74,6 +104,7 @@ describe('EngineRuntime stop', () => {
     const mcpStopRelease = new Promise<void>((resolve) => { releaseMcpStop = resolve; });
     const mcpStop = vi.spyOn(runtime.mcpHost, 'stop').mockImplementationOnce(async () => { await mcpStopRelease; }).mockResolvedValue(undefined);
     const flushPreferences = vi.spyOn(runtime.onionSkinPreferences, 'flush');
+    const flushDitherPreferences = vi.spyOn(runtime.orderedDitherPreferences, 'flush');
     const flushSymmetryPreferences = vi.spyOn(runtime.spriteSymmetryPreferences, 'flush');
     vi.spyOn(runtime.rasterUtilities, 'stop').mockImplementation(() => undefined);
     vi.spyOn(runtime.generationUtilities, 'stop').mockImplementation(() => undefined);
@@ -90,12 +121,14 @@ describe('EngineRuntime stop', () => {
     expect(failed.map((entry) => entry.status)).toEqual(['rejected', 'rejected']);
     expect(compactRecovery).toHaveBeenCalledOnce();
     expect(flushPreferences).toHaveBeenCalledOnce();
+    expect(flushDitherPreferences).toHaveBeenCalledOnce();
     expect(flushSymmetryPreferences).toHaveBeenCalledOnce();
     expect(state.started).toBe(true);
 
     await expect(runtime.stop()).resolves.toBeUndefined();
     expect(mcpStop).toHaveBeenCalledTimes(2);
     expect(flushPreferences).toHaveBeenCalledTimes(2);
+    expect(flushDitherPreferences).toHaveBeenCalledTimes(2);
     expect(flushSymmetryPreferences).toHaveBeenCalledTimes(2);
     expect(compactRecovery).toHaveBeenCalledTimes(2);
     expect(state.started).toBe(false);

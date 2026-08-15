@@ -67,6 +67,7 @@ export const PACKAGED_PRELOAD_CHANNELS = [
   'aidraw:trace:replay',
   'aidraw:editor:advisory',
   'aidraw:preferences:onion-skin:set',
+  'aidraw:preferences:ordered-dither:set',
   'aidraw:preferences:sprite-symmetry:set',
   'aidraw:renderer-diagnostics:export',
   'aidraw:renderer-recovery:test-event',
@@ -146,7 +147,7 @@ export function assertPackagedSecuritySources({ mainSource, preloadSource, rende
   const invokeBindings = (preloadSource.match(/\.ipcRenderer\.invoke\(/g) ?? []).length;
   const eventBindings = (preloadSource.match(/\.ipcRenderer\.on\(/g) ?? []).length;
   const removeBindings = (preloadSource.match(/\.ipcRenderer\.removeListener\(/g) ?? []).length;
-  invariant(invokeBindings === 60, `Packaged preload exposes ${invokeBindings} invoke bindings; expected 60.`);
+  invariant(invokeBindings === 61, `Packaged preload exposes ${invokeBindings} invoke bindings; expected 61.`);
   invariant(eventBindings === 2 && removeBindings === 2, `Packaged preload exposes ${eventBindings} subscriptions/${removeBindings} removals; expected 2/2.`);
   invariant(!/\.ipcRenderer\.(?:send|sendSync|sendTo|sendToHost|postMessage)\(/.test(preloadSource), 'Packaged preload exposes a forbidden generic IPC primitive.');
   const channelMatches = [...preloadSource.matchAll(/["'](aidraw:[^"']+)["']/g)].map((match) => match[1]);

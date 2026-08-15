@@ -328,8 +328,8 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const brushSize = useEditorStore((state) => state.brushSize);
   const pixelIndex = useEditorStore((state) => state.pixelIndex);
   const setPixelIndex = useEditorStore((state) => state.setPixelIndex);
-  const ditherMatrixSize = useEditorStore((state) => state.ditherMatrixSize);
-  const ditherCoverage = useEditorStore((state) => state.ditherCoverage);
+  const ditherConfiguration = useEditorStore((state) => state.orderedDitherPreferences.current);
+  const { matrixSize: ditherMatrixSize, coverage: ditherCoverage, phaseX: ditherPhaseX, phaseY: ditherPhaseY } = ditherConfiguration;
   const ditherMixIndex = Math.min(document.palette.length - 1, useEditorStore((state) => state.ditherMixIndex));
   const applyToActiveDocument = useEditorStore((state) => state.apply);
   const apply = useCallback((label: string, operations: CanvasOperation[]) => mountedRef.current ? applyToActiveDocument(label, operations, document.id) : Promise.resolve(false), [applyToActiveDocument, document.id]);
@@ -817,7 +817,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
           if (!(sprite && wrapEditing) && (point.x < 0 || point.y < 0 || point.x >= logical.gridWidth || point.y >= logical.gridHeight)) continue;
           if (overlayRegionFilter && !overlayRegionFilter.cellIntersects(point.x, point.y)) continue;
           const sample = sprite && wrapEditing ? wrapPixelPoint(point, sprite.width, sprite.height) : point;
-          const index = orderedDitherIndex(sample.x, sample.y, ditherMixIndex, pixelIndex, ditherCoverage, ditherMatrixSize);
+          const index = orderedDitherIndex(sample.x, sample.y, ditherMixIndex, pixelIndex, ditherCoverage, ditherMatrixSize, ditherPhaseX, ditherPhaseY);
           context.fillStyle = index === 0 ? '#ffffff80' : (activePaletteOverride ?? document.palette)[index]?.color ?? '#ff00ff';
           context.fillRect(point.x * view.scale, point.y * view.scale, view.scale, view.scale);
         }
@@ -915,7 +915,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       context.stroke();
     }
     context.restore();
-  }, [activeFrameId, activePaletteCycle, activePaletteOverride, activeTileLayerEntry, bulkPreview, ditherCoverage, ditherMatrixSize, ditherMixIndex, document, lassoPath, logical, mapLayerTranslations, mapObjectGesture, onionSettings, onionSkin, paletteCycling, paletteOffset, pixelIndex, playbacks, preview, selectedEntityId, selection, selectionOffset, size, sprite, stampPreview, symmetry, tileAnimationTimeMs, tilemap, tileStampPreview, tileset, tool, view, visibleMapLayers, wrapEditing]);
+  }, [activeFrameId, activePaletteCycle, activePaletteOverride, activeTileLayerEntry, bulkPreview, ditherCoverage, ditherMatrixSize, ditherMixIndex, ditherPhaseX, ditherPhaseY, document, lassoPath, logical, mapLayerTranslations, mapObjectGesture, onionSettings, onionSkin, paletteCycling, paletteOffset, pixelIndex, playbacks, preview, selectedEntityId, selection, selectionOffset, size, sprite, stampPreview, symmetry, tileAnimationTimeMs, tilemap, tileStampPreview, tileset, tool, view, visibleMapLayers, wrapEditing]);
 
   const toPixel = (event: ReactPointerEvent<HTMLCanvasElement>): PixelPoint => {
     const bounds = event.currentTarget.getBoundingClientRect();
@@ -1406,7 +1406,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
           const changes = tool === 'stamp'
             ? [...new Map(placedStamp.map((entry) => [`${entry.x},${entry.y}`, entry])).values()]
             : tool === 'dither'
-            ? [...new Map(points.map((point) => [`${point.x},${point.y}`, { ...point, index: orderedDitherIndex(point.x, point.y, ditherMixIndex, pixelIndex, ditherCoverage, ditherMatrixSize) }])).values()]
+            ? [...new Map(points.map((point) => [`${point.x},${point.y}`, { ...point, index: orderedDitherIndex(point.x, point.y, ditherMixIndex, pixelIndex, ditherCoverage, ditherMatrixSize, ditherPhaseX, ditherPhaseY) }])).values()]
             : tool === 'lighten' || tool === 'darken'
             ? [...new Map(points.map((point) => { const current = pixelAt(sprite, activeFrameId, point.x, point.y); return [`${point.x},${point.y}`, { ...point, index: stepPaletteByLuminance(activePaletteOverride ?? document.palette, current, tool === 'lighten' ? 'lighter' : 'darker') }] as const; })).values()]
             : uniqueChanges(points, tool === 'eraser' ? 0 : pixelIndex);

@@ -32,16 +32,16 @@ function secureMainSource(): string {
 
 function securePreloadSource(): string {
   const channels = PACKAGED_PRELOAD_CHANNELS.map((channel, index) => `channel${index}:"${channel}"`).join(',');
-  const invokes = Array.from({ length: 60 }, (_value, index) => `command${index}:()=>electron.ipcRenderer.invoke(channels.channel${index})`).join(',');
+  const invokes = Array.from({ length: 61 }, (_value, index) => `command${index}:()=>electron.ipcRenderer.invoke(channels.channel${index})`).join(',');
   return [
     '"use strict"',
     'const electron=require("electron")',
     `const channels={${channels}}`,
     `const api={${invokes}}`,
-    'electron.ipcRenderer.on(channels.channel60,listenerOne)',
-    'electron.ipcRenderer.removeListener(channels.channel60,listenerOne)',
-    'electron.ipcRenderer.on(channels.channel61,listenerTwo)',
-    'electron.ipcRenderer.removeListener(channels.channel61,listenerTwo)',
+    'electron.ipcRenderer.on(channels.channel61,listenerOne)',
+    'electron.ipcRenderer.removeListener(channels.channel61,listenerOne)',
+    'electron.ipcRenderer.on(channels.channel62,listenerTwo)',
+    'electron.ipcRenderer.removeListener(channels.channel62,listenerTwo)',
     'electron.contextBridge.exposeInMainWorld("aidraw",Object.freeze(api))',
   ].join(';');
 }
@@ -56,7 +56,7 @@ function secureSources() {
 
 describe('packaged Electron security verification', () => {
   it('tracks the complete current typed IPC channel set', () => {
-    expect(PACKAGED_PRELOAD_CHANNELS).toHaveLength(62);
+    expect(PACKAGED_PRELOAD_CHANNELS).toHaveLength(63);
     expect([...PACKAGED_PRELOAD_CHANNELS].sort()).toEqual(Object.values(IPC).sort());
   });
 
@@ -84,7 +84,7 @@ describe('packaged Electron security verification', () => {
     expect(assertPackagedSecuritySources(secureSources())).toMatchObject({
       browserWindow: { sandbox: true, contextIsolation: true, nodeIntegration: false },
       denials: { permissions: true, windowOpen: true, navigation: true, webviewAttach: true },
-      preload: { frozenAidrawBridge: true, invokeBindings: 60, eventBindings: 2, fixedChannels: 62 },
+      preload: { frozenAidrawBridge: true, invokeBindings: 61, eventBindings: 2, fixedChannels: 63 },
     });
   });
 
