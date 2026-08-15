@@ -1,12 +1,39 @@
 import { describe, expect, it } from 'vitest';
 import { createCanvas, loadImage } from '@napi-rs/canvas';
 import { createHash } from 'node:crypto';
-import { HUMAN_ACTOR, IDENTITY_TRANSFORM, applyTransaction, createId, createIllustrationDocument, createPixelDocument, createPixelSprite, createPixelTilemap, createPixelTileset, deleteBitmapFontGlyph, editBitmapFontGlyph, encodeTiledGid, nowIso, renameBitmapFont, writePixels, writeTiles, type CollisionShape, type DocumentAsset, type GroupObject, type ImageObject, type ShapeObject } from '@aidraw/core';
+import { HUMAN_ACTOR, IDENTITY_TRANSFORM, applyTransaction, bitmapTextCells, createId, createIllustrationDocument, createPixelDocument, createPixelSprite, createPixelTilemap, createPixelTileset, deleteBitmapFontGlyph, editBitmapFontGlyph, encodeTiledGid, nowIso, renameBitmapFont, writePixels, writeTiles, type CollisionShape, type DocumentAsset, type GroupObject, type ImageObject, type ShapeObject } from '@aidraw/core';
 import { exportDocument } from '@main/export-document';
 import { materializePaintTiles } from '@main/persistence';
 import { renderIllustration, renderIllustrationRegion, renderSprite, renderSpriteRegion, renderTilemap, renderTilemapRegion } from '@main/render-document';
 
 describe('native document rendering', () => {
+  it('renders and exports newly bundled printable-ASCII glyph pixels exactly', async () => {
+    const document = createPixelDocument('sprite', 'Printable ASCII raster');
+    const sprite = document.pixelAssets[document.activeAssetId];
+    if (sprite.type !== 'sprite') throw new Error('Expected sprite');
+    const cel = Object.values(sprite.cels)[0];
+    const cells = bitmapTextCells(document.bitmapFonts[0], 'go@', { x: 2, y: 3 });
+    writePixels(cel, cells.map(({ x, y }) => ({ x, y, index: 1 })));
+
+    const rendered = renderSprite(document, sprite);
+    const renderedPixels = rendered.getContext('2d').getImageData(0, 0, sprite.width, sprite.height).data;
+    const occupied = new Set<string>();
+    for (let y = 0; y < sprite.height; y += 1) for (let x = 0; x < sprite.width; x += 1) {
+      const offset = (y * sprite.width + x) * 4;
+      if (renderedPixels[offset + 3]) {
+        occupied.add(`${x},${y}`);
+        expect([...renderedPixels.slice(offset, offset + 4)]).toEqual([39, 33, 60, 255]);
+      }
+    }
+    expect(occupied).toEqual(new Set(cells.map(({ x, y }) => `${x},${y}`)));
+
+    const exported = await exportDocument(document, 'png');
+    const exportedImage = await loadImage(exported.data);
+    const exportedCanvas = createCanvas(exportedImage.width, exportedImage.height);
+    exportedCanvas.getContext('2d').drawImage(exportedImage, 0, 0);
+    expect(Buffer.from(exportedCanvas.getContext('2d').getImageData(0, 0, exportedImage.width, exportedImage.height).data)).toEqual(Buffer.from(renderedPixels));
+  });
+
   it('keeps sprite and PNG export pixels exact while editing document-owned font assets', async () => {
     const document = createPixelDocument('sprite', 'Font-independent raster');
     const sprite = document.pixelAssets[document.activeAssetId];

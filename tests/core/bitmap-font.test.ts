@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
 import {
   CanvasOperationSchema,
   HUMAN_ACTOR,
@@ -12,6 +13,7 @@ import {
   createEmptyBitmapFont,
   createId,
   createPixelDocument,
+  createPredecessorDefaultBitmapFont,
   deleteBitmapFont,
   deleteBitmapFontGlyph,
   editBitmapFontGlyph,
@@ -28,6 +30,46 @@ import {
 } from '@aidraw/core';
 
 describe('bitmap fonts', () => {
+  it('materializes every printable ASCII scalar explicitly in stable code-point order', () => {
+    const font = createDefaultBitmapFont();
+    const printableAscii = Array.from({ length: 0x7e - 0x20 + 1 }, (_, index) => String.fromCodePoint(0x20 + index));
+    expect(orderedBitmapFontCharacters(font)).toEqual(printableAscii);
+    expect(new Set(Object.keys(font.glyphs))).toHaveLength(95);
+    expect(printableAscii.every((character) => Object.hasOwn(font.glyphs, character))).toBe(true);
+    for (const character of printableAscii) {
+      const value = font.glyphs[character];
+      const directCells = value.rows.flatMap((row, y) => [...row].flatMap((pixel, x) => pixel === '#' ? [{ x, y }] : []));
+      expect(bitmapTextCells(font, character)).toEqual(directCells);
+    }
+
+    const predecessor = createPredecessorDefaultBitmapFont();
+    expect(Object.keys(predecessor.glyphs)).toHaveLength(44);
+    expect(createHash('sha256').update(JSON.stringify(predecessor)).digest('hex')).toBe('059b75358f5140d675329433fc5b8dfc5c22f873ec30732a050ee95efee329e9');
+    for (const [character, predecessorGlyph] of Object.entries(predecessor.glyphs)) {
+      expect(font.glyphs[character]).toEqual(predecessorGlyph);
+    }
+    expect(predecessor.glyphs.a).toBeUndefined();
+    expect(predecessor.glyphs['@']).toBeUndefined();
+  });
+
+  it('uses explicit lowercase and punctuation glyphs while retaining fallback outside printable ASCII', () => {
+    const font = createDefaultBitmapFont();
+    expect(font.glyphs.a).toEqual({ width: 5, advance: 6, rows: ['.....', '.....', '.###.', '....#', '.####', '#...#', '.####'] });
+    expect(font.glyphs.b).toEqual({ width: 5, advance: 6, rows: ['#....', '#....', '#.##.', '##..#', '#...#', '#...#', '####.'] });
+    expect(font.glyphs.g).toEqual({ width: 5, advance: 6, rows: ['.....', '.####', '#...#', '#...#', '.####', '....#', '.###.'] });
+    expect(font.glyphs['@']).toEqual({ width: 5, advance: 6, rows: ['.###.', '#...#', '#.###', '#.#.#', '#.###', '#....', '.####'] });
+    expect(font.glyphs['|']).toEqual({ width: 3, advance: 4, rows: ['.#.', '.#.', '.#.', '.#.', '.#.', '.#.', '.#.'] });
+    expect(bitmapTextCells(font, 'a')).not.toEqual(bitmapTextCells(font, 'A'));
+    expect(bitmapTextCells(font, 'g')).toEqual([
+      { x: 1, y: 1 }, { x: 2, y: 1 }, { x: 3, y: 1 }, { x: 4, y: 1 },
+      { x: 0, y: 2 }, { x: 4, y: 2 }, { x: 0, y: 3 }, { x: 4, y: 3 },
+      { x: 1, y: 4 }, { x: 2, y: 4 }, { x: 3, y: 4 }, { x: 4, y: 4 },
+      { x: 4, y: 5 }, { x: 1, y: 6 }, { x: 2, y: 6 }, { x: 3, y: 6 },
+    ]);
+    expect(measureBitmapText(font, 'go!\n@_~')).toEqual({ width: 17, height: 16, lineWidths: [15, 17] });
+    expect(bitmapTextCells(font, '\u0080')).toEqual(bitmapTextCells(font, '?'));
+  });
+
   it('lays out deterministic reusable glyphs with alignment, spacing, and scale', () => {
     const font = createDefaultBitmapFont(); const first = bitmapTextCells(font, 'AI\n2', { x: 20, y: 3, align: 'center', letterSpacing: 1, lineSpacing: 1, scale: 2 });
     expect(first).toEqual(bitmapTextCells(font, 'AI\n2', { x: 20, y: 3, align: 'center', letterSpacing: 1, lineSpacing: 1, scale: 2 }));
@@ -208,7 +250,7 @@ describe('bitmap fonts', () => {
     expect(deleted.selectedCharacter).toBe('');
     expect(deleted.fonts[0]).toBe(font);
     expect(resolveBitmapFontCharacter(deleted.font, '🦊')).toBe('');
-    expect(orderedBitmapFontCharacters(font).slice(0, 4)).toEqual([' ', '!', '+', ',']);
+    expect(orderedBitmapFontCharacters(font).slice(0, 4)).toEqual([' ', '!', '"', '#']);
   });
 
   it('commits rename, glyph editing, and glyph deletion as exact whole-library inverses without raster changes', () => {

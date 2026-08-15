@@ -12,7 +12,7 @@ import type {
   PixelTileset,
   TilemapLayer,
 } from './model';
-import { createDefaultBitmapFont } from './bitmap-font';
+import { createPredecessorDefaultBitmapFont } from './bitmap-font';
 
 const BLEND_MODES = new Set<BlendMode>([
   'normal', 'multiply', 'screen', 'overlay', 'darken', 'lighten', 'color-dodge', 'color-burn',
@@ -265,7 +265,7 @@ export function normalizePixelDocument(document: PixelDocument): PixelDocument {
   const normalized = structuredClone(document);
   normalized.stamps = Array.isArray(normalized.stamps) ? normalized.stamps : [];
   normalized.tileStamps = Array.isArray(normalized.tileStamps) ? normalized.tileStamps : [];
-  normalized.bitmapFonts = Array.isArray(normalized.bitmapFonts) && normalized.bitmapFonts.length ? normalized.bitmapFonts : [createDefaultBitmapFont()];
+  normalized.bitmapFonts = Array.isArray(normalized.bitmapFonts) && normalized.bitmapFonts.length ? normalized.bitmapFonts : [createPredecessorDefaultBitmapFont()];
   normalized.paletteCycles = Array.isArray(normalized.paletteCycles) ? normalized.paletteCycles : [];
   if (normalized.linkedAssets === undefined) normalized.linkedAssets = [];
   if (normalized.conversionDefaults === undefined) normalized.conversionDefaults = { resample: 'area', paletteMetric: 'oklab', dithering: 'none', alphaThreshold: 0.5 };

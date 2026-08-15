@@ -61,13 +61,56 @@ const PATTERNS: Record<string, string> = {
   S: '.####/#..../#..../.###./....#/....#/####.', T: '#####/..#../..#../..#../..#../..#../..#..', U: '#...#/#...#/#...#/#...#/#...#/#...#/.###.', V: '#...#/#...#/#...#/#...#/#...#/.#.#./..#..', W: '#...#/#...#/#...#/#.#.#/#.#.#/##.##/#...#', X: '#...#/#...#/.#.#./..#../.#.#./#...#/#...#', Y: '#...#/#...#/.#.#./..#../..#../..#../..#..', Z: '#####/....#/...#./..#../.#.../#..../#####',
 };
 
+const PRINTABLE_ASCII_ADDITIONS: Record<string, string> = {
+  '"': '#.#/#.#/.../.../.../.../...', '#': '.#.#./#####/.#.#./.#.#./#####/.#.#./.....', '$': '..#../.####/#.#../.###./..#.#/####./..#..',
+  '%': '##..#/##.#./..#../.#.../#..##/#..##/.....', '&': '.##../#..#./#.#../.##../#.#.#/#..#./.##.#', "'": '.#./.#./.../.../.../.../...',
+  '(': '..#/.#./#../#../#../.#./..#', ')': '#../.#./..#/..#/..#/.#./#..', '*': '...../#.#.#/.###./#####/.###./#.#.#/.....',
+  '/': '....#/...#./...#./..#../.#.../.#.../#....', ';': '.../.#./.../.../.#./.#./#..', '<': '...#./..#../.#.../#..../.#.../..#../...#.',
+  '=': '...../...../#####/...../#####/...../.....', '>': '#..../.#.../..#../...#./..#../.#.../#....', '@': '.###./#...#/#.###/#.#.#/#.###/#..../.####',
+  '[': '###/#../#../#../#../#../###', '\\': '#..../.#.../.#.../..#../...#./...#./....#', ']': '###/..#/..#/..#/..#/..#/###',
+  '^': '..#../.#.#./#...#/...../...../...../.....', '_': '...../...../...../...../...../...../#####', '`': '#../.#./.../.../.../.../...',
+  a: '...../...../.###./....#/.####/#...#/.####', b: '#..../#..../#.##./##..#/#...#/#...#/####.', c: '...../...../.###./#...#/#..../#...#/.###.',
+  d: '....#/....#/.##.#/#..##/#...#/#...#/.####', e: '...../...../.###./#...#/#####/#..../.####', f: '..##./.#..#/.#.../###../.#.../.#.../.#...',
+  g: '...../.####/#...#/#...#/.####/....#/.###.', h: '#..../#..../#.##./##..#/#...#/#...#/#...#', i: '.#./.../##./.#./.#./.#./###',
+  j: '..#./..../.##./..#./..#./#.#./.#..', k: '#..../#..../#..#./#.#../##.../#.#../#..#.', l: '##./.#./.#./.#./.#./.#./###',
+  m: '...../...../##.#./#.#.#/#.#.#/#.#.#/#.#.#', n: '...../...../#.##./##..#/#...#/#...#/#...#', o: '...../...../.###./#...#/#...#/#...#/.###.',
+  p: '...../####./#...#/#...#/####./#..../#....', q: '...../.####/#...#/#...#/.####/....#/....#', r: '...../...../#.##./##..#/#..../#..../#....',
+  s: '...../...../.####/#..../.###./....#/####.', t: '.#.../.#.../###../.#.../.#.../.#..#/..##.', u: '...../...../#...#/#...#/#...#/#..##/.##.#',
+  v: '...../...../#...#/#...#/#...#/.#.#./..#..', w: '...../...../#...#/#...#/#.#.#/##.##/#...#', x: '...../...../#...#/.#.#./..#../.#.#./#...#',
+  y: '...../#...#/#...#/#...#/.####/....#/.###.', z: '...../...../#####/...#./..#../.#.../#####',
+  '{': '..##./.#.../.#.../#..../.#.../.#.../..##.', '|': '.#./.#./.#./.#./.#./.#./.#.', '}': '##.../...#./...#./....#/...#./...#./##...',
+  '~': '...../...../.##.#/#.##./...../...../.....',
+};
+
 function glyph(pattern: string): BitmapGlyph {
   const rows = pattern.split('/'); const width = rows[0].length;
   return { width, advance: width + 1, rows };
 }
 
+function bitmapFontFromPatterns(patterns: ReadonlyArray<readonly [string, string]>): BitmapFont {
+  return {
+    id: 'bitmap-font-tiny-5x7',
+    name: 'Tiny 5×7',
+    lineHeight: 8,
+    glyphs: Object.fromEntries(patterns.map(([character, pattern]) => [character, glyph(pattern)])),
+  };
+}
+
+/** Materialize the predecessor bundled font when normalizing documents that predate stored font libraries. */
+export function createPredecessorDefaultBitmapFont(): BitmapFont {
+  return bitmapFontFromPatterns(Object.entries(PATTERNS));
+}
+
+/** Materialize the complete bundled printable-ASCII font for a newly created pixel document. */
 export function createDefaultBitmapFont(): BitmapFont {
-  return { id: 'bitmap-font-tiny-5x7', name: 'Tiny 5×7', lineHeight: 8, glyphs: Object.fromEntries(Object.entries(PATTERNS).map(([character, pattern]) => [character, glyph(pattern)])) };
+  const patterns: Array<readonly [string, string]> = [];
+  for (let codePoint = 0x20; codePoint <= 0x7e; codePoint += 1) {
+    const character = String.fromCodePoint(codePoint);
+    const pattern = PATTERNS[character] ?? PRINTABLE_ASCII_ADDITIONS[character];
+    if (!pattern) throw new Error(`Tiny 5×7 is missing printable ASCII U+${codePoint.toString(16).toUpperCase().padStart(4, '0')}.`);
+    patterns.push([character, pattern]);
+  }
+  return bitmapFontFromPatterns(patterns);
 }
 
 export function bitmapFontCreationError(fonts: ReadonlyArray<BitmapFont>, name: string, lineHeight: number): string | undefined {

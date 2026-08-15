@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate';
 import { createCanvas } from '@napi-rs/canvas';
-import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createId, createIllustrationDocument, createPixelDocument, createPixelTilemap, createPixelTileset, duplicatePixelFrame, nowIso, readPixel, readTileAt, resolvePixelCel, writePixels, writeTiles, type CanvasTransaction, type GroupObject, type IllustrationLayer, type PixelLayer, type ShapeObject, type TilemapLayer } from '@aidraw/core';
+import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createId, createIllustrationDocument, createPixelDocument, createPixelTilemap, createPixelTileset, createPredecessorDefaultBitmapFont, duplicatePixelFrame, nowIso, readPixel, readTileAt, resolvePixelCel, writePixels, writeTiles, type CanvasTransaction, type GroupObject, type IllustrationLayer, type PixelLayer, type ShapeObject, type TilemapLayer } from '@aidraw/core';
 import type { TransactionTraceEntry } from '@common/contracts';
 import { MAX_TRANSACTION_SERIALIZED_BYTES } from '@common/transaction-limits';
 import { nativeSaveFileSystem, readNativeDocument, writeNativeDocument, type NativeSaveFileSystem } from '@main/persistence';
@@ -39,6 +39,28 @@ function replaceStoredCrc(bytes: Buffer, entryName: string): Buffer {
 }
 
 describe('.aidraw persistence', () => {
+  it('round-trips new printable-ASCII defaults without upgrading an existing predecessor font library', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-persistence-bitmap-font-'));
+    temporaryPaths.push(root);
+
+    const current = createPixelDocument('sprite', 'Printable ASCII font');
+    const currentPath = await writeNativeDocument(join(root, 'current'), current, '1.0.0');
+    const currentLoaded = await readNativeDocument(currentPath);
+    if (currentLoaded.document.kind !== 'pixel') throw new Error('Expected pixel document');
+    expect(currentLoaded.document.bitmapFonts).toEqual(current.bitmapFonts);
+    expect(Object.hasOwn(currentLoaded.document.bitmapFonts[0].glyphs, 'a')).toBe(true);
+    expect(Object.hasOwn(currentLoaded.document.bitmapFonts[0].glyphs, '~')).toBe(true);
+
+    const predecessor = createPixelDocument('sprite', 'Predecessor font');
+    predecessor.bitmapFonts = [createPredecessorDefaultBitmapFont()];
+    const predecessorPath = await writeNativeDocument(join(root, 'predecessor'), predecessor, '1.0.0');
+    const predecessorLoaded = await readNativeDocument(predecessorPath);
+    if (predecessorLoaded.document.kind !== 'pixel') throw new Error('Expected pixel document');
+    expect(predecessorLoaded.document.bitmapFonts).toEqual(predecessor.bitmapFonts);
+    expect(Object.hasOwn(predecessorLoaded.document.bitmapFonts[0].glyphs, 'a')).toBe(false);
+    expect(Object.hasOwn(predecessorLoaded.document.bitmapFonts[0].glyphs, '~')).toBe(false);
+  });
+
   it('validates a temporary ZIP and round-trips its versioned document', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aidraw-persistence-'));
     temporaryPaths.push(root);

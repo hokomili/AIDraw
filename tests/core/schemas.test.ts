@@ -12,6 +12,7 @@ import {
   createPixelSprite,
   createPixelTilemap,
   createPixelTileset,
+  createPredecessorDefaultBitmapFont,
   migrateDocument,
   nowIso,
   writePixels,
@@ -410,7 +411,9 @@ describe('persisted pixel schemas', () => {
     delete absent.paletteCycles; delete absent.stamps; delete absent.tileStamps; delete absent.bitmapFonts; delete absent.linkedAssets; delete absent.conversionDefaults;
     const defaulted = migrateDocument(absent); if (defaulted.kind !== 'pixel') throw new Error('Expected pixel document');
     expect(defaulted).toMatchObject({ paletteCycles: [], stamps: [], tileStamps: [], linkedAssets: [], conversionDefaults: { resample: 'area', paletteMetric: 'oklab', dithering: 'none', alphaThreshold: 0.5 } });
-    expect(defaulted.bitmapFonts).toHaveLength(1);
+    expect(defaulted.bitmapFonts).toEqual([createPredecessorDefaultBitmapFont()]);
+    expect(defaulted.bitmapFonts[0].glyphs.a).toBeUndefined();
+    expect(createPixelDocument().bitmapFonts[0].glyphs.a).toBeTruthy();
   });
 
   it('rejects malformed canonical pixel palettes, libraries, assets, links, and conversion state', () => {
