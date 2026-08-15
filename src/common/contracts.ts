@@ -14,6 +14,7 @@ import type { AgentClientId, AgentClientSetupResult } from './agent-clients';
 import type { DesktopPlatformInfo } from './platform';
 import type { InterchangeFidelityEntry } from './interchange-fidelity';
 import type { PixelSelectionFragment } from './document-fragment';
+import type { OnionSkinPreferences } from './onion-skin';
 
 export type NewDocumentKind = 'illustration' | 'sprite' | 'tilemap' | 'project';
 export type ExportFormat = 'png' | 'jpeg' | 'webp' | 'svg' | 'pdf' | 'psd' | 'gif' | 'apng' | 'sprite-sheet' | 'tiled-json' | 'tiled-xml';
@@ -152,6 +153,15 @@ export interface WorkspaceSnapshot {
   agentHistories: Array<{ actor: Actor; canUndo: boolean; canRedo: boolean }>;
   checkpoints: DocumentCheckpointSummary[];
 }
+
+export interface EditorBootstrapSnapshot extends WorkspaceSnapshot {
+  /** Main-owned human-local preferences, hydrated before the editor canvas mounts. */
+  onionSkinPreferences: OnionSkinPreferences;
+}
+
+export type OnionSkinPreferenceSaveResult =
+  | { saved: true; preferences: OnionSkinPreferences }
+  | { saved: false; message: string };
 
 export interface ApplyTransactionResponse {
   status: 'committed' | 'duplicate' | 'conflict' | 'busy' | 'locked' | 'cancelled';
@@ -311,7 +321,7 @@ export type WorkspaceEvent =
   | { type: 'interchange-report'; report: InterchangeReport };
 
 export interface AIDrawDesktopAPI {
-  bootstrap(): Promise<WorkspaceSnapshot>;
+  bootstrap(): Promise<EditorBootstrapSnapshot>;
   newDocument(options: NewDocumentOptions): Promise<WorkspaceSnapshot>;
   activateDocument(documentId: Id): Promise<WorkspaceSnapshot>;
   applyTransaction(transaction: CanvasTransaction): Promise<ApplyTransactionResponse>;
@@ -368,6 +378,7 @@ export interface AIDrawDesktopAPI {
   readPixelSelectionClipboard(): Promise<PixelSelectionClipboardReadResult>;
   replayTrace(documentId: Id, transactionId: Id): Promise<{ replaying: boolean; reason?: string }>;
   updateEditorAdvisory(state: EditorAdvisoryInput): Promise<void>;
+  setOnionSkinPreferences(preferences: OnionSkinPreferences): Promise<OnionSkinPreferenceSaveResult>;
   exportRendererDiagnostics(detail: { message: string; stack?: string; componentStack?: string; userAgent?: string }): Promise<{ saved: boolean; filePath?: string; cancelled?: boolean }>;
   /** Available only to the exact isolated packaged renderer-recovery test profile. */
   injectRendererRecoveryTestEvent(): Promise<{ injected: boolean; byteLength: number }>;
@@ -438,6 +449,7 @@ export const IPC = {
   readPixelSelectionClipboard: 'aidraw:clipboard:pixel-selection:read',
   replayTrace: 'aidraw:trace:replay',
   editorAdvisory: 'aidraw:editor:advisory',
+  onionSkinPreferencesSet: 'aidraw:preferences:onion-skin:set',
   rendererDiagnosticsExport: 'aidraw:renderer-diagnostics:export',
   rendererRecoveryTestEvent: 'aidraw:renderer-recovery:test-event',
   event: 'aidraw:event',

@@ -58,6 +58,7 @@ const api: AIDrawDesktopAPI = {
   readPixelSelectionClipboard: () => ipcRenderer.invoke(IPC.readPixelSelectionClipboard),
   replayTrace: (documentId, transactionId) => ipcRenderer.invoke(IPC.replayTrace, documentId, transactionId),
   updateEditorAdvisory: (state) => ipcRenderer.invoke(IPC.editorAdvisory, state),
+  setOnionSkinPreferences: (preferences) => ipcRenderer.invoke(IPC.onionSkinPreferencesSet, preferences),
   exportRendererDiagnostics: (detail) => ipcRenderer.invoke(IPC.rendererDiagnosticsExport, detail),
   injectRendererRecoveryTestEvent: () => ipcRenderer.invoke(IPC.rendererRecoveryTestEvent),
   onEvent: (callback) => {

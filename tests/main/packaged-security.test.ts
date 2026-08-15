@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { FuseState, FuseVersion } from '@electron/fuses';
+import { IPC } from '../../src/common/contracts';
 import {
   PACKAGED_FUSE_EXPECTATIONS,
   PACKAGED_PRELOAD_CHANNELS,
@@ -31,16 +32,16 @@ function secureMainSource(): string {
 
 function securePreloadSource(): string {
   const channels = PACKAGED_PRELOAD_CHANNELS.map((channel, index) => `channel${index}:"${channel}"`).join(',');
-  const invokes = Array.from({ length: 54 }, (_value, index) => `command${index}:()=>electron.ipcRenderer.invoke(channels.channel${index})`).join(',');
+  const invokes = Array.from({ length: 59 }, (_value, index) => `command${index}:()=>electron.ipcRenderer.invoke(channels.channel${index})`).join(',');
   return [
     '"use strict"',
     'const electron=require("electron")',
     `const channels={${channels}}`,
     `const api={${invokes}}`,
-    'electron.ipcRenderer.on(channels.channel54,listenerOne)',
-    'electron.ipcRenderer.removeListener(channels.channel54,listenerOne)',
-    'electron.ipcRenderer.on(channels.channel55,listenerTwo)',
-    'electron.ipcRenderer.removeListener(channels.channel55,listenerTwo)',
+    'electron.ipcRenderer.on(channels.channel59,listenerOne)',
+    'electron.ipcRenderer.removeListener(channels.channel59,listenerOne)',
+    'electron.ipcRenderer.on(channels.channel60,listenerTwo)',
+    'electron.ipcRenderer.removeListener(channels.channel60,listenerTwo)',
     'electron.contextBridge.exposeInMainWorld("aidraw",Object.freeze(api))',
   ].join(';');
 }
@@ -54,6 +55,11 @@ function secureSources() {
 }
 
 describe('packaged Electron security verification', () => {
+  it('tracks the complete current typed IPC channel set', () => {
+    expect(PACKAGED_PRELOAD_CHANNELS).toHaveLength(61);
+    expect([...PACKAGED_PRELOAD_CHANNELS].sort()).toEqual(Object.values(IPC).sort());
+  });
+
   it('accepts only the complete hardened V1 fuse wire', () => {
     expect(assertHardenedFuseWire(hardenedWire())).toEqual({
       RunAsNode: 'disabled',
@@ -78,7 +84,7 @@ describe('packaged Electron security verification', () => {
     expect(assertPackagedSecuritySources(secureSources())).toMatchObject({
       browserWindow: { sandbox: true, contextIsolation: true, nodeIntegration: false },
       denials: { permissions: true, windowOpen: true, navigation: true, webviewAttach: true },
-      preload: { frozenAidrawBridge: true, invokeBindings: 54, eventBindings: 2, fixedChannels: 56 },
+      preload: { frozenAidrawBridge: true, invokeBindings: 59, eventBindings: 2, fixedChannels: 61 },
     });
   });
 

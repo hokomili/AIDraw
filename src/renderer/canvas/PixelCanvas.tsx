@@ -80,7 +80,7 @@ import { orthogonalCellRect, orthogonalCoordinateDeltaFromScreen, orthogonalObje
 import { TILE_VARIANT_SEED_PROPERTY, chooseTileVariant, nextTileVariantSeed, tileVariantCandidates, tileVariantGroup } from '../../common/tile-variants';
 import { isometricTileRenderCells } from '../../common/tile-render-order';
 import { coveringRasterViewportRegion, createGridRasterRegionFilter, tilemapChunksIntersectingRegion, tilemapGridLineRange } from '../../common/tilemap-region';
-import { DEFAULT_ONION_SKIN_SETTINGS, onionSkinLayers, type OnionSkinSettings } from '../../common/onion-skin';
+import { onionSkinLayers } from '../../common/onion-skin';
 import { tileAnimationFrameAt, tilesetTileSourceRect } from '../../common/tile-animation';
 import { parseBitmapFontJson } from '../../common/bitmap-font-interchange';
 import { cancelPixelGesture, releasePendingPixelLocks } from '../../common/pixel-gesture';
@@ -277,8 +277,6 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const [playing, setPlaying] = useState(false);
   const [pingPong, setPingPong] = useState(false);
   const [playDirection, setPlayDirection] = useState<1 | -1>(1);
-  const [onionSkin, setOnionSkin] = useState(true);
-  const [onionSettings, setOnionSettings] = useState<OnionSkinSettings>(() => ({ ...DEFAULT_ONION_SKIN_SETTINGS }));
   const [onionSettingsOpen, setOnionSettingsOpen] = useState(false);
   const [wrapEditing, setWrapEditing] = useState(false);
   const [symmetry, setSymmetry] = useState<'none' | 'horizontal' | 'vertical' | 'both'>('none');
@@ -297,6 +295,9 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const [selectedTagId, setSelectedTagId] = useState<string>();
   const setCanvasViewport = useEditorStore((state) => state.setCanvasViewport);
   const setCanvasAnimation = useEditorStore((state) => state.setCanvasAnimation);
+  const onionSettings = useEditorStore((state) => state.onionSkinPreferences);
+  const setOnionSkinPreferences = useEditorStore((state) => state.setOnionSkinPreferences);
+  const onionSkin = onionSettings.enabled;
   const tool = useEditorStore((state) => state.selectedTool);
   const zoom = useEditorStore((state) => state.zoom);
   const setZoom = useEditorStore((state) => state.setZoom);
@@ -1372,7 +1373,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       <PlaybackLanes playbacks={playbacks} />
       {tileset && <div className="tileset-canvas-label"><Grid3X3 size={14} /><span><strong>Tileset source</strong><small>{tileset.tileWidth} × {tileset.tileHeight}px cells · metadata in Layers</small></span></div>}
       <div className="pixel-floating-controls">
-        {hasTimeline && <button className={onionSkin ? 'is-active' : ''} onClick={() => setOnionSkin((value) => !value)} title="Onion skin"><Eye size={14} /> Onion</button>}
+        {hasTimeline && <button className={onionSkin ? 'is-active' : ''} onClick={() => setOnionSkinPreferences({ ...onionSettings, enabled: !onionSkin })} title="Onion skin"><Eye size={14} /> Onion</button>}
         {hasTimeline && <button className={onionSettingsOpen ? 'is-active' : ''} aria-expanded={onionSettingsOpen} aria-controls="onion-skin-settings" onClick={() => { setOnionSettingsOpen((open) => !open); setExposureGridOpen(false); }} title="Configure bounded onion skin frames, tint, and opacity"><SlidersHorizontal size={13} /> Onion setup</button>}
         {sprite && <button className={wrapEditing ? 'is-active' : ''} aria-pressed={wrapEditing} onClick={() => setWrapEditing((value) => !value)} title="Preview and edit through repeated copies across opposite sprite edges"><Repeat2 size={14} /> Wrap edit</button>}
         {sprite && <button className={symmetry !== 'none' ? 'is-active' : ''} onClick={() => setSymmetry((value) => value === 'none' ? 'horizontal' : value === 'horizontal' ? 'vertical' : value === 'vertical' ? 'both' : 'none')} title="Cycle symmetry: none, horizontal, vertical, both"><FlipHorizontal2 size={14} /> {symmetry === 'none' ? 'Sym' : symmetry[0].toUpperCase()}</button>}
@@ -1444,7 +1445,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
         </div>
       )}
       {exposureGridOpen && sprite && activeFrameId && <CelExposureGrid key={`${sprite.id}:${sprite.revision}:${activeFrameId}:${selectedEntityId ?? ''}`} sprite={sprite} activeFrameId={activeFrameId} activeLayerId={selectedEntityId} onSelect={(nextFrameId, layerId) => { setFrameId(nextFrameId); setSelectedEntity(layerId); }} onToggleLink={(layerId, nextFrameId) => void toggleCelExposureLink(layerId, nextFrameId)} onClose={() => setExposureGridOpen(false)} />}
-      {onionSettingsOpen && hasTimeline && sprite && <OnionSkinSettingsPanel settings={onionSettings} onChange={setOnionSettings} onClose={() => setOnionSettingsOpen(false)} />}
+      {onionSettingsOpen && hasTimeline && sprite && <OnionSkinSettingsPanel settings={onionSettings} onChange={(settings) => setOnionSkinPreferences({ ...settings, enabled: onionSkin })} onClose={() => setOnionSettingsOpen(false)} />}
       {glyphMapperOpen && sprite && <BitmapGlyphMapperDialog
         fonts={document.bitmapFonts}
         capture={selectedGlyphCapture.capture}

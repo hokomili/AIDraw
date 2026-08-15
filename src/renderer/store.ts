@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import type { Actor, CanvasOperation, Id, OrderedDitherMatrixSize } from '@aidraw/core';
 import { CanvasOperationSchema, HUMAN_ACTOR, createId, nowIso } from '@aidraw/core';
 import type { NewDocumentOptions, WorkspaceSnapshot } from '../common/contracts';
+import { DEFAULT_ONION_SKIN_PREFERENCES, parseOnionSkinPreferences, type OnionSkinPreferences } from '../common/onion-skin';
 import type { ReplaySource } from './replay';
 
 export type EditorTool =
@@ -25,6 +26,7 @@ interface EditorState {
   ditherMatrixSize: OrderedDitherMatrixSize;
   ditherCoverage: number;
   ditherMixIndex: number;
+  onionSkinPreferences: OnionSkinPreferences;
   rightPanel: 'layers' | 'assets' | 'animation' | 'activity' | 'generation';
   selectedEntityId?: Id;
   selectedEntityIds: Id[];
@@ -47,6 +49,7 @@ interface EditorState {
   setDitherMatrixSize(value: OrderedDitherMatrixSize): void;
   setDitherCoverage(value: number): void;
   setDitherMixIndex(value: number): void;
+  setOnionSkinPreferences(preferences: OnionSkinPreferences): void;
   setRightPanel(panel: EditorState['rightPanel']): void;
   setSelectedEntity(id?: Id): void;
   setSelectedEntities(ids: Id[]): void;
@@ -110,6 +113,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   ditherMatrixSize: 4,
   ditherCoverage: 0.5,
   ditherMixIndex: 0,
+  onionSkinPreferences: { ...DEFAULT_ONION_SKIN_PREFERENCES },
   rightPanel: 'layers',
   playbacks: {},
   reportPulse: 0,
@@ -142,7 +146,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       else if (event.type === 'interchange-report') set((state) => ({ reportPulse: state.reportPulse + 1 }));
     });
     const snapshot = await window.aidraw.bootstrap();
-    set((state) => ({ ...reconcileWorkspaceSnapshot(state, snapshot), loading: false }));
+    set((state) => ({
+      ...reconcileWorkspaceSnapshot(state, snapshot),
+      onionSkinPreferences: structuredClone(snapshot.onionSkinPreferences),
+      loading: false,
+    }));
     if (snapshot.recoveryWarnings?.length) get().notify(snapshot.recoveryWarnings.join(' '), 'warning');
   },
   setSnapshot: (snapshot) => set((state) => reconcileWorkspaceSnapshot(state, snapshot)),
@@ -157,6 +165,13 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   setDitherMatrixSize: (ditherMatrixSize) => set({ ditherMatrixSize }),
   setDitherCoverage: (ditherCoverage) => set({ ditherCoverage: Math.max(0, Math.min(1, ditherCoverage)) }),
   setDitherMixIndex: (ditherMixIndex) => set({ ditherMixIndex: Math.max(0, Math.min(255, Math.trunc(ditherMixIndex))) }),
+  setOnionSkinPreferences: (value) => {
+    const onionSkinPreferences = parseOnionSkinPreferences(value);
+    set({ onionSkinPreferences });
+    void window.aidraw.setOnionSkinPreferences(onionSkinPreferences)
+      .then((result) => { if (!result.saved) get().notify(result.message, 'warning'); })
+      .catch(() => get().notify('Onion skin changed in this editor, but AIDraw could not save it. The previous saved preference remains.', 'warning'));
+  },
   setRightPanel: (rightPanel) => set({ rightPanel }),
   setSelectedEntity: (selectedEntityId) => set({ selectedEntityId, selectedEntityIds: selectedEntityId ? [selectedEntityId] : [] }),
   setSelectedEntities: (selectedEntityIds) => set({ selectedEntityIds, selectedEntityId: selectedEntityIds.at(-1) }),

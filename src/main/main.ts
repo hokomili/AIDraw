@@ -547,7 +547,7 @@ function registerIpc(): void {
     return listener(event, ...args);
   });
 
-  handle(IPC.bootstrap, () => service.snapshot());
+  handle(IPC.bootstrap, () => engineRuntime.editorBootstrap());
   handle<[NewDocumentOptions], ReturnType<DocumentService['create']>>(IPC.newDocument, (_event, options) => {
     if (!['illustration', 'sprite', 'tilemap', 'project'].includes(options.kind)) throw new Error('Unknown document kind.');
     return service.create(options);
@@ -824,6 +824,7 @@ function registerIpc(): void {
     return { replaying: replay.replaying, reason };
   });
   handle(IPC.editorAdvisory, (_event, state) => { service.updateEditorAdvisory(state && typeof state === 'object' ? state : {}); });
+  handle(IPC.onionSkinPreferencesSet, (_event, value: unknown) => engineRuntime.setOnionSkinPreferences(value));
   handle(IPC.configureAgentClient, (_event, clientId: unknown) => configureAgentClient(clientId));
   handle(IPC.configureCodex, () => configureAgentClient('codex'));
 }

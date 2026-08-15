@@ -28,6 +28,7 @@ const expectedBridgeKeys = [
   'setProviderCredential', 'getProviderStatus', 'generationStart', 'generationAccept', 'generationReject', 'jobCancel',
   'importFiles', 'importPalette', 'exportPalette', 'managePixelLink', 'selectSpriteSheet', 'importSpriteSheet',
   'exportActiveDocument', 'copySelection', 'pasteClipboard', 'replayTrace', 'updateEditorAdvisory',
+  'writePixelSelectionClipboard', 'readPixelSelectionClipboard', 'setOnionSkinPreferences',
   'exportRendererDiagnostics', 'injectRendererRecoveryTestEvent', 'onEvent', 'onNewDocumentRequested',
 ].sort();
 
@@ -251,7 +252,7 @@ test(scenarioName, async () => {
       windowOpenDenied: true,
       webviewPrimitiveAbsent: true,
     });
-    expect(renderer.ownKeys).toHaveLength(56);
+    expect(renderer.ownKeys).toHaveLength(61);
     expect(renderer.csp).toContain("default-src 'self'");
     expect(renderer.csp).toContain("script-src 'self'");
     expect(renderer.csp).toContain("object-src 'none'");

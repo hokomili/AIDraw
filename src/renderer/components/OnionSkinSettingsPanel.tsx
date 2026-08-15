@@ -12,7 +12,7 @@ export function OnionSkinSettingsPanel({ settings, onChange, onClose }: OnionSki
   const countOptions = Array.from({ length: MAX_ONION_SKIN_FRAMES_PER_SIDE + 1 }, (_, value) => value);
   const update = <K extends keyof OnionSkinSettings>(key: K, value: OnionSkinSettings[K]) => onChange({ ...settings, [key]: value });
   return <section id="onion-skin-settings" className="onion-settings-panel" aria-label="Onion skin settings">
-    <header><span><strong>Onion skin</strong><small>Session preview · use Onion to show · document pixels do not change</small></span><button type="button" aria-label="Close onion skin settings" onClick={onClose}><X size={EDITOR_DENSITY.secondaryIcon} /></button></header>
+    <header><span><strong>Onion skin</strong><small>Saved locally across restarts · shared by pixel documents · document pixels do not change</small></span><button type="button" aria-label="Close onion skin settings" onClick={onClose}><X size={EDITOR_DENSITY.secondaryIcon} /></button></header>
     <div className="onion-settings-columns">
       <fieldset><legend>Previous frames</legend>
         <label><span>Count</span><select value={settings.previousFrames} onChange={(event) => update('previousFrames', Number(event.target.value))}>{countOptions.map((value) => <option value={value} key={value}>{value}</option>)}</select></label>

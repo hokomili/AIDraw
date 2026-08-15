@@ -1,10 +1,47 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { EngineRuntime } from '@main/engine-runtime';
+import { DEFAULT_ONION_SKIN_PREFERENCES } from '../../src/common/onion-skin';
 
 describe('EngineRuntime stop', () => {
+  it('binds bootstrap hydration and preference saves through the named trusted-renderer IPC boundary', async () => {
+    const source = await readFile(new URL('../../src/main/main.ts', import.meta.url), 'utf8');
+    expect(source).toContain('handle(IPC.bootstrap, () => engineRuntime.editorBootstrap())');
+    expect(source).toContain('handle(IPC.onionSkinPreferencesSet, (_event, value: unknown) => engineRuntime.setOnionSkinPreferences(value))');
+  });
+
+  it('hydrates onion preferences through bootstrap, merges one advisory, and bounds save failures', async () => {
+    const runtime = new EngineRuntime({ userDataPath: '/private/aidraw-engine-onion-preference-test', appVersion: 'test' });
+    runtime.service.initialize();
+    const durable = { ...DEFAULT_ONION_SKIN_PREFERENCES, enabled: false, previousFrames: 4 };
+    vi.spyOn(runtime.onionSkinPreferences, 'bootstrap').mockResolvedValue({
+      preferences: durable,
+      warning: 'Onion preference recovery advisory.',
+    });
+
+    await expect(runtime.editorBootstrap()).resolves.toMatchObject({
+      onionSkinPreferences: durable,
+      recoveryWarnings: ['Onion preference recovery advisory.'],
+    });
+
+    const save = vi.spyOn(runtime.onionSkinPreferences, 'save')
+      .mockRejectedValueOnce(new Error('Injected preference replacement failure.'))
+      .mockResolvedValueOnce(durable);
+    await expect(runtime.setOnionSkinPreferences({ ...durable, previousFrames: 5 })).resolves.toEqual({
+      saved: false,
+      message: 'AIDraw rejected invalid onion skin preferences; the saved preference was not changed.',
+    });
+    expect(save).not.toHaveBeenCalled();
+    await expect(runtime.setOnionSkinPreferences(durable)).resolves.toEqual({
+      saved: false,
+      message: 'Onion skin changed in this editor, but AIDraw could not save it. The previous saved preference remains.',
+    });
+    await expect(runtime.setOnionSkinPreferences(durable)).resolves.toEqual({ saved: true, preferences: durable });
+    expect(save).toHaveBeenCalledTimes(2);
+  });
+
   it('coalesces concurrent callers and remains retryable until final recovery succeeds', async () => {
     const runtime = new EngineRuntime({ userDataPath: '/private/aidraw-engine-stop-test', appVersion: 'test' });
     const state = runtime as unknown as { started: boolean };
@@ -12,6 +49,7 @@ describe('EngineRuntime stop', () => {
     let releaseMcpStop!: () => void;
     const mcpStopRelease = new Promise<void>((resolve) => { releaseMcpStop = resolve; });
     const mcpStop = vi.spyOn(runtime.mcpHost, 'stop').mockImplementationOnce(async () => { await mcpStopRelease; }).mockResolvedValue(undefined);
+    const flushPreferences = vi.spyOn(runtime.onionSkinPreferences, 'flush');
     vi.spyOn(runtime.rasterUtilities, 'stop').mockImplementation(() => undefined);
     vi.spyOn(runtime.generationUtilities, 'stop').mockImplementation(() => undefined);
     const compactRecovery = vi.spyOn(runtime.service, 'compactRecovery')
@@ -26,10 +64,12 @@ describe('EngineRuntime stop', () => {
     const failed = await Promise.allSettled([first, concurrent]);
     expect(failed.map((entry) => entry.status)).toEqual(['rejected', 'rejected']);
     expect(compactRecovery).toHaveBeenCalledOnce();
+    expect(flushPreferences).toHaveBeenCalledOnce();
     expect(state.started).toBe(true);
 
     await expect(runtime.stop()).resolves.toBeUndefined();
     expect(mcpStop).toHaveBeenCalledTimes(2);
+    expect(flushPreferences).toHaveBeenCalledTimes(2);
     expect(compactRecovery).toHaveBeenCalledTimes(2);
     expect(state.started).toBe(false);
 

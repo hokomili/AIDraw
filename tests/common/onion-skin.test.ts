@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_ONION_SKIN_SETTINGS, MAX_ONION_SKIN_FRAMES_PER_SIDE, onionSkinLayers } from '../../src/common/onion-skin';
+import {
+  DEFAULT_ONION_SKIN_PREFERENCES,
+  DEFAULT_ONION_SKIN_SETTINGS,
+  MAX_ONION_SKIN_FRAMES_PER_SIDE,
+  onionSkinLayers,
+  parseOnionSkinPreferences,
+} from '../../src/common/onion-skin';
 
 describe('onion skin layer planning', () => {
   it('orders farther frames before nearer frames and attenuates each side independently', () => {
@@ -25,5 +31,14 @@ describe('onion skin layer planning', () => {
     expect(() => onionSkinLayers(['a'], 'a', { ...DEFAULT_ONION_SKIN_SETTINGS, previousFrames: 5 })).toThrow(/0 through 4/);
     expect(() => onionSkinLayers(['a'], 'a', { ...DEFAULT_ONION_SKIN_SETTINGS, nextOpacity: Number.NaN })).toThrow(/between 0 and 1/);
     expect(() => onionSkinLayers(['a'], 'a', { ...DEFAULT_ONION_SKIN_SETTINGS, previousTint: '#fff' })).toThrow(/six-digit/);
+  });
+
+  it('admits only the complete strict human-local preference shape', () => {
+    const preferences = { ...DEFAULT_ONION_SKIN_PREFERENCES, enabled: false, previousFrames: 4, nextOpacity: 0.75, nextTint: '#123ABC' };
+    expect(parseOnionSkinPreferences(preferences)).toEqual(preferences);
+    expect(() => parseOnionSkinPreferences({ ...preferences, unexpected: true })).toThrow('Invalid onion skin preferences.');
+    expect(() => parseOnionSkinPreferences({ ...preferences, previousTint: undefined })).toThrow('Invalid onion skin preferences.');
+    expect(() => parseOnionSkinPreferences({ ...preferences, enabled: 1 })).toThrow('Invalid onion skin preferences.');
+    expect(() => parseOnionSkinPreferences({ ...preferences, previousOpacity: Number.NaN })).toThrow('Invalid onion skin preferences.');
   });
 });

@@ -9,6 +9,10 @@ export interface OnionSkinSettings {
   nextTint: string;
 }
 
+export interface OnionSkinPreferences extends OnionSkinSettings {
+  enabled: boolean;
+}
+
 export const DEFAULT_ONION_SKIN_SETTINGS: Readonly<OnionSkinSettings> = Object.freeze({
   previousFrames: 1,
   nextFrames: 1,
@@ -16,6 +20,11 @@ export const DEFAULT_ONION_SKIN_SETTINGS: Readonly<OnionSkinSettings> = Object.f
   nextOpacity: 0.18,
   previousTint: '#51bfc0',
   nextTint: '#ef7297',
+});
+
+export const DEFAULT_ONION_SKIN_PREFERENCES: Readonly<OnionSkinPreferences> = Object.freeze({
+  enabled: true,
+  ...DEFAULT_ONION_SKIN_SETTINGS,
 });
 
 export interface OnionSkinLayer {
@@ -26,7 +35,7 @@ export interface OnionSkinLayer {
   tint: string;
 }
 
-function validateSettings(settings: OnionSkinSettings): void {
+export function validateOnionSkinSettings(settings: OnionSkinSettings): void {
   for (const [label, value] of [['Previous onion frame count', settings.previousFrames], ['Next onion frame count', settings.nextFrames]] as const) {
     if (!Number.isInteger(value) || value < 0 || value > MAX_ONION_SKIN_FRAMES_PER_SIDE) throw new Error(`${label} must be an integer from 0 through ${MAX_ONION_SKIN_FRAMES_PER_SIDE}.`);
   }
@@ -38,8 +47,38 @@ function validateSettings(settings: OnionSkinSettings): void {
   }
 }
 
+const ONION_SKIN_PREFERENCE_KEYS = new Set([
+  'enabled',
+  'previousFrames',
+  'nextFrames',
+  'previousOpacity',
+  'nextOpacity',
+  'previousTint',
+  'nextTint',
+]);
+
+/** Strictly admit one complete renderer-independent onion preference value. */
+export function parseOnionSkinPreferences(value: unknown): OnionSkinPreferences {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid onion skin preferences.');
+  const source = value as Record<string, unknown>;
+  if (Object.keys(source).length !== ONION_SKIN_PREFERENCE_KEYS.size
+    || Object.keys(source).some((key) => !ONION_SKIN_PREFERENCE_KEYS.has(key))
+    || typeof source.enabled !== 'boolean') throw new Error('Invalid onion skin preferences.');
+  const settings: OnionSkinSettings = {
+    previousFrames: source.previousFrames as number,
+    nextFrames: source.nextFrames as number,
+    previousOpacity: source.previousOpacity as number,
+    nextOpacity: source.nextOpacity as number,
+    previousTint: source.previousTint as string,
+    nextTint: source.nextTint as string,
+  };
+  try { validateOnionSkinSettings(settings); }
+  catch { throw new Error('Invalid onion skin preferences.'); }
+  return { enabled: source.enabled, ...settings };
+}
+
 export function onionSkinLayers(frameIds: readonly string[], activeFrameId: string, settings: OnionSkinSettings): OnionSkinLayer[] {
-  validateSettings(settings);
+  validateOnionSkinSettings(settings);
   const activeIndex = frameIds.indexOf(activeFrameId);
   if (activeIndex < 0) return [];
   const result: OnionSkinLayer[] = [];

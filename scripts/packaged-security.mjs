@@ -40,6 +40,8 @@ export const PACKAGED_PRELOAD_CHANNELS = [
   'aidraw:locks:release',
   'aidraw:mcp:info',
   'aidraw:mcp:credentials',
+  'aidraw:mcp:credential:rotate',
+  'aidraw:mcp:access:revoke',
   'aidraw:engine:status',
   'aidraw:engine:start-at-login',
   'aidraw:mcp:configure-agent-client',
@@ -60,8 +62,11 @@ export const PACKAGED_PRELOAD_CHANNELS = [
   'aidraw:documents:export',
   'aidraw:clipboard:copy',
   'aidraw:clipboard:paste',
+  'aidraw:clipboard:pixel-selection:write',
+  'aidraw:clipboard:pixel-selection:read',
   'aidraw:trace:replay',
   'aidraw:editor:advisory',
+  'aidraw:preferences:onion-skin:set',
   'aidraw:renderer-diagnostics:export',
   'aidraw:renderer-recovery:test-event',
   'aidraw:event',
@@ -140,7 +145,7 @@ export function assertPackagedSecuritySources({ mainSource, preloadSource, rende
   const invokeBindings = (preloadSource.match(/\.ipcRenderer\.invoke\(/g) ?? []).length;
   const eventBindings = (preloadSource.match(/\.ipcRenderer\.on\(/g) ?? []).length;
   const removeBindings = (preloadSource.match(/\.ipcRenderer\.removeListener\(/g) ?? []).length;
-  invariant(invokeBindings === 54, `Packaged preload exposes ${invokeBindings} invoke bindings; expected 54.`);
+  invariant(invokeBindings === 59, `Packaged preload exposes ${invokeBindings} invoke bindings; expected 59.`);
   invariant(eventBindings === 2 && removeBindings === 2, `Packaged preload exposes ${eventBindings} subscriptions/${removeBindings} removals; expected 2/2.`);
   invariant(!/\.ipcRenderer\.(?:send|sendSync|sendTo|sendToHost|postMessage)\(/.test(preloadSource), 'Packaged preload exposes a forbidden generic IPC primitive.');
   const channelMatches = [...preloadSource.matchAll(/["'](aidraw:[^"']+)["']/g)].map((match) => match[1]);

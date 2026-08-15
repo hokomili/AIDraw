@@ -1,5 +1,7 @@
 import { join } from 'node:path';
 import type { AsyncJob } from '@aidraw/core';
+import { parseOnionSkinPreferences, type OnionSkinPreferences } from '../common/onion-skin';
+import type { EditorBootstrapSnapshot, OnionSkinPreferenceSaveResult } from '../common/contracts';
 import { LocalCredentialStore } from './credentials';
 import { DocumentService } from './document-service';
 import { GenerationManager } from './generation-manager';
@@ -11,6 +13,7 @@ import { RasterUtilitySupervisor } from './utility-supervisor';
 import { DocumentPresetStore } from './document-preset-store';
 import { InterchangeReportStore } from './interchange-report-store';
 import type { GenerationProviderRunner } from './generation-provider-runner';
+import { OnionSkinPreferenceStore } from './onion-skin-preference-store';
 
 export interface EngineRuntimeOptions {
   userDataPath: string;
@@ -41,6 +44,7 @@ export class EngineRuntime {
   readonly generationUtilities: RasterUtilitySupervisor;
   readonly documentPresets: DocumentPresetStore;
   readonly interchangeReports: InterchangeReportStore;
+  readonly onionSkinPreferences: OnionSkinPreferenceStore;
   private readonly mcpCredentials: LocalCredentialStore;
   private mcpCredentialOperation: Promise<void> = Promise.resolve();
   private recoveryTimer?: NodeJS.Timeout;
@@ -69,6 +73,7 @@ export class EngineRuntime {
       (output) => this.rasterUtilities.normalizeGeneratedOutput(output),
     );
     this.documentPresets = new DocumentPresetStore(join(userDataPath, 'settings', 'document-presets.json'));
+    this.onionSkinPreferences = new OnionSkinPreferenceStore(join(userDataPath, 'settings', 'onion-skin.json'));
     this.interchangeReports = new InterchangeReportStore(join(userDataPath, 'reports', 'interchange.json'));
     this.mcpCredentials = new LocalCredentialStore(join(userDataPath, 'credentials', 'mcp-token.json'));
     this.mcpHost = new McpHost(
@@ -89,6 +94,7 @@ export class EngineRuntime {
     this.started = true;
     await this.service.recover();
     this.service.initialize();
+    await this.onionSkinPreferences.initialize();
     this.recoveryTimer = setInterval(() => void this.service.compactRecovery(), 60_000);
     this.recoveryTimer.unref();
     try {
@@ -100,6 +106,33 @@ export class EngineRuntime {
       }
     } catch (error) {
       this.service.setMcpInfo({ running: false, access: 'unavailable', tokenHint: error instanceof Error ? error.message : 'MCP unavailable' });
+    }
+  }
+
+  async editorBootstrap(): Promise<EditorBootstrapSnapshot> {
+    const preferenceBootstrap = await this.onionSkinPreferences.bootstrap();
+    const snapshot = this.service.snapshot();
+    const recoveryWarnings = [
+      ...(snapshot.recoveryWarnings ?? []),
+      ...(preferenceBootstrap.warning ? [preferenceBootstrap.warning] : []),
+    ];
+    return {
+      ...snapshot,
+      onionSkinPreferences: preferenceBootstrap.preferences,
+      ...(recoveryWarnings.length ? { recoveryWarnings } : {}),
+    };
+  }
+
+  async setOnionSkinPreferences(value: unknown): Promise<OnionSkinPreferenceSaveResult> {
+    let preferences: OnionSkinPreferences;
+    try { preferences = parseOnionSkinPreferences(value); }
+    catch {
+      return { saved: false, message: 'AIDraw rejected invalid onion skin preferences; the saved preference was not changed.' };
+    }
+    try {
+      return { saved: true, preferences: await this.onionSkinPreferences.save(preferences) };
+    } catch {
+      return { saved: false, message: 'Onion skin changed in this editor, but AIDraw could not save it. The previous saved preference remains.' };
     }
   }
 
@@ -177,6 +210,7 @@ export class EngineRuntime {
 
   private async stopStartedRuntime(): Promise<void> {
     await this.mcpCredentialOperation;
+    await this.onionSkinPreferences.flush();
     if (this.recoveryTimer) clearInterval(this.recoveryTimer);
     this.recoveryTimer = undefined;
     await this.mcpHost.stop();
