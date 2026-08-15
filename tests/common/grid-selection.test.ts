@@ -102,6 +102,14 @@ describe('generic grid selections', () => {
     expect(placed).toMatchObject({ changes: [{ x: 2, y: 3, value: 14 }], selection: [{ x: 2, y: 3 }], dropped: 1 });
   });
 
+  it('captures a large bounded selection without argument-list amplification', () => {
+    const points = Array.from({ length: 150_000 }, (_, x) => ({ x, y: 2 }));
+    const clipboard = captureGridSelection(points, (x) => x % 8);
+    expect(clipboard).toMatchObject({ originX: 0, originY: 2, width: 150_000, height: 1 });
+    expect(clipboard.cells).toHaveLength(150_000);
+    expect(clipboard.cells.at(-1)).toEqual({ x: 149_999, y: 0, value: 7 });
+  });
+
   it('scales an irregular selection by independent integer factors without interpolating values', () => {
     const values = new Map([['1,1', 7], ['3,1', 9]]);
     const result = scaleGridSelection([{ x: 1, y: 1 }, { x: 3, y: 1 }], (x, y) => values.get(x + ',' + y) ?? 0, 2, 3, { width: 10, height: 10 }, 0);

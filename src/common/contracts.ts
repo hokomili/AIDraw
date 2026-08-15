@@ -13,6 +13,7 @@ import type { SpriteSheetSliceOptions } from './sprite-sheet';
 import type { AgentClientId, AgentClientSetupResult } from './agent-clients';
 import type { DesktopPlatformInfo } from './platform';
 import type { InterchangeFidelityEntry } from './interchange-fidelity';
+import type { PixelSelectionFragment } from './document-fragment';
 
 export type NewDocumentKind = 'illustration' | 'sprite' | 'tilemap' | 'project';
 export type ExportFormat = 'png' | 'jpeg' | 'webp' | 'svg' | 'pdf' | 'psd' | 'gif' | 'apng' | 'sprite-sheet' | 'tiled-json' | 'tiled-xml';
@@ -115,6 +116,12 @@ export interface McpCredentialLifecycleResult {
   warning?: true;
   message: string;
 }
+
+export type PixelSelectionClipboardReadResult =
+  | { status: 'valid'; fragment: PixelSelectionFragment }
+  | { status: 'absent'; message: string }
+  | { status: 'invalid'; message: string }
+  | { status: 'incompatible'; message: string };
 
 export interface EngineStatus {
   running: boolean;
@@ -353,6 +360,8 @@ export interface AIDrawDesktopAPI {
   exportActiveDocument(format: ExportFormat, options?: ExportOptions): Promise<{ exported: boolean; filePath?: string; warnings: string[]; reportId?: Id; cancelled?: boolean }>;
   copySelection(objectIds: Id[]): Promise<{ copied: boolean; kind?: string }>;
   pasteClipboard(): Promise<ApplyTransactionResponse>;
+  writePixelSelectionClipboard(fragment: PixelSelectionFragment): Promise<{ copied: true }>;
+  readPixelSelectionClipboard(): Promise<PixelSelectionClipboardReadResult>;
   replayTrace(documentId: Id, transactionId: Id): Promise<{ replaying: boolean; reason?: string }>;
   updateEditorAdvisory(state: EditorAdvisoryInput): Promise<void>;
   exportRendererDiagnostics(detail: { message: string; stack?: string; componentStack?: string; userAgent?: string }): Promise<{ saved: boolean; filePath?: string; cancelled?: boolean }>;
@@ -421,6 +430,8 @@ export const IPC = {
   exportActiveDocument: 'aidraw:documents:export',
   copySelection: 'aidraw:clipboard:copy',
   pasteClipboard: 'aidraw:clipboard:paste',
+  writePixelSelectionClipboard: 'aidraw:clipboard:pixel-selection:write',
+  readPixelSelectionClipboard: 'aidraw:clipboard:pixel-selection:read',
   replayTrace: 'aidraw:trace:replay',
   editorAdvisory: 'aidraw:editor:advisory',
   rendererDiagnosticsExport: 'aidraw:renderer-diagnostics:export',

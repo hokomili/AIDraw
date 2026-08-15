@@ -195,8 +195,11 @@ export function captureGridSelection<T>(points: PixelSelectionPoint[], read: (x:
   const source = uniquePoints(points);
   if (!source.length) throw new Error('Copy requires a non-empty grid selection.');
   if (source.length > 1_000_000) throw new Error('Grid clipboards are limited to one million cells.');
-  const originX = Math.min(...source.map((point) => point.x)); const originY = Math.min(...source.map((point) => point.y));
-  const right = Math.max(...source.map((point) => point.x)); const bottom = Math.max(...source.map((point) => point.y));
+  let originX = source[0].x; let originY = source[0].y; let right = source[0].x; let bottom = source[0].y;
+  for (const point of source.slice(1)) {
+    originX = Math.min(originX, point.x); originY = Math.min(originY, point.y);
+    right = Math.max(right, point.x); bottom = Math.max(bottom, point.y);
+  }
   return { version: 1, originX, originY, width: right - originX + 1, height: bottom - originY + 1, cells: source.map((point) => ({ x: point.x - originX, y: point.y - originY, value: read(point.x, point.y) })) };
 }
 

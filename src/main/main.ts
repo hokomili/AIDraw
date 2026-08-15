@@ -44,8 +44,10 @@ import {
 } from './generation-normalization-e2e';
 import {
   assertClipboardImageGeometry,
+  copyPixelSelectionToClipboard,
   copySelectionToClipboard,
   pasteFromClipboard,
+  readPixelSelectionFromClipboard,
   type ClipboardWorkflowDependencies,
 } from './clipboard-workflows';
 import { buildCheckpointComparison } from './checkpoint-comparison';
@@ -461,6 +463,7 @@ function clipboardDependencies(): ClipboardWorkflowDependencies {
     },
     clipboard: {
       write: (data) => {
+        if (!data.png) { clipboard.write({ text: data.text, html: data.html }); return; }
         const image = nativeImage.createFromBuffer(data.png);
         if (image.isEmpty()) throw new Error('Clipboard PNG output could not be decoded for the system clipboard.');
         clipboard.write({ text: data.text, html: data.html, image });
@@ -479,6 +482,8 @@ function clipboardDependencies(): ClipboardWorkflowDependencies {
 
 const copySelection = (objectIds: string[]) => copySelectionToClipboard(clipboardDependencies(), objectIds);
 const pasteClipboard = () => pasteFromClipboard(clipboardDependencies());
+const writePixelSelectionClipboard = (value: unknown) => copyPixelSelectionToClipboard(clipboardDependencies().clipboard, value);
+const readPixelSelectionClipboard = () => readPixelSelectionFromClipboard(clipboardDependencies().clipboard);
 
 async function confirmMcpCredentialChange(action: 'rotate' | 'revoke'): Promise<McpCredentialLifecycleResult> {
   const window = mainWindow;
@@ -809,6 +814,8 @@ function registerIpc(): void {
   });
   handle(IPC.copySelection, (_event, objectIds: string[]) => copySelection(Array.isArray(objectIds) ? objectIds : []));
   handle(IPC.pasteClipboard, () => pasteClipboard());
+  handle(IPC.writePixelSelectionClipboard, (_event, value: unknown) => writePixelSelectionClipboard(value));
+  handle(IPC.readPixelSelectionClipboard, () => readPixelSelectionClipboard());
   handle(IPC.replayTrace, async (_event, documentId: string, transactionId: string) => {
     const trace = await service.findTrace(documentId, transactionId);
     if (!trace) return { replaying: false, reason: 'The durable transaction trace is unavailable.' };

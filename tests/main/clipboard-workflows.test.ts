@@ -11,16 +11,18 @@ import {
   type AIDrawDocument,
   type ShapeObject,
 } from '@aidraw/core';
-import { exportIllustrationFragment, MAX_FRAGMENT_BYTES } from '@common/document-fragment';
+import { exportIllustrationFragment, MAX_FRAGMENT_BYTES, type PixelSelectionFragment } from '@common/document-fragment';
 import {
   AIDRAW_CLIPBOARD_HTML_VERSION,
   MAX_CLIPBOARD_FRAGMENT_BASE64_CHARACTERS,
   MAX_CLIPBOARD_HTML_BYTES,
   assertClipboardImageGeometry,
   clipboardPngAsset,
+  copyPixelSelectionToClipboard,
   copySelectionToClipboard,
   parseAIDrawClipboardHtml,
   pasteFromClipboard,
+  readPixelSelectionFromClipboard,
   serializeAIDrawClipboardHtml,
   type ClipboardPng,
   type ClipboardWorkflowDependencies,
@@ -53,6 +55,16 @@ function tinyPng(width = 2, height = 1): ClipboardPng {
   context.fillStyle = '#ff6b7a';
   context.fillRect(0, 0, width, height);
   return { bytes: canvas.toBuffer('image/png'), width, height };
+}
+
+function pixelSelectionFragment(): PixelSelectionFragment {
+  return {
+    version: 1,
+    kind: 'pixel-selection',
+    sourceDocumentId: 'clipboard-pixel-source',
+    palette: ['#00000000', '#ff6b7a'],
+    grid: { version: 1, originX: 2, originY: 3, width: 1, height: 1, cells: [{ x: 0, y: 0, value: 1 }] },
+  };
 }
 
 function workflowDependencies(
@@ -101,6 +113,23 @@ describe('clipboard workflows', () => {
     });
   });
 
+  it('publishes and reads exact indexed selections without manufacturing a PNG fallback', () => {
+    const fragment = pixelSelectionFragment();
+    const write = vi.fn<(data: ClipboardWriteData) => void>();
+    expect(copyPixelSelectionToClipboard({ write, readHtml: () => '', readPng: () => undefined }, fragment)).toEqual({ copied: true });
+    expect(write).toHaveBeenCalledOnce();
+    const written = write.mock.calls[0][0];
+    expect(written.png).toBeUndefined();
+    expect(JSON.parse(written.text)).toEqual(fragment);
+    expect(readPixelSelectionFromClipboard({ write: () => undefined, readHtml: () => written.html, readPng: () => undefined })).toEqual({ status: 'valid', fragment });
+    expect(readPixelSelectionFromClipboard({ write: () => undefined, readHtml: () => '<p>ordinary HTML</p>', readPng: () => undefined })).toMatchObject({ status: 'absent' });
+
+    const illustration = illustrationFixture();
+    const incompatible = serializeAIDrawClipboardHtml(exportIllustrationFragment(illustration.document, [illustration.shape.id]), '<svg></svg>');
+    expect(readPixelSelectionFromClipboard({ write: () => undefined, readHtml: () => incompatible, readPng: () => undefined })).toMatchObject({ status: 'incompatible', message: expect.stringContaining('whole artwork') });
+    expect(readPixelSelectionFromClipboard({ write: () => undefined, readHtml: () => '<div data-aidraw="abcd===="></div>', readPng: () => undefined })).toMatchObject({ status: 'invalid' });
+  });
+
   it('accepts the exact legacy private attribute while failing malformed or amplified envelopes closed', () => {
     const { document, shape } = illustrationFixture();
     const fragment = exportIllustrationFragment(document, [shape.id]);
@@ -134,6 +163,19 @@ describe('clipboard workflows', () => {
       apply,
     }));
     expect(response).toMatchObject({ status: 'conflict', message: expect.stringContaining('canonical base64') });
+    expect(readPng).not.toHaveBeenCalled();
+    expect(apply).not.toHaveBeenCalled();
+  });
+
+  it('does not reinterpret an indexed-selection fragment as whole artwork or a bitmap paste', async () => {
+    const readPng = vi.fn(() => tinyPng());
+    const apply = vi.fn<ClipboardWorkflowDependencies['apply']>(async () => ({ status: 'committed' }));
+    const response = await pasteFromClipboard(workflowDependencies(createPixelDocument('sprite'), {
+      html: serializeAIDrawClipboardHtml(pixelSelectionFragment(), '<span>selection</span>'),
+      readPng,
+      apply,
+    }));
+    expect(response).toMatchObject({ status: 'conflict', message: expect.stringContaining('sprite selection controls') });
     expect(readPng).not.toHaveBeenCalled();
     expect(apply).not.toHaveBeenCalled();
   });
@@ -233,6 +275,9 @@ describe('clipboard workflows', () => {
     expect(source).toContain("rasterUtilities.exportDocument(document, 'png')");
     expect(source).toContain('rasterUtilities.quantizeImage(bytes, width, height, palette, settings)');
     expect(source).toContain('assertClipboardImageGeometry(size.width, size.height)');
+    expect(source).toContain('if (!data.png) { clipboard.write({ text: data.text, html: data.html }); return; }');
+    expect(source).toContain('handle(IPC.writePixelSelectionClipboard');
+    expect(source).toContain('handle(IPC.readPixelSelectionClipboard');
     expect(source).not.toContain('quantizeToPalette');
   });
 });

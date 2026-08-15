@@ -72,6 +72,8 @@ const invokeChannels = {
   exportActiveDocument: IPC.exportActiveDocument,
   copySelection: IPC.copySelection,
   pasteClipboard: IPC.pasteClipboard,
+  writePixelSelectionClipboard: IPC.writePixelSelectionClipboard,
+  readPixelSelectionClipboard: IPC.readPixelSelectionClipboard,
   replayTrace: IPC.replayTrace,
   updateEditorAdvisory: IPC.editorAdvisory,
   exportRendererDiagnostics: IPC.rendererDiagnosticsExport,
@@ -110,7 +112,7 @@ describe('preload window.aidraw security contract', () => {
 
   it('exposes one frozen, function-only, exact allowlist with no generic primitive', () => {
     const expectedKeys = [...Object.keys(invokeChannels), ...subscriptionMethods].sort();
-    expect(expectedKeys).toHaveLength(58);
+    expect(expectedKeys).toHaveLength(60);
     expect(Object.keys(bridge).sort()).toEqual(expectedKeys);
     expect(Object.getOwnPropertySymbols(bridge)).toEqual([]);
     expect(Object.isFrozen(bridge)).toBe(true);

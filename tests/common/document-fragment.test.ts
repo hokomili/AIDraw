@@ -127,6 +127,31 @@ describe('safe document fragments', () => {
     expect(parsed).toMatchObject({ version: 1, kind: 'pixel-assets', activePixelAssetId: asset.id });
   });
 
+  it('admits only exact bounded indexed-selection envelopes', () => {
+    const selection = {
+      version: 1 as const,
+      kind: 'pixel-selection' as const,
+      sourceDocumentId: 'source-document',
+      palette: ['#00000000', '#ff6b7a', '#31a6a0'],
+      grid: {
+        version: 1 as const,
+        originX: 4,
+        originY: 6,
+        width: 2,
+        height: 2,
+        cells: [{ x: 0, y: 0, value: 1 }, { x: 1, y: 1, value: 2 }],
+      },
+    };
+    expect(parseDocumentFragment(selection)).toEqual(selection);
+    expect(() => parseDocumentFragment({ ...selection, palette: ['#00000000'], grid: { ...selection.grid, cells: selection.grid.cells.map((cell) => ({ ...cell, value: 0 })) } })).toThrow(/2–256/);
+    expect(() => parseDocumentFragment({ ...selection, extra: true })).toThrow(/unsupported fields/);
+    expect(() => parseDocumentFragment({ ...selection, palette: ['#000000', '#ff6b7a'] })).toThrow(/index 0 must remain transparent/);
+    expect(() => parseDocumentFragment({ ...selection, grid: { ...selection.grid, cells: [...selection.grid.cells, selection.grid.cells[0]] } })).toThrow(/duplicated/);
+    expect(() => parseDocumentFragment({ ...selection, grid: { ...selection.grid, width: 3 } })).toThrow(/exactly enclose/);
+    expect(() => parseDocumentFragment({ ...selection, grid: { ...selection.grid, cells: [{ x: 0, y: 0, value: 3 }, { x: 1, y: 1, value: 2 }] } })).toThrow(/outside its grid or palette/);
+    expect(() => parseDocumentFragment({ ...selection, grid: { ...selection.grid, originX: Number.MAX_SAFE_INTEGER } })).toThrow(/geometry is invalid/);
+  });
+
   it('rejects duplicate IDs, external dependencies, and payloads over the exchange cap', () => {
     const document = createIllustrationDocument();
     const layer = Object.values(document.layers).find((entry) => entry.type === 'vector')!;

@@ -72,4 +72,18 @@ describe('pixel tool renderer wiring', () => {
     expect(source).toContain('Use the Text tool to paint it as editable indexed pixels.');
     expect(source).not.toContain("kind: 'pixel.cel.set', spriteId: sprite.id, celId: cel.id, changes: capture");
   });
+
+  it('publishes pixel selections cross-process while retaining the project-local tile clipboard fail closed', async () => {
+    const source = await readFile(new URL('../../src/renderer/canvas/PixelCanvas.tsx', import.meta.url), 'utf8');
+    expect(source).toContain("type LocalSelectionClipboard = { kind: 'tile'");
+    expect(source.match(/localSelectionClipboard\s*=/gu)).toHaveLength(1); // the tile-only copy assignment
+    expect(source).toContain('await window.aidraw.writePixelSelectionClipboard(fragment)');
+    expect(source).toContain("if (await copyLocalSelection()) await deleteSelection()");
+    expect(source).toContain("window.addEventListener('focus', refreshClipboardAvailability)");
+    expect(source).toContain("window.removeEventListener('focus', refreshClipboardAvailability)");
+    expect(source).toContain('clipboard = await window.aidraw.readPixelSelectionClipboard()');
+    expect(source).toContain("if (clipboard.status !== 'valid') { notify(clipboard.message, 'warning'); return; }");
+    expect(source).toContain("if (tilemap) {\n      const clipboard = localSelectionClipboard;");
+    expect(source).not.toContain("localSelectionClipboard = { kind: 'pixel'");
+  });
 });

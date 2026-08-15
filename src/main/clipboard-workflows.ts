@@ -11,7 +11,7 @@ import {
   type ImageObject,
   type PaletteEntry,
 } from '@aidraw/core';
-import type { ApplyTransactionResponse } from '../common/contracts';
+import type { ApplyTransactionResponse, PixelSelectionClipboardReadResult } from '../common/contracts';
 import {
   MAX_FRAGMENT_BYTES,
   exportIllustrationFragment,
@@ -35,7 +35,7 @@ export const MAX_CLIPBOARD_FRAGMENT_BASE64_CHARACTERS = Math.ceil(MAX_FRAGMENT_B
 export interface ClipboardWriteData {
   text: string;
   html: string;
-  png: Buffer;
+  png?: Buffer;
 }
 
 export interface ClipboardPng {
@@ -140,6 +140,34 @@ export function parseAIDrawClipboardHtml(html: string): ParsedClipboardHtml {
   }
 }
 
+export function copyPixelSelectionToClipboard(
+  clipboard: ClipboardGateway,
+  value: unknown,
+): { copied: true } {
+  const fragment = parseDocumentFragment(value);
+  if (fragment.kind !== 'pixel-selection') throw new Error('Only an indexed pixel selection can use the pixel-selection clipboard route.');
+  clipboard.write({
+    text: JSON.stringify(fragment),
+    html: serializeAIDrawClipboardHtml(fragment, '<span>AIDraw indexed pixel selection</span>'),
+  });
+  return { copied: true };
+}
+
+export function readPixelSelectionFromClipboard(clipboard: ClipboardGateway): PixelSelectionClipboardReadResult {
+  let parsed: ParsedClipboardHtml;
+  try {
+    parsed = parseAIDrawClipboardHtml(clipboard.readHtml());
+  } catch {
+    return { status: 'invalid', message: 'The system clipboard could not be read safely.' };
+  }
+  if (parsed.status === 'absent') return { status: 'absent', message: 'The system clipboard has no AIDraw indexed pixel selection.' };
+  if (parsed.status === 'invalid') return parsed;
+  if (parsed.fragment.kind !== 'pixel-selection') {
+    return { status: 'incompatible', message: 'The AIDraw clipboard contains whole artwork rather than an indexed pixel selection.' };
+  }
+  return { status: 'valid', fragment: parsed.fragment };
+}
+
 export function assertClipboardImageGeometry(width: number, height: number): void {
   if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width < 1 || height < 1
     || width > MAX_INLINE_IMAGE_DIMENSION || height > MAX_INLINE_IMAGE_DIMENSION
@@ -212,6 +240,7 @@ export async function pasteFromClipboard(
   const operations: CanvasOperation[] = [];
   if (parsed.status === 'valid') {
     try {
+      if (parsed.fragment.kind === 'pixel-selection') throw new Error('Paste indexed selections from the sprite selection controls.');
       operations.push(...importDocumentFragmentOperations(document, parsed.fragment));
     } catch (error) {
       return { status: 'conflict', message: error instanceof Error ? error.message : 'The AIDraw fragment is invalid.' };

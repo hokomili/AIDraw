@@ -68,6 +68,8 @@ import { bresenham } from './geometry';
 import { clientPointToIsometricCoordinate, clientPointToIsometricTile, clientPointToOrthogonalCoordinate, clientPointToOrthogonalTile, clientPointToPixel } from './pixel-coordinates';
 import { pixelSelectionBounds, transformPixelSelection, type PixelSelectionTransform } from '../../common/pixel-selection';
 import { MAX_GRID_LASSO_VERTICES, appendGridLassoPoint, captureGridSelection, combineGridSelection, createGridLassoDraft, placeGridClipboard, rasterizeGridLasso, scaleGridSelection, transformGridSelection, type GridLassoDraft, type GridSelectionClipboard } from '../../common/grid-selection';
+import type { PixelSelectionFragment } from '../../common/document-fragment';
+import { planPixelSelectionPaste } from '../../common/pixel-selection-clipboard';
 import { drawBoundedGridChecker } from '../../common/grid-checker';
 import { deleteMapObjectPoint, insertMapObjectPoint, mapObjectAtPoint, mapObjectBounds, moveMapObjectPoint, nearestMapObjectSegment, transformMapObject } from '../../common/map-objects';
 import { isometricCellRect, isometricCoordinateDeltaFromScreen, isometricObjectMatrix, isometricProjectionExtent, type IsometricCellRect } from '../../common/isometric-projection';
@@ -92,9 +94,7 @@ interface TagDraft { id?: string; name: string; fromFrameId: string; toFrameId: 
 interface MapObjectGesture { layerId: string; objectId: string; mode: 'move' | 'resize' | 'point'; pointIndex?: number; start: PixelPoint; current: PixelPoint; original: CollisionShape; lockPromise: Promise<{ acquired: boolean; lockId?: string }> }
 type SelectionCombination = 'replace' | 'add' | 'subtract' | 'intersect';
 type PixelSelectionCommand = 'copy' | 'cut' | 'paste' | 'delete' | 'clear' | 'select-all';
-type LocalSelectionClipboard =
-  | { kind: 'pixel'; sourceDocumentId: string; grid: GridSelectionClipboard<number>; palette: string[] }
-  | { kind: 'tile'; sourceDocumentId: string; grid: GridSelectionClipboard<number> };
+type LocalSelectionClipboard = { kind: 'tile'; sourceDocumentId: string; grid: GridSelectionClipboard<number> };
 
 let localSelectionClipboard: LocalSelectionClipboard | undefined;
 const MIN_TILE_ANIMATION_TICK_MS = 16;
@@ -357,6 +357,20 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       void releasePendingPixelLocks(pendingLocks, (lockId) => window.aidraw.releaseHumanLock(lockId));
     };
   }, []);
+
+  useEffect(() => {
+    if (tilemap) { setClipboardAvailable(Boolean(localSelectionClipboard)); return; }
+    let current = true;
+    const refreshClipboardAvailability = () => {
+      void window.aidraw.readPixelSelectionClipboard().then(
+        (result) => { if (current) setClipboardAvailable(result.status === 'valid'); },
+        () => { if (current) setClipboardAvailable(false); },
+      );
+    };
+    refreshClipboardAvailability();
+    window.addEventListener('focus', refreshClipboardAvailability);
+    return () => { current = false; window.removeEventListener('focus', refreshClipboardAvailability); };
+  }, [document.id, sprite?.id, tilemap]);
 
   useEffect(() => {
     if (!paletteCycling || document.palette.length <= 2) return;
@@ -838,28 +852,41 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     finally { if (lock.lockId) await window.aidraw.releaseHumanLock(lock.lockId); }
   };
 
-  const copyLocalSelection = (): boolean => {
+  const copyLocalSelection = async (): Promise<boolean> => {
     if (!selection.length) { notify('Select pixels or tiles before copying.', 'warning'); return false; }
     if (tilemap) {
       const layer = Object.values(tilemap.layers).find((entry) => entry.type === 'tile' && entry.visible && !entry.locked);
       if (!layer || layer.type !== 'tile' || !layer.chunks) return false;
       localSelectionClipboard = { kind: 'tile', sourceDocumentId: document.id, grid: captureGridSelection(selection, (x, y) => readTileAt(layer.chunks!, x, y)) };
       setClipboardAvailable(true);
-      notify(`Copied ${selection.length} selected tile${selection.length === 1 ? '' : 's'} to the AIDraw clipboard.`, 'success'); return true;
+      notify(`Copied ${selection.length} selected tile${selection.length === 1 ? '' : 's'} to this project's tile clipboard.`, 'success'); return true;
     }
     if (!sprite || !activeFrameId) return false;
     const layerId = editableSpriteLayer(sprite, selectedEntityId)?.id; const cel = layerId ? celFor(sprite, layerId, activeFrameId) : undefined; if (!cel) return false;
-    const activePalette = sprite.paletteOverrides?.[activeFrameId] ?? document.palette;
-    localSelectionClipboard = { kind: 'pixel', sourceDocumentId: document.id, grid: captureGridSelection(selection, (x, y) => readPixel(cel, x, y)), palette: activePalette.map((entry) => entry.color) };
-    setClipboardAvailable(true);
-    notify(`Copied ${selection.length} selected pixel${selection.length === 1 ? '' : 's'} to the AIDraw clipboard.`, 'success'); return true;
+    const activePalette = sprite.paletteOverrides[activeFrameId] ?? document.palette;
+    const fragment: PixelSelectionFragment = {
+      version: 1,
+      kind: 'pixel-selection',
+      sourceDocumentId: document.id,
+      grid: captureGridSelection(selection, (x, y) => readPixel(cel, x, y)),
+      palette: activePalette.map((entry) => entry.color),
+    };
+    try {
+      await window.aidraw.writePixelSelectionClipboard(fragment);
+      setClipboardAvailable(true);
+      notify(`Copied ${selection.length} selected pixel${selection.length === 1 ? '' : 's'} to the system clipboard.`, 'success');
+      return true;
+    } catch {
+      notify('The indexed pixel selection could not be written to the system clipboard.', 'warning');
+      return false;
+    }
   };
 
   const pasteLocalSelection = async () => {
-    const clipboard = localSelectionClipboard; if (!clipboard) { notify('The AIDraw pixel-selection clipboard is empty.', 'warning'); return; }
-    const origin = cursor ?? { x: clipboard.grid.originX, y: clipboard.grid.originY };
     if (tilemap) {
-      if (clipboard.kind !== 'tile') { notify('Pixel selections cannot be pasted into a tilemap.', 'warning'); return; }
+      const clipboard = localSelectionClipboard;
+      if (!clipboard) { notify('This project has no copied tile selection.', 'warning'); return; }
+      const origin = cursor ?? { x: clipboard.grid.originX, y: clipboard.grid.originY };
       if (clipboard.sourceDocumentId !== document.id) { notify('Tile selections keep project-local GIDs and can only be pasted inside their source project.', 'warning'); return; }
       const layer = Object.values(tilemap.layers).find((entry) => entry.type === 'tile' && entry.visible && !entry.locked); if (!layer || layer.type !== 'tile') return;
       const placed = placeGridClipboard(clipboard.grid, origin, tilemap.infinite ? undefined : { width: tilemap.width, height: tilemap.height }); const bounds = pixelSelectionBounds(placed.selection);
@@ -871,26 +898,29 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       } finally { if (lock.lockId) await window.aidraw.releaseHumanLock(lock.lockId); }
       return;
     }
-    if (!sprite || !activeFrameId || clipboard.kind !== 'pixel') { notify('Tile selections cannot be pasted into a sprite.', 'warning'); return; }
+    if (!sprite || !activeFrameId) return;
     const layerId = editableSpriteLayer(sprite, selectedEntityId)?.id; const cel = layerId ? celFor(sprite, layerId, activeFrameId) : undefined; if (!cel) return;
-    const placed = placeGridClipboard(clipboard.grid, origin, { width: sprite.width, height: sprite.height }); const bounds = pixelSelectionBounds(placed.selection);
-    if (!bounds) { notify('The pasted pixel selection falls outside this sprite.', 'warning'); return; }
-    const palette = structuredClone(document.palette); const remap = new Map<number, number>([[0, 0]]);
-    for (const entry of placed.changes) {
-      if (remap.has(entry.value)) continue;
-      if (clipboard.sourceDocumentId === document.id && entry.value < palette.length) { remap.set(entry.value, entry.value); continue; }
-      const color = clipboard.palette[entry.value]; if (!color) { remap.set(entry.value, 0); continue; }
-      let target = palette.findIndex((candidate) => candidate.color.toLocaleLowerCase() === color.toLocaleLowerCase());
-      if (target < 0) { if (palette.length >= 256) { notify('The destination palette is full; remove a color before pasting this selection.', 'warning'); return; } target = palette.length; palette.push({ id: createId('palette'), name: `Pasted ${target}`, color }); }
-      remap.set(entry.value, target);
-    }
-    const operations: CanvasOperation[] = [];
-    if (palette.length !== document.palette.length) operations.push({ kind: 'pixel.palette.replace', palette });
-    operations.push({ kind: 'pixel.cel.set', spriteId: sprite.id, celId: cel.id, changes: placed.changes.map((entry) => ({ x: entry.x, y: entry.y, index: remap.get(entry.value) ?? 0 })), expectedRevision: cel.revision });
-    const lock = await window.aidraw.acquireHumanLock({ documentId: document.id, region: { kind: 'pixel', assetId: sprite.id, ...bounds } }); if (!lock.acquired) return;
+    let clipboard: Awaited<ReturnType<typeof window.aidraw.readPixelSelectionClipboard>>;
+    try { clipboard = await window.aidraw.readPixelSelectionClipboard(); }
+    catch { notify('The system clipboard could not be read safely.', 'warning'); return; }
+    if (clipboard.status !== 'valid') { notify(clipboard.message, 'warning'); return; }
+    let plan: ReturnType<typeof planPixelSelectionPaste>;
     try {
-      if (await apply('Paste pixel selection', operations)) setSelection(placed.selection);
-      if (placed.dropped) notify(`${placed.dropped} pasted pixel${placed.dropped === 1 ? '' : 's'} fell outside the sprite.`, 'warning');
+      plan = planPixelSelectionPaste({
+        document,
+        spriteId: sprite.id,
+        frameId: activeFrameId,
+        celId: cel.id,
+        origin: cursor ?? { x: clipboard.fragment.grid.originX, y: clipboard.fragment.grid.originY },
+      }, clipboard.fragment);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'The indexed pixel selection cannot be pasted.', 'warning');
+      return;
+    }
+    const lock = await window.aidraw.acquireHumanLock({ documentId: document.id, region: { kind: 'pixel', assetId: sprite.id, ...plan.bounds } }); if (!lock.acquired) return;
+    try {
+      if (await apply('Paste pixel selection', plan.operations)) setSelection(plan.selection);
+      if (plan.dropped) notify(`${plan.dropped} pasted pixel${plan.dropped === 1 ? '' : 's'} fell outside the sprite.`, 'warning');
     } finally { if (lock.lockId) await window.aidraw.releaseHumanLock(lock.lockId); }
   };
 
@@ -1283,8 +1313,8 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   useEffect(() => {
     const onSelectionCommand = (event: Event) => {
       const command = (event as CustomEvent<PixelSelectionCommand>).detail;
-      if (command === 'copy') copyLocalSelection();
-      else if (command === 'cut') { if (copyLocalSelection()) void deleteSelection(); }
+      if (command === 'copy') void copyLocalSelection();
+      else if (command === 'cut') void (async () => { if (await copyLocalSelection()) await deleteSelection(); })();
       else if (command === 'paste') void pasteLocalSelection();
       else if (command === 'delete') void deleteSelection();
       else if (command === 'clear') { lassoDraftRef.current = undefined; setSelection([]); setSelectionOffset(undefined); setLassoPath([]); }
@@ -1356,8 +1386,8 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
         </>}
         {selection.length > 0 && <>
           <button onClick={() => notify('With Select active, drag from inside the marching ants to move this indexed content.', 'info')} title="Drag inside the selection to move it"><Move size={13} /> Move</button>
-          <button onClick={() => copyLocalSelection()} title="Copy exact indexed selection (Ctrl+C)"><Copy size={13} /> Copy</button>
-          <button onClick={() => { if (copyLocalSelection()) void deleteSelection(); }} title="Cut exact indexed selection (Ctrl+X)"><Scissors size={13} /> Cut</button>
+          <button onClick={() => void copyLocalSelection()} title="Copy exact indexed selection (Ctrl+C)"><Copy size={13} /> Copy</button>
+          <button onClick={() => void (async () => { if (await copyLocalSelection()) await deleteSelection(); })()} title="Cut exact indexed selection (Ctrl+X)"><Scissors size={13} /> Cut</button>
           <button onClick={() => void transformSelection('flip-horizontal')} title="Flip selected pixels horizontally"><FlipHorizontal2 size={13} /> H</button>
           <button onClick={() => void transformSelection('flip-vertical')} title="Flip selected pixels vertically"><FlipVertical2 size={13} /> V</button>
           <button onClick={() => void transformSelection('rotate-clockwise')} title="Rotate selected cells 90° clockwise"><RotateCw size={13} /> CW</button>
@@ -1367,7 +1397,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
           <button onClick={() => void deleteSelection()} title="Delete selected pixels"><Trash2 size={13} /></button>
           <button onClick={() => { setSelection([]); setSelectionOffset(undefined); }} title="Clear selection">Clear</button>
         </>}
-        {clipboardAvailable && <button onClick={() => void pasteLocalSelection()} title="Paste the AIDraw pixel selection at the cursor (Ctrl+V)"><ClipboardPaste size={13} /> Paste</button>}
+        {clipboardAvailable && <button onClick={() => void pasteLocalSelection()} title={tilemap ? 'Paste the project-local tile selection at the cursor (Ctrl+V)' : 'Paste the AIDraw indexed system-clipboard selection at the cursor (Ctrl+V)'}><ClipboardPaste size={13} /> Paste</button>}
         <span>{cursor ? `${cursor.x}, ${cursor.y}` : '—, —'}</span>
       </div>
       {tileTransformPickerOpen && tilemap && tool !== 'terrain' && terrainTileset?.type === 'tileset' && <TileTransformPicker

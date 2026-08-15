@@ -12,19 +12,78 @@ import {
   type PixelDocument,
   type PaletteEntry,
 } from '@aidraw/core';
+import type { GridSelectionClipboard } from './grid-selection';
+
+export interface PixelSelectionFragment {
+  version: 1;
+  kind: 'pixel-selection';
+  sourceDocumentId: string;
+  grid: GridSelectionClipboard<number>;
+  palette: string[];
+}
 
 export type AIDrawFragment =
   | { version: 1; kind: 'illustration-objects'; objects: IllustrationObject[]; assets: DocumentAsset[] }
-  | { version: 1; kind: 'pixel-assets'; pixelAssets: PixelAsset[]; activePixelAssetId: string; palette: PaletteEntry[] };
+  | { version: 1; kind: 'pixel-assets'; pixelAssets: PixelAsset[]; activePixelAssetId: string; palette: PaletteEntry[] }
+  | PixelSelectionFragment;
 
 export const MAX_FRAGMENT_BYTES = 2 * 1024 * 1024;
 
 export function documentFragmentBytes(fragment: AIDrawFragment): number {
-  return Buffer.byteLength(JSON.stringify(fragment));
+  return new TextEncoder().encode(JSON.stringify(fragment)).byteLength;
 }
 
 function assertRecord(value: unknown, label: string): asserts value is Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label} must be an object.`);
+}
+
+function assertExactKeys(value: Record<string, unknown>, expected: string[], label: string): void {
+  const actual = Object.keys(value).sort();
+  const keys = [...expected].sort();
+  if (actual.length !== keys.length || actual.some((key, index) => key !== keys[index])) throw new Error(`${label} has unsupported fields.`);
+}
+
+function parsePixelSelectionGrid(value: unknown, paletteLength: number): GridSelectionClipboard<number> {
+  assertRecord(value, 'Pixel selection grid');
+  assertExactKeys(value, ['version', 'originX', 'originY', 'width', 'height', 'cells'], 'Pixel selection grid');
+  const { originX, originY, width, height } = value;
+  if (value.version !== 1) throw new Error('Unsupported pixel selection grid version.');
+  if (![originX, originY, width, height].every(Number.isSafeInteger) || Number(width) < 1 || Number(height) < 1
+    || Number(width) > 1_000_000 || Number(height) > 1_000_000
+    || Number(originX) > Number.MAX_SAFE_INTEGER - (Number(width) - 1)
+    || Number(originY) > Number.MAX_SAFE_INTEGER - (Number(height) - 1)) {
+    throw new Error('Pixel selection grid geometry is invalid or exceeds one million cells per axis.');
+  }
+  if (!Array.isArray(value.cells) || value.cells.length < 1 || value.cells.length > 1_000_000) throw new Error('Pixel selection fragments require 1–1,000,000 selected cells.');
+  const occupied = new Set<string>();
+  let minimumX = Number.POSITIVE_INFINITY;
+  let minimumY = Number.POSITIVE_INFINITY;
+  let maximumX = Number.NEGATIVE_INFINITY;
+  let maximumY = Number.NEGATIVE_INFINITY;
+  const cells = value.cells.map((candidate, index) => {
+    assertRecord(candidate, `Pixel selection cell ${index}`);
+    assertExactKeys(candidate, ['x', 'y', 'value'], `Pixel selection cell ${index}`);
+    const x = candidate.x; const y = candidate.y; const paletteIndex = candidate.value;
+    if (![x, y, paletteIndex].every(Number.isSafeInteger) || Number(x) < 0 || Number(y) < 0
+      || Number(x) >= Number(width) || Number(y) >= Number(height)
+      || Number(paletteIndex) < 0 || Number(paletteIndex) >= paletteLength) {
+      throw new Error(`Pixel selection cell ${index} falls outside its grid or palette.`);
+    }
+    const key = `${x},${y}`;
+    if (occupied.has(key)) throw new Error(`Pixel selection cell ${key} is duplicated.`);
+    occupied.add(key);
+    const normalizedX = Number(x);
+    const normalizedY = Number(y);
+    minimumX = Math.min(minimumX, normalizedX);
+    minimumY = Math.min(minimumY, normalizedY);
+    maximumX = Math.max(maximumX, normalizedX);
+    maximumY = Math.max(maximumY, normalizedY);
+    return { x: normalizedX, y: normalizedY, value: Number(paletteIndex) };
+  });
+  if (minimumX !== 0 || minimumY !== 0 || maximumX !== Number(width) - 1 || maximumY !== Number(height) - 1) {
+    throw new Error('Pixel selection grid bounds must exactly enclose its selected cells.');
+  }
+  return { version: 1, originX: Number(originX), originY: Number(originY), width: Number(width), height: Number(height), cells };
 }
 
 export function parseDocumentFragment(value: unknown): AIDrawFragment {
@@ -42,6 +101,24 @@ export function parseDocumentFragment(value: unknown): AIDrawFragment {
       activePixelAssetId: value.pixelAsset.id,
       palette: value.palette,
     });
+  }
+  if (value.kind === 'pixel-selection') {
+    assertExactKeys(value, ['version', 'kind', 'sourceDocumentId', 'grid', 'palette'], 'Pixel selection fragment');
+    if (typeof value.sourceDocumentId !== 'string' || !value.sourceDocumentId.trim() || value.sourceDocumentId.length > 200) throw new Error('Pixel selection source document ID must contain 1–200 characters.');
+    if (!Array.isArray(value.palette) || value.palette.length < 2 || value.palette.length > 256
+      || value.palette.some((color) => typeof color !== 'string' || !/^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/iu.test(color))) {
+      throw new Error('Pixel selection fragments require 2–256 hexadecimal palette colors.');
+    }
+    if (value.palette[0].length !== 9 || !value.palette[0].toLowerCase().endsWith('00')) throw new Error('Pixel selection palette index 0 must remain transparent.');
+    const fragment: PixelSelectionFragment = {
+      version: 1,
+      kind: 'pixel-selection',
+      sourceDocumentId: value.sourceDocumentId,
+      grid: parsePixelSelectionGrid(value.grid, value.palette.length),
+      palette: [...value.palette] as string[],
+    };
+    if (documentFragmentBytes(fragment) > MAX_FRAGMENT_BYTES) throw new Error('Document fragment exceeds the 2 MiB exchange limit.');
+    return fragment;
   }
   if (value.kind === 'illustration-objects') {
     if (!Array.isArray(value.objects) || value.objects.length < 1 || value.objects.length > 192) throw new Error('Illustration fragments require 1–192 objects.');
