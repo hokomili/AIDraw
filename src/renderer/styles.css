@@ -720,6 +720,40 @@ html[data-native-titlebar="hidden-inset"] .brand { width: max(calc(118px + var(-
 .tile-definition-state svg { width: var(--ui-icon-secondary); height: var(--ui-icon-secondary); flex: 0 0 auto; }
 .tile-definition-empty { margin: 0 12px 8px; padding: 10px; border: 1px dashed var(--border); border-radius: 8px; color: var(--muted); font-size: var(--ui-type-label); line-height: 1.4; }
 
+/* Weighted variants expose exact authored meaning without changing their bounded crop or seed kernels. */
+.tile-variant-preview { min-width: 0; margin: 7px 0; padding: 8px; border-radius: 8px; }
+.tile-variant-summary { min-width: 0; margin: 0 0 7px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.tile-variant-summary > div { min-width: 0; padding: 6px 7px; border-radius: 7px; background: #fff; }
+.tile-variant-summary dt { color: var(--muted); font-size: var(--ui-type-caption); font-weight: 700; }
+.tile-variant-summary dd { min-width: 0; margin: 3px 0 0; color: var(--ink); font-size: var(--ui-type-label); line-height: 1.35; white-space: normal; overflow-wrap: anywhere; }
+.tile-variant-strip { min-width: 0; max-height: 300px; padding-right: 2px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; overflow-y: auto; overscroll-behavior: contain; }
+.tile-variant-strip button { position: relative; min-width: 0; min-height: 44px; padding: 4px; display: grid; grid-template-columns: 34px minmax(0, 1fr); align-items: center; gap: 4px; border: 1px solid transparent; border-radius: 7px; background: #fff; color: #665c6d; text-align: left; cursor: pointer; }
+.tile-variant-strip button:focus-visible { outline: 2px solid #6948d2; outline-offset: 1px; }
+.tile-variant-strip button[aria-pressed="true"] { border-color: var(--teal); background: var(--teal-soft); box-shadow: inset 0 0 0 1px var(--teal); }
+.tile-variant-strip button > .tile-variant-thumbnail { width: 34px; height: 34px; margin: 0; display: grid; place-items: center; overflow: hidden; border: 1px solid #d1cad2; border-radius: 4px; background: repeating-conic-gradient(#ded9df 0 25%, #f7f4f2 0 50%) 50% / 8px 8px; }
+.tile-variant-thumbnail canvas { max-width: 32px; max-height: 32px; image-rendering: pixelated; }
+.tile-variant-strip button > .tile-variant-copy { width: auto; height: auto; min-width: 0; margin: 0; display: block; overflow: visible; border: 0; border-radius: 0; background: transparent; }
+.tile-variant-copy strong, .tile-variant-copy small, .tile-variant-selection-state { min-width: 0; display: block; white-space: normal; overflow-wrap: anywhere; }
+.tile-variant-copy strong { color: var(--ink); font-size: var(--ui-type-label); line-height: 1.25; font-variant-numeric: tabular-nums; }
+.tile-variant-copy small { margin-top: 2px; color: var(--muted); font-size: var(--ui-type-caption); line-height: 1.25; font-variant-numeric: tabular-nums; }
+.tile-variant-strip button > .tile-variant-selection-state { position: absolute; top: 1px; left: 1px; z-index: 1; width: 22px; height: 22px; margin: 0; display: grid; place-items: center; border: 1px solid currentColor; border-radius: 999px; background: #fff; color: #237d77; box-shadow: 0 0 0 2px #fff; }
+.tile-variant-selection-state svg { width: var(--ui-icon-secondary); height: var(--ui-icon-secondary); }
+.tile-variant-overflow { margin: 6px 0 0; color: var(--muted); font-size: var(--ui-type-caption); line-height: 1.35; white-space: normal; overflow-wrap: anywhere; }
+.variant-seed-control { width: 460px; min-width: 460px; min-height: calc(var(--ui-hit-secondary) + 12px); height: auto; flex: 0 0 auto; display: grid; grid-template-columns: minmax(126px, 1fr) 104px 146px; align-items: center; gap: 7px; padding: 6px 7px; font-size: inherit; }
+.variant-seed-summary { min-width: 0; padding: 0; display: grid; gap: 1px; }
+.variant-seed-summary strong, .variant-seed-summary > span, .variant-seed-summary small { min-width: 0; display: block; white-space: normal; overflow-wrap: anywhere; }
+.variant-seed-summary strong, .variant-seed-field > span { color: var(--muted); font-size: var(--ui-type-caption); font-weight: 700; line-height: 1.2; }
+.variant-seed-summary > span { color: var(--ink); font-size: var(--ui-type-label); line-height: 1.3; }
+.variant-seed-summary small { color: var(--muted); font-size: var(--ui-type-caption); line-height: 1.25; }
+.variant-seed-control .variant-seed-field { min-width: 0; display: grid; align-items: stretch; gap: 3px; }
+.variant-seed-control input { width: 100%; min-width: 0; height: var(--ui-hit-secondary); padding: 0 7px; border: 1px solid var(--border); border-radius: 7px; background: #fff; color: var(--ink); font-size: var(--ui-type-label); font-variant-numeric: tabular-nums; }
+.variant-seed-control button { min-width: 0; min-height: var(--ui-hit-secondary); height: auto; padding: 5px 7px; display: grid; grid-template-columns: var(--ui-icon-secondary) minmax(0, 1fr); align-items: center; gap: 5px; border-radius: 7px; background: var(--teal-soft); color: #267f79; text-align: left; cursor: pointer; }
+.variant-seed-control button:focus-visible, .variant-seed-control input:focus-visible { outline: 2px solid #6948d2; outline-offset: 1px; }
+.variant-seed-control button > svg { width: var(--ui-icon-secondary); height: var(--ui-icon-secondary); }
+.variant-seed-control button > span, .variant-seed-control button strong, .variant-seed-control button small { min-width: 0; display: block; white-space: normal; overflow-wrap: anywhere; }
+.variant-seed-control button strong { font-size: var(--ui-type-label); line-height: 1.2; }
+.variant-seed-control button small { margin-top: 1px; color: #267f79; font-size: var(--ui-type-caption); line-height: 1.2; }
+
 @media (max-width: 1120px) {
   .wang-signature-fields { grid-template-columns: minmax(0, 1fr); }
   .wang-set-row { grid-template-columns: var(--ui-hit-secondary) minmax(0, 1fr); }
@@ -746,6 +780,9 @@ html[data-native-titlebar="hidden-inset"] .brand { width: max(calc(118px + var(-
   .custom-property-entry-heading button { width: 100%; }
   .tileset-slice-editor .tileset-slice-grid, .slice-legend, .tileset-reslice-actions { grid-template-columns: minmax(0, 1fr); }
   .tile-definition-grid { max-height: 154px; grid-template-columns: repeat(5, minmax(0, 1fr)); }
+  .tile-variant-summary { grid-template-columns: minmax(0, 1fr); }
+  .tile-variant-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .variant-seed-control { width: 420px; min-width: 420px; grid-template-columns: minmax(118px, 1fr) 96px 142px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

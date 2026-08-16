@@ -65,7 +65,7 @@ import {
   type TileStamp,
   type TilemapChunk,
 } from '@aidraw/core';
-import { ArrowLeft, ArrowRight, CaseUpper, ChevronLeft, ChevronRight, ClipboardPaste, Copy, Dices, Eraser, Eye, FlipHorizontal2, FlipVertical2, Grid3X3, Link2, Move, Palette, Pause, Play, Repeat2, RotateCcw, RotateCw, Scaling, Scissors, SlidersHorizontal, Table2, Trash2, Unlink2 } from 'lucide-react';
+import { ArrowLeft, ArrowRight, CaseUpper, ChevronLeft, ChevronRight, ClipboardPaste, Copy, Eraser, Eye, FlipHorizontal2, FlipVertical2, Grid3X3, Link2, Move, Palette, Pause, Play, Repeat2, RotateCcw, RotateCw, Scaling, Scissors, SlidersHorizontal, Table2, Trash2, Unlink2 } from 'lucide-react';
 import { useEditorStore } from '../store';
 import { CelExposureGrid } from '../components/CelExposureGrid';
 import { BitmapGlyphMapperDialog } from '../components/BitmapGlyphMapperDialog';
@@ -91,6 +91,7 @@ import { PlaybackLanes } from '../components/PlaybackLanes';
 import { StampLibraryDialog } from '../components/StampLibraryDialog';
 import { TileTransformPicker } from '../components/TileTransformPicker';
 import { CurrentMapTileControl } from '../components/CurrentMapTileControl';
+import { TileVariantSeedControl } from '../components/TileVariantSeedControl';
 import { collectReplayMasks, replayPointKey, replayTileLayerKey } from '../replay';
 import { EditorDialog, EntryDialog } from '../components/EditorDialog';
 import { bresenham } from './geometry';
@@ -1959,7 +1960,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
           <button className={activeTileTransforms.diagonal ? 'is-active' : ''} disabled={!tileTransformFlagsAllowed(tileTransformCandidates.diagonal, terrainTileset.transformations)} onClick={() => setTileTransforms(tileTransformCandidates.diagonal)} title="Toggle Tiled's diagonal-first flag when the resulting transform is permitted"><RotateCw size={13} /> Tile D</button>
           <button className={tileTransformPickerOpen ? 'is-active' : ''} aria-expanded={tileTransformPickerOpen} aria-controls="tile-transform-picker" onClick={() => setTileTransformPickerOpen((open) => !open)} title="Preview and choose all permitted tile transform combinations"><Grid3X3 size={13} /> Transforms</button>
         </>}
-        {tilemap && tool !== 'terrain' && selectedVariantGroup && <div className="variant-seed-control" title={`${selectedVariantCount} weighted tiles in “${selectedVariantGroup}”`}><span>{selectedVariantGroup} · {selectedVariantCount}</span><label><span>Seed</span><input aria-label="Random tile variant seed" type="number" defaultValue={variantSeed} key={`${tilemap.id}:${variantSeed}`} onBlur={(event) => changeVariantSeed(Math.max(-2_147_483_648, Math.min(2_147_483_647, Math.trunc(Number(event.target.value) || 0))), 'Change tile variant seed')} /></label><button type="button" onClick={() => changeVariantSeed(nextTileVariantSeed(variantSeed), 'Start new tile-variant stroke seed')} title="Persist a new deterministic seed for subsequent variant strokes; existing painted tiles do not change"><Dices size={11} /> New stroke</button></div>}
+        {tilemap && tool !== 'terrain' && selectedVariantGroup && <TileVariantSeedControl key={`${tilemap.id}:${variantSeed}`} group={selectedVariantGroup} candidateCount={selectedVariantCount} seed={variantSeed} onSeedBlur={(seed) => changeVariantSeed(seed, 'Change tile variant seed')} onNewStroke={() => changeVariantSeed(nextTileVariantSeed(variantSeed), 'Start new tile-variant stroke seed')} />}
         {tool === 'stamp' && (sprite || tilemap) && <>
           {sprite ? <select aria-label="Active reusable stamp" value={activeStamp?.id ?? 'builtin-plus'} onChange={(event) => setActiveStampId(event.target.value === 'builtin-plus' ? undefined : event.target.value)} title="Reusable stamp library"><option value="builtin-plus">Built-in plus</option>{document.stamps.map((stamp) => <option key={stamp.id} value={stamp.id}>{stamp.name}</option>)}</select> : <select aria-label="Active reusable tile stamp" value={activeTileStamp?.id ?? 'builtin-tile'} onChange={(event) => setActiveTileStampId(event.target.value)} title="Reusable tile stamp library"><option value="builtin-tile">Current tile</option>{document.tileStamps.map((stamp) => <option key={stamp.id} value={stamp.id}>{stamp.name}</option>)}</select>}
           <button disabled={!selection.length} onClick={() => setStampCaptureOpen(true)} title="Capture the current selection as a reusable stamp"><Copy size={13} /> Capture</button>
