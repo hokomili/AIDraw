@@ -51,6 +51,27 @@ export interface ImageCollectionSourceReplacementPlan {
   expectedSpriteDependencies: PixelSpriteDependencyGuard[];
 }
 
+export interface ImageCollectionSourceRemovalProof {
+  baseGid: number;
+  sourceId: string;
+  sourceName: string;
+  retainedTileCount: number;
+  attachedMapCount: number;
+  scannedCellCount: number;
+  scannedObjectCount: number;
+  scannedAnimationFrameCount: number;
+  scannedTileStampCellCount: number;
+  scannedReferenceCount: number;
+}
+
+export interface ImageCollectionSourceRemovalPlan {
+  tileset: PixelTileset;
+  tileId: number;
+  sourceId: string;
+  proof: ImageCollectionSourceRemovalProof;
+  expectedSpriteDependencies: PixelSpriteDependencyGuard[];
+}
+
 export type ImageCollectionTileMetadataPatch = Partial<Pick<
   TileDefinition,
   'probability' | 'animation' | 'collisions' | 'properties'
@@ -345,6 +366,136 @@ export function replaceImageCollectionSource(
     expectedSpriteDependencies.push({ spriteId: source.id, expectedRevision: source.revision, width: source.width, height: source.height });
   }
   return { tileset, tileId, previousSourceId, sourceId: source.id, impact, expectedSpriteDependencies };
+}
+
+function consumeRemovalReferenceBudget(current: number, amount: number): number {
+  if (!Number.isSafeInteger(amount) || amount < 0 || amount > MAX_TILED_TOTAL_CELLS - current) {
+    throw new RangeError(`Image-collection removal proof exceeds the ${MAX_TILED_TOTAL_CELLS.toLocaleString('en-US')}-entry reference-scan limit.`);
+  }
+  return current + amount;
+}
+
+/**
+ * Proves that one exact sparse tile has no retained canonical reference.
+ * Unsupported Wang state and ambiguous map resolution refuse rather than
+ * treating an unproven source as unused.
+ */
+export function imageCollectionSourceRemovalProof(
+  document: PixelDocument,
+  tilesetId: string,
+  tileId: number,
+): ImageCollectionSourceRemovalProof {
+  requirePixelDocument(document);
+  const tileset = document.pixelAssets[tilesetId];
+  if (!tileset || tileset.type !== 'tileset' || !isImageCollectionTileset(tileset)) throw new Error(`Image collection ${tilesetId} does not exist.`);
+  if (!Number.isSafeInteger(tileId) || tileId < 0 || tileId >= 1_048_576) throw new Error(`Image-collection tile ${tileId} is unavailable.`);
+  const target = tileset.tiles[tileId];
+  if (!target?.imageAssetId) throw new Error(`Image-collection tile ${tileId} is unavailable.`);
+  const source = requireEligibleSource(document, target.imageAssetId);
+  const retainedIds = imageCollectionTileIds(tileset).filter((id) => id !== tileId);
+  if (retainedIds.length === 0) throw new Error('The final image-collection source cannot be removed. Append or retain another source first.');
+  if (tileset.wangSets.length > 0) {
+    throw new Error('Image-collection removal cannot prove safety while unsupported Wang metadata is present. Remove that metadata through a supported repair workflow first.');
+  }
+  const baseGid = tileset.firstGid + tileId;
+  if (!Number.isSafeInteger(baseGid) || baseGid < 1 || baseGid > TILED_GID_MASK) throw new RangeError(`Image-collection tile ${tileId} has an unsafe Tiled GID.`);
+
+  let attachedMapCount = 0;
+  let scannedCellCount = 0;
+  let scannedObjectCount = 0;
+  let scannedAnimationFrameCount = 0;
+  let scannedTileStampCellCount = 0;
+  let scannedReferenceCount = 0;
+  for (const assetId of document.assetIds) {
+    const map = document.pixelAssets[assetId];
+    if (map?.type !== 'tilemap' || !map.tilesetIds.includes(tileset.id)) continue;
+    if (map.orientation !== 'orthogonal' || map.infinite) throw new Error(`Map “${map.name}” must remain finite orthogonal before removing an image-collection source.`);
+    exactMapTilesetForLocalId(document, map, tileset, tileId);
+    attachedMapCount += 1;
+    const visited = new Set<string>();
+    const visit = (layerId: string): void => {
+      if (visited.has(layerId)) return;
+      visited.add(layerId);
+      const layer = map.layers[layerId];
+      if (!layer) throw new Error(`Map “${map.name}” is missing layer ${layerId}.`);
+      if (layer.type === 'group') {
+        for (const childId of layer.childIds ?? []) visit(childId);
+        return;
+      }
+      if (layer.type === 'tile') {
+        for (const chunk of Object.values(layer.chunks ?? {})) {
+          const chunkCells = chunk.width * chunk.height;
+          scannedReferenceCount = consumeRemovalReferenceBudget(scannedReferenceCount, chunkCells);
+          scannedCellCount += chunkCells;
+          const values = decodeTilemapChunk(chunk);
+          if (values.length !== chunkCells) throw new Error(`Map “${map.name}” layer “${layer.name}” has an invalid tile chunk payload.`);
+          if (values.some((rawGid) => decodeTiledGid(rawGid).gid === baseGid)) {
+            throw new Error(`Map “${map.name}” tile layer “${layer.name}” still references image-collection tile ${tileId}. Clear every transformed GID before removing its source.`);
+          }
+        }
+        return;
+      }
+      const objects = layer.objects ?? [];
+      scannedReferenceCount = consumeRemovalReferenceBudget(scannedReferenceCount, objects.length);
+      scannedObjectCount += objects.length;
+      const referenced = objects.find((object) => object.type === 'tile' && decodeTiledGid(object.gid).gid === baseGid);
+      if (referenced?.type === 'tile') {
+        throw new Error(`Map “${map.name}” object layer “${layer.name}” tile object “${referenced.name || referenced.id}” still references image-collection tile ${tileId}. Collection-backed tile objects are not removable in this workflow.`);
+      }
+    };
+    for (const layerId of map.layerIds) visit(layerId);
+    for (const layerId of Object.keys(map.layers)) visit(layerId);
+  }
+
+  for (const retainedId of retainedIds) {
+    const frames = tileset.tiles[retainedId].animation;
+    scannedReferenceCount = consumeRemovalReferenceBudget(scannedReferenceCount, frames.length);
+    scannedAnimationFrameCount += frames.length;
+    if (frames.some((frame) => frame.tileId === tileId)) {
+      throw new Error(`Image-collection tile ${retainedId} animation still references tile ${tileId}. Remove that ordered animation frame before detaching the source.`);
+    }
+  }
+  for (const stamp of document.tileStamps) {
+    scannedReferenceCount = consumeRemovalReferenceBudget(scannedReferenceCount, stamp.cells.length);
+    scannedTileStampCellCount += stamp.cells.length;
+    if (stamp.cells.some((cell) => decodeTiledGid(cell.gid).gid === baseGid)) {
+      throw new Error(`Reusable tile stamp “${stamp.name}” still stores image-collection tile ${tileId}'s transformed GID. Collection-backed stamp cleanup is not part of this workflow.`);
+    }
+  }
+
+  return {
+    baseGid,
+    sourceId: source.id,
+    sourceName: source.name,
+    retainedTileCount: retainedIds.length,
+    attachedMapCount,
+    scannedCellCount,
+    scannedObjectCount,
+    scannedAnimationFrameCount,
+    scannedTileStampCellCount,
+    scannedReferenceCount,
+  };
+}
+
+/** Removes one proven-unused sparse tile record without deleting its source sprite. */
+export function removeUnusedImageCollectionSource(
+  document: PixelDocument,
+  tilesetId: string,
+  tileId: number,
+): ImageCollectionSourceRemovalPlan {
+  const proof = imageCollectionSourceRemovalProof(document, tilesetId, tileId);
+  const current = document.pixelAssets[tilesetId];
+  if (!current || current.type !== 'tileset' || !isImageCollectionTileset(current)) throw new Error(`Image collection ${tilesetId} does not exist.`);
+  const retainedIds = imageCollectionTileIds(current).filter((id) => id !== tileId);
+  const retainedSourceIds = retainedIds.map((id) => current.tiles[id].imageAssetId!);
+  imageCollectionSourcePixels(document, retainedSourceIds);
+  const retainedSources = retainedSourceIds.map((id) => requireEligibleSource(document, id));
+  const expectedSpriteDependencies = imageCollectionSourceDependencyGuards(document, current);
+  const tileset = structuredClone(current);
+  delete tileset.tiles[tileId];
+  tileset.tileWidth = Math.max(...retainedSources.map((source) => source.width));
+  tileset.tileHeight = Math.max(...retainedSources.map((source) => source.height));
+  return { tileset, tileId, sourceId: proof.sourceId, proof, expectedSpriteDependencies };
 }
 
 export function imageCollectionSourceDependencyGuards(

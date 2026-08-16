@@ -157,6 +157,7 @@ import {
   imageCollectionAuthoringGuardError,
   imageCollectionSourceDependencyGuards,
   imageCollectionTileIds,
+  removeUnusedImageCollectionSource,
   replaceImageCollectionSource,
   replaceImageCollectionTileMetadata,
   type ImageCollectionTileMetadataPatch,
@@ -4176,11 +4177,61 @@ function TilesetPanel({
       return false;
     }
   };
+  const removeSource = async (opening: ImageCollectionSourceOpening) => {
+    const active = useEditorStore.getState().snapshot?.activeDocument;
+    if (active?.kind !== "pixel") {
+      notify("The active document changed. Re-open the image-collection removal before applying.", "warning");
+      return false;
+    }
+    const openingError = imageCollectionSourceOpeningGuardError(opening, document, tileset.id)
+      ?? imageCollectionSourceOpeningGuardError(opening, active, tileset.id);
+    if (openingError) {
+      notify(openingError, "warning");
+      return false;
+    }
+    const openingTarget = opening.target;
+    if (!openingTarget || openingTarget.tileId === undefined || !openingTarget.sourceId || !opening.removalProof) {
+      notify("The opening removal proof is unavailable. Close this chooser and reopen it before trying again.", "warning");
+      return false;
+    }
+    const guardError = imageCollectionAuthoringGuardError(document, active, openingTarget.id);
+    if (guardError) {
+      notify(guardError, "warning");
+      return false;
+    }
+    try {
+      const plan = removeUnusedImageCollectionSource(active, openingTarget.id, openingTarget.tileId);
+      if (plan.sourceId !== openingTarget.sourceId || JSON.stringify(plan.proof) !== JSON.stringify(opening.removalProof)) {
+        throw new Error("The selected source or unused-reference proof changed. Close this chooser and reopen it before trying again.");
+      }
+      const applied = await apply("Remove unused image-collection source", [{
+        kind: "pixel.asset.replace",
+        asset: plan.tileset,
+        expectedRevision: openingTarget.revision,
+        expectedSpriteDependencies: plan.expectedSpriteDependencies,
+      }], active.id, opening.documentRevision);
+      if (applied) {
+        setSelectedTileId(imageCollectionTileIds(plan.tileset)[0]);
+        setSelectedCollisionIds([]);
+      }
+      return applied;
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "The unused image-collection source could not be removed.", "warning");
+      return false;
+    }
+  };
   const openSourceReplacement = () => {
     try {
       setSourceOpening(createImageCollectionSourceOpening(document, "replace", { tileset, tileId: effectiveSelectedTileId }));
     } catch (error) {
       notify(error instanceof Error ? error.message : "The document-wide replacement impact could not be counted safely.", "warning");
+    }
+  };
+  const openSourceRemoval = () => {
+    try {
+      setSourceOpening(createImageCollectionSourceOpening(document, "remove", { tileset, tileId: effectiveSelectedTileId }));
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "The selected source could not be proven unused.", "warning");
     }
   };
   const addTerrain = () => {
@@ -4265,7 +4316,7 @@ function TilesetPanel({
           </small>
         </span>
       </div>
-      {imageCollection && <><p className="tileset-slice-summary">Choose an exact sparse local ID to preview its own source and edit metadata. Append references one eligible project sprite at the next ID above the authored sparse span. Replace keeps that selected ID and every authored tile record but deliberately changes its artwork everywhere after an exact impact confirmation.</p><div className="tileset-actions"><button type="button" onClick={() => setSourceOpening(createImageCollectionSourceOpening(document, "append", { tileset }))}>Append sprite source</button><button type="button" onClick={openSourceReplacement}>Replace tile {effectiveSelectedTileId} source</button></div></>}
+      {imageCollection && <><p className="tileset-slice-summary">Choose an exact sparse local ID to preview its own source and edit metadata. Append references one eligible project sprite above the authored span. Replace keeps the selected ID while changing its artwork everywhere. Remove detaches only a selected tile proven unused and leaves a sparse gap without deleting its sprite or rewriting references.</p><div className="tileset-actions"><button type="button" onClick={() => setSourceOpening(createImageCollectionSourceOpening(document, "append", { tileset }))}>Append sprite source</button><button type="button" onClick={openSourceReplacement}>Replace tile {effectiveSelectedTileId} source</button><button type="button" onClick={openSourceRemoval}>Remove unused tile {effectiveSelectedTileId}</button></div></>}
       {!imageCollection && <TilesetSliceEditor key={`${tileset.id}:${tileset.revision}`} palette={document.palette} tileset={tileset} sourceSprite={sourceSprite?.type === "sprite" ? sourceSprite : undefined} selectedTileId={selectedTileId} onCommit={(next, nextSelectedTileId, impact) => {
         const droppedEntries = impact.droppedAnimationFrames + impact.droppedCollisionShapes + impact.droppedCustomProperties + impact.droppedWangColors + impact.droppedWangTiles;
         if (impact.droppedMetadataTiles > 0 || droppedEntries > 0) notify(`Re-sliced after explicit review; ${impact.droppedMetadataTiles} metadata-addressed tile${impact.droppedMetadataTiles === 1 ? "" : "s"} and ${droppedEntries} metadata entr${droppedEntries === 1 ? "y" : "ies"} no longer fit.`, "warning");
@@ -4395,12 +4446,12 @@ function TilesetPanel({
         animation, drawing offset, properties, and collision data export through Tiled.
       </p>
       </>}
-      {imageCollection && <p className="fine-print">Probability, ordered animation, typed properties, collision metadata, drawing offset, append, and deliberate exact-ID source replacement use the existing complete tileset transaction and supported Tiled export. Replacement preserves every sparse ID and metadata record while changing only its source reference and derived nominal envelope.</p>}
+      {imageCollection && <p className="fine-print">Probability, ordered animation, typed properties, collision metadata, drawing offset, append, exact-ID replacement, and proven-unused exact-ID removal use the existing complete tileset transaction and supported Tiled export. Removal never cascades, compacts IDs, rewrites GIDs, or deletes a source sprite.</p>}
       {imageCollection && sourceOpening && <ImageCollectionSourceDialog
         opening={sourceOpening}
         currentDocument={document}
         currentTilesetId={tileset.id}
-        onSubmit={sourceOpening.mode === "replace" ? replaceSource : appendSource}
+        onSubmit={sourceOpening.mode === "replace" ? replaceSource : sourceOpening.mode === "remove" ? removeSource : appendSource}
         onClose={() => setSourceOpening(undefined)}
       />}
     </div>

@@ -170,6 +170,40 @@ describe('image-collection authoring surface', () => {
     expect(markup).toContain('current source for tile 3');
   });
 
+  it('freezes exact unused-source removal intent and presents a named no-cascade confirmation', () => {
+    const { document, tileset } = fixture();
+    const opening = createImageCollectionSourceOpening(document, 'remove', { tileset, tileId: 3 });
+    expect(Object.isFrozen(opening.target)).toBe(true);
+    expect(Object.isFrozen(opening.removalProof)).toBe(true);
+    expect(opening).toMatchObject({
+      mode: 'remove', documentId: document.id, documentRevision: document.revision,
+      target: { id: tileset.id, revision: tileset.revision, tileId: 3, sourceId: tileset.tiles[3].imageAssetId, sourceName: 'Wide tile' },
+      removalProof: { baseGid: tileset.firstGid + 3, sourceId: tileset.tiles[3].imageAssetId, sourceName: 'Wide tile', retainedTileCount: 1, scannedReferenceCount: 0 },
+    });
+    expect(opening.choices).toEqual([]);
+    const lifecycle = new ImageCollectionSourceDialogLifecycle(opening);
+    expect(lifecycle.observe(structuredClone(document), tileset.id)).toMatchObject({ impactConfirmed: false, selectedInAuthoredOrder: [] });
+    expect(lifecycle.confirmRemoval(true)).toBeUndefined();
+    expect(lifecycle.observe(structuredClone(document), tileset.id)).toMatchObject({ impactConfirmed: true, selectedInAuthoredOrder: [] });
+
+    const documentDrift = structuredClone(document); documentDrift.revision += 1;
+    expect(lifecycle.observe(documentDrift, tileset.id).contextError).toMatch(/document changed after this unused-source proof.*reopen/iu);
+    expect(lifecycle.observe(document, 'another-collection').contextError).toMatch(/selected image collection changed.*reopen/iu);
+    const sourceDrift = structuredClone(document); const changedSource = sourceDrift.pixelAssets[tileset.tiles[3].imageAssetId!]; if (changedSource.type !== 'sprite') throw new Error('Expected sprite');
+    changedSource.revision += 1;
+    expect(lifecycle.observe(sourceDrift, tileset.id).contextError).toMatch(/Sprite .* changed.*reopen/iu);
+
+    const markup = renderToStaticMarkup(createElement(ImageCollectionSourceDialog, {
+      opening, currentDocument: document, currentTilesetId: tileset.id,
+      onSubmit: async () => true, onClose: () => undefined,
+    }));
+    expect(markup).toContain('Remove unused tile 3');
+    expect(markup).toContain('Unused source removal confirmation');
+    expect(markup).toContain(`Tile 3 · Wide tile · source ${tileset.tiles[3].imageAssetId}`);
+    expect(markup).toContain('Its local ID becomes a sparse gap');
+    expect(markup).toContain('without cascading, rewriting references, or deleting its source sprite');
+  });
+
   it('renders the selected sparse tile at its own dimensions and never offers gap IDs', () => {
     vi.stubGlobal('window', { matchMedia: () => ({ matches: true }) });
     const { document, tileset } = fixture();
@@ -211,6 +245,11 @@ describe('image-collection authoring surface', () => {
     expect(app).toContain('expectedSpriteDependencies: plan.expectedSpriteDependencies');
     expect(app).toContain('], active.id, opening.documentRevision)');
     expect(app).toContain('The replacement source or document-wide impact changed.');
+    expect(app).toContain('createImageCollectionSourceOpening(document, "remove", { tileset, tileId: effectiveSelectedTileId })');
+    expect(app).toContain('const plan = removeUnusedImageCollectionSource(active, openingTarget.id, openingTarget.tileId)');
+    expect(app).toContain('The selected source or unused-reference proof changed.');
+    expect(app).toContain('Remove unused image-collection source');
+    expect(app).toContain('Remove unused tile {effectiveSelectedTileId}');
     expect(app).toContain('return <TilesetPanel key={`${document.id}:${asset.id}`}');
     expect(app).toContain('<AssetsPanel key={document.id} document={document} />');
     expect(app).toContain('availableTileIds={collectionTileIds}');
@@ -218,6 +257,6 @@ describe('image-collection authoring surface', () => {
     expect(app).toContain('width={selectedSource?.rect.width ?? tileset.tileWidth}');
     expect(app).toContain('{!imageCollection && <>');
     expect(app).toContain('Apply drawing offset');
-    expect(app).toContain('deliberate exact-ID source replacement');
+    expect(app).toContain('proven-unused exact-ID removal');
   });
 });

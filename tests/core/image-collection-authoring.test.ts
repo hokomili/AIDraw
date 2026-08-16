@@ -16,6 +16,7 @@ import {
   appendImageCollectionSource,
   createImageCollectionTileset,
   imageCollectionSourceDependencyGuards,
+  removeUnusedImageCollectionSource,
   replaceImageCollectionSource,
   replaceImageCollectionTileMetadata,
 } from '../../src/common/image-collection-authoring';
@@ -137,5 +138,47 @@ describe('image-collection metadata transaction', () => {
       expect(() => applyTransaction(drifted, transaction)).toThrow(TransactionConflictError);
       expect(drifted.pixelAssets[tileset.id]).toEqual(tileset);
     }
+  });
+
+  it('commits proven-unused exact-ID removal as one document-guarded transaction and restores the complete sparse record', () => {
+    const document = createPixelDocument('project', 'Collection source removal history');
+    const source0 = createPixelSprite('Zero', 8, 10);
+    const source3 = createPixelSprite('Three', 18, 14);
+    const source7 = createPixelSprite('Seven', 5, 12);
+    const tileset = createPixelTileset('Collection', source0.id, source0.width, source0.height, 1, 1);
+    tileset.spriteAssetId = undefined; tileset.columns = 0; tileset.rows = 0; tileset.margin = 0; tileset.spacing = 0; tileset.wangSets = [];
+    tileset.tileWidth = 18; tileset.tileHeight = 14;
+    tileset.tiles = {
+      0: { id: 0, sourceX: 0, sourceY: 0, imageAssetId: source0.id, probability: 1, animation: [{ tileId: 7, durationMs: 70 }], collisions: [], properties: {} },
+      3: { id: 3, sourceX: 0, sourceY: 0, imageAssetId: source3.id, probability: 0.35, animation: [{ tileId: 0, durationMs: 90 }], collisions: [{ id: 'solid', type: 'rectangle', x: 1, y: 2, width: 4, height: 5, properties: { damage: 2 } }], properties: { terrain: 'stone' } },
+      7: { id: 7, sourceX: 0, sourceY: 0, imageAssetId: source7.id, probability: 0.8, animation: [], collisions: [], properties: { retained: true } },
+    };
+    document.assetIds = [source0.id, source3.id, source7.id, tileset.id];
+    document.pixelAssets = { [source0.id]: source0, [source3.id]: source3, [source7.id]: source7, [tileset.id]: tileset };
+    document.activeAssetId = tileset.id;
+    const plan = removeUnusedImageCollectionSource(document, tileset.id, 3);
+    const sourceBytes = JSON.stringify([source0, source3, source7]);
+    const transaction: CanvasTransaction = {
+      id: createId('tx'), clientOperationId: createId('human-op'), documentId: document.id, expectedDocumentRevision: document.revision, actor: HUMAN_ACTOR,
+      label: 'Remove unused image-collection source', createdAt: nowIso(),
+      operations: [{ kind: 'pixel.asset.replace', asset: plan.tileset, expectedRevision: tileset.revision, expectedSpriteDependencies: plan.expectedSpriteDependencies }],
+    };
+    const applied = applyTransaction(document, transaction); if (applied.document.kind !== 'pixel') throw new Error('Expected pixel document');
+    const changed = applied.document.pixelAssets[tileset.id]; if (changed.type !== 'tileset') throw new Error('Expected tileset');
+    expect(Object.keys(changed.tiles)).toEqual(['0', '7']);
+    expect(changed).toMatchObject({ firstGid: tileset.firstGid, tileWidth: 8, tileHeight: 12, tiles: { 0: tileset.tiles[0], 7: tileset.tiles[7] } });
+    expect(JSON.stringify([applied.document.pixelAssets[source0.id], applied.document.pixelAssets[source3.id], applied.document.pixelAssets[source7.id]])).toBe(sourceBytes);
+    expect(applied.document.activity[0]).toMatchObject({ label: 'Remove unused image-collection source', actor: HUMAN_ACTOR, operationCount: 1 });
+    const restored = applyTransaction(applied.document, applied.inverse, { recordActivity: false }).document; if (restored.kind !== 'pixel') throw new Error('Expected pixel document');
+    const restoredTileset = restored.pixelAssets[tileset.id]; if (restoredTileset.type !== 'tileset') throw new Error('Expected tileset');
+    expect({ ...restoredTileset, revision: tileset.revision, updatedAt: tileset.updatedAt }).toEqual(tileset);
+
+    const sourceDrift = structuredClone(document); const driftedSource = sourceDrift.pixelAssets[source3.id]; if (driftedSource.type !== 'sprite') throw new Error('Expected sprite');
+    driftedSource.revision += 1;
+    expect(() => applyTransaction(sourceDrift, transaction)).toThrow(TransactionConflictError);
+    expect(sourceDrift.pixelAssets[tileset.id]).toEqual(tileset);
+    const documentDrift = structuredClone(document); documentDrift.revision += 1;
+    expect(() => applyTransaction(documentDrift, transaction)).toThrow(TransactionConflictError);
+    expect(documentDrift.pixelAssets[tileset.id]).toEqual(tileset);
   });
 });

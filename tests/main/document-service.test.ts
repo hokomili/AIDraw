@@ -3,9 +3,9 @@ import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { HUMAN_ACTOR, IDENTITY_TRANSFORM, applyTransaction, createId, createIllustrationDocument, createPixelDocument, createPixelSprite, createPixelTileset, nowIso, type Actor, type CanvasTransaction, type ShapeObject } from '@aidraw/core';
+import { HUMAN_ACTOR, IDENTITY_TRANSFORM, applyTransaction, createId, createIllustrationDocument, createPixelDocument, createPixelSprite, createPixelTilemap, createPixelTileset, encodeTiledGid, nowIso, readTileAt, type Actor, type CanvasTransaction, type ShapeObject } from '@aidraw/core';
 import type { TransactionTraceEntry } from '@common/contracts';
-import { appendImageCollectionSource, createImageCollectionTileset, imageCollectionSourceDependencyGuards, replaceImageCollectionSource, replaceImageCollectionTileMetadata } from '@common/image-collection-authoring';
+import { appendImageCollectionSource, createImageCollectionTileset, imageCollectionSourceDependencyGuards, removeUnusedImageCollectionSource, replaceImageCollectionSource, replaceImageCollectionTileMetadata } from '@common/image-collection-authoring';
 import { DocumentService, type NativeDocumentPreviewRenderer } from '@main/document-service';
 import { RecoveryJournal } from '@main/journal';
 import { writeNativeDocument } from '@main/persistence';
@@ -695,6 +695,61 @@ describe('document service collaboration semantics', () => {
     expect(await service.undo(document.id)).toMatchObject({ status: 'committed', revision: document.revision + 3 });
     const undone = service.getDocument(document.id); if (!undone || undone.kind !== 'pixel') throw new Error('Expected pixel document');
     expect(undone.pixelAssets[collection.id]).toMatchObject({ type: 'tileset', tiles: { 0: { imageAssetId: original.id, properties: { preserved: true } } } });
+  });
+
+  it('atomically refuses queued unused-source removal when an earlier map edit creates a transformed reference', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-service-collection-removal-guard-'));
+    temporaryPaths.push(root);
+    const service = new DocumentService(new RecoveryJournal(root), '1.0.0');
+    services.push(service);
+    const document = createPixelDocument('project', 'Queued collection removal guard');
+    const retained = document.pixelAssets[document.activeAssetId]; if (retained.type !== 'sprite') throw new Error('Expected sprite');
+    const removable = createPixelSprite('Removable source', 12, 7);
+    document.assetIds.push(removable.id); document.pixelAssets[removable.id] = removable;
+    const collection = createImageCollectionTileset(document, 'Queued collection', [retained.id, removable.id], { id: 'queued-removal-collection' });
+    const map = createPixelTilemap('Queued reference map'); map.tilesetIds = [collection.id]; map.width = 1; map.height = 1;
+    const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile' || !layer.chunks) throw new Error('Expected tile layer');
+    document.assetIds.push(collection.id, map.id); document.pixelAssets[collection.id] = collection; document.pixelAssets[map.id] = map; document.activeAssetId = collection.id;
+    service.addDocument(document);
+
+    const stalePlan = removeUnusedImageCollectionSource(document, collection.id, 1);
+    const rawTarget = encodeTiledGid(collection.firstGid + 1, { hFlip: true, diagonal: true });
+    const referenceWrite = service.apply({
+      id: createId('tx'), clientOperationId: createId('human-op'), documentId: document.id, actor: HUMAN_ACTOR,
+      label: 'Reference collection tile first', createdAt: nowIso(), operations: [{ kind: 'pixel.tilemap.set', mapId: map.id, layerId: layer.id, changes: [{ x: 0, y: 0, gid: rawTarget }], expectedRevision: layer.revision }],
+    });
+    const staleRemoval = service.apply({
+      id: createId('tx'), clientOperationId: createId('human-op'), documentId: document.id, expectedDocumentRevision: document.revision, actor: HUMAN_ACTOR,
+      label: 'Remove stale unused source', createdAt: nowIso(), operations: [{ kind: 'pixel.asset.replace', asset: stalePlan.tileset, expectedRevision: collection.revision, expectedSpriteDependencies: stalePlan.expectedSpriteDependencies }],
+    });
+    const [referenceResponse, staleResponse] = await Promise.all([referenceWrite, staleRemoval]);
+    expect(referenceResponse).toMatchObject({ status: 'committed', revision: document.revision + 1 });
+    expect(staleResponse).toMatchObject({ status: 'conflict', conflict: { entityId: document.id, expectedRevision: document.revision, actualRevision: document.revision + 1, retryable: true } });
+    const afterConflict = service.getDocument(document.id); if (!afterConflict || afterConflict.kind !== 'pixel') throw new Error('Expected pixel document');
+    const referencedMap = afterConflict.pixelAssets[map.id]; if (referencedMap.type !== 'tilemap') throw new Error('Expected map');
+    const referencedLayer = referencedMap.layers[layer.id]; if (referencedLayer.type !== 'tile' || !referencedLayer.chunks) throw new Error('Expected tile layer');
+    expect(readTileAt(referencedLayer.chunks, 0, 0)).toBe(rawTarget);
+    expect(afterConflict.pixelAssets[collection.id]).toEqual(collection);
+    expect(afterConflict.activity.map(({ label }) => label)).toEqual(['Reference collection tile first']);
+    expect(() => removeUnusedImageCollectionSource(afterConflict, collection.id, 1)).toThrow(/still references image-collection tile 1/);
+
+    expect(await service.apply({
+      id: createId('tx'), clientOperationId: createId('human-op'), documentId: document.id, actor: HUMAN_ACTOR,
+      label: 'Clear collection tile reference', createdAt: nowIso(), operations: [{ kind: 'pixel.tilemap.set', mapId: map.id, layerId: layer.id, changes: [{ x: 0, y: 0, gid: 0 }], expectedRevision: referencedLayer.revision }],
+    })).toMatchObject({ status: 'committed', revision: document.revision + 2 });
+    const cleared = service.getDocument(document.id); if (!cleared || cleared.kind !== 'pixel') throw new Error('Expected pixel document');
+    const retryPlan = removeUnusedImageCollectionSource(cleared, collection.id, 1);
+    expect(await service.apply({
+      id: createId('tx'), clientOperationId: createId('human-op'), documentId: document.id, expectedDocumentRevision: cleared.revision, actor: HUMAN_ACTOR,
+      label: 'Remove current unused source', createdAt: nowIso(), operations: [{ kind: 'pixel.asset.replace', asset: retryPlan.tileset, expectedRevision: collection.revision, expectedSpriteDependencies: retryPlan.expectedSpriteDependencies }],
+    })).toMatchObject({ status: 'committed', revision: document.revision + 3 });
+    const removed = service.getDocument(document.id); if (!removed || removed.kind !== 'pixel') throw new Error('Expected pixel document');
+    expect(removed.pixelAssets[collection.id]).toMatchObject({ type: 'tileset', tiles: { 0: { imageAssetId: retained.id } } });
+    expect(removed.pixelAssets[collection.id]).not.toHaveProperty('tiles.1');
+    expect(removed.pixelAssets[removable.id]).toEqual(removable);
+    expect(await service.undo(document.id)).toMatchObject({ status: 'committed', revision: document.revision + 4 });
+    const undone = service.getDocument(document.id); if (!undone || undone.kind !== 'pixel') throw new Error('Expected pixel document');
+    expect(undone.pixelAssets[collection.id]).toMatchObject({ type: 'tileset', tiles: { 1: { imageAssetId: removable.id } } });
   });
 
   it('orders checkpoint restore behind a pending commit and preserves that committed branch', async () => {

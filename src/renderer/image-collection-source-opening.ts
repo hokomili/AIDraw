@@ -3,8 +3,10 @@ import type { PixelDocument, PixelTileset } from '@aidraw/core';
 import {
   MAX_AUTHORED_IMAGE_COLLECTION_SOURCES,
   imageCollectionSourceEligibility,
+  imageCollectionSourceRemovalProof,
   imageCollectionSourceReplacementImpact,
   imageCollectionTileIds,
+  type ImageCollectionSourceRemovalProof,
   type ImageCollectionSourceReplacementImpact,
 } from '../common/image-collection-authoring';
 
@@ -26,7 +28,7 @@ interface ImageCollectionSourceObservation {
 }
 
 export interface ImageCollectionSourceOpening {
-  readonly mode: 'create' | 'append' | 'replace';
+  readonly mode: 'create' | 'append' | 'replace' | 'remove';
   readonly documentId: string;
   readonly documentRevision: number;
   readonly assetIds: readonly string[];
@@ -39,8 +41,10 @@ export interface ImageCollectionSourceOpening {
     readonly name: string;
     readonly tileId?: number;
     readonly sourceId?: string;
+    readonly sourceName?: string;
   };
   readonly impact?: ImageCollectionSourceReplacementImpact;
+  readonly removalProof?: ImageCollectionSourceRemovalProof;
 }
 
 export interface ImageCollectionSourceDialogView {
@@ -68,17 +72,21 @@ function imageCollectionSourceChoices(document: PixelDocument, tileset?: PixelTi
 /** Captures the exact bounded human intent that one open chooser may submit. */
 export function createImageCollectionSourceOpening(
   document: PixelDocument,
-  mode: 'create' | 'append' | 'replace',
+  mode: 'create' | 'append' | 'replace' | 'remove',
   options: { defaultName?: string; tileset?: PixelTileset; tileId?: number } = {},
 ): ImageCollectionSourceOpening {
-  if (mode !== 'create' && !options.tileset) throw new Error(`${mode === 'append' ? 'Appending' : 'Replacement'} requires one exact image collection.`);
-  const targetTile = mode === 'replace' && options.tileset && options.tileId !== undefined
+  if (mode !== 'create' && !options.tileset) throw new Error(`${mode === 'append' ? 'Appending' : mode === 'replace' ? 'Replacement' : 'Removal'} requires one exact image collection.`);
+  const targetTile = (mode === 'replace' || mode === 'remove') && options.tileset && options.tileId !== undefined
     ? options.tileset.tiles[options.tileId]
     : undefined;
-  if (mode === 'replace' && (!targetTile?.imageAssetId || options.tileId === undefined)) throw new Error('Replacement requires one exact existing image-collection tile.');
+  if ((mode === 'replace' || mode === 'remove') && (!targetTile?.imageAssetId || options.tileId === undefined)) throw new Error(`${mode === 'replace' ? 'Replacement' : 'Removal'} requires one exact existing image-collection tile.`);
   const impact = mode === 'replace' && options.tileset && options.tileId !== undefined
     ? imageCollectionSourceReplacementImpact(document, options.tileset.id, options.tileId)
     : undefined;
+  const removalProof = mode === 'remove' && options.tileset && options.tileId !== undefined
+    ? imageCollectionSourceRemovalProof(document, options.tileset.id, options.tileId)
+    : undefined;
+  const targetSource = targetTile?.imageAssetId ? document.pixelAssets[targetTile.imageAssetId] : undefined;
   const sourceObservations = document.assetIds.flatMap((assetId) => {
     const asset = document.pixelAssets[assetId];
     return asset?.type === 'sprite'
@@ -90,16 +98,17 @@ export function createImageCollectionSourceOpening(
     documentId: document.id,
     documentRevision: document.revision,
     assetIds: Object.freeze([...document.assetIds]),
-    choices: Object.freeze(imageCollectionSourceChoices(document, options.tileset, options.tileId).map((choice) => Object.freeze(choice))),
+    choices: Object.freeze((mode === 'remove' ? [] : imageCollectionSourceChoices(document, options.tileset, options.tileId)).map((choice) => Object.freeze(choice))),
     sourceObservations: Object.freeze(sourceObservations.map((observation) => Object.freeze(observation))),
     ...(options.defaultName ? { defaultName: options.defaultName } : {}),
     ...(options.tileset ? { target: Object.freeze({
       id: options.tileset.id,
       revision: options.tileset.revision,
       name: options.tileset.name,
-      ...(options.tileId === undefined ? {} : { tileId: options.tileId, sourceId: targetTile?.imageAssetId }),
+      ...(options.tileId === undefined ? {} : { tileId: options.tileId, sourceId: targetTile?.imageAssetId, sourceName: targetSource?.name }),
     }) } : {}),
     ...(impact ? { impact: Object.freeze(impact) } : {}),
+    ...(removalProof ? { removalProof: Object.freeze(removalProof) } : {}),
   });
 }
 
@@ -120,8 +129,8 @@ export function imageCollectionSourceOpeningGuardError(
     if (!opening.target || currentTilesetId !== opening.target.id) return `The selected image collection changed while this chooser was open. ${retry}`;
     const target = current.pixelAssets[opening.target.id];
     if (target?.type !== 'tileset' || target.revision !== opening.target.revision) return `The image collection changed while this chooser was open. ${retry}`;
-    if (opening.mode === 'replace') {
-      if (current.revision !== opening.documentRevision) return `The document changed after this replacement impact was counted. ${retry}`;
+    if (opening.mode === 'replace' || opening.mode === 'remove') {
+      if (current.revision !== opening.documentRevision) return `The document changed after this ${opening.mode === 'replace' ? 'replacement impact was counted' : 'unused-source proof was computed'}. ${retry}`;
       if (opening.target.tileId === undefined || !opening.target.sourceId || target.tiles[opening.target.tileId]?.imageAssetId !== opening.target.sourceId) {
         return `The selected image-collection tile source changed while this chooser was open. ${retry}`;
       }
@@ -175,6 +184,12 @@ export class ImageCollectionSourceDialogLifecycle {
 
   confirmReplacement(value: boolean): string | undefined {
     if (this.opening.mode !== 'replace') return 'Only source replacement has a document-wide impact confirmation.';
+    this.impactConfirmed = value;
+    return undefined;
+  }
+
+  confirmRemoval(value: boolean): string | undefined {
+    if (this.opening.mode !== 'remove') return 'Only source removal has an unused-tile confirmation.';
     this.impactConfirmed = value;
     return undefined;
   }

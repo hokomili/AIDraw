@@ -11,7 +11,7 @@ import { readNativeDocument, writeNativeDocument } from '../../src/main/persiste
 import { renderSprite, renderTilemap, renderTilemapRegion } from '../../src/main/render-document';
 import { runImportUtilityRequest } from '../../src/main/utility-import';
 import { editTileObject } from '../../src/common/tile-object-authoring';
-import { appendImageCollectionSource, createImageCollectionTileset, replaceImageCollectionSource } from '../../src/common/image-collection-authoring';
+import { appendImageCollectionSource, createImageCollectionTileset, removeUnusedImageCollectionSource, replaceImageCollectionSource } from '../../src/common/image-collection-authoring';
 
 const fixture = new URL('../fixtures/tiled/isometric-external.tmj', import.meta.url).pathname.replace(/^\/(?=[A-Za-z]:)/, '');
 const xmlFixtureSource = new URL('../fixtures/tiled/orthogonal-external.tmx', import.meta.url).pathname.replace(/^\/(?=[A-Za-z]:)/, '');
@@ -588,6 +588,51 @@ describe('representative Tiled JSON interchange', () => {
       const reopenedCollection = reopenedDocument.pixelAssets[reopenedMap.tilesetIds[0]]; if (reopenedCollection.type !== 'tileset') throw new Error('Expected tileset');
       expect(Object.keys(reopenedCollection.tiles)).toEqual(['0', '1']);
       expect(Buffer.from(renderTilemap(reopenedDocument, reopenedMap).getContext('2d').getImageData(0, 0, 2, 1).data)).toEqual(afterPixels);
+    }
+  });
+
+  it('persists and JSON/XML reopens proven-unused removal without compacting retained sparse IDs or deleting the source sprite', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'aidraw-removed-image-collection-')); temporaryDirectories.push(directory);
+    const document = createPixelDocument('project', 'Removed collection source project');
+    const source0 = createPixelSprite('Source zero', 2, 2); writePixels(Object.values(source0.cels)[0], [{ x: 0, y: 0, index: 4 }]);
+    const source3 = createPixelSprite('Removable largest source', 10, 9); writePixels(Object.values(source3.cels)[0], [{ x: 0, y: 0, index: 8 }]);
+    const source7 = createPixelSprite('Source seven', 3, 1); writePixels(Object.values(source7.cels)[0], [{ x: 0, y: 0, index: 12 }, { x: 1, y: 0, index: 12 }, { x: 2, y: 0, index: 12 }]);
+    document.assetIds = [source0.id, source3.id, source7.id]; document.pixelAssets = { [source0.id]: source0, [source3.id]: source3, [source7.id]: source7 }; document.activeAssetId = source0.id;
+    const collection = createImageCollectionTileset(document, 'Removal collection', [source0.id, source3.id, source7.id], { id: 'removal-collection' });
+    collection.tiles = {
+      0: { ...collection.tiles[0], id: 0 },
+      3: { ...collection.tiles[1], id: 3, probability: 0.4, properties: { removable: true } },
+      7: { ...collection.tiles[2], id: 7, probability: 0.7, properties: { retained: true } },
+    };
+    const map = createPixelTilemap('Retained sparse GID map'); map.width = 1; map.height = 1; map.tileWidth = 3; map.tileHeight = 1; map.tilesetIds = [collection.id];
+    const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile' || !layer.chunks) throw new Error('Expected tile layer');
+    const retainedRawGid = encodeTiledGid(collection.firstGid + 7, { diagonal: true });
+    writeTiles(layer.chunks, [{ x: 0, y: 0, gid: retainedRawGid }]);
+    document.assetIds.push(collection.id, map.id); document.pixelAssets[collection.id] = collection; document.pixelAssets[map.id] = map; document.activeAssetId = map.id;
+    const beforeMap = JSON.stringify(map); const beforeSources = JSON.stringify([source0, source3, source7]);
+    const plan = removeUnusedImageCollectionSource(document, collection.id, 3);
+    expect(Object.keys(plan.tileset.tiles)).toEqual(['0', '7']);
+    expect(plan.tileset).toMatchObject({ firstGid: collection.firstGid, tileWidth: 3, tileHeight: 2, tiles: { 7: collection.tiles[7] } });
+    document.pixelAssets[collection.id] = plan.tileset;
+    expect(JSON.stringify(map)).toBe(beforeMap); expect(JSON.stringify([source0, source3, source7])).toBe(beforeSources);
+    expect(readTileAt(layer.chunks, 0, 0)).toBe(retainedRawGid);
+
+    const nativePath = await writeNativeDocument(join(directory, 'removed-native'), document, '1.0.0');
+    const native = await readNativeDocument(nativePath); if (native.document.kind !== 'pixel') throw new Error('Expected pixel document');
+    expect(native.document.pixelAssets[source3.id]).toEqual(source3);
+    for (const format of ['tiled-json', 'tiled-xml'] as const) {
+      const artifact = await exportDocument(native.document, format);
+      expect(artifact.companions?.map(({ name }) => name)).toEqual(['Removal collection tile 0.png', 'Removal collection tile 7.png']);
+      const outputDirectory = join(directory, `removed-${format}`); await mkdir(outputDirectory);
+      const outputPath = join(outputDirectory, format === 'tiled-json' ? 'map.tmj' : 'map.tmx');
+      await Promise.all([writeFile(outputPath, artifact.data), ...artifact.companions!.map((entry) => writeFile(join(outputDirectory, entry.name), entry.data))]);
+      const reopened = await importDocument(outputPath, true); const reopenedDocument = reopened.documents[0]; if (reopenedDocument.kind !== 'pixel') throw new Error('Expected reopened image collection');
+      const reopenedMap = reopenedDocument.pixelAssets[reopenedDocument.activeAssetId]; if (reopenedMap.type !== 'tilemap') throw new Error('Expected tilemap');
+      const reopenedLayer = reopenedMap.layers[reopenedMap.layerIds[0]]; if (reopenedLayer.type !== 'tile' || !reopenedLayer.chunks) throw new Error('Expected tile layer');
+      expect(readTileAt(reopenedLayer.chunks, 0, 0)).toBe(retainedRawGid);
+      const reopenedCollection = reopenedDocument.pixelAssets[reopenedMap.tilesetIds[0]]; if (reopenedCollection.type !== 'tileset') throw new Error('Expected tileset');
+      expect(Object.keys(reopenedCollection.tiles)).toEqual(['0', '7']);
+      expect(reopenedCollection.tiles[7]).toMatchObject({ id: 7, probability: 0.7, properties: { retained: true } });
     }
   });
 

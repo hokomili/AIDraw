@@ -457,6 +457,7 @@ describe('authenticated stateful MCP contract', () => {
     expect(guide).toContain('pixel.image-collection.create');
     expect(guide).toContain('pixel.image-collection.append');
     expect(guide).toContain('pixel.image-collection.source.replace');
+    expect(guide).toContain('pixel.image-collection.source.remove');
     expect(guide).toContain('intent-derived deterministic stream');
     const safetyHelp = await callTool(started.url, client.headers, 13, 'aidraw_help', { topic: 'safety' });
     expect(safetyHelp.steps).toEqual(expect.arrayContaining([
@@ -475,6 +476,7 @@ describe('authenticated stateful MCP contract', () => {
     expect(JSON.stringify(operationsHelp.examples)).toContain('pixel.wang-terrain.stroke');
     expect(JSON.stringify(operationsHelp.examples)).toContain('pixel.image-collection.create');
     expect(JSON.stringify(operationsHelp.examples)).toContain('pixel.image-collection.source.replace');
+    expect(JSON.stringify(operationsHelp.examples)).toContain('pixel.image-collection.source.remove');
   });
 
   it('initializes the same raw Streamable HTTP profile under each configured client name', async () => {
@@ -1074,7 +1076,7 @@ describe('authenticated stateful MCP contract', () => {
     expect(readPixel(committedCel, 7, 7)).toBe(6);
   });
 
-  it('creates, appends, and replaces exact image-collection sources through one guarded semantic lifecycle transaction', async () => {
+  it('creates, appends, replaces, and removes exact image-collection sources through one guarded semantic lifecycle transaction', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aidraw-mcp-image-collection-')); temporaryPaths.push(root);
     const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0'); documents.initialize();
     const host = new McpHost(documents, '1.0.0', join(root, 'port.json')); hosts.push(host); const started = await host.start('image-collection-token');
@@ -1130,19 +1132,34 @@ describe('authenticated stateful MCP contract', () => {
     expect(replaced).toMatchObject({ firstGid: collection.firstGid, tiles: { 0: { id: 0, imageAssetId: fourth.id }, 1: { id: 1, imageAssetId: first.id }, 2: { id: 2, imageAssetId: second.id } } });
     expect(JSON.stringify([afterReplacement.pixelAssets[first.id], afterReplacement.pixelAssets[second.id], afterReplacement.pixelAssets[third.id], afterReplacement.pixelAssets[fourth.id]])).toBe(sourceBytes);
 
-    const stale = await callToolMessage(started.url, client.headers, 8, 'canvas_apply', {
+    expect(await callTool(started.url, client.headers, 8, 'canvas_apply', {
+      documentId: document.id, clientOperationId: 'semantic-collection-source-remove', label: 'Remove semantic collection source', playback: { mode: 'instant', speed: 1 },
+      operations: [{ kind: 'pixel.image-collection.source.remove', tilesetId: collection.id, tileId: 1, expectedTilesetRevision: replaced.revision, expectedDocumentRevision: afterReplacement.revision }],
+    })).toMatchObject({ status: 'committed' });
+    const afterRemoval = documents.getDocument(document.id); if (!afterRemoval || afterRemoval.kind !== 'pixel') throw new Error('Expected pixel project');
+    const removed = afterRemoval.pixelAssets[collection.id]; if (removed.type !== 'tileset') throw new Error('Expected image collection');
+    expect(Object.keys(removed.tiles)).toEqual(['0', '2']);
+    expect(removed).toMatchObject({ firstGid: collection.firstGid, tiles: { 0: { id: 0, imageAssetId: fourth.id }, 2: { id: 2, imageAssetId: second.id } } });
+    expect(JSON.stringify([afterRemoval.pixelAssets[first.id], afterRemoval.pixelAssets[second.id], afterRemoval.pixelAssets[third.id], afterRemoval.pixelAssets[fourth.id]])).toBe(sourceBytes);
+
+    const stale = await callToolMessage(started.url, client.headers, 9, 'canvas_apply', {
       documentId: document.id, clientOperationId: 'semantic-collection-stale', label: 'Reject stale collection append', playback: { mode: 'instant', speed: 1 },
       operations: [{ kind: 'pixel.image-collection.append', tilesetId: collection.id, sourceSpriteId: second.id, expectedTilesetRevision: appended.revision, expectedDocumentRevision: afterCreate.revision }],
     });
     expect(stale.result?.isError).toBe(true);
     expect(JSON.stringify(stale)).toContain('document revision changed');
-    expect(documents.getDocument(document.id)).toEqual(afterReplacement);
-    expect(await callTool(started.url, client.headers, 9, 'history_manage', { action: 'undo', documentId: document.id })).toMatchObject({ status: 'committed' });
+    expect(documents.getDocument(document.id)).toEqual(afterRemoval);
+    expect(await callTool(started.url, client.headers, 10, 'history_manage', { action: 'undo', documentId: document.id })).toMatchObject({ status: 'committed' });
+    const removalUndone = documents.getDocument(document.id); if (!removalUndone || removalUndone.kind !== 'pixel') throw new Error('Expected pixel project');
+    const removalUndoneCollection = removalUndone.pixelAssets[collection.id]; if (removalUndoneCollection.type !== 'tileset') throw new Error('Expected image collection');
+    expect(removalUndoneCollection.tiles[1].imageAssetId).toBe(first.id);
+    expect(removalUndoneCollection.tiles[0].imageAssetId).toBe(fourth.id);
+    expect(await callTool(started.url, client.headers, 11, 'history_manage', { action: 'undo', documentId: document.id })).toMatchObject({ status: 'committed' });
     const replacementUndone = documents.getDocument(document.id); if (!replacementUndone || replacementUndone.kind !== 'pixel') throw new Error('Expected pixel project');
     const replacementUndoneCollection = replacementUndone.pixelAssets[collection.id]; if (replacementUndoneCollection.type !== 'tileset') throw new Error('Expected image collection');
     expect(replacementUndoneCollection.tiles[0].imageAssetId).toBe(third.id);
     expect(replacementUndoneCollection.tiles[2].imageAssetId).toBe(second.id);
-    expect(await callTool(started.url, client.headers, 10, 'history_manage', { action: 'undo', documentId: document.id })).toMatchObject({ status: 'committed' });
+    expect(await callTool(started.url, client.headers, 12, 'history_manage', { action: 'undo', documentId: document.id })).toMatchObject({ status: 'committed' });
     const undone = documents.getDocument(document.id); if (!undone || undone.kind !== 'pixel') throw new Error('Expected pixel project');
     const undoneCollection = undone.pixelAssets[collection.id]; if (undoneCollection.type !== 'tileset') throw new Error('Expected image collection');
     expect(Object.keys(undoneCollection.tiles)).toEqual(['0', '1']);

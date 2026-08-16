@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { TILED_GID_MASK, createPixelDocument, createPixelSprite, createPixelTilemap, createPixelTileset, encodeTiledGid, writeTiles } from '@aidraw/core';
+import { TILED_GID_MASK, createId, createPixelDocument, createPixelSprite, createPixelTilemap, createPixelTileset, encodeTiledGid, nowIso, writeTiles } from '@aidraw/core';
 
 import {
   appendImageCollectionSource,
@@ -8,8 +8,10 @@ import {
   imageCollectionSourceEligibility,
   imageCollectionSourceObservationGuardError,
   imageCollectionSourceDependencyGuards,
+  imageCollectionSourceRemovalProof,
   imageCollectionSourceReplacementImpact,
   imageCollectionTileIds,
+  removeUnusedImageCollectionSource,
   replaceImageCollectionSource,
   replaceImageCollectionTileMetadata,
 } from '../../src/common/image-collection-authoring';
@@ -100,6 +102,82 @@ describe('image-collection authoring boundary', () => {
     expect(plan.expectedSpriteDependencies.map(({ spriteId }) => spriteId)).toEqual([source0.id, source3.id, replacement.id]);
     expect(JSON.stringify([source0, source3, replacement])).toBe(sourceBytes);
     expect(JSON.stringify(map)).toBe(mapBytes);
+  });
+
+  it('removes only one proven-unused sparse tile and deterministically shrinks the retained-source envelope', () => {
+    const { document, tileset, source0, source3 } = collectionFixture();
+    const source7 = createPixelSprite('Tile seven', 4, 11);
+    tileset.tiles[7] = { id: 7, sourceX: 0, sourceY: 0, imageAssetId: source7.id, probability: 0.25, animation: [], collisions: [], properties: { retained: true } };
+    tileset.tileWidth = source3.width; tileset.tileHeight = source7.height;
+    tileset.tiles[0].animation = [{ tileId: 7, durationMs: 90 }];
+    const map = createPixelTilemap('Unused source map'); map.tilesetIds = [tileset.id]; map.width = 2; map.height = 1;
+    document.assetIds.push(source7.id, map.id); document.pixelAssets[source7.id] = source7; document.pixelAssets[map.id] = map;
+    const beforeSources = JSON.stringify([source0, source3, source7]);
+    const beforeMap = JSON.stringify(map);
+
+    expect(imageCollectionSourceRemovalProof(document, tileset.id, 3)).toEqual({
+      baseGid: tileset.firstGid + 3,
+      sourceId: source3.id,
+      sourceName: source3.name,
+      retainedTileCount: 2,
+      attachedMapCount: 1,
+      scannedCellCount: 0,
+      scannedObjectCount: 0,
+      scannedAnimationFrameCount: 1,
+      scannedTileStampCellCount: 0,
+      scannedReferenceCount: 1,
+    });
+    const plan = removeUnusedImageCollectionSource(document, tileset.id, 3);
+    expect(plan).toMatchObject({ tileId: 3, sourceId: source3.id, tileset: { firstGid: tileset.firstGid, tileWidth: source0.width, tileHeight: source7.height } });
+    expect(Object.keys(plan.tileset.tiles)).toEqual(['0', '7']);
+    expect(plan.tileset.tiles[0]).toEqual(tileset.tiles[0]);
+    expect(plan.tileset.tiles[7]).toEqual(tileset.tiles[7]);
+    expect(plan.expectedSpriteDependencies.map(({ spriteId }) => spriteId)).toEqual([source0.id, source3.id, source7.id]);
+    expect(JSON.stringify([source0, source3, source7])).toBe(beforeSources);
+    expect(JSON.stringify(map)).toBe(beforeMap);
+  });
+
+  it('refuses final, transformed-map, animation, tile-object, stamp, Wang, and resolver-shadow removal references', () => {
+    const { document, tileset, source0 } = collectionFixture();
+    const only = createImageCollectionTileset(document, 'Only source', [source0.id], { id: 'only-source' });
+    document.assetIds.push(only.id); document.pixelAssets[only.id] = only;
+    expect(() => removeUnusedImageCollectionSource(document, only.id, 0)).toThrow(/final image-collection source/);
+
+    const animationReference = structuredClone(document);
+    const animatedTileset = animationReference.pixelAssets[tileset.id]; if (animatedTileset.type !== 'tileset') throw new Error('Expected tileset');
+    animatedTileset.tiles[0].animation = [{ tileId: 3, durationMs: 100 }];
+    expect(() => removeUnusedImageCollectionSource(animationReference, tileset.id, 3)).toThrow(/tile 0 animation still references tile 3/);
+
+    const mapReference = structuredClone(document);
+    const map = createPixelTilemap('Reference map'); map.tilesetIds = [tileset.id]; map.width = 1; map.height = 1;
+    const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile' || !layer.chunks) throw new Error('Expected tile layer');
+    writeTiles(layer.chunks, [{ x: 0, y: 0, gid: encodeTiledGid(tileset.firstGid + 3, { hFlip: true, vFlip: true, diagonal: true }) }]);
+    mapReference.assetIds.push(map.id); mapReference.pixelAssets[map.id] = map;
+    expect(() => removeUnusedImageCollectionSource(mapReference, tileset.id, 3)).toThrow(/tile layer .* still references.*tile 3/);
+
+    const objectReference = structuredClone(document);
+    const objectMap = createPixelTilemap('Object reference map'); objectMap.tilesetIds = [tileset.id];
+    const createdAt = nowIso(); const objectLayerId = createId('map-layer');
+    objectMap.layerIds.push(objectLayerId); objectMap.layers[objectLayerId] = {
+      id: objectLayerId, revision: 0, name: 'Objects', type: 'object', visible: true, locked: false, opacity: 1, createdBy: 'human',
+      offsetX: 0, offsetY: 0, parallaxX: 1, parallaxY: 1, createdAt, updatedAt: createdAt,
+      objects: [{ id: 'tile-object', type: 'tile', gid: encodeTiledGid(tileset.firstGid + 3, { diagonal: true }), x: 0, y: 0, width: 13, height: 5, rotation: 0, name: 'Target', className: '', properties: {} }],
+    };
+    objectReference.assetIds.push(objectMap.id); objectReference.pixelAssets[objectMap.id] = objectMap;
+    expect(() => removeUnusedImageCollectionSource(objectReference, tileset.id, 3)).toThrow(/tile object.*still references.*tile 3/);
+
+    const stampReference = structuredClone(document);
+    stampReference.tileStamps = [{ id: 'stamp', name: 'Target stamp', width: 1, height: 1, anchorX: 0, anchorY: 0, cells: [{ x: 0, y: 0, gid: encodeTiledGid(tileset.firstGid + 3, { hFlip: true }) }] }];
+    expect(() => removeUnusedImageCollectionSource(stampReference, tileset.id, 3)).toThrow(/tile stamp.*still stores.*tile 3/);
+
+    const wangReference = structuredClone(document); const wangTileset = wangReference.pixelAssets[tileset.id]; if (wangTileset.type !== 'tileset') throw new Error('Expected tileset');
+    wangTileset.wangSets = [{ id: 'wang', name: 'Unsupported', type: 'mixed', colors: [], tiles: [{ tileId: 3, wangId: [0, 0, 0, 0, 0, 0, 0, 0] }] }];
+    expect(() => removeUnusedImageCollectionSource(wangReference, tileset.id, 3)).toThrow(/unsupported Wang metadata/);
+
+    const shadowReference = structuredClone(document); const shadowMap = createPixelTilemap('Shadow map'); shadowMap.tilesetIds = [tileset.id];
+    const shadow = createPixelTileset('Short shadow', source0.id, 8, 8, 1, 1); shadow.firstGid = tileset.firstGid + 2;
+    shadowReference.assetIds.push(shadow.id, shadowMap.id); shadowReference.pixelAssets[shadow.id] = shadow; shadowReference.pixelAssets[shadowMap.id] = shadowMap; shadowMap.tilesetIds.push(shadow.id);
+    expect(() => removeUnusedImageCollectionSource(shadowReference, tileset.id, 3)).toThrow(/attached tileset precedence shadows the target/);
   });
 
   it('refuses animated, duplicate, oversized, overlapping, and exhausted lifecycle inputs', () => {
