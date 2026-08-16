@@ -149,6 +149,7 @@ import { CustomPropertyEditor } from "./components/CustomPropertyEditor";
 import { DitherPresetDialog, OrderedDitherPhaseInput } from "./components/DitherPresetDialog";
 import { ImageCropFields } from "./components/ImageCropFields";
 import { MapSetupDisclosure } from "./components/MapSetupDisclosure";
+import { PaletteControls, PALETTE_USAGE_REVIEW_LIMIT } from "./components/PaletteControls";
 import { flattenLayerTree, layerTreeDescendants, moveLayerTreeEntry } from "../common/layer-tree";
 import { assignWangTile, deleteWangColor, deleteWangSet, upsertWangColor, upsertWangSet } from "../common/wang-authoring";
 import { planImageCollectionWangMutation } from "../common/wang-terrain-authoring";
@@ -4545,8 +4546,7 @@ function PalettePanel({ document }: { document: PixelDocument }) {
   const [cycleDraft, setCycleDraft] = useState<PaletteCycle>();
   const [paletteImportMode, setPaletteImportMode] = useState<PaletteImportMode>("replace-slots");
   const [replacementIndex, setReplacementIndex] = useState(0);
-  const selected = document.palette[index] ?? document.palette[0];
-  const selectedUsage = useMemo(() => countPaletteIndexUsage(document, index, 10_000), [document, index]);
+  const selectedUsage = useMemo(() => countPaletteIndexUsage(document, index, PALETTE_USAGE_REVIEW_LIMIT), [document, index]);
   const customOverride = index > 0 && Object.values(document.pixelAssets).some((asset) => asset.type === "sprite" && Object.values(asset.paletteOverrides).some((override) => override[index] && JSON.stringify(override[index]) !== JSON.stringify(document.palette[index])));
   const updateSelectedColor = async (color: string) => {
     const palette = structuredClone(document.palette);
@@ -4612,82 +4612,38 @@ function PalettePanel({ document }: { document: PixelDocument }) {
         <span>Indexed palette</span>
         <small>{document.palette.length}/256</small>
       </div>
-      <div className="palette-file-actions">
-        <select aria-label="Palette import behavior" value={paletteImportMode} onChange={(event) => setPaletteImportMode(event.target.value as PaletteImportMode)} title="How imported palette colors affect existing indexed artwork">
-          <option value="replace-slots">Replace colors by index</option>
-          <option value="append-unique">Append unique colors</option>
-        </select>
-        <button type="button" onClick={() => void importPalette()} title="Import AIDraw JSON or GIMP GPL palette"><Upload size={11} /> Import</button>
-        <button type="button" onClick={() => void exportPalette("json")} title="Export portable AIDraw palette JSON"><Download size={11} /> JSON</button>
-        <button type="button" onClick={() => void exportPalette("gpl")} title="Export GIMP palette (transparent index omitted)"><Download size={11} /> GPL</button>
-      </div>
-      <div className="palette-grid">
-        {document.palette.map((entry, entryIndex) => (
-          <button
-            key={entry.id}
-            className={`swatch ${entryIndex === index ? "is-active" : ""} ${entryIndex === 0 ? "is-transparent" : ""}`}
-            style={{ "--swatch": entry.color } as React.CSSProperties}
-            title={`${entryIndex}: ${entry.name} ${entry.color}`}
-            onClick={() => {
-              setIndex(entryIndex);
-              setColor(entry.color.slice(0, 7));
-            }}
-          />
-        ))}
-      </div>
-      <div className="palette-editor-row">
-        <input
-          aria-label="Edit selected palette color"
-          type="color"
-          value={selected.color.slice(0, 7)}
-          onChange={(event) => void updateSelectedColor(event.target.value)}
-        />
-        <span>
-          <strong>{selected.name}</strong>
-          <small>
-            Index {index} · {selected.color}
-          </small>
-        </span>
-        <button
-          title="Previous palette slot"
-          disabled={index <= 1}
-          onClick={() => setIndex(index - 1)}
-        >
-          ‹
-        </button>
-        <button
-          title="Next palette slot"
-          disabled={index >= document.palette.length - 1}
-          onClick={() => setIndex(index + 1)}
-        >
-          ›
-        </button>
-        <button title="Move selected color one slot earlier" disabled={index <= 1} onClick={() => void movePaletteEntry(-1)}><ChevronLeft size={11} /></button>
-        <button title="Move selected color one slot later" disabled={index <= 0 || index >= document.palette.length - 1} onClick={() => void movePaletteEntry(1)}><ChevronRight size={11} /></button>
-        <button
-          title="Add palette color"
-          disabled={document.palette.length >= 256}
-          onClick={() =>
-            void apply("Add palette color", [
-              {
-                kind: "pixel.palette.replace",
-                palette: [
-                  ...document.palette,
-                  {
-                    id: `color-${document.palette.length}`,
-                    name: `Color ${document.palette.length}`,
-                    color: "#ff6b7a",
-                  },
-                ],
-              },
-            ])
-          }
-        >
-          +
-        </button>
-        <button title={index === 0 ? "Transparent index 0 cannot be deleted" : selectedUsage ? `Replace this color first; it is used ${selectedUsage}${selectedUsage >= 10_000 ? "+" : ""} times` : customOverride ? "Clear this color's frame-specific overrides before deleting it" : "Delete unused palette color"} disabled={index === 0 || Boolean(selectedUsage) || customOverride || document.palette.length <= 1} onClick={() => void deletePaletteEntry()}><Trash2 size={11} /></button>
-      </div>
-      {index > 0 && document.palette.length > 1 && <div className="palette-remap-row"><span>Replace index {index} everywhere with</span><select aria-label="Replacement palette color" value={replacementIndex === index ? 0 : replacementIndex} onChange={(event) => setReplacementIndex(Number(event.target.value))}>{document.palette.map((entry, entryIndex) => entryIndex === index ? null : <option key={entry.id} value={entryIndex}>{entryIndex}: {entry.name}</option>)}</select><button onClick={() => void replaceAndDeletePaletteEntry()}><Trash2 size={11} /> Replace & delete</button></div>}
+      <PaletteControls
+        palette={document.palette}
+        selectedIndex={index}
+        importMode={paletteImportMode}
+        replacementIndex={replacementIndex}
+        selectedUsage={selectedUsage}
+        hasCustomOverride={customOverride}
+        onImportModeChange={setPaletteImportMode}
+        onImport={() => void importPalette()}
+        onExportJson={() => void exportPalette("json")}
+        onExportGpl={() => void exportPalette("gpl")}
+        onSelect={(entryIndex, color) => {
+          setIndex(entryIndex);
+          setColor(color.slice(0, 7));
+        }}
+        onColorChange={(color) => void updateSelectedColor(color)}
+        onPrevious={() => setIndex(index - 1)}
+        onNext={() => setIndex(index + 1)}
+        onMoveEarlier={() => void movePaletteEntry(-1)}
+        onMoveLater={() => void movePaletteEntry(1)}
+        onAdd={() => void apply("Add palette color", [{
+          kind: "pixel.palette.replace",
+          palette: [...document.palette, {
+            id: `color-${document.palette.length}`,
+            name: `Color ${document.palette.length}`,
+            color: "#ff6b7a",
+          }],
+        }])}
+        onDeleteUnused={() => void deletePaletteEntry()}
+        onReplacementChange={setReplacementIndex}
+        onReplaceAndDelete={() => void replaceAndDeletePaletteEntry()}
+      />
       <div className="palette-cycle-editor">
         <div className="section-heading"><span>Named color cycles</span><button disabled={document.palette.length < 3} onClick={openNewCycle}>+ Cycle</button></div>
         {document.paletteCycles.length === 0 ? <small>No ranges yet. Cycling preview currently rotates every non-transparent color.</small> : <div className="palette-cycle-list">{document.paletteCycles.map((cycle) => <div className="palette-cycle-row" key={cycle.id}><button className="palette-cycle-main" onClick={() => setCycleDraft(structuredClone(cycle))}><Repeat2 size={12} /><span><strong>{cycle.name}</strong><small>{cycle.fromIndex}–{cycle.toIndex} · {cycle.direction} · {cycle.stepMs}ms</small></span></button><button title="Delete palette cycle" onClick={() => void apply("Delete palette cycle", [{ kind: "pixel.palette-cycles.replace", cycles: document.paletteCycles.filter((entry) => entry.id !== cycle.id) }])}><Trash2 size={12} /></button></div>)}</div>}
