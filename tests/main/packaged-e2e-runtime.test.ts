@@ -57,6 +57,7 @@ describe('packaged Level 2 platform routing', () => {
       ['tests/e2e/editor.spec.ts', 1],
       ['tests/e2e/stale-renderer-recovery.spec.ts', 2],
       ['scripts/ux01-packaged-acceptance.mjs', 1],
+      ['scripts/ux09-text-reflow-acceptance.mjs', 1],
       ['scripts/fnd05-packaged-acceptance.mjs', 1],
     ] as const;
     for (const [path, expectedCalls] of consumers) {
@@ -104,6 +105,7 @@ describe('packaged Level 2 platform routing', () => {
     expect(retained.grep?.test('FND-05-UNRESPONSIVE-RENDERER exact package')).toBe(true);
     expect(retained.grep?.test('UX-01-DENSITY exact package')).toBe(true);
     expect(retained.grep?.test('UX-01-WINDOW-CHROME exact package')).toBe(true);
+    expect(retained.grep?.test('UX-09-TEXT-REFLOW exact package')).toBe(true);
     expect(retained.grepInvert).toBeUndefined();
 
     const historicalWindowsInvocation = resolvePackagedE2eSelection({ AIDRAW_E2E_FND09_UTILITY_PROFILE: 'E:\\AIDraw\\test-results\\retained\\aidraw-e2e-fnd09-utility-run' }, ['--grep=FND-09-UTILITY-CONTAINMENT']);
@@ -112,10 +114,10 @@ describe('packaged Level 2 platform routing', () => {
     expect(() => resolvePackagedE2eSelection({ AIDRAW_E2E_SUITE: 'self-contained', AIDRAW_E2E_FND09_UTILITY_PROFILE: 'configured' }, [])).toThrow(/cannot be combined/);
   });
 
-  it('freezes the reviewed split at 27 clean-package cases plus 14 explicit retained cases', () => {
+  it('freezes the reviewed split at 27 clean-package cases plus 15 explicit retained cases', () => {
     expect(PACKAGED_E2E_SELF_CONTAINED_CASES).toBe(27);
-    expect(PACKAGED_E2E_RETAINED_CASES).toBe(14);
-    expect(PACKAGED_E2E_SELF_CONTAINED_CASES + PACKAGED_E2E_RETAINED_CASES).toBe(41);
+    expect(PACKAGED_E2E_RETAINED_CASES).toBe(15);
+    expect(PACKAGED_E2E_SELF_CONTAINED_CASES + PACKAGED_E2E_RETAINED_CASES).toBe(42);
   });
 
   it('keeps spawn behavior and primary shortcuts native on both desktop platforms', () => {

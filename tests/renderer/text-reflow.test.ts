@@ -41,20 +41,53 @@ describe('primary pixel workspace 200%-text contract', () => {
   it('reserves non-overlay scrollbar and frame-metadata space without changing ordinary-root dimensions', () => {
     expect(EDITOR_TEXT_REFLOW_FIT).toEqual({
       inspectorTabs: { minimumHeight: 52, offsetPixels: 31, rootMultiplier: 1.25 },
-      timelineFrame: { minimumWidth: 62, offsetPixels: -18, rootMultiplier: 5 },
+      timelineFrame: {
+        minimumWidth: 62,
+        offsetPixels: -18,
+        rootMultiplier: 5,
+        horizontalPadding: 6,
+        expandedLayoutMinimumUsableWidth: 100,
+      },
     });
     expect(editorTextReflowFitAtRoot(EDITOR_TEXT_REFLOW.baseRootFontSize)).toEqual({
       inspectorTabsHeight: 52,
       timelineFrameWidth: 62,
+      timelineFrameUsableWidth: 56,
+      timelineFrameExpandedLayout: false,
+      timelineFrameNumberWidth: 28,
+      timelineFrameMetadataWidth: 28,
     });
     const enlarged = editorTextReflowFitAtRoot(EDITOR_TEXT_REFLOW.enlargedRootFontSize);
-    expect(enlarged).toEqual({ inspectorTabsHeight: 71, timelineFrameWidth: 142 });
+    expect(enlarged).toEqual({
+      inspectorTabsHeight: 71,
+      timelineFrameWidth: 142,
+      timelineFrameUsableWidth: 136,
+      timelineFrameExpandedLayout: true,
+      timelineFrameNumberWidth: 136,
+      timelineFrameMetadataWidth: 136,
+    });
 
     const enlargedCaption = editorTypeTiersAtRoot(EDITOR_TEXT_REFLOW.enlargedRootFontSize).caption;
     const tabContentHeight = 19 + 4 + enlargedCaption * 1.2;
     expect(enlarged.inspectorTabsHeight - 16).toBeGreaterThanOrEqual(tabContentHeight);
-    const maximumDurationMetadataWidth = 6 + (1 + '60000ms'.length) * enlargedCaption * 0.75;
-    expect(enlarged.timelineFrameWidth).toBeGreaterThanOrEqual(maximumDurationMetadataWidth);
+    const maximumDurationMetadataWidth = '60000ms'.length * enlargedCaption * 0.75;
+    expect(maximumDurationMetadataWidth).toBe(105);
+    expect(enlarged.timelineFrameMetadataWidth).toBeGreaterThanOrEqual(maximumDurationMetadataWidth);
+    expect(enlarged.timelineFrameNumberWidth).toBe(enlarged.timelineFrameUsableWidth);
+    expect(editorTextReflowFitAtRoot(24)).toMatchObject({
+      timelineFrameWidth: 102,
+      timelineFrameUsableWidth: 96,
+      timelineFrameExpandedLayout: false,
+      timelineFrameNumberWidth: 48,
+      timelineFrameMetadataWidth: 48,
+    });
+    expect(editorTextReflowFitAtRoot(25)).toMatchObject({
+      timelineFrameWidth: 107,
+      timelineFrameUsableWidth: 101,
+      timelineFrameExpandedLayout: true,
+      timelineFrameNumberWidth: 101,
+      timelineFrameMetadataWidth: 101,
+    });
     expect(() => editorTextReflowFitAtRoot(Number.POSITIVE_INFINITY)).toThrow(/positive finite/);
   });
 
@@ -115,12 +148,18 @@ describe('primary pixel workspace 200%-text contract', () => {
 
   it('fits enlarged inspector tabs and timeline metadata without changing the canvas boundary', async () => {
     const styles = await readFile(new URL('../../src/renderer/styles.css', import.meta.url), 'utf8');
+    expect(styles).toContain('* { box-sizing: border-box; }');
+    expect(styles).toMatch(/\.frame-strip > button \{[^}]*padding: 3px;/);
     expect(styles).toContain('.panel-tabs { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(3.25rem, 1fr); height: max(52px, calc(31px + 1.25rem));');
     expect(styles).toMatch(/\.panel-tabs button \{[^}]*font-size: var\(--ui-type-caption\); line-height: 1\.2;/);
     expect(styles).toContain('.timeline-label { width: max(80px, 3.5rem); display: grid; align-content: center; gap: 2px; }');
     expect(styles).toContain('.timeline-label strong { font-size: var(--ui-type-label); line-height: 1; }');
     expect(styles).toContain('.timeline-label small, .frame-strip em { font-size: var(--ui-type-caption); line-height: 1; }');
     expect(styles).toContain('.frame-strip > button { width: max(62px, calc(5rem - 18px)); height: max(70px, calc(50px + 1.2em)); grid-template-rows: 44px max(18px, 1.2em); overflow: hidden; font-size: var(--ui-type-caption); }');
+    expect(styles).toContain('.frame-strip > button:not(.add-frame) { container: timeline-frame-card / inline-size; }');
+    expect(styles).toContain('@container timeline-frame-card (min-width: 100px) {');
+    expect(styles).toContain('.frame-strip > button:not(.add-frame) small { grid-column: 1 / 3; grid-row: 1; align-self: start; justify-self: stretch; z-index: 1; overflow: visible; text-overflow: clip; text-align: left; }');
+    expect(styles).toContain('.frame-strip > button:not(.add-frame) em { grid-column: 1 / 3; grid-row: 2; justify-self: stretch; overflow: visible; text-overflow: clip; }');
     expect(styles).toContain('.frame-strip small, .frame-strip em { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }');
     const timelineHeights = [...styles.matchAll(/\.timeline \{[^}]*height:\s*([^;]+);/g)].map((match) => match[1]);
     expect(timelineHeights).not.toHaveLength(0);

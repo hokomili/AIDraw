@@ -32,16 +32,16 @@ function secureMainSource(): string {
 
 function securePreloadSource(): string {
   const channels = PACKAGED_PRELOAD_CHANNELS.map((channel, index) => `channel${index}:"${channel}"`).join(',');
-  const invokes = Array.from({ length: 62 }, (_value, index) => `command${index}:()=>electron.ipcRenderer.invoke(channels.channel${index})`).join(',');
+  const invokes = Array.from({ length: 63 }, (_value, index) => `command${index}:()=>electron.ipcRenderer.invoke(channels.channel${index})`).join(',');
   return [
     '"use strict"',
     'const electron=require("electron")',
     `const channels={${channels}}`,
     `const api={${invokes}}`,
-    'electron.ipcRenderer.on(channels.channel62,listenerOne)',
-    'electron.ipcRenderer.removeListener(channels.channel62,listenerOne)',
-    'electron.ipcRenderer.on(channels.channel63,listenerTwo)',
-    'electron.ipcRenderer.removeListener(channels.channel63,listenerTwo)',
+    'electron.ipcRenderer.on(channels.channel63,listenerOne)',
+    'electron.ipcRenderer.removeListener(channels.channel63,listenerOne)',
+    'electron.ipcRenderer.on(channels.channel64,listenerTwo)',
+    'electron.ipcRenderer.removeListener(channels.channel64,listenerTwo)',
     'electron.contextBridge.exposeInMainWorld("aidraw",Object.freeze(api))',
   ].join(';');
 }
@@ -84,7 +84,7 @@ describe('packaged Electron security verification', () => {
     expect(assertPackagedSecuritySources(secureSources())).toMatchObject({
       browserWindow: { sandbox: true, contextIsolation: true, nodeIntegration: false },
       denials: { permissions: true, windowOpen: true, navigation: true, webviewAttach: true },
-      preload: { frozenAidrawBridge: true, invokeBindings: 62, eventBindings: 2, fixedChannels: 65 },
+      preload: { frozenAidrawBridge: true, invokeBindings: 63, eventBindings: 2, fixedChannels: 65 },
     });
   });
 

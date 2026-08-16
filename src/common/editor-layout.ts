@@ -55,6 +55,8 @@ export const EDITOR_TEXT_REFLOW_FIT = {
     minimumWidth: 62,
     offsetPixels: -18,
     rootMultiplier: 5,
+    horizontalPadding: 6,
+    expandedLayoutMinimumUsableWidth: 100,
   },
 } as const;
 
@@ -76,19 +78,33 @@ export function editorTypeTiersAtRoot(rootFontSize: number): {
 export function editorTextReflowFitAtRoot(rootFontSize: number): {
   inspectorTabsHeight: number;
   timelineFrameWidth: number;
+  timelineFrameUsableWidth: number;
+  timelineFrameExpandedLayout: boolean;
+  timelineFrameNumberWidth: number;
+  timelineFrameMetadataWidth: number;
 } {
   if (!Number.isFinite(rootFontSize) || rootFontSize <= 0) {
     throw new Error('Editor root font size must be a positive finite number.');
   }
+  const timelineFrameWidth = Math.max(
+    EDITOR_TEXT_REFLOW_FIT.timelineFrame.minimumWidth,
+    EDITOR_TEXT_REFLOW_FIT.timelineFrame.offsetPixels + rootFontSize * EDITOR_TEXT_REFLOW_FIT.timelineFrame.rootMultiplier,
+  );
+  const timelineFrameUsableWidth = timelineFrameWidth - EDITOR_TEXT_REFLOW_FIT.timelineFrame.horizontalPadding;
+  const timelineFrameExpandedLayout = timelineFrameUsableWidth >= EDITOR_TEXT_REFLOW_FIT.timelineFrame.expandedLayoutMinimumUsableWidth;
+  const timelineFrameRowContentWidth = timelineFrameExpandedLayout
+    ? timelineFrameUsableWidth
+    : timelineFrameUsableWidth / 2;
   return {
     inspectorTabsHeight: Math.max(
       EDITOR_TEXT_REFLOW_FIT.inspectorTabs.minimumHeight,
       EDITOR_TEXT_REFLOW_FIT.inspectorTabs.offsetPixels + rootFontSize * EDITOR_TEXT_REFLOW_FIT.inspectorTabs.rootMultiplier,
     ),
-    timelineFrameWidth: Math.max(
-      EDITOR_TEXT_REFLOW_FIT.timelineFrame.minimumWidth,
-      EDITOR_TEXT_REFLOW_FIT.timelineFrame.offsetPixels + rootFontSize * EDITOR_TEXT_REFLOW_FIT.timelineFrame.rootMultiplier,
-    ),
+    timelineFrameWidth,
+    timelineFrameUsableWidth,
+    timelineFrameExpandedLayout,
+    timelineFrameNumberWidth: timelineFrameRowContentWidth,
+    timelineFrameMetadataWidth: timelineFrameRowContentWidth,
   };
 }
 

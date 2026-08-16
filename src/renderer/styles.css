@@ -444,10 +444,15 @@ html[data-native-titlebar="hidden-inset"] .brand { width: max(calc(118px + var(-
 .timeline-frame-actions button, .timeline-frame-actions input { width: var(--ui-hit-secondary); height: var(--ui-hit-secondary); }
 .frame-strip { height: 80px; }
 .frame-strip > button { width: max(62px, calc(5rem - 18px)); height: max(70px, calc(50px + 1.2em)); grid-template-rows: 44px max(18px, 1.2em); overflow: hidden; font-size: var(--ui-type-caption); }
+.frame-strip > button:not(.add-frame) { container: timeline-frame-card / inline-size; }
 .frame-thumb { height: 41px; }
 .frame-strip small, .frame-strip em { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .frame-strip small { font-size: var(--ui-type-caption); line-height: 1; }
 .frame-strip > button.add-frame { width: var(--ui-hit-primary); height: 62px; }
+@container timeline-frame-card (min-width: 100px) {
+  .frame-strip > button:not(.add-frame) small { grid-column: 1 / 3; grid-row: 1; align-self: start; justify-self: stretch; z-index: 1; overflow: visible; text-overflow: clip; text-align: left; }
+  .frame-strip > button:not(.add-frame) em { grid-column: 1 / 3; grid-row: 2; justify-self: stretch; overflow: visible; text-overflow: clip; }
+}
 .document-tab-viewport, .context-bar, .tool-rail, .panel-tabs, .panel-content, .pixel-floating-controls, .timeline, .timeline-tags, .frame-strip, .statusbar { scroll-padding: 4px; }
 .cel-exposure-panel { bottom: calc(var(--timeline-height) + 10px); max-height: min(360px, calc(100% - var(--timeline-height) - 48px)); }
 .onion-settings-panel { bottom: calc(var(--timeline-height) + 10px); max-height: min(330px, calc(100% - var(--timeline-height) - 48px)); }
