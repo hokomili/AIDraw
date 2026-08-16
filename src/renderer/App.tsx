@@ -150,6 +150,12 @@ import { DitherPresetDialog, OrderedDitherPhaseInput } from "./components/Dither
 import { ImageCropFields } from "./components/ImageCropFields";
 import { MapSetupDisclosure } from "./components/MapSetupDisclosure";
 import { PaletteControls, PALETTE_USAGE_REVIEW_LIMIT } from "./components/PaletteControls";
+import {
+  PixelCanvasSizeEditor,
+  PixelCreationSizeReview,
+  TilemapStorageChoice,
+} from "./components/PixelProjectSizing";
+import { pixelCanvasSizeEditorKey, pixelDimension } from "./pixel-project-sizing";
 import { flattenLayerTree, layerTreeDescendants, moveLayerTreeEntry } from "../common/layer-tree";
 import { assignWangTile, deleteWangColor, deleteWangSet, upsertWangColor, upsertWangSet } from "../common/wang-authoring";
 import { planImageCollectionWangMutation } from "../common/wang-terrain-authoring";
@@ -272,13 +278,6 @@ function toolDefinitions(mode: "illustration" | "pixel"): ToolDefinition[] {
 const COMMON_TOOL_COUNT = 4;
 const illustrationTools = toolDefinitions("illustration");
 const pixelTools = toolDefinitions("pixel");
-
-function pixelDimension(value: string | number, fallback = 64): number {
-  const parsed = typeof value === "number" ? value : Number(value);
-  return Number.isFinite(parsed)
-    ? Math.max(1, Math.min(8192, Math.round(parsed)))
-    : fallback;
-}
 
 function ModalShell({
   title,
@@ -675,6 +674,11 @@ function NewDocumentDialog({
                 </div>
               </label>
             </div>
+            {(kind === "sprite" || kind === "project") && <PixelCreationSizeReview
+              kind={kind}
+              width={pixelDimension(width, definition.width)}
+              height={pixelDimension(height, definition.height)}
+            />}
             <div className="document-presets" aria-label="Size presets">
               {documentPresets[kind].map((preset) => (
                 <button
@@ -796,20 +800,15 @@ function NewDocumentDialog({
                     <em>px</em>
                   </div>
                 </label>
-                <label className="infinite-toggle">
-                  <input
-                    type="checkbox"
-                    checked={infinite}
-                    onChange={(event) => setInfinite(event.target.checked)}
-                  />
-                  <span>
-                    <strong>Sparse infinite map</strong>
-                    <small>
-                      Store painted regions in 32 × 32 chunks beyond the initial
-                      area.
-                    </small>
-                  </span>
-                </label>
+                <TilemapStorageChoice
+                  infinite={infinite}
+                  width={pixelDimension(width, definition.width)}
+                  height={pixelDimension(height, definition.height)}
+                  tileWidth={pixelDimension(tileWidth, 16)}
+                  tileHeight={pixelDimension(tileHeight, 16)}
+                  orientation={orientation}
+                  onChange={setInfinite}
+                />
               </div>
             )}
           </div>
@@ -3542,67 +3541,6 @@ function ObjectInspector({ document }: { document: IllustrationDocument }) {
   );
 }
 
-function PixelCanvasSizeEditor({
-  sprite,
-  onResize,
-}: {
-  sprite: PixelSprite;
-  onResize: (width: number, height: number) => void;
-}) {
-  const [width, setWidth] = useState(String(sprite.width));
-  const [height, setHeight] = useState(String(sprite.height));
-  const nextWidth = pixelDimension(width, sprite.width);
-  const nextHeight = pixelDimension(height, sprite.height);
-  const unchanged = nextWidth === sprite.width && nextHeight === sprite.height;
-
-  return (
-    <div className="pixel-size-editor">
-      <div className="section-heading">
-        <span>Sprite canvas</span>
-        <small>Top-left anchor</small>
-      </div>
-      <div className="pixel-size-fields">
-        <label>
-          <span>Width</span>
-          <input
-            aria-label="Sprite canvas width"
-            type="number"
-            min="1"
-            max="8192"
-            value={width}
-            onChange={(event) => setWidth(event.target.value)}
-          />
-        </label>
-        <span>×</span>
-        <label>
-          <span>Height</span>
-          <input
-            aria-label="Sprite canvas height"
-            type="number"
-            min="1"
-            max="8192"
-            value={height}
-            onChange={(event) => setHeight(event.target.value)}
-          />
-        </label>
-        <button
-          disabled={unchanged}
-          onClick={() => {
-            setWidth(String(nextWidth));
-            setHeight(String(nextHeight));
-            onResize(nextWidth, nextHeight);
-          }}
-        >
-          Resize
-        </button>
-      </div>
-      <small className="pixel-size-note">
-        Shrinking crops pixels outside the new canvas. Undo restores them.
-      </small>
-    </div>
-  );
-}
-
 function TilemapLayerOffsetEditor({
   layer,
   onApply,
@@ -3793,7 +3731,7 @@ function PixelLayers({ document }: { document: PixelDocument }) {
       </div>
       {asset.type === "sprite" && (
         <PixelCanvasSizeEditor
-          key={`${asset.id}:${asset.width}:${asset.height}`}
+          key={pixelCanvasSizeEditorKey(asset)}
           sprite={asset}
           onResize={(width, height) =>
             updateAsset(
