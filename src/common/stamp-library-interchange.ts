@@ -12,6 +12,23 @@ import {
   type TileStamp,
 } from '@aidraw/core';
 import { z } from 'zod';
+import {
+  MAX_PORTABLE_STAMP_KIT_ASSETS,
+  MAX_PORTABLE_STAMP_KIT_TILESETS,
+  createPortableTileStampKit,
+  preparePortableTileStampKitImport,
+  validatePortableTileStampKit,
+  type PortableTileStampImportPreview,
+  type PortableTileStampKitBundle,
+} from './portable-tile-stamp-kit';
+
+export {
+  MAX_PORTABLE_STAMP_KIT_ASSETS,
+  MAX_PORTABLE_STAMP_KIT_OPERATION_BYTES,
+  MAX_PORTABLE_STAMP_KIT_SOURCE_PIXELS,
+  MAX_PORTABLE_STAMP_KIT_TILESETS,
+} from './portable-tile-stamp-kit';
+export type { PortableTileStampImportPreview, PortableTileStampKitBundle } from './portable-tile-stamp-kit';
 
 export const MAX_STAMP_LIBRARY_BYTES = 16 * 1024 * 1024;
 export const MAX_STAMP_LIBRARY_CELLS = 262_144;
@@ -52,16 +69,22 @@ export interface TileStampLibraryBundle {
   stamps: TileStamp[];
 }
 
-export type StampLibraryBundle = PixelStampLibraryBundle | TileStampLibraryBundle;
+export type StampLibraryBundle = PixelStampLibraryBundle | TileStampLibraryBundle | PortableTileStampKitBundle;
 export type StampLibraryImportMode = 'append' | 'replace';
 
 export interface StampLibraryImportPlan {
   kind: 'pixel' | 'tile';
   mode: StampLibraryImportMode;
+  formatVersion: 1 | 2;
+  expectedDocumentId: string;
+  expectedDocumentRevision: number;
+  expectedMapId?: string;
+  expectedMapRevision?: number;
   incomingCount: number;
   totalCount: number;
   importedIds: string[];
   operations: CanvasOperation[];
+  portable?: PortableTileStampImportPreview;
 }
 
 const PixelEnvelopeSchema = z.object({
@@ -77,6 +100,16 @@ const TileEnvelopeSchema = z.object({
   version: z.literal(1),
   kind: z.literal('tile'),
   tilesets: z.array(TilesetReferenceSchema).max(1_024),
+  stamps: z.unknown(),
+}).strict();
+
+const PortableTileEnvelopeSchema = z.object({
+  format: z.literal('aidraw-stamp-library'),
+  version: z.literal(2),
+  kind: z.literal('tile'),
+  palette: z.unknown(),
+  assets: z.array(z.unknown()).min(2).max(MAX_PORTABLE_STAMP_KIT_ASSETS),
+  tilesetIds: z.array(z.string().min(1)).min(1).max(MAX_PORTABLE_STAMP_KIT_TILESETS),
   stamps: z.unknown(),
 }).strict();
 
@@ -164,11 +197,25 @@ export function parseStampLibraryJson(text: string): StampLibraryBundle {
     return { ...envelope.data, palette: validatePalette(envelope.data.palette), stamps: validatePixelStamps(envelope.data.stamps) };
   }
   if (kind === 'tile') {
-    const envelope = TileEnvelopeSchema.safeParse(parsed);
-    if (!envelope.success) throw firstIssue(envelope, 'The tile stamp library envelope is invalid.');
-    const stamps = validateTileStamps(envelope.data.stamps);
-    assertTileStampReferences(stamps, envelope.data.tilesets);
-    return { ...envelope.data, tilesets: structuredClone(envelope.data.tilesets), stamps };
+    const version = (parsed as { version?: unknown }).version;
+    if (version === 1) {
+      const envelope = TileEnvelopeSchema.safeParse(parsed);
+      if (!envelope.success) throw firstIssue(envelope, 'The tile stamp library envelope is invalid.');
+      const stamps = validateTileStamps(envelope.data.stamps);
+      assertTileStampReferences(stamps, envelope.data.tilesets);
+      return { ...envelope.data, tilesets: structuredClone(envelope.data.tilesets), stamps };
+    }
+    if (version === 2) {
+      const envelope = PortableTileEnvelopeSchema.safeParse(parsed);
+      if (!envelope.success) throw firstIssue(envelope, 'The portable tile kit envelope is invalid.');
+      return validatePortableTileStampKit({
+        ...envelope.data,
+        palette: validatePalette(envelope.data.palette),
+        assets: envelope.data.assets as PortableTileStampKitBundle['assets'],
+        stamps: validateTileStamps(envelope.data.stamps),
+      });
+    }
+    throw new Error('Tile stamp library JSON uses an unsupported version.');
   }
   throw new Error('Stamp library JSON must declare pixel or tile stamps.');
 }
@@ -220,6 +267,11 @@ export function serializeTileStampLibrary(document: PixelDocument, map: PixelTil
   const tilesets = [...references.values()].sort((left, right) => left.firstGid - right.firstGid);
   assertTileStampReferences(stamps, tilesets);
   return serializeBundle({ format: 'aidraw-stamp-library', version: 1, kind: 'tile', tilesets, stamps });
+}
+
+export function serializePortableTileStampKit(document: PixelDocument, map: PixelTilemap): string {
+  const stamps = validateTileStamps(document.tileStamps);
+  return serializeBundle(createPortableTileStampKit(document, map, stamps));
 }
 
 function uniqueId(prefix: string, used: Set<string>, makeId: (prefix: string) => string): string {
@@ -295,10 +347,28 @@ export function prepareStampLibraryImport(
     const operations: CanvasOperation[] = [];
     if (palette.length !== document.palette.length) operations.push({ kind: 'pixel.palette.replace', palette });
     operations.push({ kind: 'pixel.stamps.replace', stamps: merged.stamps });
-    return { kind: 'pixel', mode, incomingCount: imported.length, totalCount: merged.stamps.length, importedIds: merged.importedIds, operations };
+    return {
+      kind: 'pixel', mode, formatVersion: 1,
+      expectedDocumentId: document.id, expectedDocumentRevision: document.revision,
+      incomingCount: imported.length, totalCount: merged.stamps.length,
+      importedIds: merged.importedIds, operations,
+    };
   }
   const map = options.map;
   if (!map) throw new Error('Choose a tilemap before importing a tile stamp library.');
+  if (bundle.version === 2) {
+    const portable = preparePortableTileStampKitImport(document, map, bundle, mode, { makeId: options.makeId });
+    return {
+      kind: 'tile', mode, formatVersion: 2,
+      expectedDocumentId: document.id, expectedDocumentRevision: document.revision,
+      expectedMapId: map.id, expectedMapRevision: map.revision,
+      incomingCount: bundle.stamps.length,
+      totalCount: mode === 'append' ? document.tileStamps.length + bundle.stamps.length : bundle.stamps.length,
+      importedIds: portable.importedIds,
+      operations: portable.operations,
+      portable: portable.preview,
+    };
+  }
   for (const reference of bundle.tilesets) assertTargetTilesetCompatibility(document, map, reference);
   for (const stamp of bundle.stamps) for (const cell of stamp.cells) {
     const { gid } = decodeTiledGid(cell.gid);
@@ -311,5 +381,12 @@ export function prepareStampLibraryImport(
   const merged = mode === 'append' ? appendTileStampCopies(document.tileStamps, imported, makeId) : { stamps: imported, importedIds: imported.map((stamp) => stamp.id) };
   const stampOperation = CanvasOperationSchema.safeParse({ kind: 'pixel.tile-stamps.replace', stamps: merged.stamps });
   if (!stampOperation.success) throw firstIssue(stampOperation, 'The imported tile stamp library is invalid.');
-  return { kind: 'tile', mode, incomingCount: imported.length, totalCount: merged.stamps.length, importedIds: merged.importedIds, operations: [{ kind: 'pixel.tile-stamps.replace', stamps: merged.stamps }] };
+  return {
+    kind: 'tile', mode, formatVersion: 1,
+    expectedDocumentId: document.id, expectedDocumentRevision: document.revision,
+    expectedMapId: map.id, expectedMapRevision: map.revision,
+    incomingCount: imported.length, totalCount: merged.stamps.length,
+    importedIds: merged.importedIds,
+    operations: [{ kind: 'pixel.tile-stamps.replace', stamps: merged.stamps }],
+  };
 }

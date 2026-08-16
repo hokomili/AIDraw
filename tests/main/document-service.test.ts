@@ -7,6 +7,7 @@ import { HUMAN_ACTOR, IDENTITY_TRANSFORM, applyTransaction, createId, createIllu
 import type { TransactionTraceEntry } from '@common/contracts';
 import { appendImageCollectionSource, createImageCollectionTileset, imageCollectionSourceDependencyGuards, removeUnusedImageCollectionSource, replaceImageCollectionSource, replaceImageCollectionTileMetadata } from '@common/image-collection-authoring';
 import { planTileObjectCreation } from '@common/tile-object-authoring';
+import { parseStampLibraryJson, prepareStampLibraryImport, serializePortableTileStampKit } from '@common/stamp-library-interchange';
 import { DocumentService, type NativeDocumentPreviewRenderer } from '@main/document-service';
 import { RecoveryJournal } from '@main/journal';
 import { writeNativeDocument } from '@main/persistence';
@@ -610,6 +611,68 @@ describe('document service collaboration semantics', () => {
     expect(current.activity.map(({ label }) => label)).toEqual(['Resize collection source first']);
     expect(current.pixelAssets[source3.id]).toMatchObject({ type: 'sprite', width: source3.width + 1, revision: source3.revision + 1 });
     expect(current.pixelAssets[tileset.id]).toMatchObject({ type: 'tileset', revision: tileset.revision, tiles: { 3: { probability: 0.5 } } });
+  });
+
+  it('atomically refuses a queued portable tile-kit plan after an earlier palette change, then admits a fresh import and undo', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-service-portable-stamp-kit-guard-'));
+    temporaryPaths.push(root);
+    const service = new DocumentService(new RecoveryJournal(root), '1.0.0');
+    services.push(service);
+
+    const source = createPixelDocument('project', 'Portable kit source');
+    source.assetIds = []; source.pixelAssets = {};
+    const sourceSprite = createPixelSprite('Portable source pixels', 16, 16);
+    const sourceTileset = createPixelTileset('Portable terrain', sourceSprite.id, 16, 16, 1, 1); sourceTileset.firstGid = 21;
+    const sourceMap = createPixelTilemap('Portable source map'); sourceMap.tilesetIds = [sourceTileset.id];
+    source.pixelAssets = { [sourceSprite.id]: sourceSprite, [sourceTileset.id]: sourceTileset, [sourceMap.id]: sourceMap };
+    source.assetIds = [sourceSprite.id, sourceTileset.id, sourceMap.id]; source.activeAssetId = sourceMap.id;
+    source.tileStamps = [{ id: 'portable-stamp', name: 'Portable stamp', width: 1, height: 1, anchorX: 0, anchorY: 0, cells: [{ x: 0, y: 0, gid: encodeTiledGid(21, { hFlip: true }) }] }];
+    const bundle = parseStampLibraryJson(serializePortableTileStampKit(source, sourceMap));
+
+    const document = createPixelDocument('project', 'Portable kit destination');
+    document.assetIds = []; document.pixelAssets = {};
+    const targetMap = createPixelTilemap('Portable target map');
+    document.assetIds = [targetMap.id]; document.pixelAssets = { [targetMap.id]: targetMap }; document.activeAssetId = targetMap.id;
+    service.addDocument(document);
+    let sequence = 0;
+    const makeId = (prefix: string) => `${prefix}-queued-${++sequence}`;
+    const stalePlan = prepareStampLibraryImport(document, bundle, 'append', { map: targetMap, makeId });
+    const palette = [...document.palette, { id: 'queued-palette-entry', name: 'Queued color', color: '#123456' }];
+    const paletteWrite = service.apply({
+      id: createId('tx'), clientOperationId: createId('human-op'), documentId: document.id, expectedDocumentRevision: document.revision, actor: HUMAN_ACTOR,
+      label: 'Change palette before portable import', createdAt: nowIso(), operations: [{ kind: 'pixel.palette.replace', palette }],
+    });
+    const staleImport = service.apply({
+      id: createId('tx'), clientOperationId: createId('human-op'), documentId: stalePlan.expectedDocumentId,
+      expectedDocumentRevision: stalePlan.expectedDocumentRevision, actor: HUMAN_ACTOR,
+      label: 'Import stale portable tile kit', createdAt: nowIso(), operations: stalePlan.operations,
+    });
+    const [paletteResponse, staleResponse] = await Promise.all([paletteWrite, staleImport]);
+    expect(paletteResponse).toMatchObject({ status: 'committed', revision: document.revision + 1 });
+    expect(staleResponse).toMatchObject({ status: 'conflict', conflict: { entityId: document.id, expectedRevision: document.revision, actualRevision: document.revision + 1, retryable: true } });
+    const afterConflict = service.getDocument(document.id); if (!afterConflict || afterConflict.kind !== 'pixel') throw new Error('Expected pixel document');
+    expect(afterConflict.assetIds).toEqual([targetMap.id]);
+    expect((afterConflict.pixelAssets[targetMap.id] as ReturnType<typeof createPixelTilemap>).tilesetIds).toEqual([]);
+    expect(afterConflict.tileStamps).toEqual([]);
+    expect(afterConflict.activity.map(({ label }) => label)).toEqual(['Change palette before portable import']);
+    expect(service.getChanges(document.id, document.revision)).toHaveLength(1);
+
+    const freshMap = afterConflict.pixelAssets[targetMap.id]; if (freshMap.type !== 'tilemap') throw new Error('Expected target map');
+    const freshPlan = prepareStampLibraryImport(afterConflict, bundle, 'append', { map: freshMap, makeId });
+    expect(await service.apply({
+      id: createId('tx'), clientOperationId: createId('human-op'), documentId: freshPlan.expectedDocumentId,
+      expectedDocumentRevision: freshPlan.expectedDocumentRevision, actor: HUMAN_ACTOR,
+      label: 'Import current portable tile kit', createdAt: nowIso(), operations: freshPlan.operations,
+    })).toMatchObject({ status: 'committed', revision: document.revision + 2 });
+    const imported = service.getDocument(document.id); if (!imported || imported.kind !== 'pixel') throw new Error('Expected pixel document');
+    expect(imported.tileStamps).toHaveLength(1);
+    expect(imported.assetIds.length).toBeGreaterThan(afterConflict.assetIds.length);
+    expect(await service.undo(document.id)).toMatchObject({ status: 'committed', revision: document.revision + 3 });
+    const undone = service.getDocument(document.id); if (!undone || undone.kind !== 'pixel') throw new Error('Expected pixel document');
+    expect(undone.assetIds).toEqual(afterConflict.assetIds);
+    expect((undone.pixelAssets[targetMap.id] as ReturnType<typeof createPixelTilemap>).tilesetIds).toEqual([]);
+    expect(undone.tileStamps).toEqual([]);
+    expect(undone.palette).toEqual(afterConflict.palette);
   });
 
   it('atomically refuses queued collection tile-object placement after an earlier source-sprite change', async () => {

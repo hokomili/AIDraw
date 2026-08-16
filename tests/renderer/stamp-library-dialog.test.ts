@@ -23,11 +23,11 @@ describe('stamp library dialog', () => {
     expect(markup).toContain('16 MiB · 262,144 cells');
     expect(markup).toContain('checked=""');
     expect(markup).toContain('Add copies');
-    expect(markup).toContain('Replace library');
+    expect(markup).toContain('Replace stamp library');
     expect(markup).toContain('Preview import');
   });
 
-  it('states that tile transfer requires exact shared assets and does not bundle or rebase them', () => {
+  it('offers exact-reference predecessor JSON and a deliberate bounded portable-copy workflow', () => {
     const document = createPixelDocument('sprite', 'Tile stamp target');
     const map = createPixelTilemap('Map');
     const markup = renderToStaticMarkup(createElement(StampLibraryDialog, {
@@ -37,9 +37,16 @@ describe('stamp library dialog', () => {
       onClose: () => undefined,
     }));
     expect(markup).toContain('Tile stamp library JSON');
-    expect(markup).toContain('exact exported tileset and source-sprite identities, revisions, GID ranges, and geometry');
-    expect(markup).toContain('Tileset pixels are not bundled or rebased.');
-    expect(markup).toContain('Remove the current tile stamps and preserve the imported library IDs.');
+    expect(markup).toContain('Version 1 exact-reference JSON keeps predecessor clone/shared-project behavior.');
+    expect(markup).toContain('A reviewed version 2 portable kit carries every and only required tilesets and sprite sources.');
+    expect(markup).toContain('Byte-identical tilesets reuse only when already attached');
+    expect(markup).toContain('preserve every existing cell, tile-object, and retained-stamp GID meaning');
+    expect(markup).toContain('Existing assets, maps, cells, and source projects are never rewritten or deleted.');
+    expect(markup).toContain('Copy portable kit');
+    expect(markup).toContain('Copy exact-reference JSON');
+    expect(markup).toContain('128 assets, 64 tilesets, 4,194,304 logical/stored source pixels');
+    expect(markup).toContain('1,500,000 planned bytes/256 operations');
+    expect(markup).toContain('Replace only the current tile stamps. Existing project assets, maps, cells, and sources remain.');
   });
 
   it('wires one previewed operation plan into the existing atomic document transaction', async () => {
@@ -48,13 +55,19 @@ describe('stamp library dialog', () => {
     expect(canvasSource).toContain('<StampLibraryDialog');
     expect(canvasSource).toContain('plan.operations');
     expect(canvasSource).toContain('Import reusable ${plan.kind} stamp library');
+    expect(canvasSource).toContain('plan.expectedDocumentId');
+    expect(canvasSource).toContain('plan.expectedDocumentRevision');
     expect(canvasSource).toContain('setActiveStampId(activeId)');
     expect(canvasSource).toContain('setActiveTileStampId(activeId)');
     expect(dialogSource).toContain('prepareStampLibraryImport(document, bundle, mode, { map })');
-    expect(dialogSource).toContain('previewRevision !== document.revision');
+    expect(dialogSource).toContain('plan.expectedDocumentRevision !== document.revision');
     expect(dialogSource).toContain('The document changed after preview. Preview again before applying.');
-    expect(dialogSource).toContain('const currentPlan = buildPlan()');
-    expect(dialogSource).toContain('if (await onApply(currentPlan)) onClose()');
+    expect(dialogSource).not.toContain('const currentPlan = buildPlan()');
+    expect(dialogSource).toContain('if (await onApply(plan)) onClose()');
+    expect(dialogSource).toContain('Apply uses this frozen, document-bound preview.');
+    expect(dialogSource).toContain('sourceFirstGid');
+    expect(dialogSource).toContain('sourceAssetId');
+    expect(dialogSource).toContain('mapAttachments');
     expect(dialogSource).toContain('No document operation has run yet.');
   });
 });

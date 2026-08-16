@@ -1939,7 +1939,12 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
         document={document}
         map={tilemap}
         onApply={async (plan) => {
-          const applied = await apply(`Import reusable ${plan.kind} stamp library`, plan.operations);
+          const applied = await applyToActiveDocument(
+            `Import reusable ${plan.kind} stamp library`,
+            plan.operations,
+            plan.expectedDocumentId,
+            plan.expectedDocumentRevision,
+          );
           if (applied) {
             const activeId = plan.importedIds.at(-1);
             if (plan.kind === 'pixel') setActiveStampId(activeId);
