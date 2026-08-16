@@ -96,7 +96,9 @@ import {
   createPixelTilemap,
   createPixelTileset,
   decodeTiledGid,
+  imageCollectionTilemapModeError,
   illustrationAtTime,
+  nextTilesetFirstGid,
   nowIso,
   resolveTilesetForGid,
   resizePixelSpriteCanvas,
@@ -3631,6 +3633,13 @@ function PixelLayers({ document }: { document: PixelDocument }) {
         expectedRevision: asset.revision,
       },
     ]);
+  const updateMapMode = (next: typeof asset, label: string) => {
+    if (next.type === "tilemap") {
+      const error = imageCollectionTilemapModeError(document, next);
+      if (error) { notify(error, "warning"); return; }
+    }
+    updateAsset(next, label);
+  };
   const updateLayer = (
     layer: PixelLayer | TilemapLayer,
     patch: Partial<PixelLayer | TilemapLayer>,
@@ -3777,8 +3786,8 @@ function PixelLayers({ document }: { document: PixelDocument }) {
           <label className="field"><span>Height</span><input key={"map-height-" + asset.height} type="number" min="1" max="1048576" defaultValue={asset.height} onBlur={(event) => { const height = Math.max(1, Math.round(Number(event.target.value))); if (height !== asset.height) updateAsset({ ...asset, height }, "Resize tilemap height"); }} /></label>
           <label className="field"><span>Tile width</span><input key={"map-tile-width-" + asset.tileWidth} type="number" min="1" max="1024" defaultValue={asset.tileWidth} onBlur={(event) => { const tileWidth = Math.max(1, Math.round(Number(event.target.value))); if (tileWidth !== asset.tileWidth) updateAsset({ ...asset, tileWidth }, "Change map tile width"); }} /></label>
           <label className="field"><span>Tile height</span><input key={"map-tile-height-" + asset.tileHeight} type="number" min="1" max="1024" defaultValue={asset.tileHeight} onBlur={(event) => { const tileHeight = Math.max(1, Math.round(Number(event.target.value))); if (tileHeight !== asset.tileHeight) updateAsset({ ...asset, tileHeight }, "Change map tile height"); }} /></label>
-          <label className="field"><span>Orientation</span><select value={asset.orientation} onChange={(event) => updateAsset({ ...asset, orientation: event.target.value as typeof asset.orientation }, "Change map orientation")}><option value="orthogonal">Orthogonal</option><option value="isometric">Isometric</option></select></label>
-          <label className="map-infinite-toggle"><input type="checkbox" checked={asset.infinite} onChange={(event) => updateAsset({ ...asset, infinite: event.target.checked }, event.target.checked ? "Enable infinite map" : "Use finite map")} /><span>Infinite 32×32 chunks</span></label>
+          <label className="field"><span>Orientation</span><select value={asset.orientation} onChange={(event) => updateMapMode({ ...asset, orientation: event.target.value as typeof asset.orientation }, "Change map orientation")}><option value="orthogonal">Orthogonal</option><option value="isometric">Isometric</option></select></label>
+          <label className="map-infinite-toggle"><input type="checkbox" checked={asset.infinite} onChange={(event) => updateMapMode({ ...asset, infinite: event.target.checked }, event.target.checked ? "Enable infinite map" : "Use finite map")} /><span>Infinite 32×32 chunks</span></label>
         </div>
         <div className="section-heading"><span>Map properties</span></div>
         <div className="tile-property-add"><input aria-label="Map property name" placeholder="name" value={mapPropertyName} onChange={(event) => setMapPropertyName(event.target.value)} /><input aria-label="Map property value" placeholder="value" value={mapPropertyValue} onChange={(event) => setMapPropertyValue(event.target.value)} /><button disabled={!mapPropertyName.trim()} onClick={() => { const value = mapPropertyValue === "true" ? true : mapPropertyValue === "false" ? false : mapPropertyValue.trim() !== "" && Number.isFinite(Number(mapPropertyValue)) ? Number(mapPropertyValue) : mapPropertyValue; updateAsset({ ...asset, properties: { ...asset.properties, [mapPropertyName.trim()]: value } }, "Set map property"); setMapPropertyName(""); setMapPropertyValue(""); }}>Add</button></div>
@@ -3969,6 +3978,14 @@ function TilesetPanel({
   const [propertyValue, setPropertyValue] = useState("");
   const [selectedWangSetId, setSelectedWangSetId] = useState<string>();
   const [drawingOffsetDraft, setDrawingOffsetDraft] = useState<{ tilesetId: string; revision: number; x: string; y: string }>();
+  if (!tileset.spriteAssetId) {
+    const tiles = Object.values(tileset.tiles).sort((left, right) => left.id - right.id);
+    return <div className="tileset-panel">
+      <div className="asset-heading"><span className="asset-kind tileset"><Grid3X3 size={15} /></span><span><strong>{tileset.name}</strong><small>Image collection · {tiles.length} sparse PNG tile{tiles.length === 1 ? "" : "s"} · {tileset.columns} display column{tileset.columns === 1 ? "" : "s"}</small></span></div>
+      <p className="tileset-slice-summary">Imported per-tile artwork remains individually sourced. This checkpoint renders and re-exports finite orthogonal tile layers; atlas slicing, terrain authoring, and tile-object artwork stay unavailable for image collections.</p>
+      <div className="section-heading"><span>Preserved local tile IDs</span><small>{tiles.map((tile) => tile.id).join(", ")}</small></div>
+    </div>;
+  }
   const replace = (next: PixelTileset, label: string) =>
     void apply(label, [
       {
@@ -5610,13 +5627,12 @@ function AssetsPanel({ document }: { document: AIDrawDocument }) {
       columns,
       rows,
     );
-    tileset.firstGid = assets
-      .filter((asset) => asset.type === "tileset")
-      .reduce(
-        (next, asset) =>
-          Math.max(next, asset.firstGid + asset.columns * asset.rows),
-        1,
-      );
+    try {
+      tileset.firstGid = nextTilesetFirstGid(assets.filter((asset): asset is PixelTileset => asset.type === "tileset"));
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "No safe Tiled GID range remains for another tileset.", "warning");
+      return;
+    }
     operations.push({ kind: "pixel.asset.add", asset: tileset });
     void apply("Add tileset", operations);
   };

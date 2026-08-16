@@ -7,6 +7,7 @@ import {
   createId,
   createIllustrationDocument,
   createPixelDocument,
+  createPixelSprite,
   createPixelTilemap,
   createPixelTileset,
   duplicatePixelFrame,
@@ -42,6 +43,30 @@ function shapeTransaction(documentId: string, layerId: string, expectedRevision?
 }
 
 describe('transaction reducer', () => {
+  it('refuses image-collection maps outside finite orthogonal mode before canonical mutation', () => {
+    const document = createPixelDocument('project', 'Collection mode guard');
+    const tileImage = createPixelSprite('Sparse tile', 2, 2);
+    const collection = createPixelTileset('Sparse collection', tileImage.id, 2, 2, 1, 1);
+    delete collection.spriteAssetId; collection.columns = 2; collection.rows = 0;
+    collection.tiles = { 3: { id: 3, sourceX: 0, sourceY: 0, imageAssetId: tileImage.id, probability: 1, animation: [], collisions: [], properties: {} } };
+    const map = createPixelTilemap('Finite orthogonal map'); map.tilesetIds = [collection.id];
+    document.pixelAssets = { [tileImage.id]: tileImage, [collection.id]: collection, [map.id]: map };
+    document.assetIds = [tileImage.id, collection.id, map.id]; document.activeAssetId = map.id;
+    const before = structuredClone(document);
+    const replace = (asset: typeof map, label: string): CanvasTransaction => ({
+      id: createId('tx'), clientOperationId: createId('op'), documentId: document.id, actor: HUMAN_ACTOR, label, createdAt: nowIso(),
+      operations: [{ kind: 'pixel.asset.replace', asset, expectedRevision: map.revision }],
+    });
+
+    expect(() => applyTransaction(document, replace({ ...map, orientation: 'isometric' }, 'Use isometric mode'))).toThrow(/must remain finite orthogonal/);
+    expect(() => applyTransaction(document, replace({ ...map, infinite: true }, 'Enable infinite chunks'))).toThrow(/must remain finite orthogonal/);
+    expect(document).toEqual(before);
+
+    const applied = applyTransaction(document, replace({ ...map, width: map.width + 1 }, 'Resize finite map'));
+    if (applied.document.kind !== 'pixel') throw new Error('Expected pixel document');
+    expect(applied.document.pixelAssets[map.id]).toMatchObject({ width: map.width + 1, orientation: 'orthogonal', infinite: false });
+  });
+
   it('authors a tilemap layer offset through one revisioned replacement with an exact inverse', () => {
     const document = createPixelDocument('tilemap', 'Layer offset history'); const map = document.pixelAssets[document.activeAssetId];
     if (map.type !== 'tilemap') throw new Error('Expected tilemap'); const layer = map.layers[map.layerIds[0]];

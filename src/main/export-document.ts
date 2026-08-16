@@ -8,6 +8,7 @@ import {
   illustrationAnimationSamples,
   illustrationAtTime,
   cycledPaletteIndex,
+  isImageCollectionTileset,
   normalizeTextStyleRanges,
   pixelAnimationSequence,
   validatePaletteCycle,
@@ -794,8 +795,31 @@ function tiledMapObjectJson(object: MapObject, objectIds: TiledObjectIdAllocator
   };
 }
 
-function tilesetJson(document: PixelDocument, tileset: PixelTileset, image: string | undefined, objectIds: TiledObjectIdAllocator) {
-  const sprite = document.pixelAssets[tileset.spriteAssetId];
+function tiledImageKey(tilesetId: string, tileId?: number): string {
+  return tileId === undefined ? tilesetId : `${tilesetId}\0${tileId}`;
+}
+
+function tilesetJson(document: PixelDocument, tileset: PixelTileset, images: Record<string, string>, objectIds: TiledObjectIdAllocator) {
+  if (isImageCollectionTileset(tileset)) {
+    const tiles = Object.values(tileset.tiles).sort((left, right) => left.id - right.id).map((tile) => {
+      const sprite = tile.imageAssetId ? document.pixelAssets[tile.imageAssetId] : undefined;
+      if (sprite?.type !== 'sprite') throw new Error(`Tiled image-collection tile ${tile.id} is missing its source sprite.`);
+      const image = images[tiledImageKey(tileset.id, tile.id)];
+      if (!image) throw new Error(`Tiled image-collection tile ${tile.id} is missing its planned PNG companion.`);
+      return { id: tile.id, image, imagewidth: sprite.width, imageheight: sprite.height, probability: tile.probability, animation: tile.animation.map((frame) => ({ tileid: frame.tileId, duration: frame.durationMs })), properties: tiledPropertyJson(tile.properties), objectgroup: tile.collisions.length ? { draworder: 'index', objects: tile.collisions.map((shape) => tiledObjectJson(shape, objectIds)) } : undefined };
+    });
+    return {
+      type: 'tileset', version: '1.10', tiledversion: '1.11.2', name: tileset.name, tilewidth: tileset.tileWidth, tileheight: tileset.tileHeight, margin: 0, spacing: 0,
+      tileoffset: tileset.tileOffset.x || tileset.tileOffset.y ? { x: tileset.tileOffset.x, y: tileset.tileOffset.y } : undefined,
+      objectalignment: tileset.objectAlignment === 'unspecified' ? undefined : tileset.objectAlignment,
+      tilecount: tiles.length, columns: tileset.columns,
+      transformations: { hflip: tileset.transformations.hFlip, vflip: tileset.transformations.vFlip, rotate: tileset.transformations.rotate, preferuntransformed: false },
+      tiles,
+      wangsets: [],
+    };
+  }
+  const sprite = tileset.spriteAssetId ? document.pixelAssets[tileset.spriteAssetId] : undefined;
+  const image = images[tiledImageKey(tileset.id)];
   return {
     type: 'tileset', version: '1.10', tiledversion: '1.11.2', name: tileset.name, tilewidth: tileset.tileWidth, tileheight: tileset.tileHeight, margin: tileset.margin, spacing: tileset.spacing,
     tileoffset: tileset.tileOffset.x || tileset.tileOffset.y ? { x: tileset.tileOffset.x, y: tileset.tileOffset.y } : undefined,
@@ -842,7 +866,7 @@ function tilemapToTiledWithObjectIds(document: PixelDocument, map: PixelTilemap,
     type: 'map', version: '1.10', tiledversion: '1.11.2', orientation: map.orientation, renderorder: 'right-down', infinite: map.infinite,
     width: map.width, height: map.height, tilewidth: map.tileWidth, tileheight: map.tileHeight,
     properties: tiledPropertyJson(map.properties),
-    tilesets: plan.tilesets.map(({ tileset }) => ({ firstgid: tileset.firstGid, ...tilesetJson(document, tileset, images[tileset.id], objectIds) })),
+    tilesets: plan.tilesets.map(({ tileset }) => ({ firstgid: tileset.firstGid, ...tilesetJson(document, tileset, images, objectIds) })),
     layers: map.layerIds.map(layerJson),
   };
 }
@@ -868,8 +892,20 @@ function mapObjectXml(object: MapObject, objectIds: TiledObjectIdAllocator): str
   return `<object id="${objectIds.next(object.id)}" name="${xml(object.name)}" type="${xml(object.className)}" gid="${object.gid}" x="${object.x}" y="${object.y}" width="${object.width}" height="${object.height}"${object.rotation ? ` rotation="${object.rotation}"` : ''}>${tiledPropertyXml(object.properties)}</object>`;
 }
 
-function tilesetXml(document: PixelDocument, tileset: PixelTileset, image: string, objectIds: TiledObjectIdAllocator): string {
-  const sprite = document.pixelAssets[tileset.spriteAssetId];
+function tilesetXml(document: PixelDocument, tileset: PixelTileset, images: Record<string, string>, objectIds: TiledObjectIdAllocator): string {
+  if (isImageCollectionTileset(tileset)) {
+    const tileOffset = tileset.tileOffset.x || tileset.tileOffset.y ? `<tileoffset x="${tileset.tileOffset.x}" y="${tileset.tileOffset.y}"/>` : '';
+    const tiles = Object.values(tileset.tiles).sort((left, right) => left.id - right.id).map((tile) => {
+      const sprite = tile.imageAssetId ? document.pixelAssets[tile.imageAssetId] : undefined;
+      if (sprite?.type !== 'sprite') throw new Error(`Tiled image-collection tile ${tile.id} is missing its source sprite.`);
+      const image = images[tiledImageKey(tileset.id, tile.id)];
+      if (!image) throw new Error(`Tiled image-collection tile ${tile.id} is missing its planned PNG companion.`);
+      return `<tile id="${tile.id}" probability="${tile.probability}">${tiledPropertyXml(tile.properties)}<image source="${xml(image)}" width="${sprite.width}" height="${sprite.height}"/>${tile.collisions.length ? `<objectgroup>${tile.collisions.map((shape) => collisionXml(shape, objectIds)).join('')}</objectgroup>` : ''}${tile.animation.length ? `<animation>${tile.animation.map((frame) => `<frame tileid="${frame.tileId}" duration="${frame.durationMs}"/>`).join('')}</animation>` : ''}</tile>`;
+    }).join('');
+    return `<tileset version="1.10" tiledversion="1.11.2" name="${xml(tileset.name)}" tilewidth="${tileset.tileWidth}" tileheight="${tileset.tileHeight}" margin="0" spacing="0" tilecount="${Object.keys(tileset.tiles).length}" columns="${tileset.columns}"${tileset.objectAlignment === 'unspecified' ? '' : ` objectalignment="${tileset.objectAlignment}"`}>${tileOffset}<transformations hflip="${Number(tileset.transformations.hFlip)}" vflip="${Number(tileset.transformations.vFlip)}" rotate="${Number(tileset.transformations.rotate)}" preferuntransformed="0"/>${tiles}</tileset>`;
+  }
+  const sprite = tileset.spriteAssetId ? document.pixelAssets[tileset.spriteAssetId] : undefined;
+  const image = images[tiledImageKey(tileset.id)];
   const tiles = Object.values(tileset.tiles).filter((tile) => tile.probability !== 1 || tile.animation.length || tile.collisions.length || Object.keys(tile.properties).length).map((tile) => `<tile id="${tile.id}" probability="${tile.probability}">${tiledPropertyXml(tile.properties)}${tile.animation.length ? `<animation>${tile.animation.map((frame) => `<frame tileid="${frame.tileId}" duration="${frame.durationMs}"/>`).join('')}</animation>` : ''}${tile.collisions.length ? `<objectgroup>${tile.collisions.map((shape) => collisionXml(shape, objectIds)).join('')}</objectgroup>` : ''}</tile>`).join('');
   const wangsets = tileset.wangSets.length ? `<wangsets>${tileset.wangSets.map((set) => `<wangset name="${xml(set.name)}" type="${set.type}">${set.colors.map((color) => `<wangcolor name="${xml(color.name)}" color="${xml(color.color)}" tile="${color.tileId}" probability="${color.probability}"/>`).join('')}${set.tiles.map((tile) => `<wangtile tileid="${tile.tileId}" wangid="${tile.wangId.join(',')}"/>`).join('')}</wangset>`).join('')}</wangsets>` : '';
   const tileOffset = tileset.tileOffset.x || tileset.tileOffset.y ? `<tileoffset x="${tileset.tileOffset.x}" y="${tileset.tileOffset.y}"/>` : '';
@@ -887,7 +923,7 @@ function tilemapXml(document: PixelDocument, map: PixelTilemap, images: Record<s
     if (data.infinite) return `<layer ${common} width="${map.width}" height="${map.height}"><data encoding="csv">${data.chunks.map((chunk) => `<chunk x="${chunk.x}" y="${chunk.y}" width="${chunk.width}" height="${chunk.height}">${chunk.data.join(',')}</chunk>`).join('')}</data></layer>`;
     return `<layer ${common} width="${map.width}" height="${map.height}"><data encoding="csv">${data.data.join(',')}</data></layer>`;
   };
-  const tilesets = plan.tilesets.map(({ tileset }) => tilesetXml(document, tileset, images[tileset.id], objectIds).replace('<tileset ', `<tileset firstgid="${tileset.firstGid}" `)).join('');
+  const tilesets = plan.tilesets.map(({ tileset }) => tilesetXml(document, tileset, images, objectIds).replace('<tileset ', `<tileset firstgid="${tileset.firstGid}" `)).join('');
   return `<?xml version="1.0" encoding="UTF-8"?><map version="1.10" tiledversion="1.11.2" orientation="${map.orientation}" renderorder="right-down" infinite="${Number(map.infinite)}" width="${map.width}" height="${map.height}" tilewidth="${map.tileWidth}" tileheight="${map.tileHeight}">${tiledPropertyXml(map.properties)}${tilesets}${map.layerIds.map(layerXml).join('')}</map>`;
 }
 
@@ -897,17 +933,17 @@ async function tiled(document: PixelDocument, format: 'tiled-json' | 'tiled-xml'
   const references = mapPlan ?? planTiledExportReferences(document, active);
   const objectIds = tiledObjectIds(active, references);
   const companionPlan = planTiledExportCompanions(document) ?? []; const images: Record<string, string> = {}; const companions: NonNullable<ExportArtifact['companions']> = [];
-  for (const planned of companionPlan) images[planned.tilesetId] = planned.name;
+  for (const planned of companionPlan) images[tiledImageKey(planned.tilesetId, planned.tileId)] = planned.name;
   let body: string;
   if (active.type === 'tileset') {
-    body = format === 'tiled-json' ? JSON.stringify(tilesetJson(document, active, images[active.id], objectIds), null, 2) : `<?xml version="1.0" encoding="UTF-8"?>${tilesetXml(document, active, images[active.id], objectIds)}`;
+    body = format === 'tiled-json' ? JSON.stringify(tilesetJson(document, active, images, objectIds), null, 2) : `<?xml version="1.0" encoding="UTF-8"?>${tilesetXml(document, active, images, objectIds)}`;
   } else {
     body = format === 'tiled-json' ? JSON.stringify(tilemapToTiledWithObjectIds(document, active, images, objectIds, mapPlan!), null, 2) : tilemapXml(document, active, images, objectIds, mapPlan!);
   }
   for (const planned of companionPlan) {
-    const reference = references.tilesets.find(({ tileset }) => tileset.id === planned.tilesetId);
-    if (!reference) throw new Error(`Tiled export map references missing tileset ${planned.tilesetId}.`);
-    companions.push({ name: planned.name, extension: planned.extension, mimeType: planned.mimeType, data: renderSprite(document, reference.sprite).toBuffer('image/png') });
+    const source = document.pixelAssets[planned.spriteAssetId];
+    if (source?.type !== 'sprite') throw new Error(`Tiled export companion ${planned.name} is missing its source sprite.`);
+    companions.push({ name: planned.name, extension: planned.extension, mimeType: planned.mimeType, data: renderSprite(document, source).toBuffer('image/png') });
   }
   const map = active.type === 'tilemap';
   return { data: Buffer.from(body), mimeType: format === 'tiled-json' ? 'application/json' : 'application/xml', extension: map ? (format === 'tiled-json' ? 'tmj' : 'tmx') : (format === 'tiled-json' ? 'tsj' : 'tsx'), companions, report: { warnings: [], rasterized: [] } };

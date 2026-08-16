@@ -1,5 +1,5 @@
 import { dirname, extname, join } from 'node:path';
-import type { AIDrawDocument, PixelTileset } from '@aidraw/core';
+import { isImageCollectionTileset, type AIDrawDocument, type PixelTileset } from '@aidraw/core';
 import type { ExportFormat } from '../common/contracts';
 import { planTiledExportReferences } from '../common/tiled-export-integrity';
 import { MAX_EXPORT_UTILITY_MEMBERS } from './utility-resource-policy';
@@ -18,6 +18,8 @@ export interface ExpectedExportArtifactIdentity {
 
 export interface PlannedTiledCompanion extends ExportArtifactMemberIdentity {
   tilesetId: string;
+  tileId?: number;
+  spriteAssetId: string;
   name: string;
 }
 
@@ -50,12 +52,12 @@ export function planTiledExportCompanions(document: AIDrawDocument): PlannedTile
   const companions: PlannedTiledCompanion[] = [];
   const reserved = new Set<string>();
   const nextSuffix = new Map<string, number>();
-  for (const tileset of tilesets) {
+  const append = (tileset: PixelTileset, spriteAssetId: string, label: string, tileId?: number) => {
     if (companions.length >= MAX_TILED_EXPORT_COMPANIONS) {
       throw new RangeError(`Tiled export exceeds the ${MAX_TILED_EXPORT_COMPANIONS.toLocaleString('en-US')}-companion-image safety limit.`);
     }
     const extension = 'png';
-    const baseName = safeTiledAssetName(tileset.name, extension);
+    const baseName = safeTiledAssetName(label, extension);
     const baseKey = foldedTiledAssetKey(baseName);
     let name = baseName;
     let suffix = nextSuffix.get(baseKey) ?? 2;
@@ -65,7 +67,18 @@ export function planTiledExportCompanions(document: AIDrawDocument): PlannedTile
     }
     nextSuffix.set(baseKey, suffix);
     reserved.add(foldedTiledAssetKey(name));
-    companions.push({ tilesetId: tileset.id, name, extension, mimeType: 'image/png' });
+    companions.push({ tilesetId: tileset.id, ...(tileId === undefined ? {} : { tileId }), spriteAssetId, name, extension, mimeType: 'image/png' });
+  };
+  for (const tileset of tilesets) {
+    if (isImageCollectionTileset(tileset)) {
+      for (const tile of Object.values(tileset.tiles).sort((left, right) => left.id - right.id)) {
+        if (!tile.imageAssetId) throw new Error(`Tiled image-collection tile ${tile.id} is missing its source sprite.`);
+        append(tileset, tile.imageAssetId, `${tileset.name} tile ${tile.id}`, tile.id);
+      }
+      continue;
+    }
+    if (!tileset.spriteAssetId) throw new Error(`Tiled export tileset “${tileset.name}” is missing its source sprite.`);
+    append(tileset, tileset.spriteAssetId, tileset.name);
   }
   return companions;
 }

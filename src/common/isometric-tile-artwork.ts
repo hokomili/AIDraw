@@ -148,7 +148,7 @@ export function isometricMapTileArtworkEnvelope(
   const artworkSizes: IsometricTileArtworkSize[] = [];
   for (const id of map.tilesetIds) {
     const asset = document.pixelAssets[id];
-    const source = asset?.type === 'tileset' ? document.pixelAssets[asset.spriteAssetId] : undefined;
+    const source = asset?.type === 'tileset' && asset.spriteAssetId ? document.pixelAssets[asset.spriteAssetId] : undefined;
     if (asset?.type === 'tileset' && source?.type === 'sprite') artworkSizes.push({ width: asset.tileWidth, height: asset.tileHeight, offset: asset.tileOffset });
   }
   return isometricTileArtworkEnvelope(map.tileWidth, map.tileHeight, artworkSizes);

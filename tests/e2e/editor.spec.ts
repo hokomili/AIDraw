@@ -3397,6 +3397,7 @@ test('QA-06-TILED-RT closes an exact packaged supported orthogonal TMJ companion
     if (layer.type !== 'tile' || !layer.chunks) throw new Error('The canonical QA-06 Tiled layer is unavailable.');
     const tileset = document.pixelAssets[map.tilesetIds[0]];
     if (tileset?.type !== 'tileset') throw new Error('The canonical QA-06 Tiled tileset is unavailable.');
+    if (!tileset.spriteAssetId) throw new Error('The canonical QA-06 Tiled tileset is not atlas-backed.');
     const sprite = document.pixelAssets[tileset.spriteAssetId];
     if (sprite?.type !== 'sprite') throw new Error('The canonical QA-06 Tiled tileset pixels are unavailable.');
     return {
@@ -3684,6 +3685,7 @@ test('QA-06-TILED-RT closes an exact packaged supported orthogonal TMJ companion
     expect(importedSemantics).toEqual(firstSemantics);
     const importedTileset = importedDocument.pixelAssets[importedMap.tilesetIds[0]];
     if (importedTileset?.type !== 'tileset') throw new Error('The imported QA-06 Tiled tileset is unavailable.');
+    if (!importedTileset.spriteAssetId) throw new Error('The imported QA-06 Tiled tileset is not atlas-backed.');
     const importedSprite = importedDocument.pixelAssets[importedTileset.spriteAssetId];
     if (importedSprite?.type !== 'sprite') throw new Error('The imported QA-06 Tiled companion pixels are unavailable.');
     const importedSpriteObserved = await call('canvas_observe', { documentId: importedDocument.id, includePng: true, assetId: importedSprite.id, scale: 1, background: 'transparent' });

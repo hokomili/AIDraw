@@ -11,7 +11,7 @@ import type {
 import type { CanvasOperation, CanvasTransaction } from './operations';
 import { TransactionConflictError } from './operations';
 import { createId, nowIso } from './ids';
-import { remapPixelCelIndices, writePixelRuns, writePixels, writeTileRuns, writeTiles } from './pixel';
+import { assertImageCollectionTilemapModes, remapPixelCelIndices, writePixelRuns, writePixels, writeTileRuns, writeTiles } from './pixel';
 import { findDocumentAssetReferences } from './references';
 import { resolvePixelCel } from './animation';
 import {
@@ -647,6 +647,7 @@ function applyOperation(
       pixel.pixelAssets[operation.asset.id] = structuredClone(operation.asset);
       const index = Math.max(0, Math.min(operation.index ?? pixel.assetIds.length, pixel.assetIds.length));
       pixel.assetIds.splice(index, 0, operation.asset.id);
+      assertImageCollectionTilemapModes(pixel);
       return { kind: 'pixel.asset.delete', assetId: operation.asset.id, expectedRevision: operation.asset.revision };
     }
     case 'pixel.asset.replace': {
@@ -658,6 +659,7 @@ function applyOperation(
       const previous = structuredClone(current);
       pixel.pixelAssets[current.id] = structuredClone(operation.asset);
       touch(pixel.pixelAssets[current.id], timestamp);
+      assertImageCollectionTilemapModes(pixel);
       return {
         kind: 'pixel.asset.replace',
         asset: previous,

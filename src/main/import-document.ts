@@ -11,7 +11,9 @@ import {
   MAX_ILLUSTRATION_TEXT_LENGTH,
   MAX_TILEMAP_LAYER_OFFSET,
   MAX_TILESET_DRAWING_OFFSET,
+  TILED_GID_MASK,
   decodeTiledGid,
+  decodeTilemapChunk,
   createId,
   createIllustrationDocument,
   createPixelDocument,
@@ -20,6 +22,8 @@ import {
   migrateDocument,
   nowIso,
   resolveTilesetForGid,
+  isImageCollectionTileset,
+  tilesetLocalIdSpan,
   writePixels,
   writeTiles,
   type AIDrawDocument,
@@ -34,6 +38,7 @@ import {
   type PixelLayer,
   type PixelSprite,
   type PixelTilemap,
+  type PixelTileset,
   type TextObject,
   type TextStyleRange,
   type TileDefinition,
@@ -74,6 +79,8 @@ const INVALID_CANONICAL_PSD_ERROR = "PSD import produced content outside AIDraw'
 const PSD_TEXT_TRANSFER_LIMIT_ERROR = `PSD editable text exceeds the ${Math.floor(MAX_IMPORT_UTILITY_SERIALIZED_BYTES / 1024 / 1024)} MiB imported-document transfer limit.`;
 const PSD_PALETTE_FALLBACK_WARNING = 'PSD raster layers contain more than 255 visible RGBA colors after the alpha threshold; layers were quantized to the document palette.';
 const MAX_TILESET_TILES = 1_048_576;
+const MAX_IMAGE_COLLECTION_TILES = 1_023;
+const MAX_IMAGE_COLLECTION_EXPANDED_PIXELS = 64 * 1024 * 1024;
 
 export async function renderPdfPagePng(
   width: number,
@@ -688,11 +695,32 @@ function tiledData(source: any, width: number, height: number): number[] {
   return validateGids(text.split(/\s+/).filter(Boolean).map(Number), expected, 'Tiled layer data');
 }
 
+function hasOwnTiledField(source: unknown, field: string): boolean {
+  return Boolean(source && typeof source === 'object' && Object.prototype.hasOwnProperty.call(source, field));
+}
+
+function optionalTiledImageSource(source: unknown, label: string): string | undefined {
+  if (!hasOwnTiledField(source, 'image')) return undefined;
+  const image = (source as { image?: unknown }).image;
+  if (typeof image !== 'string' || !image.trim()) throw new Error(`${label} must be a nonempty string path.`);
+  return image;
+}
+
+function tiledTilesetImageSources(source: any, tiles: any[]): { atlasImage?: string; tileImages: Array<string | undefined>; imageCollection: boolean } {
+  const atlasImage = optionalTiledImageSource(source, 'Tiled tileset image source');
+  const tileImages = tiles.map((tile, index) => optionalTiledImageSource(tile, `Tiled tile ${String(tile?.id ?? index)} image source`));
+  return {
+    atlasImage,
+    tileImages,
+    imageCollection: atlasImage === undefined && (Number(source.columns) === 0 || tileImages.some((image) => image !== undefined)),
+  };
+}
+
 function xmlTileset(source: any): Record<string, any> {
   if (source.source) return { firstgid: source.firstgid, source: source.source };
-  const tiles = arrayify(source.tile).map((tile: any) => ({ id: Number(tile.id), probability: Number(tile.probability ?? 1), properties: tiledProperties(tile.properties), animation: arrayify(tile.animation?.frame).map((frame: any) => ({ tileid: Number(frame.tileid), duration: Number(frame.duration ?? 100) })), objectgroup: tile.objectgroup ? { objects: arrayify(tile.objectgroup.object) } : undefined }));
+  const tiles = arrayify(source.tile).map((tile: any) => ({ id: Number(tile.id), probability: Number(tile.probability ?? 1), ...(hasOwnTiledField(tile, 'image') ? { image: tile.image?.source, imagewidth: tile.image?.width, imageheight: tile.image?.height } : {}), properties: tiledProperties(tile.properties), animation: arrayify(tile.animation?.frame).map((frame: any) => ({ tileid: Number(frame.tileid), duration: Number(frame.duration ?? 100) })), objectgroup: tile.objectgroup ? { objects: arrayify(tile.objectgroup.object) } : undefined }));
   const wangsets = arrayify(source.wangsets?.wangset).map((set: any) => ({ name: set.name, type: set.type, wangcolors: arrayify(set.wangcolor).map((color: any) => ({ name: color.name, color: color.color, tile: Number(color.tile ?? -1), probability: Number(color.probability ?? 1) })), wangtiles: arrayify(set.wangtile).map((tile: any) => ({ tileid: Number(tile.tileid), wangid: String(tile.wangid ?? '').split(',').map(Number) })) }));
-  return { ...source, type: 'tileset', image: source.image?.source, imagewidth: source.image?.width, imageheight: source.image?.height, tiles, wangsets, properties: tiledProperties(source.properties), transformations: source.transformations };
+  return { ...source, type: 'tileset', ...(hasOwnTiledField(source, 'image') ? { image: source.image?.source, imagewidth: source.image?.width, imageheight: source.image?.height } : {}), tiles, wangsets, properties: tiledProperties(source.properties), transformations: source.transformations };
 }
 
 function xmlLayer(source: any, type: 'tilelayer' | 'objectgroup' | 'group', depth = 0, budget = { layers: 0, cells: 0 }): Record<string, any> {
@@ -721,6 +749,10 @@ function integerInRange(value: unknown, minimum: number, maximum: number, label:
   return number;
 }
 
+function optionalPositiveInteger(value: unknown, maximum: number, label: string): number | undefined {
+  return value === undefined ? undefined : integerInRange(value, 1, maximum, label);
+}
+
 function validateObjectPoints(source: any, label: string): void {
   const points = source?.polygon?.points ?? source?.polygon ?? source?.polyline?.points ?? source?.polyline ?? source?.points;
   const count = typeof points === 'string' ? points.split(/\s+/).filter(Boolean).length : Array.isArray(points) ? points.length : 0;
@@ -731,12 +763,37 @@ function validateTilesetStructure(source: any, fallbackTileWidth: number, fallba
   const tileWidth = integerInRange(source.tilewidth ?? fallbackTileWidth, 1, MAX_INLINE_IMAGE_DIMENSION, 'Tileset tile width');
   const tileHeight = integerInRange(source.tileheight ?? fallbackTileHeight, 1, MAX_INLINE_IMAGE_DIMENSION, 'Tileset tile height');
   assertImageDimensions(tileWidth, tileHeight, 'Tileset tile');
+  const tiles = arrayify(source.tiles ?? source.tile);
+  const { tileImages, imageCollection } = tiledTilesetImageSources(source, tiles);
   const imageWidth = Number(source.imagewidth ?? 0); const imageHeight = Number(source.imageheight ?? 0);
   if (imageWidth || imageHeight) assertImageDimensions(imageWidth, imageHeight, 'Tileset image');
-  const imageColumns = imageWidth ? Math.max(1, Math.floor(imageWidth / tileWidth)) : 1; const imageRows = imageHeight ? Math.max(1, Math.floor(imageHeight / tileHeight)) : 1;
-  const tileCount = integerInRange(source.tilecount ?? Math.max(1, imageColumns * imageRows, arrayify(source.tiles ?? source.tile).length), 0, MAX_TILESET_TILES, 'Tileset tile count');
-  const columns = integerInRange(source.columns ?? imageColumns, 1, Math.max(1, MAX_TILESET_TILES), 'Tileset column count');
-  if (tileCount > 0 && columns > tileCount) throw new Error('Tileset columns cannot exceed its tile count.');
+  if (imageCollection) {
+    integerInRange(source.columns ?? 0, 0, MAX_TILESET_TILES, 'Image-collection display column count');
+    if (Number(source.margin ?? 0) !== 0 || Number(source.spacing ?? 0) !== 0) throw new Error('Tiled image collections cannot use atlas margin or spacing.');
+    if (tiles.length < 1 || tiles.length > MAX_TILESET_TILES) throw new Error('Tiled image collections require 1–1,048,576 sparse tile records.');
+    const tileCount = integerInRange(source.tilecount ?? tiles.length, 1, MAX_TILESET_TILES, 'Tileset tile count');
+    if (tileCount !== tiles.length) throw new Error('Tiled image-collection tile count must equal its exact sparse tile record count.');
+    const ids = new Set<number>();
+    for (const [tileIndex, tile] of tiles.entries()) {
+      const id = integerInRange(tile?.id, 0, MAX_TILESET_TILES - 1, 'Image-collection tile ID');
+      if (ids.has(id)) throw new Error(`Tiled image-collection tile ID ${id} is duplicated.`);
+      ids.add(id);
+      if (tileImages[tileIndex] === undefined) throw new Error(`Tiled image-collection tile ${id} is missing its image source.`);
+      optionalPositiveInteger(tile.imagewidth, MAX_INLINE_IMAGE_DIMENSION, `Image-collection tile ${id} image width`);
+      optionalPositiveInteger(tile.imageheight, MAX_INLINE_IMAGE_DIMENSION, `Image-collection tile ${id} image height`);
+    }
+    for (const tile of tiles) for (const frame of arrayify(tile.animation)) {
+      const frameId = integerInRange(frame.tileid ?? frame.tileId, 0, MAX_TILESET_TILES - 1, 'Image-collection animation tile ID');
+      if (!ids.has(frameId)) throw new Error(`Tiled image-collection animation references missing tile ${frameId}.`);
+    }
+    if (arrayify(source.wangsets).length) throw new Error('Tiled image-collection Wang metadata is outside this supported slice.');
+  } else {
+    const imageColumns = imageWidth ? Math.max(1, Math.floor(imageWidth / tileWidth)) : 1; const imageRows = imageHeight ? Math.max(1, Math.floor(imageHeight / tileHeight)) : 1;
+    const tileCount = integerInRange(source.tilecount ?? Math.max(1, imageColumns * imageRows, tiles.length), 0, MAX_TILESET_TILES, 'Tileset tile count');
+    const columns = integerInRange(source.columns ?? imageColumns, 1, Math.max(1, MAX_TILESET_TILES), 'Tileset column count');
+    if (tileCount > 0 && columns > tileCount) throw new Error('Tileset columns cannot exceed its tile count.');
+    if (tileImages.some((image) => image !== undefined)) throw new Error('Atlas tilesets cannot mix in per-tile image sources.');
+  }
   if (source.tileoffset !== undefined) {
     if (!source.tileoffset || typeof source.tileoffset !== 'object' || Array.isArray(source.tileoffset)) throw new Error('Tileset drawing offset must provide bounded integer x and y values.');
     integerInRange(source.tileoffset.x ?? 0, -MAX_TILESET_DRAWING_OFFSET, MAX_TILESET_DRAWING_OFFSET, 'Tileset drawing offset x');
@@ -745,7 +802,7 @@ function validateTilesetStructure(source: any, fallbackTileWidth: number, fallba
   if (source.objectalignment !== undefined && ![
     'unspecified', 'topleft', 'top', 'topright', 'left', 'center', 'right', 'bottomleft', 'bottom', 'bottomright',
   ].includes(String(source.objectalignment))) throw new Error(`Unsupported Tiled tile-object alignment: ${String(source.objectalignment)}`);
-  const tiles = arrayify(source.tiles ?? source.tile); if (tiles.length > MAX_TILESET_TILES) throw new Error('Tileset metadata exceeds the one-million-tile limit.');
+  if (tiles.length > MAX_TILESET_TILES) throw new Error('Tileset metadata exceeds the one-million-tile limit.');
   let animationFrames = 0; let collisionObjects = 0;
   for (const tile of tiles) {
     animationFrames += arrayify(tile.animation).length; if (animationFrames > MAX_TILESET_TILES) throw new Error('Tileset animation metadata exceeds the one-million-frame limit.');
@@ -811,10 +868,70 @@ async function attachTileset(document: ReturnType<typeof createPixelDocument>, s
     const external = await readCompanionFile(rootFilePath, rootFilePath, String(sourceReference.source), MAX_STRUCTURED_IMPORT_BYTES, 'External Tiled tileset'); sourceFilePath = external.path; source = parseTiled(external.bytes, extname(external.path).toLowerCase());
   }
   if (source.type === 'map') throw new Error('An external Tiled tileset reference resolved to a map.'); validateTilesetStructure(source, fallbackTileWidth, fallbackTileHeight);
+  const collectionTiles = arrayify(source.tiles ?? source.tile);
+  const { atlasImage, tileImages, imageCollection } = tiledTilesetImageSources(source, collectionTiles);
   const tileWidth = Number(source.tilewidth ?? fallbackTileWidth); const tileHeight = Number(source.tileheight ?? fallbackTileHeight); let imageWidth = Number(source.imagewidth ?? 0); let imageHeight = Number(source.imageheight ?? 0); let imageBytes: Buffer | undefined; let imagePath: string | undefined;
-  if (typeof source.image === 'string') {
-    const companion = await readCompanionFile(rootFilePath, sourceFilePath, source.image, MAX_BINARY_IMPORT_BYTES, 'Tileset image'); imagePath = companion.path; imageBytes = companion.bytes;
-    try { const header = inspectImageHeader(imageBytes); assertImageDimensions(header.width, header.height, 'Tileset image'); const decoded = await loadImage(imageBytes); const size = { width: decoded.width, height: decoded.height }; if (size.width !== header.width || size.height !== header.height) throw new Error('decoded dimensions disagree with the file header'); if ((imageWidth && imageWidth !== size.width) || (imageHeight && imageHeight !== size.height)) throw new Error('declared dimensions disagree with the image file'); imageWidth = size.width; imageHeight = size.height; } catch (error) { warnings.push(`Tileset image ${source.image} could not be decoded: ${error instanceof Error ? error.message : String(error)}.`); imageBytes = undefined; imagePath = undefined; }
+  if (imageCollection) {
+    if (collectionTiles.length > MAX_IMAGE_COLLECTION_TILES) throw new Error(`Tiled image collections support at most ${MAX_IMAGE_COLLECTION_TILES.toLocaleString('en-US')} independently publishable tile images.`);
+    const tilesetName = String(source.name ?? 'Tileset');
+    const sprites = new Map<number, PixelSprite>();
+    const paths = new Map<number, string>();
+    let expandedPixels = 0; let sourceBytes = 0;
+    for (const [tileIndex, tile] of collectionTiles.entries()) {
+      const id = Number(tile.id);
+      const image = tileImages[tileIndex];
+      if (image === undefined) throw new Error(`Image-collection tile ${id} lost its admitted source path.`);
+      if (extname(image).toLowerCase() !== '.png') throw new Error(`Image-collection tile ${id} must use a PNG source in this supported slice.`);
+      const companion = await readCompanionFile(rootFilePath, sourceFilePath, image, MAX_BINARY_IMPORT_BYTES, `Image-collection tile ${id}`);
+      assertImportedInlineAssetBytes(companion.bytes, `Image-collection tile ${id}`);
+      const header = inspectImageHeader(companion.bytes);
+      if (header.mimeType !== 'image/png') throw new Error(`Image-collection tile ${id} must be a static PNG image.`);
+      assertImageDimensions(header.width, header.height, `Image-collection tile ${id}`);
+      expandedPixels += header.width * header.height; sourceBytes += companion.bytes.byteLength;
+      if (!Number.isSafeInteger(expandedPixels) || expandedPixels > MAX_IMAGE_COLLECTION_EXPANDED_PIXELS) throw new Error('Tiled image-collection tile images exceed the 64-megapixel expanded import budget.');
+      if (!Number.isSafeInteger(sourceBytes) || sourceBytes > MAX_BINARY_IMPORT_BYTES) throw new Error('Tiled image-collection tile images exceed the 256 MiB aggregate source budget.');
+      const decoded = await loadImage(companion.bytes);
+      if (decoded.width !== header.width || decoded.height !== header.height) throw new Error(`Image-collection tile ${id} decoded dimensions disagree with its PNG header.`);
+      const declaredWidth = optionalPositiveInteger(tile.imagewidth, MAX_INLINE_IMAGE_DIMENSION, `Image-collection tile ${id} image width`);
+      const declaredHeight = optionalPositiveInteger(tile.imageheight, MAX_INLINE_IMAGE_DIMENSION, `Image-collection tile ${id} image height`);
+      if ((declaredWidth !== undefined && declaredWidth !== decoded.width) || (declaredHeight !== undefined && declaredHeight !== decoded.height)) throw new Error(`Image-collection tile ${id} declared dimensions disagree with its PNG source.`);
+      const sprite = createPixelSprite(`${tilesetName} · Tile ${id}`, decoded.width, decoded.height);
+      const cel = Object.values(sprite.cels)[0];
+      writePixels(cel, await quantizeImageToPalette(companion.bytes, sprite.width, sprite.height, document.palette, { alphaThreshold: document.conversionDefaults.alphaThreshold, dithering: document.conversionDefaults.dithering }));
+      const embedded = imageAsset(basename(companion.path), 'image/png', companion.bytes);
+      document.assets[embedded.id] = embedded;
+      document.linkedAssets.push({ id: createId('link'), name: basename(companion.path), mode: 'linked', relativePath: relative(dirname(rootFilePath), companion.path).replace(/\\/g, '/'), sha256: embedded.sha256, cachedPreviewAssetId: embedded.id });
+      document.pixelAssets[sprite.id] = sprite;
+      document.assetIds.push(sprite.id);
+      sprites.set(id, sprite);
+      paths.set(id, companion.path);
+    }
+    const firstSprite = sprites.values().next().value as PixelSprite | undefined;
+    if (!firstSprite) throw new Error('Tiled image collection has no admitted tile image.');
+    const tileset = createPixelTileset(tilesetName, firstSprite.id, tileWidth, tileHeight, 1, 1) as PixelTileset;
+    delete tileset.spriteAssetId;
+    tileset.columns = integerInRange(source.columns ?? 0, 0, MAX_TILESET_TILES, 'Image-collection display column count'); tileset.rows = 0; tileset.margin = 0; tileset.spacing = 0;
+    tileset.firstGid = integerInRange(sourceReference.firstgid ?? 1, 1, TILED_GID_MASK, 'Image-collection first GID');
+    const lastGid = tileset.firstGid + Math.max(...collectionTiles.map((tile) => Number(tile.id)));
+    if (!Number.isSafeInteger(lastGid) || lastGid > TILED_GID_MASK) throw new Error(`Tiled image collection “${tileset.name}” exceeds the supported 28-bit GID range.`);
+    tileset.tileOffset = { x: Number(source.tileoffset?.x ?? 0), y: Number(source.tileoffset?.y ?? 0) };
+    tileset.objectAlignment = String(source.objectalignment ?? 'unspecified') as typeof tileset.objectAlignment;
+    for (const tile of collectionTiles) {
+      const id = Number(tile.id); const sprite = sprites.get(id);
+      if (!sprite || !paths.has(id)) throw new Error(`Image-collection tile ${id} lost its admitted source.`);
+      tileset.tiles[id] = {
+        id, sourceX: 0, sourceY: 0, imageAssetId: sprite.id, probability: Number(tile.probability ?? 1),
+        animation: arrayify(tile.animation).map((frame: any) => ({ tileId: Number(frame.tileid ?? frame.tileId), durationMs: Number(frame.duration ?? frame.durationMs ?? 100) })),
+        collisions: arrayify(tile.objectgroup?.objects ?? tile.collisions).map(tiledCollisionShape), properties: tiledProperties(tile.properties),
+      };
+    }
+    const transforms = source.transformations;
+    if (transforms) tileset.transformations = { hFlip: transforms.hflip !== false && transforms.hflip !== 0, vFlip: transforms.vflip !== false && transforms.vflip !== 0, rotate: transforms.rotate !== false && transforms.rotate !== 0 };
+    document.pixelAssets[tileset.id] = tileset; document.assetIds.push(tileset.id); return tileset;
+  }
+  if (atlasImage !== undefined) {
+    const companion = await readCompanionFile(rootFilePath, sourceFilePath, atlasImage, MAX_BINARY_IMPORT_BYTES, 'Tileset image'); imagePath = companion.path; imageBytes = companion.bytes;
+    try { const header = inspectImageHeader(imageBytes); assertImageDimensions(header.width, header.height, 'Tileset image'); const decoded = await loadImage(imageBytes); const size = { width: decoded.width, height: decoded.height }; if (size.width !== header.width || size.height !== header.height) throw new Error('decoded dimensions disagree with the file header'); if ((imageWidth && imageWidth !== size.width) || (imageHeight && imageHeight !== size.height)) throw new Error('declared dimensions disagree with the image file'); imageWidth = size.width; imageHeight = size.height; } catch (error) { warnings.push(`Tileset image ${atlasImage} could not be decoded: ${error instanceof Error ? error.message : String(error)}.`); imageBytes = undefined; imagePath = undefined; }
   }
   const columns = Math.max(1, Number(source.columns ?? (Math.floor(imageWidth / tileWidth) || 1))); const tileCount = Math.max(1, Number(source.tilecount ?? columns * Math.max(1, Math.floor(imageHeight / tileHeight)))); const rows = Math.max(1, Math.ceil(tileCount / columns)); const spriteWidth = Math.max(tileWidth, imageWidth || columns * tileWidth); const spriteHeight = Math.max(tileHeight, imageHeight || rows * tileHeight); assertImageDimensions(spriteWidth, spriteHeight, 'Tileset pixel source'); const sprite = createPixelSprite(String(source.name ?? 'Tileset pixels'), spriteWidth, spriteHeight);
   if (imageBytes) { const cel = Object.values(sprite.cels)[0]; writePixels(cel, await quantizeImageToPalette(imageBytes, sprite.width, sprite.height, document.palette, { alphaThreshold: document.conversionDefaults.alphaThreshold, dithering: document.conversionDefaults.dithering })); const embedded = imageAsset(basename(imagePath!), `image/${extname(imagePath!).slice(1).replace('jpg', 'jpeg') || 'png'}`, imageBytes); document.assets[embedded.id] = embedded; document.linkedAssets.push({ id: createId('link'), name: basename(imagePath!), mode: 'linked', relativePath: relative(dirname(rootFilePath), imagePath!).replace(/\\/g, '/'), sha256: embedded.sha256, cachedPreviewAssetId: embedded.id }); }
@@ -833,6 +950,16 @@ async function importTiled(bytes: Buffer, name: string, filePath: string): Promi
   const document = createPixelDocument('tilemap', name); const map = document.pixelAssets[document.activeAssetId]; if (map.type !== 'tilemap') throw new Error('Expected map');
   map.name = String(tiled.name ?? name); map.orientation = tiled.orientation === 'isometric' ? 'isometric' : 'orthogonal'; if (!['orthogonal', 'isometric'].includes(String(tiled.orientation ?? 'orthogonal'))) warnings.push(`Tiled ${tiled.orientation} orientation was converted to orthogonal.`); map.infinite = Boolean(tiled.infinite); map.width = Number(tiled.width ?? 0); map.height = Number(tiled.height ?? 0); map.tileWidth = Number(tiled.tilewidth ?? 16); map.tileHeight = Number(tiled.tileheight ?? 16); map.properties = tiledProperties(tiled.properties); map.layerIds = []; map.layers = {}; map.tilesetIds = [];
   for (const source of arrayify(tiled.tilesets)) { const tileset = await attachTileset(document, source, filePath, map.tileWidth, map.tileHeight, warnings); map.tilesetIds.push(tileset.id); }
+  const collectionTilesets = map.tilesetIds.map((id) => document.pixelAssets[id]).filter((asset): asset is PixelTileset => asset?.type === 'tileset' && isImageCollectionTileset(asset));
+  if (collectionTilesets.length) {
+    const companionCount = map.tilesetIds.reduce((total, id) => { const asset = document.pixelAssets[id]; return total + (asset?.type === 'tileset' && isImageCollectionTileset(asset) ? Object.keys(asset.tiles).length : asset?.type === 'tileset' ? 1 : 0); }, 0);
+    if (companionCount > MAX_IMAGE_COLLECTION_TILES) throw new Error(`The imported Tiled map would require more than ${MAX_IMAGE_COLLECTION_TILES.toLocaleString('en-US')} PNG companions on re-export.`);
+  }
+  if (collectionTilesets.length && (map.orientation !== 'orthogonal' || map.infinite)) throw new Error('This image-collection checkpoint supports only finite orthogonal Tiled maps.');
+  if (collectionTilesets.length) {
+    const ranges = map.tilesetIds.map((id) => document.pixelAssets[id]).filter((asset): asset is PixelTileset => asset?.type === 'tileset').map((tileset) => ({ tileset, first: tileset.firstGid, last: tileset.firstGid + tilesetLocalIdSpan(tileset) - 1 })).sort((left, right) => left.first - right.first);
+    for (let index = 1; index < ranges.length; index += 1) if (ranges[index].first <= ranges[index - 1].last) throw new Error(`Tiled image-collection import cannot admit overlapping GID ranges for “${ranges[index - 1].tileset.name}” and “${ranges[index].tileset.name}”.`);
+  }
   const addLayer = (source: any, parentId?: string): string => {
     const timestamp = nowIso(); const id = createId('map-layer'); const type = source.type === 'objectgroup' ? 'object' as const : source.type === 'group' ? 'group' as const : 'tile' as const;
     const layer = { id, revision: 0, name: String(source.name ?? 'Layer'), createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, type, visible: source.visible !== false && source.visible !== 0, locked: false, opacity: Number(source.opacity ?? 1), parentId, childIds: type === 'group' ? [] : undefined, chunks: type === 'tile' ? {} : undefined, objects: type === 'object' ? arrayify(source.objects).map((object) => tiledMapObject(object, document, map)) : undefined, offsetX: Number(source.offsetx ?? 0), offsetY: Number(source.offsety ?? 0), parallaxX: Number(source.parallaxx ?? 1), parallaxY: Number(source.parallaxy ?? 1) };
@@ -840,7 +967,21 @@ async function importTiled(bytes: Buffer, name: string, filePath: string): Promi
     if (type === 'tile' && layer.chunks) for (const chunk of source.chunks ?? [{ x: 0, y: 0, width: Number(source.width ?? map.width), height: Number(source.height ?? map.height), data: source.data ?? [] }]) { const width = Number(chunk.width || map.width || 1); const changes = arrayify(chunk.data).map((gid, index) => ({ x: Number(chunk.x ?? 0) + index % width, y: Number(chunk.y ?? 0) + Math.floor(index / width), gid: Number(gid) })); writeTiles(layer.chunks, changes); }
     if (type === 'group') for (const child of arrayify(source.layers)) addLayer(child, id); return id;
   };
-  for (const source of arrayify(tiled.layers)) addLayer(source); document.dirty = true; return { documents: [document], warnings };
+  for (const source of arrayify(tiled.layers)) addLayer(source);
+  if (collectionTilesets.length) {
+    const collectionRange = (gid: number) => collectionTilesets.find((tileset) => gid >= tileset.firstGid && gid < tileset.firstGid + tilesetLocalIdSpan(tileset));
+    for (const layer of Object.values(map.layers)) {
+      if (layer.type === 'object') for (const object of layer.objects ?? []) if (object.type === 'tile') {
+        const decoded = decodeTiledGid(object.gid); const collection = collectionRange(decoded.gid);
+        if (collection) throw new Error(`Tiled tile objects backed by image collection “${collection.name}” are outside this supported slice.`);
+      }
+      if (layer.type === 'tile') for (const chunk of Object.values(layer.chunks ?? {})) for (const raw of decodeTilemapChunk(chunk)) {
+        const decoded = decodeTiledGid(raw); if (!decoded.gid) continue; const collection = collectionRange(decoded.gid);
+        if (collection && !resolveTilesetForGid(document, map, decoded.gid)) throw new Error(`Tiled tile layer references missing sparse image-collection GID ${decoded.gid}.`);
+      }
+    }
+  }
+  document.dirty = true; return { documents: [document], warnings };
 }
 
 async function importPdf(bytes: Buffer, name: string, pixelMode: boolean): Promise<ImportResult> {

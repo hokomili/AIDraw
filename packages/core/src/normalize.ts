@@ -184,6 +184,8 @@ function normalizeTileset(value: Record<string, unknown>, current: PixelTileset 
   const base = entityBase(value, text(value.id, 'recovered-tileset'), 'Recovered tileset', current, timestamp, actorId);
   const transformations = record(value.transformations);
   const tileOffset = record(value.tileOffset);
+  const spriteAssetId = text(value.spriteAssetId, '');
+  const imageCollection = !spriteAssetId;
   return {
     ...base,
     type: 'tileset',
@@ -199,9 +201,11 @@ function normalizeTileset(value: Record<string, unknown>, current: PixelTileset 
     objectAlignment: value.objectAlignment === undefined
       ? current?.objectAlignment ?? 'unspecified'
       : value.objectAlignment as PixelTileset['objectAlignment'],
-    columns: positiveInteger(value.columns, current?.columns ?? 1),
-    rows: positiveInteger(value.rows, current?.rows ?? 1),
-    spriteAssetId: text(value.spriteAssetId, current?.spriteAssetId ?? ''),
+    columns: imageCollection
+      ? Math.max(0, Math.round(finite(value.columns, current?.columns ?? 0)))
+      : positiveInteger(value.columns, current?.columns ?? 1),
+    rows: imageCollection ? 0 : positiveInteger(value.rows, current?.rows ?? 1),
+    ...(spriteAssetId ? { spriteAssetId } : {}),
     tiles: structuredClone(record(value.tiles)) as PixelTileset['tiles'],
     wangSets: Array.isArray(value.wangSets) ? structuredClone(value.wangSets) as PixelTileset['wangSets'] : [],
     transformations: {

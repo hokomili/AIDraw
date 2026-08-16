@@ -166,7 +166,7 @@ export class GenerationManager {
       };
       operations.push({ kind: 'illustration.layer.add', layer }, { kind: 'illustration.object.add', object });
     } else {
-      const active = document.pixelAssets[document.activeAssetId]; const source = active?.type === 'sprite' ? active : active?.type === 'tileset' ? document.pixelAssets[active.spriteAssetId] : undefined;
+      const active = document.pixelAssets[document.activeAssetId]; const source = active?.type === 'sprite' ? active : active?.type === 'tileset' && active.spriteAssetId ? document.pixelAssets[active.spriteAssetId] : undefined;
       if (source?.type === 'sprite') {
         const sprite = structuredClone(source); const timestamp = nowIso(); const layer: PixelLayer = { id: createId('layer'), revision: 0, name: 'Generated result', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, type: 'pixel', visible: true, locked: false, opacity: 1, blendMode: 'normal' }; sprite.layers[layer.id] = layer; sprite.layerIds.push(layer.id);
         for (const [index, frameId] of sprite.frameIds.entries()) { const celId = createId('cel'); sprite.cels[celId] = { id: celId, revision: 0, name: `${layer.name} · ${sprite.frames[frameId].name}`, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, layerId: layer.id, frameId, chunks: {} }; if (index === 0) writePixels(sprite.cels[celId], await this.quantizeGenerated(bytes, sprite.width, sprite.height, document.palette, document.conversionDefaults.alphaThreshold, document.conversionDefaults.dithering)); }

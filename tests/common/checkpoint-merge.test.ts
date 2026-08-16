@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { HUMAN_ACTOR, createIllustrationDocument, createPixelDocument, createPixelTileset, createId, nowIso, applyTransaction } from '@aidraw/core';
+import { HUMAN_ACTOR, createIllustrationDocument, createPixelDocument, createPixelSprite, createPixelTileset, createId, nowIso, applyTransaction } from '@aidraw/core';
 import { checkpointMergeCandidates, checkpointMergeOperations } from '../../src/common/checkpoint-merge';
 
 describe('checkpoint selective merge', () => {
@@ -14,6 +14,35 @@ describe('checkpoint selective merge', () => {
   it('duplicates a selected pixel asset with its dependency closure', () => {
     const source = createPixelDocument('project', 'Source'); const target = createPixelDocument('project', 'Target'); const sprite = source.pixelAssets[source.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('Expected sprite'); const tileset = createPixelTileset('Terrain', sprite.id, 16, 16, 2, 2); source.pixelAssets[tileset.id] = tileset; source.assetIds.push(tileset.id);
     const operations = checkpointMergeOperations(target, source, [tileset.id]); const merged = applyTransaction(target, { id: 'tx', clientOperationId: 'merge-pixel', documentId: target.id, actor: HUMAN_ACTOR, label: 'Merge checkpoint asset', createdAt: nowIso(), operations }).document;
-    if (merged.kind !== 'pixel') throw new Error('Expected pixel'); const copies = Object.values(merged.pixelAssets); const copiedTileset = copies.find((asset) => asset.type === 'tileset'); expect(copiedTileset?.type).toBe('tileset'); if (copiedTileset?.type === 'tileset') expect(merged.pixelAssets[copiedTileset.spriteAssetId]?.type).toBe('sprite');
+    if (merged.kind !== 'pixel') throw new Error('Expected pixel'); const copies = Object.values(merged.pixelAssets); const copiedTileset = copies.find((asset) => asset.type === 'tileset'); expect(copiedTileset?.type).toBe('tileset'); if (copiedTileset?.type === 'tileset') { if (!copiedTileset.spriteAssetId) throw new Error('Expected atlas tileset'); expect(merged.pixelAssets[copiedTileset.spriteAssetId]?.type).toBe('sprite'); }
+  });
+
+  it('duplicates every sparse image-collection sprite dependency with exact remapped local IDs', () => {
+    const source = createPixelDocument('project', 'Collection source'); const target = createPixelDocument('project', 'Collection target');
+    const tileZero = source.pixelAssets[source.activeAssetId]; if (tileZero.type !== 'sprite') throw new Error('Expected first collection sprite');
+    const tileThree = createPixelSprite('Sparse tile 3', 3, 2); const collection = createPixelTileset('Sparse collection', tileZero.id, 2, 2, 1, 1); delete collection.spriteAssetId; collection.columns = 2; collection.rows = 0;
+    collection.tiles = {
+      0: { id: 0, sourceX: 0, sourceY: 0, imageAssetId: tileZero.id, probability: 1, animation: [], collisions: [], properties: {} },
+      3: { id: 3, sourceX: 0, sourceY: 0, imageAssetId: tileThree.id, probability: 1, animation: [], collisions: [], properties: {} },
+    };
+    source.pixelAssets[tileThree.id] = tileThree; source.pixelAssets[collection.id] = collection; source.assetIds.push(tileThree.id, collection.id);
+
+    const operations = checkpointMergeOperations(target, source, [collection.id]);
+    expect(operations.filter((operation) => operation.kind === 'pixel.asset.add')).toHaveLength(3);
+    const merged = applyTransaction(target, { id: 'collection-merge-tx', clientOperationId: 'collection-merge', documentId: target.id, actor: HUMAN_ACTOR, label: 'Merge image collection', createdAt: nowIso(), operations }).document;
+    if (merged.kind !== 'pixel') throw new Error('Expected pixel document');
+    const copiedCollection = Object.values(merged.pixelAssets).find((asset) => asset.type === 'tileset');
+    if (copiedCollection?.type !== 'tileset') throw new Error('Expected copied collection');
+    const remappedSources = [copiedCollection.tiles[0].imageAssetId, copiedCollection.tiles[3].imageAssetId];
+    expect(copiedCollection).toMatchObject({ columns: 2, rows: 0 });
+    expect(copiedCollection.spriteAssetId).toBeUndefined();
+    expect(Object.keys(copiedCollection.tiles)).toEqual(['0', '3']);
+    expect(new Set(remappedSources).size).toBe(2);
+    expect(remappedSources).not.toContain(tileZero.id);
+    expect(remappedSources).not.toContain(tileThree.id);
+    for (const sourceId of remappedSources) {
+      expect(sourceId).toBeDefined();
+      expect(merged.pixelAssets[sourceId!]?.type).toBe('sprite');
+    }
   });
 });

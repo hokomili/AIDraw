@@ -151,7 +151,10 @@ export function parseDocumentFragment(value: unknown): AIDrawFragment {
     for (const asset of assets) CanvasOperationSchema.parse({ kind: 'pixel.asset.add', asset });
     const assetsById = new Map(assets.map((asset) => [asset.id, asset]));
     for (const asset of assets) {
-      if (asset.type === 'tileset' && assetsById.get(asset.spriteAssetId)?.type !== 'sprite') throw new Error(`Tileset ${asset.id} has a sprite dependency outside the fragment.`);
+      if (asset.type === 'tileset') {
+        if (asset.spriteAssetId && assetsById.get(asset.spriteAssetId)?.type !== 'sprite') throw new Error(`Tileset ${asset.id} has a sprite dependency outside the fragment.`);
+        for (const tile of Object.values(asset.tiles)) if (tile.imageAssetId && assetsById.get(tile.imageAssetId)?.type !== 'sprite') throw new Error(`Tileset ${asset.id} tile ${tile.id} has an image dependency outside the fragment.`);
+      }
       if (asset.type === 'tilemap' && asset.tilesetIds.some((id) => assetsById.get(id)?.type !== 'tileset')) throw new Error(`Tilemap ${asset.id} has a tileset dependency outside the fragment.`);
     }
     const palette = value.palette as PaletteEntry[];
@@ -191,7 +194,10 @@ export function exportPixelFragment(document: PixelDocument, assetId = document.
     const asset = document.pixelAssets[id];
     if (!asset) throw new Error(`Pixel fragment dependency ${id} is missing.`);
     ids.add(id);
-    if (asset.type === 'tileset') queue.push(asset.spriteAssetId);
+    if (asset.type === 'tileset') {
+      if (asset.spriteAssetId) queue.push(asset.spriteAssetId);
+      for (const tile of Object.values(asset.tiles)) if (tile.imageAssetId) queue.push(tile.imageAssetId);
+    }
     if (asset.type === 'tilemap') queue.push(...asset.tilesetIds);
   }
   const pixelAssets = [...ids].map((id) => document.pixelAssets[id]);
@@ -288,7 +294,10 @@ function pixelImportOperations(document: PixelDocument, fragment: Extract<AIDraw
     asset.name = `${asset.name} copy`;
     asset.revision = 0;
     remapSpritePalette(asset, mapping);
-    if (asset.type === 'tileset') asset.spriteAssetId = ids.get(asset.spriteAssetId) ?? asset.spriteAssetId;
+    if (asset.type === 'tileset') {
+      if (asset.spriteAssetId) asset.spriteAssetId = ids.get(asset.spriteAssetId) ?? asset.spriteAssetId;
+      for (const tile of Object.values(asset.tiles)) if (tile.imageAssetId) tile.imageAssetId = ids.get(tile.imageAssetId) ?? tile.imageAssetId;
+    }
     if (asset.type === 'tilemap') asset.tilesetIds = asset.tilesetIds.map((id) => ids.get(id) ?? id);
     operations.push({ kind: 'pixel.asset.add', asset });
   }

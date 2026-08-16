@@ -66,6 +66,22 @@ describe('canvas operation schemas', () => {
     }).success).toBe(true);
   });
 
+  it('strictly distinguishes atlas slices from sparse image collections', () => {
+    const source = createPixelSprite('Tile image', 2, 3);
+    const collection = createPixelTileset('Collection', source.id, 2, 2, 1, 1);
+    delete collection.spriteAssetId; collection.columns = 3; collection.rows = 0;
+    collection.tiles = { 3: { id: 3, sourceX: 0, sourceY: 0, imageAssetId: source.id, probability: 1, animation: [{ tileId: 3, durationMs: 100 }], collisions: [], properties: { kind: 'stone' } } };
+    expect(CanvasOperationSchema.safeParse({ kind: 'pixel.asset.add', asset: collection }).success).toBe(true);
+    expect(CanvasOperationSchema.safeParse({ kind: 'pixel.asset.add', asset: { ...collection, columns: -1 } }).success).toBe(false);
+    expect(CanvasOperationSchema.safeParse({ kind: 'pixel.asset.add', asset: { ...collection, rows: 1 } }).success).toBe(false);
+    const missingImage = structuredClone(collection); delete missingImage.tiles[3].imageAssetId;
+    expect(CanvasOperationSchema.safeParse({ kind: 'pixel.asset.add', asset: missingImage }).success).toBe(false);
+    const missingAnimationTarget = structuredClone(collection); missingAnimationTarget.tiles[3].animation[0].tileId = 2;
+    expect(CanvasOperationSchema.safeParse({ kind: 'pixel.asset.add', asset: missingAnimationTarget }).success).toBe(false);
+    const atlas = createPixelTileset('Atlas', source.id, 2, 2, 1, 1); atlas.tiles[0] = { ...collection.tiles[3], id: 0 };
+    expect(CanvasOperationSchema.safeParse({ kind: 'pixel.asset.add', asset: atlas }).success).toBe(false);
+  });
+
   it('rejects overlapping, oversized, and malformed compact region runs', () => {
     expect(CanvasOperationSchema.safeParse({ kind: 'pixel.cel.region', spriteId: 's', celId: 'c', runs: [{ x: 0, y: 0, length: 4, index: 1 }, { x: 3, y: 0, length: 2, index: 2 }] }).success).toBe(false);
     expect(CanvasOperationSchema.safeParse({ kind: 'pixel.tilemap.region', mapId: 'm', layerId: 'l', runs: [{ x: 0, y: 0, length: 65_537, gid: 1 }] }).success).toBe(false);

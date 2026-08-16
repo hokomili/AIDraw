@@ -475,7 +475,7 @@ function resolveObservationTarget(request: ObservationUtilityRequest): Observati
   const assetId = selection.assetId ?? document.activeAssetId;
   const selectedAsset = document.pixelAssets[assetId];
   if (!selectedAsset) return undefined;
-  const renderedAsset = selectedAsset.type === 'tileset' ? document.pixelAssets[selectedAsset.spriteAssetId] : selectedAsset;
+  const renderedAsset = selectedAsset.type === 'tileset' && selectedAsset.spriteAssetId ? document.pixelAssets[selectedAsset.spriteAssetId] : selectedAsset.type === 'tileset' ? undefined : selectedAsset;
   if (!renderedAsset || renderedAsset.type !== 'sprite' && renderedAsset.type !== 'tilemap') return undefined;
   if (renderedAsset.type === 'sprite') {
     const frameId = selection.frameId ?? renderedAsset.frameIds[0];

@@ -2,6 +2,7 @@ import { z } from 'zod';
 import type { AIDrawDocument, PixelDocument } from './model';
 import type { CanvasOperation, CanvasTransaction } from './operations';
 import { assertPixelDocumentPaletteReferences } from './palette';
+import { assertImageCollectionTilemapModes } from './pixel';
 import { assertAcyclicReferences } from './reference-graph';
 
 const OperationKindSchema = z.enum([
@@ -582,6 +583,7 @@ const TileDefinitionInputSchema = z.object({
   id: FiniteNumberSchema.int().nonnegative(),
   sourceX: FiniteNumberSchema.nonnegative().max(MAX_PIXEL_COORDINATE),
   sourceY: FiniteNumberSchema.nonnegative().max(MAX_PIXEL_COORDINATE),
+  imageAssetId: IdSchema.optional(),
   probability: FiniteNumberSchema.nonnegative(),
   animation: z.array(z.object({ tileId: FiniteNumberSchema.int().nonnegative(), durationMs: FiniteNumberSchema.int().min(1).max(Number.MAX_SAFE_INTEGER) }).strict()),
   collisions: CollisionShapesInputSchema,
@@ -677,23 +679,39 @@ const PixelTilesetInputSchema = z.object({
   objectAlignment: z.enum([
     'unspecified', 'topleft', 'top', 'topright', 'left', 'center', 'right', 'bottomleft', 'bottom', 'bottomright',
   ]).default('unspecified'),
-  columns: FiniteNumberSchema.int().min(1).max(MAX_TILESET_TILES),
-  rows: FiniteNumberSchema.int().min(1).max(MAX_TILESET_TILES),
-  spriteAssetId: IdSchema,
+  columns: FiniteNumberSchema.int().min(0).max(MAX_TILESET_TILES),
+  rows: FiniteNumberSchema.int().min(0).max(MAX_TILESET_TILES),
+  spriteAssetId: IdSchema.optional(),
   tiles: z.record(z.string(), TileDefinitionInputSchema),
   wangSets: z.array(WangSetInputSchema).max(MAX_WANG_SETS),
   transformations: z.object({ hFlip: z.boolean(), vFlip: z.boolean(), rotate: z.boolean() }).strict(),
 }).strict().superRefine((tileset, context) => {
-  const tileCount = tileset.columns * tileset.rows;
-  if (!Number.isSafeInteger(tileCount) || tileCount > MAX_TILESET_TILES) context.addIssue({ code: 'custom', path: ['columns'], message: 'Tileset slice exceeds the established one-million-tile limit' });
   const tileDefinitions = Object.entries(tileset.tiles);
+  const imageCollection = tileset.spriteAssetId === undefined;
+  const tileCount = imageCollection ? tileDefinitions.length : tileset.columns * tileset.rows;
+  if (imageCollection) {
+    if (tileset.rows !== 0) context.addIssue({ code: 'custom', path: ['rows'], message: 'Image-collection tilesets require zero atlas rows' });
+    if (tileset.margin !== 0 || tileset.spacing !== 0) context.addIssue({ code: 'custom', path: ['margin'], message: 'Image-collection tilesets cannot use atlas margin or spacing' });
+    if (!tileDefinitions.length) context.addIssue({ code: 'custom', path: ['tiles'], message: 'Image-collection tilesets require at least one tile image' });
+    if (tileset.wangSets.length) context.addIssue({ code: 'custom', path: ['wangSets'], message: 'Image-collection Wang metadata is not supported' });
+  } else {
+    if (tileset.columns < 1 || tileset.rows < 1) context.addIssue({ code: 'custom', path: ['columns'], message: 'Atlas tilesets require positive columns and rows' });
+    if (!Number.isSafeInteger(tileCount) || tileCount > MAX_TILESET_TILES) context.addIssue({ code: 'custom', path: ['columns'], message: 'Tileset slice exceeds the established one-million-tile limit' });
+  }
   if (tileDefinitions.length > MAX_TILESET_TILES) context.addIssue({ code: 'custom', path: ['tiles'], message: 'Tileset metadata exceeds the established one-million-tile limit' });
   let animationFrames = 0; let collisionObjects = 0;
   for (const [key, tile] of tileDefinitions) {
     animationFrames += tile.animation.length; collisionObjects += tile.collisions.length;
     if (key !== String(tile.id)) context.addIssue({ code: 'custom', path: ['tiles', key, 'id'], message: 'Tile record keys must match tile IDs' });
-    if (tile.id >= tileCount) context.addIssue({ code: 'custom', path: ['tiles', key, 'id'], message: `Tile ${tile.id} falls outside the tileset slice` });
-    tile.animation.forEach((frame, index) => { if (frame.tileId >= tileCount) context.addIssue({ code: 'custom', path: ['tiles', key, 'animation', index, 'tileId'], message: `Animated tile ${frame.tileId} falls outside the tileset slice` }); });
+    if (imageCollection) {
+      if (tile.id >= MAX_TILESET_TILES) context.addIssue({ code: 'custom', path: ['tiles', key, 'id'], message: `Tile ${tile.id} exceeds the image-collection local-ID limit` });
+      if (!tile.imageAssetId) context.addIssue({ code: 'custom', path: ['tiles', key, 'imageAssetId'], message: `Tile ${tile.id} is missing its image sprite` });
+      tile.animation.forEach((frame, index) => { if (!tileset.tiles[String(frame.tileId)]?.imageAssetId) context.addIssue({ code: 'custom', path: ['tiles', key, 'animation', index, 'tileId'], message: `Animated tile ${frame.tileId} is missing from the image collection` }); });
+    } else {
+      if (tile.imageAssetId) context.addIssue({ code: 'custom', path: ['tiles', key, 'imageAssetId'], message: 'Atlas tiles cannot own per-tile image sprites' });
+      if (tile.id >= tileCount) context.addIssue({ code: 'custom', path: ['tiles', key, 'id'], message: `Tile ${tile.id} falls outside the tileset slice` });
+      tile.animation.forEach((frame, index) => { if (frame.tileId >= tileCount) context.addIssue({ code: 'custom', path: ['tiles', key, 'animation', index, 'tileId'], message: `Animated tile ${frame.tileId} falls outside the tileset slice` }); });
+    }
   }
   if (animationFrames > MAX_TILESET_TILES) context.addIssue({ code: 'custom', path: ['tiles'], message: 'Tileset animation metadata exceeds the established one-million-frame limit' });
   if (collisionObjects > MAX_TILESET_COLLISION_OBJECTS) context.addIssue({ code: 'custom', path: ['tiles'], message: 'Tileset collision metadata exceeds the established 100,000-object limit' });
@@ -701,8 +719,8 @@ const PixelTilesetInputSchema = z.object({
   tileset.wangSets.forEach((set, setIndex) => {
     if (wangSetIds.has(set.id)) context.addIssue({ code: 'custom', path: ['wangSets', setIndex, 'id'], message: 'Wang set IDs must be unique' });
     wangSetIds.add(set.id); wangTiles += set.tiles.length;
-    set.colors.forEach((color, colorIndex) => { if (color.tileId >= tileCount) context.addIssue({ code: 'custom', path: ['wangSets', setIndex, 'colors', colorIndex, 'tileId'], message: 'Wang color representative tile falls outside the tileset slice' }); });
-    set.tiles.forEach((tile, tileIndex) => { if (tile.tileId >= tileCount) context.addIssue({ code: 'custom', path: ['wangSets', setIndex, 'tiles', tileIndex, 'tileId'], message: 'Wang tile falls outside the tileset slice' }); });
+    set.colors.forEach((color, colorIndex) => { if (!imageCollection && color.tileId >= tileCount) context.addIssue({ code: 'custom', path: ['wangSets', setIndex, 'colors', colorIndex, 'tileId'], message: 'Wang color representative tile falls outside the tileset slice' }); });
+    set.tiles.forEach((tile, tileIndex) => { if (!imageCollection && tile.tileId >= tileCount) context.addIssue({ code: 'custom', path: ['wangSets', setIndex, 'tiles', tileIndex, 'tileId'], message: 'Wang tile falls outside the tileset slice' }); });
   });
   if (wangTiles > MAX_TILESET_TILES) context.addIssue({ code: 'custom', path: ['wangSets'], message: 'Wang terrain metadata exceeds the established one-million-tile limit' });
 });
@@ -741,6 +759,13 @@ const PersistedPixelAssetStateInputSchema = z.object({
   state.assetIds.forEach((id, index) => { if (!state.pixelAssets[id]) context.addIssue({ code: 'custom', path: ['assetIds', index], message: `Ordered pixel asset ${id} is missing` }); });
   for (const id of Object.keys(state.pixelAssets)) if (!state.assetIds.includes(id)) context.addIssue({ code: 'custom', path: ['pixelAssets', id], message: `Pixel asset ${id} is not ordered` });
   if (!state.pixelAssets[state.activeAssetId]) context.addIssue({ code: 'custom', path: ['activeAssetId'], message: 'The active pixel asset must exist' });
+  for (const [id, asset] of Object.entries(state.pixelAssets)) {
+    if (asset.type !== 'tileset' || asset.spriteAssetId !== undefined) continue;
+    for (const [tileId, tile] of Object.entries(asset.tiles)) {
+      const source = tile.imageAssetId ? state.pixelAssets[tile.imageAssetId] : undefined;
+      if (source?.type !== 'sprite') context.addIssue({ code: 'custom', path: ['pixelAssets', id, 'tiles', tileId, 'imageAssetId'], message: `Image-collection tile ${tileId} is missing its source sprite` });
+    }
+  }
 });
 const PersistedPixelLibrariesInputSchema = z.object({
   paletteCycles: PaletteCyclesInputSchema,
@@ -998,6 +1023,11 @@ export function validateNormalizedPixelDocument(document: PixelDocument): PixelD
   document.assetIds = assets.data.assetIds;
   document.pixelAssets = assets.data.pixelAssets as PixelDocument['pixelAssets'];
   document.activeAssetId = assets.data.activeAssetId;
+  try {
+    assertImageCollectionTilemapModes(document);
+  } catch (error) {
+    throw new Error(error instanceof Error ? error.message : 'Invalid persisted image-collection map mode.');
+  }
   document.linkedAssets = links.data;
   document.conversionDefaults = conversion.data;
   for (const asset of Object.values(document.pixelAssets)) {

@@ -7,7 +7,8 @@ import UPNG from 'upng-js';
 
 import { importDocument } from '../../src/main/import-document';
 import { exportDocument } from '../../src/main/export-document';
-import { renderTilemap } from '../../src/main/render-document';
+import { readNativeDocument, writeNativeDocument } from '../../src/main/persistence';
+import { renderTilemap, renderTilemapRegion } from '../../src/main/render-document';
 import { runImportUtilityRequest } from '../../src/main/utility-import';
 import { editTileObject } from '../../src/common/tile-object-authoring';
 
@@ -16,6 +17,12 @@ const xmlFixtureSource = new URL('../fixtures/tiled/orthogonal-external.tmx', im
 const xmlTilesetSource = new URL('../fixtures/tiled/terrain.tsx.fixture', import.meta.url).pathname.replace(/^\/(?=[A-Za-z]:)/, '');
 const temporaryDirectories: string[] = [];
 afterEach(async () => { await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
+
+function exactPng(width: number, height: number, rgba: number[]): Buffer {
+  const pixels = Uint8Array.from(rgba);
+  if (pixels.length !== width * height * 4) throw new Error('PNG fixture pixels do not match its dimensions.');
+  return Buffer.from(UPNG.encode([pixels.buffer as ArrayBuffer], width, height, 0));
+}
 
 describe('representative Tiled JSON interchange', () => {
   it('imports an external tileset with typed metadata, collisions, Wang colors, transforms, and nested isometric layers', async () => {
@@ -361,6 +368,7 @@ describe('representative Tiled JSON interchange', () => {
     const importedTileset = importedDocument.pixelAssets[importedMap.tilesetIds[0]]; if (importedTileset.type !== 'tileset') throw new Error('Expected imported tileset');
     expect(importedTileset).toMatchObject({ name: tileset.name, firstGid: 1, tileWidth: 16, tileHeight: 16, columns: 2, rows: 1, transformations: tileset.transformations });
     expect(importedTileset.tiles).toMatchObject({ 0: { probability: 0.25, properties: { walkable: true, cost: 3 } }, 1: { probability: 0.75, animation: [{ tileId: 0, durationMs: 120 }], properties: { walkable: false, cost: 8 } } });
+    if (!importedTileset.spriteAssetId) throw new Error('Expected imported atlas tileset');
     const importedSprite = importedDocument.pixelAssets[importedTileset.spriteAssetId]; if (importedSprite.type !== 'sprite') throw new Error('Expected imported tileset pixels');
     const pixelPlane = (asset: PixelSprite) => { const cel = Object.values(asset.cels)[0]; return Array.from({ length: asset.width * asset.height }, (_, index) => readPixel(cel, index % asset.width, Math.floor(index / asset.width))); };
     expect(importedSprite).toMatchObject({ width: sprite.width, height: sprite.height }); expect(pixelPlane(importedSprite)).toEqual(pixelPlane(sprite));
@@ -408,5 +416,143 @@ describe('representative Tiled JSON interchange', () => {
     const importedLayer = importedMap.layers[importedMap.layerIds[0]]; if (importedLayer.type !== 'tile' || !importedLayer.chunks) throw new Error('Expected imported tile layer');
     expect(Array.from({ length: 8 }, (_, x) => readTileAt(importedLayer.chunks!, x, 0))).toEqual(expectedGids);
     expect(Buffer.from(renderTilemap(importedDocument, importedMap).getContext('2d').getImageData(0, 0, 16, 2).data)).toEqual(originalRender);
+  });
+
+  it('imports, persists, renders, and JSON/XML re-exports one sparse orthogonal image collection without atlas synthesis', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'aidraw-tiled-image-collection-')); temporaryDirectories.push(directory);
+    const colors = {
+      plum: [108, 59, 120, 255], coral: [255, 107, 122, 255], teal: [49, 166, 160, 255], gold: [229, 184, 75, 255],
+    };
+    await Promise.all([
+      writeFile(join(directory, 'tile-zero.png'), exactPng(2, 2, [...colors.plum, ...colors.coral, ...colors.teal, ...colors.gold])),
+      writeFile(join(directory, 'tile-three.png'), exactPng(1, 2, [...colors.gold, ...colors.coral])),
+      writeFile(join(directory, 'collection.tsj'), JSON.stringify({
+        type: 'tileset', name: 'Sparse collection', tilewidth: 2, tileheight: 2, tilecount: 2, columns: 2,
+        transformations: { hflip: true, vflip: true, rotate: true, preferuntransformed: false },
+        tiles: [
+          { id: 0, image: 'tile-zero.png', imagewidth: 2, imageheight: 2, probability: 0.25, animation: [{ tileid: 0, duration: 80 }, { tileid: 3, duration: 120 }], properties: [{ name: 'walkable', type: 'bool', value: true }], objectgroup: { objects: [{ id: 7, name: 'Solid', type: 'collision', x: 0, y: 1, width: 2, height: 1, properties: [{ name: 'damage', type: 'int', value: 2 }] }] } },
+          { id: 3, image: 'tile-three.png', imagewidth: 1, imageheight: 2, probability: 0.75, properties: [{ name: 'terrain', type: 'string', value: 'stone' }] },
+        ],
+      }, null, 2)),
+      writeFile(join(directory, 'map.tmj'), JSON.stringify({ type: 'map', orientation: 'orthogonal', infinite: false, width: 2, height: 1, tilewidth: 2, tileheight: 2, tilesets: [{ firstgid: 5, source: 'collection.tsj' }], layers: [{ id: 1, name: 'Sparse cells', type: 'tilelayer', width: 2, height: 1, data: [5, encodeTiledGid(8, { hFlip: true, diagonal: true })] }] }, null, 2)),
+    ]);
+
+    const imported = await importDocument(join(directory, 'map.tmj'), true); expect(imported.warnings).toEqual([]);
+    const document = imported.documents[0]; if (document.kind !== 'pixel') throw new Error('Expected pixel image-collection document');
+    const map = document.pixelAssets[document.activeAssetId]; if (map.type !== 'tilemap') throw new Error('Expected image-collection tilemap');
+    const tileset = document.pixelAssets[map.tilesetIds[0]]; if (tileset.type !== 'tileset') throw new Error('Expected image-collection tileset');
+    expect(tileset).toMatchObject({ firstGid: 5, columns: 2, rows: 0, transformations: { hFlip: true, vFlip: true, rotate: true } });
+    expect(tileset.spriteAssetId).toBeUndefined();
+    expect(Object.keys(tileset.tiles)).toEqual(['0', '3']);
+    expect(tileset.tiles[0]).toMatchObject({ probability: 0.25, animation: [{ tileId: 0, durationMs: 80 }, { tileId: 3, durationMs: 120 }], properties: { walkable: true }, collisions: [expect.objectContaining({ type: 'rectangle', properties: { name: 'Solid', class: 'collision', damage: 2 } })] });
+    expect(tileset.tiles[3]).toMatchObject({ probability: 0.75, properties: { terrain: 'stone' } });
+    expect(new Set([tileset.tiles[0].imageAssetId, tileset.tiles[3].imageAssetId]).size).toBe(2);
+    const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile' || !layer.chunks) throw new Error('Expected image-collection tile layer');
+    expect([readTileAt(layer.chunks, 0, 0), readTileAt(layer.chunks, 1, 0)]).toEqual([5, encodeTiledGid(8, { hFlip: true, diagonal: true })]);
+    const originalRaster = Buffer.from(renderTilemap(document, map).getContext('2d').getImageData(0, 0, 4, 2).data);
+    expect([...originalRaster].filter((_, index) => Math.floor(index / 4) % 4 < 2 && index % 4 === 3).every((alpha) => alpha === 255)).toBe(true);
+    const rightRegion = renderTilemapRegion(document, map, { x: 3, y: 0, width: 1, height: 2 });
+    expect(Buffer.from(rightRegion.getContext('2d').getImageData(0, 0, 1, 2).data)).toEqual(Buffer.from(originalRaster.filter((_, index) => Math.floor(index / 4) % 4 === 3)));
+    for (const unsupported of [{ orientation: 'isometric' as const }, { infinite: true }]) {
+      const rejectedDocument = structuredClone(document); const rejectedMap = rejectedDocument.pixelAssets[rejectedDocument.activeAssetId];
+      if (rejectedMap.type !== 'tilemap') throw new Error('Expected rejected image-collection tilemap'); Object.assign(rejectedMap, unsupported);
+      expect(() => renderTilemap(rejectedDocument, rejectedMap)).toThrow(/must remain finite orthogonal/);
+    }
+
+    const nativePath = await writeNativeDocument(join(directory, 'collection-native'), document, '1.0.0');
+    const native = await readNativeDocument(nativePath); if (native.document.kind !== 'pixel') throw new Error('Expected persisted image-collection document');
+    const nativeMap = native.document.pixelAssets[native.document.activeAssetId]; if (nativeMap.type !== 'tilemap') throw new Error('Expected persisted tilemap');
+    const nativeTileset = native.document.pixelAssets[nativeMap.tilesetIds[0]]; if (nativeTileset.type !== 'tileset') throw new Error('Expected persisted tileset');
+    expect({ columns: nativeTileset.columns, rows: nativeTileset.rows, spriteAssetId: nativeTileset.spriteAssetId, ids: Object.keys(nativeTileset.tiles) }).toEqual({ columns: 2, rows: 0, spriteAssetId: undefined, ids: ['0', '3'] });
+    expect(Buffer.from(renderTilemap(native.document, nativeMap).getContext('2d').getImageData(0, 0, 4, 2).data)).toEqual(originalRaster);
+
+    for (const format of ['tiled-json', 'tiled-xml'] as const) {
+      const artifact = await exportDocument(native.document, format); expect(artifact.report).toEqual({ warnings: [], rasterized: [] }); expect(artifact.companions?.map((entry) => entry.name)).toEqual(['Sparse collection tile 0.png', 'Sparse collection tile 3.png']);
+      const text = artifact.data.toString();
+      if (format === 'tiled-json') {
+        const output = JSON.parse(text); const exported = output.tilesets[0];
+        expect(exported).toMatchObject({ firstgid: 5, tilecount: 2, columns: 2 }); expect(exported.image).toBeUndefined();
+        expect(exported.tiles.map((tile: any) => ({ id: tile.id, image: tile.image }))).toEqual([{ id: 0, image: 'Sparse collection tile 0.png' }, { id: 3, image: 'Sparse collection tile 3.png' }]);
+        expect(exported.tiles[0]).toMatchObject({ probability: 0.25, animation: [{ tileid: 0, duration: 80 }, { tileid: 3, duration: 120 }], properties: [expect.objectContaining({ name: 'walkable', type: 'bool', value: true })] });
+      } else {
+        expect(text).toContain('tilecount="2" columns="2"'); expect(text).not.toMatch(/<tileset[^>]*>[^<]*<image /);
+        expect(text).toContain('<image source="Sparse collection tile 0.png" width="2" height="2"/>');
+        expect(text).toContain('<image source="Sparse collection tile 3.png" width="1" height="2"/>');
+        const tileZero = text.match(/<tile id="0"[^>]*>([\s\S]*?)<\/tile>/)?.[1]; expect(tileZero).toBeDefined();
+        const childOrder = ['<properties>', '<image ', '<objectgroup>', '<animation>'].map((child) => tileZero!.indexOf(child));
+        expect(childOrder.every((index) => index >= 0)).toBe(true); expect(childOrder).toEqual([...childOrder].sort((left, right) => left - right));
+      }
+      const outputDirectory = join(directory, format); await mkdir(outputDirectory);
+      const outputPath = join(outputDirectory, format === 'tiled-json' ? 'map.tmj' : 'map.tmx');
+      await Promise.all([writeFile(outputPath, artifact.data), ...artifact.companions!.map((entry) => writeFile(join(outputDirectory, entry.name), entry.data))]);
+      const reopened = await importDocument(outputPath, true); const reopenedDocument = reopened.documents[0]; if (reopenedDocument.kind !== 'pixel') throw new Error('Expected reopened image collection');
+      const reopenedMap = reopenedDocument.pixelAssets[reopenedDocument.activeAssetId]; if (reopenedMap.type !== 'tilemap') throw new Error('Expected reopened image-collection map');
+      const reopenedTileset = reopenedDocument.pixelAssets[reopenedMap.tilesetIds[0]]; if (reopenedTileset.type !== 'tileset') throw new Error('Expected reopened image-collection tileset');
+      expect(reopenedTileset.columns).toBe(2);
+      expect(Object.keys(reopenedTileset.tiles)).toEqual(['0', '3']);
+      expect(Buffer.from(renderTilemap(reopenedDocument, reopenedMap).getContext('2d').getImageData(0, 0, 4, 2).data)).toEqual(originalRaster);
+    }
+
+    const standalone = structuredClone(native.document); standalone.activeAssetId = nativeTileset.id;
+    const standaloneTsx = await exportDocument(standalone, 'tiled-xml'); expect(standaloneTsx.extension).toBe('tsx');
+    const standaloneTileZero = standaloneTsx.data.toString().match(/<tile id="0"[^>]*>([\s\S]*?)<\/tile>/)?.[1]; expect(standaloneTileZero).toBeDefined();
+    const standaloneOrder = ['<properties>', '<image ', '<objectgroup>', '<animation>'].map((child) => standaloneTileZero!.indexOf(child));
+    expect(standaloneOrder.every((index) => index >= 0)).toBe(true); expect(standaloneOrder).toEqual([...standaloneOrder].sort((left, right) => left - right));
+  });
+
+  it('rejects explicitly malformed JSON/XML image declarations while retaining metadata-only atlases', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'aidraw-tiled-image-declarations-')); temporaryDirectories.push(directory);
+    const metadataOnly = { type: 'tileset', name: 'Metadata only', tilewidth: 1, tileheight: 1, tilecount: 1, columns: 1, tiles: [{ id: 0, properties: [{ name: 'kind', type: 'string', value: 'marker' }] }] };
+    await writeFile(join(directory, 'metadata-only.tsj'), JSON.stringify(metadataOnly));
+    const admitted = await importDocument(join(directory, 'metadata-only.tsj'), true);
+    const admittedDocument = admitted.documents[0]; if (admittedDocument.kind !== 'pixel') throw new Error('Expected metadata-only pixel document');
+    const admittedTileset = admittedDocument.pixelAssets[admittedDocument.activeAssetId]; if (admittedTileset.type !== 'tileset') throw new Error('Expected metadata-only tileset');
+    expect(admittedTileset.spriteAssetId).toBeDefined();
+    expect(admittedTileset.tiles[0].properties).toEqual({ kind: 'marker' });
+
+    await writeFile(join(directory, 'bad-top-level.tsj'), JSON.stringify({ ...metadataOnly, image: 42 }));
+    await expect(importDocument(join(directory, 'bad-top-level.tsj'), true)).rejects.toThrow('Tiled tileset image source must be a nonempty string path.');
+    await writeFile(join(directory, 'bad-per-tile.tsj'), JSON.stringify({ ...metadataOnly, tiles: [{ id: 0, image: '   ' }] }));
+    await expect(importDocument(join(directory, 'bad-per-tile.tsj'), true)).rejects.toThrow('Tiled tile 0 image source must be a nonempty string path.');
+
+    await writeFile(join(directory, 'bad-top-level.tsx'), '<tileset version="1.10" tiledversion="1.12.2" name="Bad top" tilewidth="1" tileheight="1" tilecount="1" columns="1"><image/></tileset>');
+    await expect(importDocument(join(directory, 'bad-top-level.tsx'), true)).rejects.toThrow('Tiled tileset image source must be a nonempty string path.');
+    await writeFile(join(directory, 'bad-per-tile.tsx'), '<tileset version="1.10" tiledversion="1.12.2" name="Bad tile" tilewidth="1" tileheight="1" tilecount="1" columns="1"><tile id="0"><image/></tile></tileset>');
+    await expect(importDocument(join(directory, 'bad-per-tile.tsx'), true)).rejects.toThrow('Tiled tile 0 image source must be a nonempty string path.');
+  });
+
+  it('fails closed for incompatible sources, ambiguous IDs/ranges, sparse gaps, isometric maps, and tile objects', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'aidraw-tiled-image-collection-refusal-')); temporaryDirectories.push(directory);
+    await writeFile(join(directory, 'tile.png'), exactPng(1, 1, [255, 107, 122, 255]));
+    const tileset = { type: 'tileset', name: 'Collection', tilewidth: 1, tileheight: 1, tilecount: 1, columns: 0, tiles: [{ id: 2, image: 'tile.png', imagewidth: 1, imageheight: 1 }] };
+    await writeFile(join(directory, 'collection.tsj'), JSON.stringify(tileset));
+    const map = (overrides: Record<string, unknown> = {}) => ({ type: 'map', orientation: 'orthogonal', infinite: false, width: 1, height: 1, tilewidth: 1, tileheight: 1, tilesets: [{ firstgid: 7, source: 'collection.tsj' }], layers: [{ id: 1, name: 'Cells', type: 'tilelayer', width: 1, height: 1, data: [9] }], ...overrides });
+    await writeFile(join(directory, 'gap.tmj'), JSON.stringify(map({ layers: [{ id: 1, name: 'Gap', type: 'tilelayer', width: 1, height: 1, data: [7] }] })));
+    await expect(importDocument(join(directory, 'gap.tmj'), true)).rejects.toThrow('missing sparse image-collection GID 7');
+    await writeFile(join(directory, 'isometric.tmj'), JSON.stringify(map({ orientation: 'isometric' })));
+    await expect(importDocument(join(directory, 'isometric.tmj'), true)).rejects.toThrow('only finite orthogonal');
+    await writeFile(join(directory, 'object.tmj'), JSON.stringify(map({ layers: [{ id: 1, name: 'Objects', type: 'objectgroup', objects: [{ id: 1, gid: 9, x: 0, y: 1, width: 1, height: 1 }] }] })));
+    await expect(importDocument(join(directory, 'object.tmj'), true)).rejects.toThrow('tile objects backed by image collection');
+    await writeFile(join(directory, 'missing.tsj'), JSON.stringify({ ...tileset, tiles: [{ id: 2, image: 'missing.png' }] }));
+    await writeFile(join(directory, 'missing.tmj'), JSON.stringify({ ...map(), tilesets: [{ firstgid: 7, source: 'missing.tsj' }] }));
+    await expect(importDocument(join(directory, 'missing.tmj'), true)).rejects.toThrow('missing.png');
+    await writeFile(join(directory, 'not-static.png'), Buffer.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 1, 0, 1, 0]));
+    await writeFile(join(directory, 'incompatible.tsj'), JSON.stringify({ ...tileset, tiles: [{ id: 2, image: 'not-static.png' }] }));
+    await writeFile(join(directory, 'incompatible.tmj'), JSON.stringify({ ...map(), tilesets: [{ firstgid: 7, source: 'incompatible.tsj' }] }));
+    await expect(importDocument(join(directory, 'incompatible.tmj'), true)).rejects.toThrow('must be a static PNG');
+    for (const [name, tile, message] of [
+      ['bad-width', { ...tileset.tiles[0], imagewidth: 'not-a-number' }, 'image width must be an integer from 1'],
+      ['bad-height', { ...tileset.tiles[0], imageheight: 0 }, 'image height must be an integer from 1'],
+      ['mismatch-width', { ...tileset.tiles[0], imagewidth: 2 }, 'declared dimensions disagree'],
+    ] as const) {
+      await writeFile(join(directory, `${name}.tsj`), JSON.stringify({ ...tileset, tiles: [tile] }));
+      await writeFile(join(directory, `${name}.tmj`), JSON.stringify({ ...map(), tilesets: [{ firstgid: 7, source: `${name}.tsj` }] }));
+      await expect(importDocument(join(directory, `${name}.tmj`), true)).rejects.toThrow(message);
+    }
+    await writeFile(join(directory, 'duplicate.tsj'), JSON.stringify({ ...tileset, tilecount: 2, tiles: [tileset.tiles[0], tileset.tiles[0]] }));
+    await writeFile(join(directory, 'duplicate.tmj'), JSON.stringify({ ...map(), tilesets: [{ firstgid: 7, source: 'duplicate.tsj' }] }));
+    await expect(importDocument(join(directory, 'duplicate.tmj'), true)).rejects.toThrow('tile ID 2 is duplicated');
+    await writeFile(join(directory, 'overlap.tmj'), JSON.stringify({ ...map(), tilesets: [{ firstgid: 7, source: 'collection.tsj' }, { firstgid: 8, source: 'collection.tsj' }] }));
+    await expect(importDocument(join(directory, 'overlap.tmj'), true)).rejects.toThrow('overlapping GID ranges');
   });
 });

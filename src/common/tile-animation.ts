@@ -1,4 +1,4 @@
-import type { PixelTileset, TileDefinition } from '@aidraw/core';
+import { isImageCollectionTileset, type PixelTileset, type TileDefinition } from '@aidraw/core';
 
 export type TileAnimationFrame = TileDefinition['animation'][number];
 
@@ -48,7 +48,12 @@ export function moveTileAnimationFrame(
   return next;
 }
 
-export function tilesetTileSourceRect(tileset: PixelTileset, tileId: number): { x: number; y: number; width: number; height: number } {
+export function tilesetTileSourceRect(tileset: PixelTileset, tileId: number, collectionSource?: { width: number; height: number }): { x: number; y: number; width: number; height: number } {
+  if (isImageCollectionTileset(tileset)) {
+    if (!Number.isInteger(tileId) || tileId < 0 || !tileset.tiles[tileId]?.imageAssetId) throw new RangeError('Animation tile is missing from the image collection.');
+    if (!collectionSource || !Number.isInteger(collectionSource.width) || !Number.isInteger(collectionSource.height) || collectionSource.width < 1 || collectionSource.height < 1) throw new RangeError('Image-collection tile is missing valid source dimensions.');
+    return { x: 0, y: 0, width: collectionSource.width, height: collectionSource.height };
+  }
   if (!Number.isInteger(tileId) || tileId < 0 || tileId >= tileset.columns * tileset.rows) throw new RangeError('Animation tile falls outside the tileset slice.');
   const tile = tileset.tiles[tileId];
   return {

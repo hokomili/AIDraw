@@ -75,12 +75,12 @@ describe('UX-09 exact-package 32 px text-reflow boundary', () => {
     expect(tracker).toContain('separate enlarged thumbnail/metadata rows each expose the full 136 px');
     expect(testing).toContain('ordinary second row retains its 28/28 px frame-number/metadata split');
     expect(changelog).toContain('two-axis inspector-label containment and the unchanged exact `60000ms` intrinsic-fit assertion passed');
-    expect(tracker).toContain('passed tab/frame-fit plus document-tab smooth-scroll predicates but no complete product PASS');
+    expect(tracker).toContain('prior fit predicates and `.document-tab-viewport` smooth-scroll proof passed');
     expect(testing).toContain('Treat this as a controller-proof failure, not a product document-tab scrolling defect.');
     expect(testing).toContain('`overflow-x: auto` and `scroll-behavior: smooth`');
     expect(testing).toContain('One screenshot was retained');
     expect(changelog).toContain('passed `.document-tab-viewport`');
-    expect(tracker).toContain('context-axis scenario-evidence failure');
+    expect(tracker).toContain('controller/scenario evidence gap');
     expect(testing).toContain('no positive horizontal range in that scenario state');
     expect(testing).toContain('not evidence that context controls are clipped or unreachable');
     expect(testing).toContain('finite positive scrollport');

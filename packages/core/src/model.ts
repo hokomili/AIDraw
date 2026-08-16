@@ -470,6 +470,8 @@ export interface TileDefinition {
   id: number;
   sourceX: number;
   sourceY: number;
+  /** Exact per-tile sprite source for a Tiled image-collection tileset. */
+  imageAssetId?: Id;
   probability: number;
   animation: Array<{ tileId: number; durationMs: number }>;
   collisions: CollisionShape[];
@@ -512,9 +514,12 @@ export interface PixelTileset extends EntityBase {
   };
   /** Tiled-compatible anchor for tile objects; omitted Tiled input defaults to unspecified. */
   objectAlignment: TileObjectAlignment;
+  /** Atlas slice columns, or Tiled display columns when spriteAssetId is omitted. */
   columns: number;
+  /** Atlas slice rows; zero is the explicit image-collection sentinel. */
   rows: number;
-  spriteAssetId: Id;
+  /** Atlas source. Omitted only when every sparse tile owns imageAssetId. */
+  spriteAssetId?: Id;
   tiles: Record<number, TileDefinition>;
   wangSets: WangSet[];
   transformations: {

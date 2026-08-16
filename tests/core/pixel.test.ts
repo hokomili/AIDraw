@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createPixelDocument, decodeTiledGid, encodeTiledGid, readPixel, resizePixelSpriteCanvas, tiledTileTransformMatrix, writePixelRuns, writePixels, writeTileRuns, writeTiles, readTile, type TilemapChunk } from '@aidraw/core';
+import { createPixelDocument, createPixelSprite, createPixelTilemap, createPixelTileset, decodeTiledGid, encodeTiledGid, isImageCollectionTileset, nextTilesetFirstGid, readPixel, resolveTilesetForGid, resizePixelSpriteCanvas, tiledTileTransformMatrix, tilesetLocalIdSpan, tilesetTileSourceAssetId, writePixelRuns, writePixels, writeTileRuns, writeTiles, readTile, type TilemapChunk } from '@aidraw/core';
 
 describe('chunked indexed pixels and sparse tiles', () => {
   it('round-trips pixels across positive and negative chunk boundaries', () => {
@@ -30,6 +30,26 @@ describe('chunked indexed pixels and sparse tiles', () => {
     expect(encoded).toBe(0xeabc_def0);
     expect(decodeTiledGid(encoded)).toEqual({ gid: 0x0abc_def0, hFlip: true, vFlip: true, diagonal: true });
     expect(() => encodeTiledGid(0x1000_0000)).toThrow(/28-bit/);
+  });
+
+  it('resolves only exact sparse image-collection IDs without rebasing gaps', () => {
+    const document = createPixelDocument('project', 'Sparse collection'); document.assetIds = []; document.pixelAssets = {};
+    const zero = createPixelSprite('Tile zero', 2, 2); const three = createPixelSprite('Tile three', 1, 2);
+    const tileset = createPixelTileset('Collection', zero.id, 2, 2, 1, 1); delete tileset.spriteAssetId; tileset.columns = 2; tileset.rows = 0; tileset.firstGid = 17;
+    tileset.tiles = {
+      0: { id: 0, sourceX: 0, sourceY: 0, imageAssetId: zero.id, probability: 1, animation: [], collisions: [], properties: {} },
+      3: { id: 3, sourceX: 0, sourceY: 0, imageAssetId: three.id, probability: 1, animation: [], collisions: [], properties: {} },
+    };
+    const atlas = createPixelTileset('Following atlas', zero.id, 2, 2, 1, 1); atlas.firstGid = nextTilesetFirstGid([tileset]);
+    const map = createPixelTilemap('Map'); map.tilesetIds = [tileset.id, atlas.id];
+    document.pixelAssets = { [zero.id]: zero, [three.id]: three, [tileset.id]: tileset, [atlas.id]: atlas, [map.id]: map }; document.assetIds = [zero.id, three.id, tileset.id, atlas.id, map.id]; document.activeAssetId = map.id;
+    expect(isImageCollectionTileset(tileset)).toBe(true); expect(tilesetLocalIdSpan(tileset)).toBe(4);
+    expect(tileset.columns).toBe(2); expect(atlas.firstGid).toBe(21);
+    expect(resolveTilesetForGid(document, map, 17)).toMatchObject({ tileset, localId: 0 });
+    expect(resolveTilesetForGid(document, map, 20)).toMatchObject({ tileset, localId: 3 });
+    expect(resolveTilesetForGid(document, map, 18)).toBeUndefined();
+    expect(resolveTilesetForGid(document, map, 21)).toMatchObject({ tileset: atlas, localId: 0 });
+    expect(tilesetTileSourceAssetId(tileset, 3)).toBe(three.id);
   });
 
   it('maps all eight Tiled tile transforms in diagonal-first order', () => {

@@ -61,6 +61,7 @@ describe('tile-object human authoring', () => {
     const tileset = source.document.pixelAssets[source.tilesetId]; if (tileset.type !== 'tileset') throw new Error('Expected tileset'); tileset.transformations = { hFlip: false, vFlip: false, rotate: false };
     expect(() => planTileObjectCreation(source.document, { ...request, transforms: { hFlip: true, vFlip: false, diagonal: false } })).toThrow('not permitted');
     tileset.transformations = { hFlip: true, vFlip: true, rotate: true };
+    if (!tileset.spriteAssetId) throw new Error('Expected atlas tileset');
     const overlap = createPixelTileset('Overlap', tileset.spriteAssetId, 24, 32, 1, 1); overlap.firstGid = 18; source.document.pixelAssets[overlap.id] = overlap; map.tilesetIds.push(overlap.id);
     expect(() => planTileObjectCreation(source.document, request)).toThrow('covered by 2 attached tileset ranges');
     expect(() => planTileObjectCreation(source.document, { ...request, tilesetId: overlap.id, tileId: 0 })).toThrow('covered by 2 attached tileset ranges');

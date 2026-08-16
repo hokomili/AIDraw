@@ -91,7 +91,11 @@ function illustrationMergeOperations(target: IllustrationDocument, source: Illus
 function pixelDependencyClosure(document: Extract<AIDrawDocument, { kind: 'pixel' }>, rootIds: string[]): PixelAsset[] {
   const seen = new Set<string>(); const visit = (id: string) => {
     if (seen.has(id)) return; const asset = document.pixelAssets[id]; if (!asset) throw new Error(`Checkpoint pixel asset ${id} does not exist.`); seen.add(id);
-    if (asset.type === 'tileset') visit(asset.spriteAssetId); if (asset.type === 'tilemap') for (const tilesetId of asset.tilesetIds) visit(tilesetId);
+    if (asset.type === 'tileset') {
+      if (asset.spriteAssetId) visit(asset.spriteAssetId);
+      for (const tile of Object.values(asset.tiles)) if (tile.imageAssetId) visit(tile.imageAssetId);
+    }
+    if (asset.type === 'tilemap') for (const tilesetId of asset.tilesetIds) visit(tilesetId);
   };
   for (const id of rootIds) visit(id);
   return document.assetIds.filter((id) => seen.has(id)).map((id) => document.pixelAssets[id]);

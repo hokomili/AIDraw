@@ -19,6 +19,8 @@ import {
   editBitmapFontGlyph,
   floodPixelRegion,
   HUMAN_ACTOR,
+  imageCollectionTilemapModeError,
+  isImageCollectionTileset,
   createId,
   mapBitmapFontGlyphSheet,
   nowIso,
@@ -37,6 +39,7 @@ import {
   reorderPixelFrame,
   renameBitmapFont,
   resolveTilesetForGid,
+  tilesetTileSourceAssetId,
   setPixelCelLinked,
   setPixelFrameCelsLinked,
   setPixelFramePaletteOverride,
@@ -261,9 +264,11 @@ function BitmapTextDialog({ fonts, selectedFontId, origin, spriteSize, paletteIn
 export function PixelCanvas({ document }: { document: PixelDocument }) {
   const asset = document.pixelAssets[document.activeAssetId];
   const tileset = asset?.type === 'tileset' ? asset : undefined;
-  const sourceAsset = tileset ? document.pixelAssets[tileset.spriteAssetId] : undefined;
+  const tilesetPreviewSourceId = tileset?.spriteAssetId;
+  const sourceAsset = tilesetPreviewSourceId ? document.pixelAssets[tilesetPreviewSourceId] : undefined;
   const sprite = asset?.type === 'sprite' ? asset : sourceAsset?.type === 'sprite' ? sourceAsset : undefined;
   const tilemap = asset?.type === 'tilemap' ? asset : undefined;
+  const tilemapModeError = tilemap ? imageCollectionTilemapModeError(document, tilemap) : undefined;
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [size, setSize] = useState({ width: 800, height: 600 });
@@ -373,12 +378,13 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     const entry = document.pixelAssets[id];
     return entry?.type === 'tileset' ? [entry] : [];
   }) ?? [], [document.pixelAssets, tilemap]);
-  const tileObjectTilesetId = tilemap && tileObjectTilesetChoice?.mapId === tilemap.id ? tileObjectTilesetChoice.tilesetId : attachedMapTilesets[0]?.id;
-  const tileObjectTileset = attachedMapTilesets.find((entry) => entry.id === tileObjectTilesetId);
-  const terrainTileset = tool === 'tile-object' ? tileObjectTileset : attachedMapTilesets[0];
+  const authorableMapTilesets = attachedMapTilesets.filter((entry) => Boolean(entry.spriteAssetId));
+  const tileObjectTilesetId = tilemap && tileObjectTilesetChoice?.mapId === tilemap.id ? tileObjectTilesetChoice.tilesetId : authorableMapTilesets[0]?.id;
+  const tileObjectTileset = authorableMapTilesets.find((entry) => entry.id === tileObjectTilesetId);
+  const terrainTileset = tool === 'tile-object' ? tileObjectTileset : authorableMapTilesets[0];
   const terrainSet = terrainTileset?.type === 'tileset' ? terrainTileset.wangSets.find((set) => set.id === terrainSetId) ?? terrainTileset.wangSets[0] : undefined;
   const terrainColor = terrainSet?.colors.find((color) => color.id === terrainColorId) ?? terrainSet?.colors[0];
-  const terrainSource = terrainTileset?.type === 'tileset' ? document.pixelAssets[terrainTileset.spriteAssetId] : undefined;
+  const terrainSource = terrainTileset?.type === 'tileset' && terrainTileset.spriteAssetId ? document.pixelAssets[terrainTileset.spriteAssetId] : undefined;
   const terrainSourceSprite = terrainSource?.type === 'sprite' ? terrainSource : undefined;
   const constrainedTileTransforms = constrainTileTransformFlags(tileTransforms, terrainTileset?.type === 'tileset' ? terrainTileset.transformations : undefined);
   const activeTileTransforms = tool === 'tile-object' ? { ...tileTransforms } : constrainedTileTransforms;
@@ -674,7 +680,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
         context.stroke();
         context.restore();
       }
-    } else if (tilemap) {
+    } else if (tilemap && !tilemapModeError) {
       const mapSources = new BoundedResourceCache<SpriteRegionBitmap>(MAX_MAP_TILE_SOURCE_CACHE_ENTRIES, MAX_MAP_TILE_SOURCE_CACHE_BYTES, (source) => { source.canvas.width = 1; source.canvas.height = 1; });
       const orthogonalArtworkEnvelope = tilemap.orientation === 'orthogonal' ? orthogonalMapTileArtworkEnvelope(document, tilemap) : undefined;
       const isometricArtworkEnvelope = tilemap.orientation === 'isometric' ? isometricMapTileArtworkEnvelope(document, tilemap) : undefined;
@@ -703,11 +709,11 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
             }
             const decoded = decodeTiledGid(object.gid);
             const resolved = resolveTilesetForGid(document, tilemap, decoded.gid);
-            const sourceAsset = resolved ? document.pixelAssets[resolved.tileset.spriteAssetId] : undefined;
+            const sourceAsset = resolved?.tileset.spriteAssetId ? document.pixelAssets[resolved.tileset.spriteAssetId] : undefined;
             const placement = tileObjectArtworkPlacement(object, tilemap.orientation, matrix, view.scale / tilemap.tileWidth, resolved?.tileset);
             if (!tileObjectArtworkIntersects(placement, viewport, selected ? 5 : 0)) continue;
             const visibleLocalId = resolved ? animatedLocalId(resolved) : undefined;
-            const sourceRect = resolved && visibleLocalId !== undefined ? tilesetTileSourceRect(resolved.tileset, visibleLocalId) : undefined;
+            const sourceRect = resolved && visibleLocalId !== undefined ? tilesetTileSourceRect(resolved.tileset, visibleLocalId, sourceAsset?.type === 'sprite' ? sourceAsset : undefined) : undefined;
             const sourcePlan = sourceAsset?.type === 'sprite' && sourceRect ? pixelSpriteRegionPlan(sourceAsset, sourceRect) : undefined; const frameId = sourceAsset?.type === 'sprite' ? sourceAsset.frameIds[0] : undefined;
             const mapSource = sourceAsset?.type === 'sprite' && sourceRect && sourcePlan && frameId
               ? mapSources.acquire(`${sourceAsset.id}\0${frameId}\0${sourceRect.x},${sourceRect.y},${sourceRect.width},${sourceRect.height}`, sourcePlan.render.width * sourcePlan.render.height * 4, () => spriteRegionBitmap(sourceAsset, frameId, document.palette, sourceRect))
@@ -739,7 +745,9 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
         const drawCell = (x: number, y: number, raw: number) => {
           const decoded = decodeTiledGid(raw); if (!decoded.gid || hiddenCells?.has(replayPointKey(x, y))) return;
           const resolved = resolveTilesetForGid(document, tilemap, decoded.gid);
-          const mapSourceAsset = resolved ? document.pixelAssets[resolved.tileset.spriteAssetId] : undefined;
+          const visibleLocalId = resolved ? animatedLocalId(resolved) : undefined;
+          const mapSourceAssetId = resolved && visibleLocalId !== undefined ? tilesetTileSourceAssetId(resolved.tileset, visibleLocalId) : undefined;
+          const mapSourceAsset = mapSourceAssetId ? document.pixelAssets[mapSourceAssetId] : undefined;
           const sourceIsRenderable = mapSourceAsset?.type === 'sprite';
           const canonicalRect = tilemap.orientation === 'isometric'
             ? isometricCellRect(x, y, tilemap.height, tilemap.tileWidth, tilemap.tileHeight)
@@ -758,7 +766,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
                 canonicalRect,
                 tilemap.tileWidth,
                 tilemap.tileHeight,
-                { width: resolved.tileset.tileWidth, height: resolved.tileset.tileHeight },
+                { width: isImageCollectionTileset(resolved.tileset) ? mapSourceAsset.width : resolved.tileset.tileWidth, height: isImageCollectionTileset(resolved.tileset) ? mapSourceAsset.height : resolved.tileset.tileHeight },
                 decoded,
                 resolved.tileset.tileOffset,
               )
@@ -772,8 +780,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
               && canonicalRect.x < layerViewportRegion.x + layerViewportRegion.width
               && canonicalRect.y < layerViewportRegion.y + layerViewportRegion.height;
           if (!canonicalIntersects) return;
-          const visibleLocalId = resolved ? animatedLocalId(resolved) : undefined;
-          const sourceRect = resolved && visibleLocalId !== undefined ? tilesetTileSourceRect(resolved.tileset, visibleLocalId) : undefined;
+          const sourceRect = resolved && visibleLocalId !== undefined ? tilesetTileSourceRect(resolved.tileset, visibleLocalId, mapSourceAsset?.type === 'sprite' ? mapSourceAsset : undefined) : undefined;
           const sourcePlan = mapSourceAsset?.type === 'sprite' && sourceRect ? pixelSpriteRegionPlan(mapSourceAsset, sourceRect) : undefined; const frameId = mapSourceAsset?.type === 'sprite' ? mapSourceAsset.frameIds[0] : undefined;
           const mapSource = mapSourceAsset?.type === 'sprite' && sourceRect && sourcePlan && frameId
             ? mapSources.acquire(`${mapSourceAsset.id}\0${frameId}\0${sourceRect.x},${sourceRect.y},${sourceRect.width},${sourceRect.height}`, sourcePlan.render.width * sourcePlan.render.height * 4, () => spriteRegionBitmap(mapSourceAsset, frameId, document.palette, sourceRect))
@@ -783,7 +790,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
           try {
             if (tilemap.orientation === 'orthogonal') {
               const rect = gridCellRect({ x, y });
-              const placement = resolved && sourceIsRenderable ? orthogonalTileArtworkPlacement(rect, tilemap.tileWidth, tilemap.tileHeight, { width: resolved.tileset.tileWidth, height: resolved.tileset.tileHeight }, decoded, resolved.tileset.tileOffset) : undefined;
+              const placement = resolved && sourceIsRenderable ? orthogonalTileArtworkPlacement(rect, tilemap.tileWidth, tilemap.tileHeight, { width: isImageCollectionTileset(resolved.tileset) ? mapSourceAsset.width : resolved.tileset.tileWidth, height: isImageCollectionTileset(resolved.tileset) ? mapSourceAsset.height : resolved.tileset.tileHeight }, decoded, resolved.tileset.tileOffset) : undefined;
               if (!drawTile(placement)) { context.fillStyle = `hsl(${visibleGid * 47 % 360} 52% 62%)`; context.fillRect(rect.x, rect.y, rect.width, rect.height); }
             } else {
               const rect = gridCellRect({ x, y });
@@ -923,7 +930,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       context.stroke();
     }
     context.restore();
-  }, [activeFrameId, activePaletteCycle, activePaletteOverride, activeTileLayerEntry, bulkPreview, ditherCoverage, ditherMatrixSize, ditherMixIndex, ditherPhaseX, ditherPhaseY, document, lassoPath, logical, mapLayerTranslations, mapObjectGesture, onionSettings, onionSkin, paletteCycling, paletteOffset, pixelIndex, playbacks, preview, selectedEntityId, selection, selectionOffset, size, sprite, stampPreview, symmetry, tileAnimationTimeMs, tilemap, tileStampPreview, tileset, tool, view, visibleMapLayers, wrapEditing]);
+  }, [activeFrameId, activePaletteCycle, activePaletteOverride, activeTileLayerEntry, bulkPreview, ditherCoverage, ditherMatrixSize, ditherMixIndex, ditherPhaseX, ditherPhaseY, document, lassoPath, logical, mapLayerTranslations, mapObjectGesture, onionSettings, onionSkin, paletteCycling, paletteOffset, pixelIndex, playbacks, preview, selectedEntityId, selection, selectionOffset, size, sprite, stampPreview, symmetry, tileAnimationTimeMs, tilemap, tilemapModeError, tileStampPreview, tileset, tool, view, visibleMapLayers, wrapEditing]);
 
   const toPixel = (event: ReactPointerEvent<HTMLCanvasElement>): PixelPoint => {
     const bounds = event.currentTarget.getBoundingClientRect();
@@ -1647,7 +1654,9 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   });
 
   if (!asset) return <div className="empty-canvas">No pixel asset selected.</div>;
+  if (asset.type === 'tileset' && isImageCollectionTileset(asset)) return <div className="empty-canvas"><Grid3X3 size={36} /><strong>Image collection tileset</strong><span>{Object.keys(asset.tiles).length} sparse PNG tile(s) · {asset.columns} display column(s). Per-tile artwork is read-only here; use this tileset from a finite orthogonal map.</span></div>;
   if (asset.type === 'tileset' && !sprite) return <div className="empty-canvas"><Grid3X3 size={36} /><strong>Missing tileset pixels</strong><span>The linked source sprite is unavailable.</span></div>;
+  if (tilemapModeError) return <div className="empty-canvas"><Grid3X3 size={36} /><strong>Unsupported image-collection map mode</strong><span>{tilemapModeError}</span></div>;
   const durationFrame = durationFrameId && sprite ? sprite.frames[durationFrameId] : undefined;
   const durationFrameNumber = durationFrameId && sprite ? sprite.frameIds.indexOf(durationFrameId) + 1 : undefined;
   const tagFromIndex = tagDraft && sprite ? sprite.frameIds.indexOf(tagDraft.fromFrameId) : -1;
@@ -1687,7 +1696,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
         {paletteCycling && document.paletteCycles.length > 0 && <select aria-label="Active palette cycle" value={activePaletteCycle?.id} onChange={(event) => { setActivePaletteCycleId(event.target.value); setPaletteOffset(0); }} title="Named palette cycle">{document.paletteCycles.map((cycle) => <option key={cycle.id} value={cycle.id}>{cycle.name}</option>)}</select>}
         {tool === 'terrain' && terrainTileset?.type === 'tileset' && <><select aria-label="Active Wang set" value={terrainSet?.id ?? ''} onChange={(event) => { setTerrainSetId(event.target.value); setTerrainColorId(undefined); }}><option value="" disabled>Wang set</option>{terrainTileset.wangSets.map((set) => <option key={set.id} value={set.id}>{set.name}</option>)}</select><select aria-label="Active Wang color" value={terrainColor?.id ?? ''} onChange={(event) => setTerrainColorId(Number(event.target.value))}><option value="" disabled>Terrain color</option>{terrainSet?.colors.map((color) => <option key={color.id} value={color.id}>{color.name}</option>)}</select><button className={terrainErase ? 'is-active' : ''} onClick={() => setTerrainErase((value) => !value)} title="Toggle terrain erase and neighbor repair"><Eraser size={13} /> {terrainErase ? 'Erase' : 'Paint'}</button></>}
         {tool === 'tile-object' && tilemap && <>
-          <select aria-label="Tile object tileset" value={tileObjectTileset?.id ?? ''} onChange={(event) => setTileObjectTilesetChoice({ mapId: tilemap.id, tilesetId: event.target.value })} title="Exact attached tileset for the new tile object"><option value="" disabled>Attached tileset</option>{attachedMapTilesets.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}</select>
+          <select aria-label="Tile object tileset" value={tileObjectTileset?.id ?? ''} onChange={(event) => setTileObjectTilesetChoice({ mapId: tilemap.id, tilesetId: event.target.value })} title="Exact attached atlas tileset for the new tile object"><option value="" disabled>Attached atlas tileset</option>{authorableMapTilesets.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}</select>
           <label className="tile-object-tile-control"><span>Tile ID</span><input aria-label="Tile object local tile ID" type="number" min={0} max={Math.max(0, (tileObjectTileset?.columns ?? 1) * (tileObjectTileset?.rows ?? 1) - 1)} step={1} value={tileObjectTileDraftValue} onChange={(event) => { const value = event.target.value; setTileObjectTileDraft({ mapId: tilemap.id, value }); const parsed = Number(value); if (value.trim() && Number.isSafeInteger(parsed) && parsed >= 0) setPixelIndex(parsed + 1); }} /></label>
           <span title="Exact destination object layer">{activeObjectLayerEntry ? activeObjectLayerEntry.layer.name : 'Select object layer'}</span>
         </>}

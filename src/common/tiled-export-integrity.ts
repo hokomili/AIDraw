@@ -1,6 +1,9 @@
 import {
   decodeTiledGid,
   decodeTilemapChunk,
+  isImageCollectionTileset,
+  tilesetHasLocalId,
+  tilesetLocalIdSpan,
   TILED_GID_MASK,
   type PixelDocument,
   type PixelSprite,
@@ -11,7 +14,7 @@ import { MAX_TILED_TILESETS, assertTiledExportResourceBudget } from './tiled-res
 
 export interface TiledExportTilesetReference {
   tileset: PixelTileset;
-  sprite: PixelSprite;
+  sprite?: PixelSprite;
   firstGid: number;
   lastGid: number;
 }
@@ -39,8 +42,16 @@ export interface TiledMapExportPlan extends TiledExportReferencePlan {
   tileLayers: ReadonlyMap<string, TiledExportTileLayerData>;
 }
 
-function requireSourceSprite(document: PixelDocument, tileset: PixelTileset): PixelSprite {
-  const source = document.pixelAssets[tileset.spriteAssetId];
+function requireSourceSprite(document: PixelDocument, tileset: PixelTileset): PixelSprite | undefined {
+  if (isImageCollectionTileset(tileset)) {
+    if (!Object.keys(tileset.tiles).length) throw new Error(`Tiled export image collection “${tileset.name}” has no tile images.`);
+    for (const tile of Object.values(tileset.tiles)) {
+      const source = tile.imageAssetId ? document.pixelAssets[tile.imageAssetId] : undefined;
+      if (source?.type !== 'sprite') throw new Error(`Tiled export image-collection tile ${tile.id} in “${tileset.name}” is missing its source sprite.`);
+    }
+    return undefined;
+  }
+  const source = tileset.spriteAssetId ? document.pixelAssets[tileset.spriteAssetId] : undefined;
   if (source?.type !== 'sprite') throw new Error(`Tiled export tileset “${tileset.name}” is missing its source sprite.`);
   return source;
 }
@@ -59,12 +70,12 @@ function mapTilesetReferences(document: PixelDocument, map: PixelTilemap): Tiled
     if (!Number.isSafeInteger(tileset.firstGid) || tileset.firstGid < 1 || tileset.firstGid > TILED_GID_MASK) {
       throw new RangeError(`Tiled export tileset “${tileset.name}” falls outside the supported 28-bit GID range.`);
     }
-    const tileCount = tileset.columns * tileset.rows;
+    const tileCount = tilesetLocalIdSpan(tileset);
     const lastGid = tileset.firstGid + tileCount - 1;
     if (!Number.isSafeInteger(lastGid) || lastGid > TILED_GID_MASK) {
       throw new RangeError(`Tiled export tileset “${tileset.name}” exceeds the supported 28-bit GID range.`);
     }
-    return { tileset, sprite, firstGid: tileset.firstGid, lastGid };
+    return { tileset, ...(sprite ? { sprite } : {}), firstGid: tileset.firstGid, lastGid };
   });
 }
 
@@ -79,8 +90,11 @@ export function planTiledExportReferences(
 ): TiledExportReferencePlan {
   if (active.type === 'tileset') {
     const sprite = requireSourceSprite(document, active);
+    const span = tilesetLocalIdSpan(active);
+    const lastGid = isImageCollectionTileset(active) ? active.firstGid + Math.max(0, span - 1) : active.firstGid;
+    if (isImageCollectionTileset(active) && (!Number.isSafeInteger(active.firstGid) || active.firstGid < 1 || !Number.isSafeInteger(lastGid) || lastGid > TILED_GID_MASK)) throw new RangeError(`Tiled export tileset “${active.name}” exceeds the supported 28-bit GID range.`);
     return {
-      tilesets: [{ tileset: active, sprite, firstGid: active.firstGid, lastGid: active.firstGid }],
+      tilesets: [{ tileset: active, ...(sprite ? { sprite } : {}), firstGid: active.firstGid, lastGid }],
       ranges: [],
     };
   }
@@ -105,7 +119,13 @@ function resolvesBaseGid(plan: TiledExportReferencePlan, gid: number): boolean {
     if (plan.ranges[middle].firstGid <= gid) low = middle + 1;
     else high = middle - 1;
   }
-  return high >= 0 && gid <= plan.ranges[high].lastGid;
+  if (high < 0 || gid > plan.ranges[high].lastGid) return false;
+  const reference = plan.ranges[high];
+  return tilesetHasLocalId(reference.tileset, gid - reference.firstGid);
+}
+
+function referenceForBaseGid(plan: TiledExportReferencePlan, gid: number): TiledExportTilesetReference | undefined {
+  return plan.ranges.find((reference) => gid >= reference.firstGid && gid <= reference.lastGid && tilesetHasLocalId(reference.tileset, gid - reference.firstGid));
 }
 
 function assertResolvedGid(
@@ -150,6 +170,13 @@ function planTiledExportLayerData(
       for (const childId of layer.childIds ?? []) visit(childId);
       return;
     }
+    if (layer.type === 'object') {
+      for (const object of layer.objects ?? []) if (object.type === 'tile') {
+        const reference = referenceForBaseGid(plan, decodeTiledGid(object.gid).gid);
+        if (reference && isImageCollectionTileset(reference.tileset)) throw new Error(`Tiled tile objects backed by image collection “${reference.tileset.name}” are outside this supported slice.`);
+      }
+      return;
+    }
     if (layer.type !== 'tile') return;
 
     const chunks = Object.values(layer.chunks ?? {});
@@ -189,5 +216,6 @@ function planTiledExportLayerData(
 export function planTiledMapExport(document: PixelDocument, map: PixelTilemap): TiledMapExportPlan {
   assertTiledExportResourceBudget(map);
   const plan = planTiledExportReferences(document, map);
+  if (plan.tilesets.some(({ tileset }) => isImageCollectionTileset(tileset)) && (map.orientation !== 'orthogonal' || map.infinite)) throw new Error('Tiled image-collection export supports only finite orthogonal maps.');
   return { ...plan, tileLayers: planTiledExportLayerData(map, plan) };
 }

@@ -5,6 +5,7 @@ import {
   applyTransaction,
   createIllustrationDocument,
   createPixelDocument,
+  createPixelSprite,
   createPixelTilemap,
   createPixelTileset,
   nowIso,
@@ -113,11 +114,62 @@ describe('safe document fragments', () => {
     if (importedMap.type !== 'tilemap') throw new Error('Expected imported map');
     const importedTileset = imported.pixelAssets[importedMap.tilesetIds[0]];
     if (importedTileset.type !== 'tileset') throw new Error('Expected imported tileset');
+    if (!importedTileset.spriteAssetId) throw new Error('Expected imported atlas tileset');
     const importedSprite = imported.pixelAssets[importedTileset.spriteAssetId];
     if (importedSprite.type !== 'sprite') throw new Error('Expected imported sprite');
-    const importedIndex = readPixel(Object.values(importedSprite.cels)[0], 1, 1);
+    const importedIndex = readPixel(Object.values(importedSprite.cels)[0]!, 1, 1);
     expect(imported.palette[importedIndex].color).toBe('#123456');
     expect([importedMap.id, importedTileset.id, importedSprite.id]).not.toContain(map.id);
+  });
+
+  it('exports and remaps every sparse image-collection sprite dependency without collapsing local IDs', () => {
+    const source = createPixelDocument('project', 'Collection source');
+    const tileZero = source.pixelAssets[source.activeAssetId];
+    if (tileZero.type !== 'sprite') throw new Error('Expected first collection sprite');
+    const tileThree = createPixelSprite('Sparse tile 3', 3, 2);
+    const collection = createPixelTileset('Sparse collection', tileZero.id, 2, 2, 1, 1);
+    delete collection.spriteAssetId;
+    collection.columns = 2;
+    collection.rows = 0;
+    collection.tiles = {
+      0: { id: 0, sourceX: 0, sourceY: 0, imageAssetId: tileZero.id, probability: 1, animation: [], collisions: [], properties: { label: 'zero' } },
+      3: { id: 3, sourceX: 0, sourceY: 0, imageAssetId: tileThree.id, probability: 1, animation: [], collisions: [], properties: { label: 'three' } },
+    };
+    const map = createPixelTilemap('Sparse map');
+    map.tilesetIds = [collection.id];
+    Object.assign(source.pixelAssets, { [tileThree.id]: tileThree, [collection.id]: collection, [map.id]: map });
+    source.assetIds.push(tileThree.id, collection.id, map.id);
+    source.activeAssetId = map.id;
+
+    const fragment = exportPixelFragment(source, map.id);
+    if (fragment.kind !== 'pixel-assets') throw new Error('Expected pixel fragment');
+    expect(fragment.pixelAssets.filter((asset) => asset.type === 'sprite').map((asset) => asset.id).sort()).toEqual([tileThree.id, tileZero.id].sort());
+    const exportedCollection = fragment.pixelAssets.find((asset) => asset.type === 'tileset');
+    expect(exportedCollection).toMatchObject({ type: 'tileset', columns: 2, rows: 0 });
+    if (exportedCollection?.type !== 'tileset') throw new Error('Expected exported collection');
+    expect(exportedCollection.spriteAssetId).toBeUndefined();
+    expect(Object.keys(exportedCollection.tiles)).toEqual(['0', '3']);
+    expect([exportedCollection.tiles[0].imageAssetId, exportedCollection.tiles[3].imageAssetId].sort()).toEqual([tileThree.id, tileZero.id].sort());
+
+    const target = createPixelDocument('project', 'Collection target');
+    const operations = importDocumentFragmentOperations(target, fragment);
+    const imported = applyTransaction(target, { id: 'collection-fragment-tx', clientOperationId: 'collection-fragment-import', documentId: target.id, actor: HUMAN_ACTOR, label: 'Import collection fragment', createdAt: nowIso(), operations }).document;
+    if (imported.kind !== 'pixel') throw new Error('Expected pixel document');
+    const importedMap = imported.pixelAssets[imported.activeAssetId];
+    if (importedMap.type !== 'tilemap') throw new Error('Expected imported map');
+    const importedCollection = imported.pixelAssets[importedMap.tilesetIds[0]];
+    if (importedCollection.type !== 'tileset') throw new Error('Expected imported collection');
+    const remappedSources = [importedCollection.tiles[0].imageAssetId, importedCollection.tiles[3].imageAssetId];
+    expect(importedCollection).toMatchObject({ columns: 2, rows: 0 });
+    expect(importedCollection.spriteAssetId).toBeUndefined();
+    expect(Object.keys(importedCollection.tiles)).toEqual(['0', '3']);
+    expect(new Set(remappedSources).size).toBe(2);
+    expect(remappedSources).not.toContain(tileZero.id);
+    expect(remappedSources).not.toContain(tileThree.id);
+    for (const sourceId of remappedSources) {
+      expect(sourceId).toBeDefined();
+      expect(imported.pixelAssets[sourceId!]?.type).toBe('sprite');
+    }
   });
 
   it('upgrades the legacy single-pixel-asset clipboard shape', () => {

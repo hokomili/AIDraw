@@ -35,7 +35,58 @@ export function tiledTileTransformMatrix(transforms: { hFlip?: boolean; vFlip?: 
 export function resolveTilesetForGid(document: PixelDocument, map: PixelTilemap, gid: number): { tileset: PixelTileset; localId: number } | undefined {
   const candidates = map.tilesetIds.map((id) => document.pixelAssets[id]).filter((asset): asset is PixelTileset => asset?.type === 'tileset' && asset.firstGid <= gid).sort((a, b) => b.firstGid - a.firstGid);
   const tileset = candidates[0]; if (!tileset) return undefined;
-  const localId = gid - tileset.firstGid; return localId >= 0 && localId < tileset.columns * tileset.rows ? { tileset, localId } : undefined;
+  const localId = gid - tileset.firstGid; return tilesetHasLocalId(tileset, localId) ? { tileset, localId } : undefined;
+}
+
+export function isImageCollectionTileset(tileset: PixelTileset): boolean {
+  return tileset.spriteAssetId === undefined;
+}
+
+export function tilesetHasLocalId(tileset: PixelTileset, localId: number): boolean {
+  if (!Number.isSafeInteger(localId) || localId < 0) return false;
+  return isImageCollectionTileset(tileset)
+    ? Boolean(tileset.tiles[localId]?.imageAssetId)
+    : localId < tileset.columns * tileset.rows;
+}
+
+export function tilesetLocalIdSpan(tileset: PixelTileset): number {
+  if (!isImageCollectionTileset(tileset)) return tileset.columns * tileset.rows;
+  let span = 0;
+  for (const tile of Object.values(tileset.tiles)) span = Math.max(span, tile.id + 1);
+  return span;
+}
+
+export function nextTilesetFirstGid(tilesets: readonly PixelTileset[]): number {
+  let next = 1;
+  for (const tileset of tilesets) {
+    const span = tilesetLocalIdSpan(tileset);
+    if (!Number.isSafeInteger(span) || span < 1) throw new RangeError(`Tileset “${tileset.name}” has no valid local-ID range.`);
+    const after = tileset.firstGid + span;
+    if (!Number.isSafeInteger(after) || after > TILED_GID_MASK) throw new RangeError(`Tileset “${tileset.name}” leaves no room for another Tiled GID range.`);
+    next = Math.max(next, after);
+  }
+  return next;
+}
+
+export function imageCollectionTilemapModeError(document: PixelDocument, map: PixelTilemap): string | undefined {
+  const collection = map.tilesetIds
+    .map((id) => document.pixelAssets[id])
+    .find((asset): asset is PixelTileset => asset?.type === 'tileset' && isImageCollectionTileset(asset));
+  if (!collection || (map.orientation === 'orthogonal' && !map.infinite)) return undefined;
+  return `Map “${map.name}” uses image-collection tileset “${collection.name}” and must remain finite orthogonal. Detach the collection before changing orientation or enabling infinite chunks.`;
+}
+
+export function assertImageCollectionTilemapMode(document: PixelDocument, map: PixelTilemap): void {
+  const error = imageCollectionTilemapModeError(document, map);
+  if (error) throw new Error(error);
+}
+
+export function assertImageCollectionTilemapModes(document: PixelDocument): void {
+  for (const asset of Object.values(document.pixelAssets)) if (asset.type === 'tilemap') assertImageCollectionTilemapMode(document, asset);
+}
+
+export function tilesetTileSourceAssetId(tileset: PixelTileset, localId: number): string | undefined {
+  return isImageCollectionTileset(tileset) ? tileset.tiles[localId]?.imageAssetId : tileset.spriteAssetId;
 }
 
 function encodeBytes(bytes: Uint8Array): string {

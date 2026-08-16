@@ -185,6 +185,7 @@ export function serializePixelStampLibrary(document: PixelDocument): string {
 }
 
 function tilesetReference(document: PixelDocument, tileset: PixelTileset): StampLibraryTilesetReference {
+  if (!tileset.spriteAssetId) throw new Error(`Tileset “${tileset.name}” is an image collection; tile-stamp library exchange requires an atlas source.`);
   const source = document.pixelAssets[tileset.spriteAssetId];
   if (!source || source.type !== 'sprite') throw new Error(`Tileset “${tileset.name}” is missing its source sprite.`);
   return {

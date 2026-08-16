@@ -1,4 +1,5 @@
 import {
+  isImageCollectionTileset,
   tiledTileTransformMatrix,
   type PixelDocument,
   type PixelTilemap,
@@ -141,8 +142,16 @@ export function orthogonalMapTileArtworkEnvelope(
   const artworkSizes: OrthogonalTileArtworkSize[] = [{ width: map.tileWidth, height: map.tileHeight }];
   for (const id of map.tilesetIds) {
     const asset = document.pixelAssets[id];
-    const source = asset?.type === 'tileset' ? document.pixelAssets[asset.spriteAssetId] : undefined;
-    if (asset?.type === 'tileset' && source?.type === 'sprite') artworkSizes.push({ width: asset.tileWidth, height: asset.tileHeight, offset: asset.tileOffset });
+    if (asset?.type !== 'tileset') continue;
+    if (isImageCollectionTileset(asset)) {
+      for (const tile of Object.values(asset.tiles)) {
+        const source = tile.imageAssetId ? document.pixelAssets[tile.imageAssetId] : undefined;
+        if (source?.type === 'sprite') artworkSizes.push({ width: source.width, height: source.height, offset: asset.tileOffset });
+      }
+      continue;
+    }
+    const source = asset.spriteAssetId ? document.pixelAssets[asset.spriteAssetId] : undefined;
+    if (source?.type === 'sprite') artworkSizes.push({ width: asset.tileWidth, height: asset.tileHeight, offset: asset.tileOffset });
   }
   return orthogonalTileArtworkEnvelope(map.tileWidth, map.tileHeight, artworkSizes);
 }

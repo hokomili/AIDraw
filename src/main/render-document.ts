@@ -1,9 +1,12 @@
 import { Canvas, Path2D, createCanvas, loadImage } from '@napi-rs/canvas';
 import { getStroke } from 'perfect-freehand';
 import {
+  assertImageCollectionTilemapMode,
   decodeTiledGid,
   decodeTilemapChunk,
+  isImageCollectionTileset,
   resolveTilesetForGid,
+  tilesetTileSourceAssetId,
   type AIDrawDocument,
   type BlendMode,
   type IllustrationDocument,
@@ -361,6 +364,7 @@ export function renderTilemapDimensions(map: PixelTilemap): { width: number; hei
 }
 
 function renderTilemapSurface(document: PixelDocument, map: PixelTilemap, region: PixelSpriteRegion, onlyLayerId?: string, tileAnimationTimeMs = 0): Canvas {
+  assertImageCollectionTilemapMode(document, map);
   const isometric = map.orientation === 'isometric';
   const dimensions = renderTilemapDimensions(map);
   const orthogonalArtworkEnvelope = isometric ? undefined : orthogonalMapTileArtworkEnvelope(document, map);
@@ -394,11 +398,11 @@ function renderTilemapSurface(document: PixelDocument, map: PixelTilemap, region
         }
         const decoded = decodeTiledGid(object.gid);
         const resolved = resolveTilesetForGid(document, map, decoded.gid);
-        const sourceAsset = resolved ? document.pixelAssets[resolved.tileset.spriteAssetId] : undefined;
+        const sourceAsset = resolved?.tileset.spriteAssetId ? document.pixelAssets[resolved.tileset.spriteAssetId] : undefined;
         const placement = tileObjectArtworkPlacement(object, map.orientation, matrix, 1, resolved?.tileset);
         if (!tileObjectArtworkIntersects(placement, layerRegion)) continue;
         if (resolved && sourceAsset?.type === 'sprite') {
-          const sourceRect = tilesetTileSourceRect(resolved.tileset, animatedLocalId(resolved.tileset, resolved.localId));
+          const sourceRect = tilesetTileSourceRect(resolved.tileset, animatedLocalId(resolved.tileset, resolved.localId), sourceAsset);
           const plan = pixelSpriteRegionPlan(sourceAsset, sourceRect); const frameId = sourceAsset.frameIds[0]; const cacheKey = `${sourceAsset.id}\0${frameId}\0${sourceRect.x},${sourceRect.y},${sourceRect.width},${sourceRect.height}`;
           const source = sources.acquire(cacheKey, plan.render.width * plan.render.height * 4, () => renderSpriteRegion(document, sourceAsset, sourceRect, frameId));
           try {
@@ -426,12 +430,15 @@ function renderTilemapSurface(document: PixelDocument, map: PixelTilemap, region
       const rect = isometric
         ? isometricCellRect(tileX, tileY, map.height, map.tileWidth, map.tileHeight)
         : orthogonalCellRect(tileX, tileY, map.tileWidth, map.tileHeight);
-      const resolved = resolveTilesetForGid(document, map, decoded.gid); const sourceAsset = resolved ? document.pixelAssets[resolved.tileset.spriteAssetId] : undefined;
+      const resolved = resolveTilesetForGid(document, map, decoded.gid);
+      const renderedLocalId = resolved ? animatedLocalId(resolved.tileset, resolved.localId) : undefined;
+      const sourceAssetId = resolved && renderedLocalId !== undefined ? tilesetTileSourceAssetId(resolved.tileset, renderedLocalId) : undefined;
+      const sourceAsset = sourceAssetId ? document.pixelAssets[sourceAssetId] : undefined;
       const sourceIsRenderable = sourceAsset?.type === 'sprite';
       const artworkPlacement = resolved && sourceIsRenderable
         ? isometric
           ? isometricTileArtworkPlacement(rect, map.tileWidth, map.tileHeight, { width: resolved.tileset.tileWidth, height: resolved.tileset.tileHeight }, decoded, resolved.tileset.tileOffset)
-          : orthogonalTileArtworkPlacement(rect, map.tileWidth, map.tileHeight, { width: resolved.tileset.tileWidth, height: resolved.tileset.tileHeight }, decoded, resolved.tileset.tileOffset)
+          : orthogonalTileArtworkPlacement(rect, map.tileWidth, map.tileHeight, { width: isImageCollectionTileset(resolved.tileset) ? sourceAsset.width : resolved.tileset.tileWidth, height: isImageCollectionTileset(resolved.tileset) ? sourceAsset.height : resolved.tileset.tileHeight }, decoded, resolved.tileset.tileOffset)
         : undefined;
       const artworkIntersects = artworkPlacement
         ? isometric
@@ -440,7 +447,7 @@ function renderTilemapSurface(document: PixelDocument, map: PixelTilemap, region
         : rect.x + rect.width > layerRegion.x && rect.y + rect.height > layerRegion.y && rect.x < layerRegion.x + layerRegion.width && rect.y < layerRegion.y + layerRegion.height;
       if (!artworkIntersects) return;
       if (resolved && sourceAsset?.type === 'sprite') {
-        const sourceRect = tilesetTileSourceRect(resolved.tileset, animatedLocalId(resolved.tileset, resolved.localId));
+        const sourceRect = tilesetTileSourceRect(resolved.tileset, renderedLocalId!, sourceAsset);
         const plan = pixelSpriteRegionPlan(sourceAsset, sourceRect); const frameId = sourceAsset.frameIds[0]; const cacheKey = `${sourceAsset.id}\0${frameId}\0${sourceRect.x},${sourceRect.y},${sourceRect.width},${sourceRect.height}`;
         const source = sources.acquire(cacheKey, plan.render.width * plan.render.height * 4, () => renderSpriteRegion(document, sourceAsset, sourceRect, frameId));
         try {
@@ -448,7 +455,7 @@ function renderTilemapSurface(document: PixelDocument, map: PixelTilemap, region
           const placement = artworkPlacement!;
           context.save(); try { context.translate(placement.centerX, placement.centerY); context.transform(placement.transform.a, placement.transform.b, placement.transform.c, placement.transform.d, 0, 0); context.drawImage(sampled.canvas, sampled.sample.x, sampled.sample.y, sampled.sample.width, sampled.sample.height, -placement.width / 2, -placement.height / 2, placement.width, placement.height); } finally { context.restore(); }
         } finally { source.release(); }
-      } else { const visibleGid = resolved ? resolved.tileset.firstGid + animatedLocalId(resolved.tileset, resolved.localId) : decoded.gid; context.fillStyle = `hsl(${visibleGid * 47 % 360} 55% 60%)`; context.fillRect(rect.x, rect.y, rect.width, rect.height); }
+      } else { const visibleGid = resolved && renderedLocalId !== undefined ? resolved.tileset.firstGid + renderedLocalId : decoded.gid; context.fillStyle = `hsl(${visibleGid * 47 % 360} 55% 60%)`; context.fillRect(rect.x, rect.y, rect.width, rect.height); }
     };
     if (isometric) for (const cell of isometricTileRenderCells(candidateChunks, (chunk) => decodeTilemapChunk(chunk))) drawCell(cell.x, cell.y, cell.raw);
     else for (const chunk of candidateChunks) {
@@ -497,7 +504,7 @@ export function renderPixelAsset(document: PixelDocument, assetId = document.act
   if (asset?.type === 'sprite') return renderSprite(document, asset, frameId ?? asset.frameIds[0], layerId);
   if (asset?.type === 'tilemap') return renderTilemap(document, asset, layerId);
   if (asset?.type === 'tileset') {
-    const sprite = document.pixelAssets[asset.spriteAssetId];
+    const sprite = asset.spriteAssetId ? document.pixelAssets[asset.spriteAssetId] : undefined;
     if (sprite?.type === 'sprite') return renderSprite(document, sprite, frameId ?? sprite.frameIds[0], layerId);
   }
   return createCanvas(1, 1);
@@ -511,7 +518,8 @@ export async function renderDocument(document: AIDrawDocument): Promise<Canvas> 
 export function renderDocumentDimensions(document: AIDrawDocument): { width: number; height: number } {
   if (document.kind === 'illustration') return { width: document.artboard.width, height: document.artboard.height };
   const active = document.pixelAssets[document.activeAssetId];
-  const asset = active?.type === 'tileset' ? document.pixelAssets[active.spriteAssetId] : active;
+  const sourceId = active?.type === 'tileset' ? active.spriteAssetId : undefined;
+  const asset = active?.type === 'tileset' ? sourceId ? document.pixelAssets[sourceId] : undefined : active;
   if (asset?.type === 'sprite') return { width: asset.width, height: asset.height };
   if (asset?.type === 'tilemap') return renderTilemapDimensions(asset);
   return { width: 1, height: 1 };

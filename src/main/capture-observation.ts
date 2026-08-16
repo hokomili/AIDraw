@@ -51,7 +51,7 @@ export const captureObservation: CaptureObservation = async (
     assetId = request.assetId ?? document.activeAssetId;
     const requestedAsset = document.pixelAssets[assetId];
     if (!requestedAsset) return { error: 'asset_not_found', assetId };
-    const renderedAsset = requestedAsset.type === 'tileset' ? document.pixelAssets[requestedAsset.spriteAssetId] : requestedAsset;
+    const renderedAsset = requestedAsset.type === 'tileset' && requestedAsset.spriteAssetId ? document.pixelAssets[requestedAsset.spriteAssetId] : requestedAsset.type === 'tileset' ? undefined : requestedAsset;
     if (!renderedAsset || (renderedAsset.type !== 'sprite' && renderedAsset.type !== 'tilemap')) return { error: 'invalid_observation_target', message: 'The selected asset has no renderable sprite or tilemap source.', assetId };
     if (renderedAsset.type === 'sprite') {
       frameId = request.frameId ?? renderedAsset.frameIds[0];
