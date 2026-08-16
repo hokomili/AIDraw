@@ -140,6 +140,7 @@ export function PixelCreationSizeReview({
 }
 
 export function TilemapStorageChoice({
+  context = 'creation',
   infinite,
   width,
   height,
@@ -148,6 +149,7 @@ export function TilemapStorageChoice({
   orientation,
   onChange,
 }: {
+  context?: 'creation' | 'existing';
   infinite: boolean;
   width: number;
   height: number;
@@ -156,20 +158,28 @@ export function TilemapStorageChoice({
   orientation: 'orthogonal' | 'isometric';
   onChange: (infinite: boolean) => void;
 }) {
-  return <fieldset className="tilemap-storage-choice">
-    <legend>Map extent and storage</legend>
+  const existing = context === 'existing';
+  const radioName = existing ? 'existing-map-storage' : 'new-tilemap-storage';
+  const descriptionPrefix = existing ? 'existing-map-storage' : 'new-tilemap-storage';
+  const reviewId = `${descriptionPrefix}-geometry-review`;
+  const extentLabel = existing ? 'current' : 'initial';
+  return <fieldset className={`tilemap-storage-choice${existing ? ' map-geometry-storage-choice' : ''}`}>
+    <legend>{existing ? 'Map storage and view mode' : 'Map extent and storage'}</legend>
     <div className="tilemap-storage-options">
       <label className={!infinite ? 'is-selected' : undefined}>
         <input
           type="radio"
-          name="new-tilemap-storage"
+          name={radioName}
           checked={!infinite}
-          aria-label="Use finite tilemap storage"
+          aria-label={existing ? 'Use finite map mode' : 'Use finite tilemap storage'}
+          aria-describedby={`${descriptionPrefix}-finite-description ${reviewId}`}
           onChange={() => onChange(false)}
         />
         <span>
           <strong>Finite map</strong>
-          <small>{width} × {height} addressed cells. Painting stays inside the configured bounds.</small>
+          <small id={`${descriptionPrefix}-finite-description`}>{existing
+            ? `${width} × ${height} current cells form the complete addressed map. Painting stays inside these bounds.`
+            : `${width} × ${height} addressed cells. Painting stays inside the configured bounds.`}</small>
         </span>
         <span className="tilemap-storage-state" aria-hidden="true">
           {!infinite && <Check />}
@@ -179,14 +189,17 @@ export function TilemapStorageChoice({
       <label className={infinite ? 'is-selected' : undefined}>
         <input
           type="radio"
-          name="new-tilemap-storage"
+          name={radioName}
           checked={infinite}
-          aria-label="Use sparse infinite tilemap storage"
+          aria-label={existing ? 'Use sparse infinite map mode' : 'Use sparse infinite tilemap storage'}
+          aria-describedby={`${descriptionPrefix}-infinite-description ${reviewId}`}
           onChange={() => onChange(true)}
         />
         <span>
           <strong>Sparse infinite map</strong>
-          <small>Starts at {width} × {height} cells; painted regions beyond it use 32 × 32 chunks.</small>
+          <small id={`${descriptionPrefix}-infinite-description`}>{existing
+            ? `The ${width} × ${height} current extent remains the initial view; painted regions beyond it use 32 × 32 chunks.`
+            : `Starts at ${width} × ${height} cells; painted regions beyond it use 32 × 32 chunks.`}</small>
         </span>
         <span className="tilemap-storage-state" aria-hidden="true">
           {infinite && <Check />}
@@ -194,9 +207,9 @@ export function TilemapStorageChoice({
         </span>
       </label>
     </div>
-    <p className="tilemap-storage-review">
-      <strong>Configured map</strong>
-      <span>{orientation === 'orthogonal' ? 'Orthogonal' : 'Isometric'} · {width} × {height} initial cells · {tileWidth} × {tileHeight} px tiles</span>
+    <p className="tilemap-storage-review" id={reviewId}>
+      <strong>{existing ? 'Current map geometry' : 'Configured map'}</strong>
+      <span>{orientation === 'orthogonal' ? 'Orthogonal' : 'Isometric'} · {width} × {height} {extentLabel} cells · {tileWidth} × {tileHeight} px tiles</span>
     </p>
   </fieldset>;
 }

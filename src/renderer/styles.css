@@ -969,9 +969,12 @@ html[data-native-titlebar="hidden-inset"] .brand { width: max(calc(118px + var(-
 .tilemap-storage-review strong, .tilemap-storage-review span { min-width: 0; display: block; white-space: normal; overflow-wrap: anywhere; }
 .tilemap-storage-review strong { color: var(--ink); font-size: var(--ui-type-label); }
 .tilemap-storage-review span { margin-top: 3px; color: var(--muted); font-size: var(--ui-type-caption); line-height: 1.4; font-variant-numeric: tabular-nums; }
+.tilemap-setting-grid .map-geometry-storage-choice { grid-column: 1 / -1; min-width: 0; margin: 2px 0 0; padding: 0; border: 0; }
+.map-geometry-storage-choice .tilemap-storage-review { border: 1px solid #d9d0e8; background: #f8f5ff; }
 
 @media (max-width: 1120px) {
   .pixel-size-review { grid-template-columns: minmax(0, 1fr); }
+  .map-geometry-storage-choice .tilemap-storage-options { grid-template-columns: minmax(0, 1fr); }
 }
 
 @media (max-width: 680px) {

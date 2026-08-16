@@ -2718,7 +2718,7 @@ test('QA-06-WANG closes an exact packaged finite-map Wang-terrain lifecycle', as
     await expect(tileWidthInput).toHaveValue('16');
     await expect(tileHeightInput).toHaveValue('16');
     await expect(mapSettings.getByRole('combobox', { name: 'Orientation', exact: true })).toHaveValue('orthogonal');
-    await expect(mapSettings.locator('.map-infinite-toggle input')).not.toBeChecked();
+    await expect(mapSettings.getByRole('radio', { name: 'Use sparse infinite map mode' })).not.toBeChecked();
     await page.getByRole('button', { name: 'Wang terrain', exact: true }).click();
     const floatingControls = page.locator('.pixel-floating-controls');
     await expect(floatingControls.getByLabel('Active Wang set')).toHaveValue(authoredWangSet.id);
@@ -3098,9 +3098,9 @@ test('QA-06-INFINITE closes an exact packaged orthogonal sparse-chunk lifecycle'
       const map = document?.kind === 'pixel' ? document.pixelAssets[createdAssets.mapId] : undefined;
       return map?.type === 'tilemap' ? [map.width, map.height] : undefined;
     }).toEqual([32, 32]);
-    const infiniteToggle = mapSettings.locator('.map-infinite-toggle input');
+    const infiniteToggle = mapSettings.getByRole('radio', { name: 'Use sparse infinite map mode' });
     await expect(infiniteToggle).toHaveCount(1);
-    await mapSettings.locator('.map-infinite-toggle').click();
+    await infiniteToggle.check();
     await expect.poll(async () => {
       const document = await page.evaluate(async () => (await window.aidraw.bootstrap()).activeDocument);
       const map = document?.kind === 'pixel' ? document.pixelAssets[createdAssets.mapId] : undefined;

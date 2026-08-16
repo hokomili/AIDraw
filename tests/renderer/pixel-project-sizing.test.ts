@@ -131,8 +131,8 @@ describe('pixel project creation and sprite sizing presentation', () => {
     expect(finite).toContain('<legend>Map extent and storage</legend>');
     expect(finite).toMatch(/aria-label="Use finite tilemap storage"[^>]*checked=""/);
     expect(finite).toContain('aria-label="Use sparse infinite tilemap storage"');
-    expect(finite).toContain('<strong>Finite map</strong><small>96 × 48 addressed cells. Painting stays inside the configured bounds.</small>');
-    expect(finite).toContain('<strong>Sparse infinite map</strong><small>Starts at 96 × 48 cells; painted regions beyond it use 32 × 32 chunks.</small>');
+    expect(finite).toMatch(/<strong>Finite map<\/strong><small[^>]*>96 × 48 addressed cells\. Painting stays inside the configured bounds\.<\/small>/u);
+    expect(finite).toMatch(/<strong>Sparse infinite map<\/strong><small[^>]*>Starts at 96 × 48 cells; painted regions beyond it use 32 × 32 chunks\.<\/small>/u);
     expect(finite).toContain('<strong>Configured map</strong><span>Isometric · 96 × 48 initial cells · 32 × 16 px tiles</span>');
     expect(finite.match(/>Selected<\/span>/g)).toHaveLength(1);
 
@@ -246,7 +246,7 @@ describe('pixel project creation and sprite sizing presentation', () => {
     expect(changelog).toContain('UX-01/PIX-01 pixel creation and canvas-sizing presentation correction');
     expect(architecture).toContain('Pixel project creation and sprite resizing share one renderer-only sizing presentation');
     expect(tracker).toContain('A bounded source/headless UX-01/PIX-01 checkpoint (2026-08-17)');
-    expect(tracker).toContain('The current bounded UX-01/PIX-01 source/headless candidate changes only pixel creation and sprite canvas-sizing presentation');
+    expect(tracker).toContain('The bounded UX-01/PIX-01 source/headless presentation follow-up now shows normalized starting sprite/project size');
     expect(testing).toContain('Current source/headless pixel creation and sizing presentation checkpoint');
     for (const truth of [changelog, architecture, tracker, testing]) {
       expect(truth).toContain('top-left');

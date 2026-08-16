@@ -3756,7 +3756,19 @@ function PixelLayers({ document }: { document: PixelDocument }) {
           <label className="field"><span>Tile width</span><input key={"map-tile-width-" + asset.tileWidth} type="number" min="1" max="1024" defaultValue={asset.tileWidth} onBlur={(event) => { const tileWidth = Math.max(1, Math.round(Number(event.target.value))); if (tileWidth !== asset.tileWidth) updateAsset({ ...asset, tileWidth }, "Change map tile width"); }} /></label>
           <label className="field"><span>Tile height</span><input key={"map-tile-height-" + asset.tileHeight} type="number" min="1" max="1024" defaultValue={asset.tileHeight} onBlur={(event) => { const tileHeight = Math.max(1, Math.round(Number(event.target.value))); if (tileHeight !== asset.tileHeight) updateAsset({ ...asset, tileHeight }, "Change map tile height"); }} /></label>
           <label className="field"><span>Orientation</span><select value={asset.orientation} onChange={(event) => updateMapMode({ ...asset, orientation: event.target.value as typeof asset.orientation }, "Change map orientation")}><option value="orthogonal">Orthogonal</option><option value="isometric">Isometric</option></select></label>
-          <label className="map-infinite-toggle"><input type="checkbox" checked={asset.infinite} onChange={(event) => updateMapMode({ ...asset, infinite: event.target.checked }, event.target.checked ? "Enable infinite map" : "Use finite map")} /><span>Infinite 32×32 chunks</span></label>
+          <TilemapStorageChoice
+            context="existing"
+            infinite={asset.infinite}
+            width={asset.width}
+            height={asset.height}
+            tileWidth={asset.tileWidth}
+            tileHeight={asset.tileHeight}
+            orientation={asset.orientation}
+            onChange={(infinite) => updateMapMode(
+              { ...asset, infinite },
+              infinite ? "Enable infinite map" : "Use finite map",
+            )}
+          />
         </div>
         <CustomPropertyEditor
           title="Map properties"
