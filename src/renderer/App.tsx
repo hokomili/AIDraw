@@ -187,6 +187,7 @@ import { CollisionShapeManager } from "./components/CollisionShapeManager";
 import { CollisionShapeEditor } from "./components/CollisionShapeEditor";
 import { IllustrationAnimationPanel } from "./components/IllustrationAnimationPanel";
 import { TileAnimationEditor } from "./components/TileAnimationEditor";
+import { TilesetTileChooser } from "./components/TilesetTileChooser";
 import { TilesetSliceEditor } from "./components/TilesetSliceEditor";
 import { TileVariantPreview } from "./components/TileVariantPreview";
 import { WangSignatureEditor } from "./components/WangSignatureEditor";
@@ -4376,7 +4377,15 @@ function TilesetPanel({
         setSelectedCollisionIds([]);
       }} />}
       <div className="section-heading"><span>{imageCollection ? "Sparse tiles" : "Tiles"}</span><small>Select one to edit metadata</small></div>
-      <div className="tile-definition-grid">{displayedTileIds.map((id) => <button key={id} type="button" aria-label={`Select tile ${id}`} className={effectiveSelectedTileId === id ? "is-active" : ""} onClick={() => { setSelectedTileId(id); setSelectedCollisionIds([]); }}>{id}</button>)}</div>
+      <TilesetTileChooser
+        sourceKind={imageCollection ? "image-collection" : "atlas"}
+        tileIds={displayedTileIds}
+        selectedTileId={effectiveSelectedTileId}
+        onSelect={(tileId) => {
+          setSelectedTileId(tileId);
+          setSelectedCollisionIds([]);
+        }}
+      />
       {!imageCollection && tileCount > 256 && <small className="tileset-slice-summary">Showing the first 256 of {tileCount} tiles.</small>}
       <div className="tile-definition-editor">
         <div className="section-heading"><span>Tile {effectiveSelectedTileId}</span><small>{imageCollection && selectedSource ? `${selectedSource.rect.width} × ${selectedSource.rect.height}px source` : `${selectedTile.sourceX}, ${selectedTile.sourceY}`}</small></div>

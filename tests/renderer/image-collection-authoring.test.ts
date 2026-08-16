@@ -236,7 +236,9 @@ describe('image-collection authoring surface', () => {
   it('wires sparse selection, metadata-only replacement, exact sources, and the guarded canonical transaction', async () => {
     const app = await readFile(new URL('../../src/renderer/App.tsx', import.meta.url), 'utf8');
     expect(app).toContain('const collectionTileIds = imageCollection ? imageCollectionTileIds(tileset) : undefined;');
-    expect(app).toContain('displayedTileIds.map((id)');
+    expect(app).toContain('tileIds={displayedTileIds}');
+    expect(app).toContain('selectedTileId={effectiveSelectedTileId}');
+    expect(app).toContain('sourceKind={imageCollection ? "image-collection" : "atlas"}');
     expect(app).toContain('replaceImageCollectionTileMetadata(tileset, effectiveSelectedTileId, patch)');
     expect(app).toContain('imageCollectionAuthoringGuardError(document, active, tileset.id)');
     expect(app).toContain('imageCollectionSourceDependencyGuards(document, tileset)');

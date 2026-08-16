@@ -152,7 +152,8 @@ describe('professional editor density contract', () => {
     expect(styles).toMatch(/\.pixel-floating-controls \{[^}]*overflow-x: auto/);
     expect(styles).toMatch(/\.timeline-tags \{[^}]*overflow-x: auto/);
     expect(styles).toMatch(/\.frame-strip \{[^}]*overflow-x: auto/);
-    expect(styles).toContain('.palette-grid, .tile-definition-grid { grid-template-columns: repeat(7, minmax(0, 1fr)); }');
+    expect(styles).toContain('.palette-grid { grid-template-columns: repeat(7, minmax(0, 1fr)); }');
+    expect(styles).toContain('.tile-definition-grid { max-height: 154px; grid-template-columns: repeat(5, minmax(0, 1fr)); }');
   });
 
   it('brings sprite-animation companion panels onto the shared secondary tier', async () => {

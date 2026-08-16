@@ -499,7 +499,7 @@ html[data-native-titlebar="hidden-inset"] .brand { width: max(calc(118px + var(-
   .agent-pill { width: var(--ui-hit-primary); padding: 0; justify-content: center; }
   .agent-pill span { display: none; }
   .context-tool-name { min-width: 74px; }.range-field input { width: 64px; }
-  .palette-grid, .tile-definition-grid { grid-template-columns: repeat(7, minmax(0, 1fr)); }
+  .palette-grid { grid-template-columns: repeat(7, minmax(0, 1fr)); }
 }
 
 @media (max-height: 720px) {
@@ -667,6 +667,17 @@ html[data-native-titlebar="hidden-inset"] .brand { width: max(calc(118px + var(-
 .custom-property-details code { font: inherit; }
 .custom-property-value { grid-column: 1 / -1; }
 
+/* Atlas and sparse image-collection tile IDs share one exact native chooser. */
+.tile-definition-grid { max-height: 164px; margin: 0 12px 8px; padding: 2px 4px 2px 2px; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 4px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.tile-definition-grid button { min-width: 0; min-height: var(--ui-hit-secondary); padding: 0 2px; display: grid; align-content: center; justify-items: center; gap: 0; border: 1px solid transparent; border-radius: 7px; background: #f1edef; color: var(--muted); text-align: center; cursor: pointer; }
+.tile-definition-grid button:focus-visible { outline: 2px solid #6948d2; outline-offset: 1px; }
+.tile-definition-grid button[aria-pressed="true"] { grid-template-rows: var(--ui-icon-secondary) var(--ui-type-label); border-color: var(--teal); background: var(--teal-soft); color: #237d77; box-shadow: inset 0 0 0 1px var(--teal); }
+.tile-definition-id { min-width: 0; color: var(--ink); font-size: var(--ui-type-caption); line-height: 1; white-space: normal; overflow-wrap: anywhere; }
+.tile-definition-id strong { font-size: var(--ui-type-label); font-weight: 760; font-variant-numeric: tabular-nums; }
+.tile-definition-state { display: inline-flex; align-items: center; justify-content: center; line-height: 1; }
+.tile-definition-state svg { width: var(--ui-icon-secondary); height: var(--ui-icon-secondary); flex: 0 0 auto; }
+.tile-definition-empty { margin: 0 12px 8px; padding: 10px; border: 1px dashed var(--border); border-radius: 8px; color: var(--muted); font-size: var(--ui-type-label); line-height: 1.4; }
+
 @media (max-width: 1120px) {
   .wang-signature-fields { grid-template-columns: minmax(0, 1fr); }
   .wang-set-row { grid-template-columns: var(--ui-hit-secondary) minmax(0, 1fr); }
@@ -691,6 +702,7 @@ html[data-native-titlebar="hidden-inset"] .brand { width: max(calc(118px + var(-
   .custom-property-type, .custom-property-value { grid-column: 1; }
   .custom-property-entry-heading { align-items: stretch; flex-direction: column; }
   .custom-property-entry-heading button { width: 100%; }
+  .tile-definition-grid { max-height: 154px; grid-template-columns: repeat(5, minmax(0, 1fr)); }
 }
 
 @media (prefers-reduced-motion: reduce) {
