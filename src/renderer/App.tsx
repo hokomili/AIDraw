@@ -188,6 +188,7 @@ import { TileAnimationEditor } from "./components/TileAnimationEditor";
 import { TilesetSliceEditor } from "./components/TilesetSliceEditor";
 import { TileVariantPreview } from "./components/TileVariantPreview";
 import { WangSignatureEditor } from "./components/WangSignatureEditor";
+import { WangTerrainSetEditor, WangTerrainSetList } from "./components/WangTerrainManager";
 import { withWangSignatureSlot, type WangSignatureSlotIndex } from "./wang-signature";
 import { TileMapObjectInspector } from "./components/TileMapObjectInspector";
 import { ImageCollectionSourceDialog } from "./components/ImageCollectionSourceDialog";
@@ -4326,6 +4327,17 @@ function TilesetPanel({
     const colorId = Math.max(0, ...activeWangSet.colors.map((color) => color.id)) + 1;
     replaceWang(upsertWangColor(tileset, activeWangSet.id, { id: colorId, name: "Terrain " + colorId, color: document.palette[Math.min(colorId + 3, document.palette.length - 1)]?.color ?? "#ff6b7a", tileId: effectiveSelectedTileId, probability: 1 }), "Add Wang color");
   };
+  const updateWangColor = (
+    colorIndex: number,
+    patch: Partial<Pick<WangSet["colors"][number], "color" | "name" | "probability">>,
+    label: string,
+  ) => {
+    if (!activeWangSet) return;
+    updateWangSet({
+      ...activeWangSet,
+      colors: activeWangSet.colors.map((entry, index) => index === colorIndex ? { ...entry, ...patch } : entry),
+    }, label);
+  };
   const assignWangSlot = (slot: WangSignatureSlotIndex, colorId: number) => {
     if (!activeWangSet) return;
     const wangId = withWangSignatureSlot(activeTileWangId, slot, colorId);
@@ -4372,39 +4384,26 @@ function TilesetPanel({
         <span>Wang terrain</span>
         <small>{tileset.wangSets.length}</small>
       </div>
-      {tileset.wangSets.map((set) => (
-        <button className={"terrain-row " + (activeWangSet?.id === set.id ? "is-active" : "")} key={set.id} onClick={() => setSelectedWangSetId(set.id)}>
-          <span
-            className="terrain-chip"
-            style={
-              {
-                "--terrain": set.colors[0]?.color ?? "#ff6b7a",
-              } as React.CSSProperties
-            }
-          />
-          <span>
-            <strong>{set.name}</strong>
-            <small>
-              {set.type} · {set.tiles.length} mapped tiles
-            </small>
-          </span>
-        </button>
-      ))}
+      <WangTerrainSetList sets={tileset.wangSets} activeSetId={activeWangSet?.id} onSelect={setSelectedWangSetId} />
       <div className="tileset-actions">
         <button onClick={addTerrain}>+ Terrain</button>
-        <button disabled={!activeWangSet} onClick={addWangColor}>+ Color</button>
-        <button disabled={!activeWangSet} onClick={() => { if (!activeWangSet) return; replaceWang(deleteWangSet(tileset, activeWangSet.id), "Delete Wang terrain"); setSelectedWangSetId(undefined); }}>Delete terrain</button>
+        <button aria-label={activeWangSet ? `Add Wang color to set ${activeWangSet.name}, ID ${activeWangSet.id}` : "Add Wang color; no terrain set selected"} disabled={!activeWangSet} onClick={addWangColor}>+ Color</button>
+        <button aria-label={activeWangSet ? `Delete Wang terrain set ${activeWangSet.name}, ID ${activeWangSet.id}` : "Delete Wang terrain; no set selected"} disabled={!activeWangSet} onClick={() => { if (!activeWangSet) return; replaceWang(deleteWangSet(tileset, activeWangSet.id), "Delete Wang terrain"); setSelectedWangSetId(undefined); }}>Delete terrain</button>
       </div>
-      {activeWangSet && <div className="wang-editor">
-        <div className="two-fields"><label className="field"><span>Set name</span><input key={activeWangSet.id + activeWangSet.name} defaultValue={activeWangSet.name} onBlur={(event) => { const name = event.target.value.trim(); if (name && name !== activeWangSet.name) updateWangSet({ ...activeWangSet, name }, "Rename Wang set"); }} /></label><label className="field"><span>Mode</span><select value={activeWangSet.type} onChange={(event) => updateWangSet({ ...activeWangSet, type: event.target.value as WangSet["type"] }, "Change Wang set mode")}><option value="edge">Edge</option><option value="corner">Corner</option><option value="mixed">Mixed</option></select></label></div>
-        <div className="wang-color-list">{activeWangSet.colors.map((color, colorIndex) => <div className="wang-color-row" key={color.id}><input aria-label={"Wang color " + color.id} type="color" value={color.color.slice(0, 7)} onChange={(event) => updateWangSet({ ...activeWangSet, colors: activeWangSet.colors.map((entry, index) => index === colorIndex ? { ...entry, color: event.target.value } : entry) }, "Change Wang color")} /><input aria-label={"Wang color name " + color.id} value={color.name} onChange={(event) => updateWangSet({ ...activeWangSet, colors: activeWangSet.colors.map((entry, index) => index === colorIndex ? { ...entry, name: event.target.value } : entry) }, "Rename Wang color")} /><input aria-label={"Wang color probability " + color.id} type="number" min="0" step="0.05" value={color.probability} onChange={(event) => updateWangSet({ ...activeWangSet, colors: activeWangSet.colors.map((entry, index) => index === colorIndex ? { ...entry, probability: Math.max(0, Number(event.target.value) || 0) } : entry) }, "Change Wang probability")} /><button title="Delete Wang color" onClick={() => replaceWang(deleteWangColor(tileset, activeWangSet.id, color.id), "Delete Wang color")}><Trash2 size={10} /></button></div>)}</div>
+      {activeWangSet && <WangTerrainSetEditor
+        set={activeWangSet}
+        onRename={(name) => updateWangSet({ ...activeWangSet, name }, "Rename Wang set")}
+        onChangeType={(type) => updateWangSet({ ...activeWangSet, type }, "Change Wang set mode")}
+        onChangeColor={updateWangColor}
+        onDeleteColor={(colorId) => replaceWang(deleteWangColor(tileset, activeWangSet.id, colorId), "Delete Wang color")}
+      >
         <WangSignatureEditor
           tileId={effectiveSelectedTileId}
           wangId={activeTileWangId}
           colors={activeWangSet.colors}
           onChange={assignWangSlot}
         />
-      </div>}
+      </WangTerrainSetEditor>}
       </>
       <div className="section-heading"><span>Tile {effectiveSelectedTileId} collisions</span><small>{selectedTile.collisions.length}</small></div>
       <div className="tileset-actions"><select aria-label="Collision shape type" value={collisionType} onChange={(event) => setCollisionType(event.target.value as typeof collisionType)}><option value="rectangle">Rectangle</option><option value="ellipse">Ellipse</option><option value="polygon">Polygon</option><option value="polyline">Polyline</option></select><button onClick={addCollision}>+ Shape</button></div>

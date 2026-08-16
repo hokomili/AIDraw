@@ -131,7 +131,7 @@ describe('Wang signature editor', () => {
     expect(changelog).toContain('line markers plus the word **Edge** and diamond markers plus **Corner**');
     expect(architecture).toContain('The tileset Wang signature editor is a renderer-only projection of that same eight-value tuple.');
     expect(tracker).toContain('A bounded source/headless UX-01/MAP-05 checkpoint');
-    expect(tracker).toContain('packaged visual/assistive acceptance of the new diagram');
+    expect(tracker).toContain('not packaged visual/pointer/keyboard/screen-reader acceptance');
     expect(tracker).not.toContain('visual edge diagrams, and external fixtures remain');
     expect(testing).toContain('This checkpoint adds no schema, map-cell mutation, semantic-agent authority, signature generation');
     expect(testing).toContain('packaged/native visual, pointer, keyboard, screen-reader, RC, or stable-v1 acceptance');

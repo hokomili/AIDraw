@@ -553,8 +553,49 @@ html[data-native-titlebar="hidden-inset"] .brand { width: max(calc(118px + var(-
 .wang-signature-current > i.is-none { border-style: dashed; background: transparent; }
 .wang-signature-current > span { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
 
+/* Wang set and color management retains exact IDs while meeting the shared inspector density floor. */
+.wang-set-list { display: grid; gap: 6px; padding: 0 12px 2px; }
+.wang-set-row { width: 100%; min-width: 0; min-height: var(--ui-hit-primary); padding: 7px; display: grid; grid-template-columns: var(--ui-hit-secondary) minmax(0, 1fr) auto; align-items: center; gap: 8px; border: 1px solid transparent; border-radius: 8px; background: #f5f2f1; color: var(--ink); text-align: left; cursor: pointer; }
+.wang-set-row.is-active { border-color: #75beb8; background: var(--teal-soft); }
+.wang-set-swatch { width: var(--ui-hit-secondary); height: var(--ui-hit-secondary); border-radius: 7px; background: var(--terrain); box-shadow: inset 0 0 0 1px rgba(35, 28, 43, .25); }
+.wang-set-copy { min-width: 0; }
+.wang-set-copy strong, .wang-set-copy small { display: block; min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+.wang-set-copy strong { font-size: var(--ui-type-label); line-height: 1.3; }
+.wang-set-copy small { margin-top: 2px; color: var(--muted); font-size: var(--ui-type-caption); line-height: 1.3; }
+.wang-set-state { padding: 3px 6px; border-radius: 999px; background: #ebe6ea; color: var(--muted); font-size: var(--ui-type-caption); line-height: 1.2; }
+.wang-set-row.is-active .wang-set-state { background: #d8efec; color: #237d77; }
+.wang-active-set { min-width: 0; display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; padding-bottom: 8px; border-bottom: 1px solid var(--border-soft); }
+.wang-active-set > span { min-width: 0; }
+.wang-active-set strong, .wang-active-set small { display: block; min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+.wang-active-set strong { color: var(--ink); font-size: var(--ui-type-label); line-height: 1.3; }
+.wang-active-set small { margin-top: 2px; color: var(--muted); font-size: var(--ui-type-caption); line-height: 1.3; }
+.wang-active-set em { flex: 0 0 auto; padding: 3px 6px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted); font-size: var(--ui-type-caption); font-style: normal; line-height: 1.2; }
+.wang-set-fields { min-width: 0; margin-top: 8px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(88px, .55fr); gap: 7px; }
+.wang-set-fields .field { min-width: 0; margin-bottom: 0; }
+.wang-set-fields .field input, .wang-set-fields .field select { height: var(--ui-hit-secondary); font-size: var(--ui-type-label); }
+.wang-color-list { display: grid; gap: 7px; margin-top: 8px; }
+.wang-color-card { min-width: 0; margin: 0; padding: 7px; border: 1px solid var(--border-soft); border-radius: 8px; background: #fff; }
+.wang-color-card legend { max-width: 100%; padding: 0 4px; }
+.wang-color-card legend strong, .wang-color-card legend small { display: block; min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+.wang-color-card legend strong { color: var(--ink); font-size: var(--ui-type-label); line-height: 1.3; }
+.wang-color-card legend small { margin-top: 2px; color: var(--muted); font-size: var(--ui-type-caption); line-height: 1.25; }
+.wang-color-controls { min-width: 0; display: grid; grid-template-columns: 64px minmax(0, 1fr) minmax(82px, .58fr); align-items: end; gap: 6px; }
+.wang-color-field { min-width: 0; display: grid; gap: 4px; color: var(--muted); font-size: var(--ui-type-caption); font-weight: 700; }
+.wang-color-field input { width: 100%; min-width: 0; height: var(--ui-hit-secondary); padding: 0 7px; border: 1px solid var(--border); border-radius: 7px; background: #fff; color: var(--ink); font-size: var(--ui-type-label); }
+.wang-color-field input[type="color"] { padding: 3px; }
+.wang-color-delete { grid-column: 1 / -1; min-height: var(--ui-hit-secondary); justify-self: end; padding: 0 9px; display: inline-flex; align-items: center; justify-content: center; gap: 5px; border-radius: 7px; background: var(--coral-soft); color: var(--coral); font-size: var(--ui-type-caption); cursor: pointer; }
+.wang-color-delete svg { width: var(--ui-icon-secondary); height: var(--ui-icon-secondary); }
+
 @media (max-width: 1120px) {
   .wang-signature-fields { grid-template-columns: minmax(0, 1fr); }
+  .wang-set-row { grid-template-columns: var(--ui-hit-secondary) minmax(0, 1fr); }
+  .wang-set-swatch { grid-row: 1 / span 2; }
+  .wang-set-state { grid-column: 2; justify-self: start; }
+  .wang-set-fields { grid-template-columns: minmax(0, 1fr); }
+  .wang-color-controls { grid-template-columns: minmax(64px, .55fr) minmax(86px, .65fr); }
+  .wang-color-field.is-name { grid-column: 1 / -1; grid-row: 1; }
+  .wang-color-field.is-color { grid-column: 1; grid-row: 2; }
+  .wang-color-field.is-probability { grid-column: 2; grid-row: 2; }
 }
 
 @media (prefers-reduced-motion: reduce) {
