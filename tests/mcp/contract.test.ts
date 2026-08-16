@@ -8,7 +8,7 @@ import { RecoveryJournal } from '@main/journal';
 import { McpHost, parseFolderTrustSettings, parsePreferredPortSettings, type GenerationApprovalPreviewRenderer } from '@main/mcp-host';
 import { TransactionTraceStore } from '@main/trace-store';
 import { createCanvas, loadImage } from '@napi-rs/canvas';
-import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createId, createPixelTileset, decodeTiledGid, encodeTiledGid, nowIso, readPixel, readTileAt } from '@aidraw/core';
+import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createId, createPixelDocument, createPixelTileset, decodeTiledGid, encodeTiledGid, nowIso, readPixel, readTileAt } from '@aidraw/core';
 import { LATEST_PROTOCOL_VERSION } from '@modelcontextprotocol/server';
 
 const temporaryPaths: string[] = [];
@@ -144,7 +144,7 @@ describe('authenticated stateful MCP contract', () => {
     expect(names).toEqual(expect.arrayContaining(['aidraw_help', 'session_manage', 'canvas_observe', 'canvas_apply', 'history_manage', 'document_manage', 'asset_import', 'document_export', 'generation_start', 'job_manage']));
     expect(tools.find((tool) => tool.name === 'document_export')?.inputSchema?.properties?.scale).toMatchObject({ default: 1, maximum: 64 });
     expect(tools.find((tool) => tool.name === 'asset_import')?.inputSchema?.properties).toEqual(expect.objectContaining({ spriteSheet: expect.any(Object), paletteMode: expect.any(Object), projectLinkId: expect.any(Object) }));
-    expect(tools.find((tool) => tool.name === 'document_export')?.inputSchema?.properties).toEqual(expect.objectContaining({ projectLinkId: expect.any(Object) }));
+    expect(tools.find((tool) => tool.name === 'document_export')?.inputSchema?.properties).toEqual(expect.objectContaining({ paletteCycleId: expect.any(Object), paletteCycleFrameId: expect.any(Object), projectLinkId: expect.any(Object) }));
     const documentSchema = tools.find((tool) => tool.name === 'document_manage')?.inputSchema;
     expectFlatActionSchema(documentSchema, ['list', 'new', 'activate', 'open', 'save', 'save-as', 'close'], ['documentId', 'path', 'kind', 'name', 'width', 'height', 'background', 'orientation', 'infinite', 'tileWidth', 'tileHeight']);
     expectFlatActionSchema(tools.find((tool) => tool.name === 'history_manage')?.inputSchema, ['undo', 'redo', 'replay', 'checkpoint-list', 'checkpoint-create', 'checkpoint-restore', 'checkpoint-merge', 'checkpoint-delete'], ['documentId', 'transactionId', 'name', 'checkpointId', 'sourceIds']);
@@ -180,6 +180,80 @@ describe('authenticated stateful MCP contract', () => {
     ]);
     expect(invalidActionInputs.every((message) => message.result?.isError === true)).toBe(true);
     expect(JSON.stringify(invalidActionInputs)).toContain('Invalid arguments');
+  });
+
+  it('validates an exact palette-cycle sheet schedule before creating a human export approval', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-mcp-cycle-export-')); temporaryPaths.push(root);
+    const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0'); documents.initialize();
+    const document = createPixelDocument('sprite', 'MCP cycle export');
+    const sprite = document.pixelAssets[document.activeAssetId];
+    if (sprite.type !== 'sprite') throw new Error('Expected sprite');
+    sprite.frames[sprite.frameIds[0]].name = 'Agent source frame';
+    document.paletteCycles = [{ id: 'agent-cycle', name: 'Agent cycle', fromIndex: 1, toIndex: 3, direction: 'forward', stepMs: 83 }];
+    documents.addDocument(document);
+    const host = new McpHost(documents, '1.0.0', join(root, 'port.json')); hosts.push(host);
+    const started = await host.start('cycle-export-token');
+    const client = await initializeClient(started.url, 'cycle-export-token', 'cycle-export-client');
+    const fileHelp = await callTool(started.url, client.headers, 1_001, 'aidraw_help', { topic: 'files' });
+    expect(fileHelp.steps).toEqual(expect.arrayContaining([expect.stringContaining('paletteCycleId plus one paletteCycleFrameId')]));
+    expect(fileHelp.steps).toEqual(expect.arrayContaining([expect.stringContaining('refused before approval otherwise')]));
+    expect(fileHelp.examples).toEqual(expect.arrayContaining([expect.objectContaining({
+      tool: 'document_export', arguments: expect.objectContaining({ format: 'sprite-sheet', paletteCycleId: '<cycleId>', paletteCycleFrameId: '<frameId>' }),
+    })]));
+    const canonicalRoot = await realpath(root);
+    const outputPath = join(canonicalRoot, 'agent-cycle.png');
+    const companionPath = join(canonicalRoot, 'agent-cycle.json');
+    await writeFile(companionPath, 'approval must disclose this predecessor');
+    const initialJobCount = documents.snapshot().jobs.length;
+
+    expect(await callTool(started.url, client.headers, 2, 'document_export', {
+      documentId: document.id, path: outputPath, format: 'sprite-sheet', paletteCycleId: 'agent-cycle',
+    })).toMatchObject({ error: 'invalid_arguments', message: expect.stringContaining('both paletteCycleId and paletteCycleFrameId') });
+    expect(await callTool(started.url, client.headers, 3, 'document_export', {
+      documentId: document.id, path: outputPath, format: 'sprite-sheet', animationTagId: 'some-tag', paletteCycleId: 'agent-cycle', paletteCycleFrameId: sprite.frameIds[0],
+    })).toMatchObject({ error: 'invalid_arguments', message: expect.stringContaining('either animationTagId or a palette cycle') });
+    expect(await callTool(started.url, client.headers, 4, 'document_export', {
+      documentId: document.id, path: outputPath, format: 'png', paletteCycleId: 'agent-cycle', paletteCycleFrameId: sprite.frameIds[0],
+    })).toMatchObject({ error: 'unsupported_palette_cycle_format' });
+    expect(await callTool(started.url, client.headers, 5, 'document_export', {
+      documentId: document.id, path: outputPath, format: 'sprite-sheet', paletteCycleId: 'missing-cycle', paletteCycleFrameId: sprite.frameIds[0],
+    })).toMatchObject({ error: 'palette_cycle_not_found', paletteCycleId: 'missing-cycle' });
+    expect(await callTool(started.url, client.headers, 6, 'document_export', {
+      documentId: document.id, path: outputPath, format: 'sprite-sheet', paletteCycleId: 'agent-cycle', paletteCycleFrameId: 'missing-frame',
+    })).toMatchObject({ error: 'palette_cycle_frame_not_found', paletteCycleFrameId: 'missing-frame' });
+    const inexactGifPath = join(canonicalRoot, 'agent-cycle.gif');
+    const inexactGif = await callTool(started.url, client.headers, 7, 'document_export', {
+      documentId: document.id, path: inexactGifPath, format: 'gif', paletteCycleId: 'agent-cycle', paletteCycleFrameId: sprite.frameIds[0],
+    });
+    expect(inexactGif).toMatchObject({ error: 'inexact_gif_timing', paletteCycleId: 'agent-cycle', stepMs: 83 });
+    expect(inexactGif).not.toHaveProperty('jobId');
+    await expect(access(inexactGifPath)).rejects.toThrow();
+    expect(documents.snapshot().jobs).toHaveLength(initialJobCount);
+
+    const requested = await callTool(started.url, client.headers, 8, 'document_export', {
+      documentId: document.id, path: outputPath, format: 'sprite-sheet', scale: 2, paletteCycleId: 'agent-cycle', paletteCycleFrameId: sprite.frameIds[0],
+    });
+    expect(requested).toMatchObject({ status: 'waiting-for-user' });
+    const job = documents.getJob(String(requested.jobId))!;
+    expect(job.result).toMatchObject({
+      documentId: document.id,
+      request: {
+        action: 'export', path: outputPath, format: 'sprite-sheet', scale: 2,
+        paletteCycleId: 'agent-cycle', paletteCycleFrameId: sprite.frameIds[0], overwritePaths: [companionPath],
+      },
+    });
+    expect(job.approval?.review).toMatchObject({ target: outputPath, overwritePaths: [companionPath] });
+    expect(job.approval?.review?.fields).toEqual(expect.arrayContaining([
+      expect.objectContaining({ label: 'Palette cycle', value: 'agent-cycle' }),
+      expect.objectContaining({ label: 'Palette-cycle source frame', value: sprite.frameIds[0] }),
+      expect.objectContaining({ label: 'Will overwrite', value: companionPath, tone: 'warning' }),
+    ]));
+    const mainSource = await readFile(new URL('../../src/main/main.ts', import.meta.url), 'utf8');
+    expect(mainSource).toContain("paletteCycleId: typeof request.paletteCycleId === 'string' ? request.paletteCycleId : undefined");
+    expect(mainSource).toContain("paletteCycleFrameId: typeof request.paletteCycleFrameId === 'string' ? request.paletteCycleFrameId : undefined");
+    expect(await callTool(started.url, client.headers, 9, 'job_manage', { action: 'cancel', jobId: job.id })).toMatchObject({ status: 'cancelled' });
+    await expect(access(outputPath)).rejects.toThrow();
+    expect(await readFile(companionPath, 'utf8')).toBe('approval must disclose this predecessor');
   });
 
   it('invalidates the prior bearer, retires active transports, and fails closed after revocation', async () => {

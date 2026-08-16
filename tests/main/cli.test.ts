@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -16,6 +16,7 @@ import {
 import {
   CLI_EXIT_CODES,
   CliRefusalError,
+  cliHelp,
   executeBatchExport,
   parseCliArguments,
   runCliInvocation,
@@ -126,10 +127,15 @@ describe('AIDraw CLI', () => {
   it('parses Aseprite-style headless presentation export arguments', () => {
     expect(parseCliArguments([])).toBeUndefined();
     expect(parseCliArguments(['-b', 'slime.aidraw', '--scale', '8', '--save-as', 'slime-x8.gif'])).toEqual({
-      kind: 'batch-export', inputPath: 'slime.aidraw', outputPath: 'slime-x8.gif', format: undefined, scale: 8, animationTag: undefined, overwrite: false,
+      kind: 'batch-export', inputPath: 'slime.aidraw', outputPath: 'slime-x8.gif', format: undefined, scale: 8, animationTag: undefined, paletteCycle: undefined, paletteCycleFrame: undefined, overwrite: false,
     });
     expect(() => parseCliArguments(['--batch', 'slime.aidraw', '--scale', '1.5', '--save-as', 'slime.gif'])).toThrow('integer from 1 to 64');
     expect(parseCliArguments(['--batch', 'map.aidraw', '--save-as', 'map.tsj'])).toMatchObject({ format: undefined, outputPath: 'map.tsj' });
+    expect(parseCliArguments(['--batch', 'sprite.aidraw', '--format', 'sprite-sheet', '--palette-cycle', 'Glow', '--palette-cycle-frame', 'Idle', '--save-as', 'glow.png'])).toMatchObject({ paletteCycle: 'Glow', paletteCycleFrame: 'Idle' });
+    expect(cliHelp('AIDraw')).toContain('--palette-cycle-frame <id/name>');
+    expect(cliHelp('AIDraw')).toContain('GIF requires 10 ms step multiples');
+    expect(() => parseCliArguments(['--batch', 'sprite.aidraw', '--palette-cycle', 'Glow', '--save-as', 'glow.png'])).toThrow('requires both --palette-cycle and --palette-cycle-frame');
+    expect(() => parseCliArguments(['--batch', 'sprite.aidraw', '--animation-tag', 'Idle', '--palette-cycle', 'Glow', '--palette-cycle-frame', 'Idle', '--save-as', 'glow.png'])).toThrow('either --animation-tag or a palette cycle');
   });
 
   it('exports a scaled GIF without starting the editor engine', async () => {
@@ -237,6 +243,99 @@ describe('AIDraw CLI', () => {
       expect(frame.frame.x + frame.frame.w).toBeLessThanOrEqual(png.width);
       expect(frame.frame.y + frame.frame.h).toBeLessThanOrEqual(png.height);
     }
+  });
+
+  it('publishes one exact named palette-cycle period as an honest sprite-sheet schedule', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-cli-cycle-sheet-')); temporaryPaths.push(root);
+    const document = createPixelDocument('sprite', 'CLI cycle sheet');
+    const sprite = document.pixelAssets[document.activeAssetId];
+    if (sprite.type !== 'sprite') throw new Error('Expected sprite');
+    sprite.width = 1;
+    sprite.height = 1;
+    sprite.frames[sprite.frameIds[0]].name = 'Idle frame';
+    document.palette = [
+      { id: 'transparent', name: 'Transparent', color: '#00000000' },
+      { id: 'one', name: 'One', color: '#ff0000' },
+      { id: 'two', name: 'Two', color: '#00ff00' },
+      { id: 'three', name: 'Three', color: '#0000ff' },
+    ];
+    writePixels(Object.values(sprite.cels)[0], [{ x: 0, y: 0, index: 1 }]);
+    sprite.paletteOverrides[sprite.frameIds[0]] = document.palette.map((entry, index) => ({
+      ...entry,
+      color: ['#00000000', '#ffff00', '#00ffff', '#ff00ff'][index],
+    }));
+    document.paletteCycles = [{ id: 'glow-cycle', name: 'Glow', fromIndex: 1, toIndex: 3, direction: 'reverse', stepMs: 83 }];
+    const inputPath = join(root, 'cycle.aidraw');
+    const outputPath = join(root, 'cycle-sheet.png');
+    await writeNativeDocument(inputPath, document, 'test');
+    const command = parseCliArguments(['--batch', inputPath, '--format', 'sprite-sheet', '--scale', '2', '--palette-cycle', 'glow', '--palette-cycle-frame', 'idle frame', '--save-as', outputPath]);
+    if (command?.kind !== 'batch-export') throw new Error('Expected batch command');
+    const result = await executeBatchExport(command, noImageDecode);
+    const companionPath = join(root, 'cycle-sheet.json');
+    const metadata = JSON.parse(await readFile(companionPath, 'utf8')) as {
+      frames: Record<string, { sourceFrameId: string; duration: number; paletteCycleOffset: number }>;
+      meta: { image: string; scale: number; entryOrder: string[]; schedule: { kind: string; paletteCycle: Record<string, unknown>; sourceFrame: Record<string, unknown> } };
+    };
+    const decoded = UPNG.decode(Uint8Array.from(await readFile(outputPath)).buffer);
+    const pixels = new Uint8Array(UPNG.toRGBA8(decoded)[0]);
+    const pixel = (x: number, y: number) => [...pixels.subarray((y * decoded.width + x) * 4, (y * decoded.width + x + 1) * 4)];
+    expect(result).toMatchObject({ outputPath, companionPaths: [companionPath], format: 'sprite-sheet', scale: 2 });
+    expect(result.warnings).toEqual(expect.arrayContaining([
+      'Exported one complete 3-step palette cycle “Glow” from frame “Idle frame” using reverse rotation at 83 ms per step.',
+      'Sprite-sheet entries are ordered palette-cycle steps derived from one canonical source frame, not distinct animation frames.',
+    ]));
+    expect(metadata.meta).toEqual(expect.objectContaining({
+      image: 'cycle-sheet.png',
+      scale: 2,
+      entryOrder: ['cycle-step-1', 'cycle-step-2', 'cycle-step-3'],
+      schedule: {
+        kind: 'palette-cycle',
+        paletteCycle: { id: 'glow-cycle', name: 'Glow', fromIndex: 1, toIndex: 3, direction: 'reverse', stepMs: 83 },
+        sourceFrame: { id: sprite.frameIds[0], name: 'Idle frame' },
+      },
+    }));
+    expect(Object.values(metadata.frames).map((entry) => ({ sourceFrameId: entry.sourceFrameId, duration: entry.duration, offset: entry.paletteCycleOffset }))).toEqual([
+      { sourceFrameId: sprite.frameIds[0], duration: 83, offset: 0 },
+      { sourceFrameId: sprite.frameIds[0], duration: 83, offset: 1 },
+      { sourceFrameId: sprite.frameIds[0], duration: 83, offset: 2 },
+    ]);
+    expect([pixel(0, 0), pixel(2, 0), pixel(0, 2)]).toEqual([
+      [255, 255, 0, 255],
+      [255, 0, 255, 255],
+      [0, 255, 255, 255],
+    ]);
+
+    const refusedPath = join(root, 'refused.png');
+    await expect(executeBatchExport({ ...command, outputPath: refusedPath, format: 'png' }, noImageDecode)).rejects.toThrow('--palette-cycle requires a GIF, APNG, or sprite-sheet export');
+    await expect(readFile(refusedPath)).rejects.toMatchObject({ code: 'ENOENT' });
+
+    const inexactGifPath = join(root, 'inexact.gif');
+    const inexactCommand = { ...command, outputPath: inexactGifPath, format: 'gif' as const, overwrite: true };
+    await expect(executeBatchExport(inexactCommand, noImageDecode)).rejects.toBeInstanceOf(CliRefusalError);
+    const inexactStdout = vi.fn(); const inexactStderr = vi.fn();
+    await expect(runCliInvocation({
+      version: 'test', executable: 'AIDraw', command: inexactCommand,
+      executeBatch: async (requested) => executeBatchExport(requested, noImageDecode),
+      writeStdout: inexactStdout, writeStderr: inexactStderr,
+    })).resolves.toBe(CLI_EXIT_CODES.refusal);
+    expect(inexactStdout).not.toHaveBeenCalled();
+    expect(inexactStderr).toHaveBeenCalledWith(expect.stringContaining('uses 83 ms steps, which GIF cannot represent exactly'));
+    for (const extension of ['gif', 'png', 'json']) await expect(readFile(join(root, `inexact.${extension}`))).rejects.toMatchObject({ code: 'ENOENT' });
+
+    const predecessors = ['gif', 'png', 'json'].map((extension) => join(root, `predecessor.${extension}`));
+    await Promise.all(predecessors.map((predecessor, index) => writeFile(predecessor, `predecessor-${index}`)));
+    await expect(runCliInvocation({
+      version: 'test', executable: 'AIDraw', command: { ...inexactCommand, outputPath: predecessors[0] },
+      executeBatch: async (requested) => executeBatchExport(requested, noImageDecode),
+      writeStdout: vi.fn(), writeStderr: vi.fn(),
+    })).resolves.toBe(CLI_EXIT_CODES.refusal);
+    await expect(Promise.all(predecessors.map((predecessor) => readFile(predecessor, 'utf8')))).resolves.toEqual(['predecessor-0', 'predecessor-1', 'predecessor-2']);
+
+    document.paletteCycles.push({ ...document.paletteCycles[0], id: 'ambiguous-cycle', name: 'glow' });
+    await writeNativeDocument(inputPath, document, 'test');
+    const ambiguousPath = join(root, 'ambiguous.png');
+    await expect(executeBatchExport({ ...command, outputPath: ambiguousPath }, noImageDecode)).rejects.toThrow('ambiguous; use an exact cycle ID');
+    await expect(readFile(ambiguousPath)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('publishes Tiled JSON/XML maps and standalone tilesets with every declared image companion', async () => {

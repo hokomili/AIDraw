@@ -12,7 +12,7 @@ const formats: ExportFormat[] = ['png', 'jpeg', 'webp', 'svg', 'pdf', 'psd', 'gi
 export type CliCommand =
   | { kind: 'help' }
   | { kind: 'version' }
-  | { kind: 'batch-export'; inputPath: string; outputPath: string; format?: ExportFormat; scale: number; animationTag?: string; overwrite: boolean };
+  | { kind: 'batch-export'; inputPath: string; outputPath: string; format?: ExportFormat; scale: number; animationTag?: string; paletteCycle?: string; paletteCycleFrame?: string; overwrite: boolean };
 
 export interface BatchExportResult {
   inputPath: string;
@@ -59,7 +59,7 @@ export function parseCliArguments(arguments_: string[]): CliCommand | undefined 
   if (arguments_.includes('-h') || arguments_.includes('--help')) return { kind: 'help' };
   if (arguments_.includes('--version')) return { kind: 'version' };
 
-  let outputPath: string | undefined; let format: ExportFormat | undefined; let scale = 1; let animationTag: string | undefined; let overwrite = false; let batch = false;
+  let outputPath: string | undefined; let format: ExportFormat | undefined; let scale = 1; let animationTag: string | undefined; let paletteCycle: string | undefined; let paletteCycleFrame: string | undefined; let overwrite = false; let batch = false;
   const positional: string[] = [];
   for (let index = 0; index < arguments_.length; index += 1) {
     const argument = arguments_[index];
@@ -72,6 +72,8 @@ export function parseCliArguments(arguments_: string[]): CliCommand | undefined 
       index += 1;
     }
     else if (argument === '--animation-tag') { animationTag = nextValue(arguments_, index, argument).trim(); if (!animationTag || animationTag.length > 120) throw new CliRefusalError('--animation-tag must contain from 1 to 120 characters.'); index += 1; }
+    else if (argument === '--palette-cycle') { paletteCycle = nextValue(arguments_, index, argument).trim(); if (!paletteCycle || paletteCycle.length > 120) throw new CliRefusalError('--palette-cycle must contain from 1 to 120 characters.'); index += 1; }
+    else if (argument === '--palette-cycle-frame') { paletteCycleFrame = nextValue(arguments_, index, argument).trim(); if (!paletteCycleFrame || paletteCycleFrame.length > 120) throw new CliRefusalError('--palette-cycle-frame must contain from 1 to 120 characters.'); index += 1; }
     else if (argument === '--format') {
       const value = nextValue(arguments_, index, argument);
       if (!formats.includes(value as ExportFormat)) throw new CliRefusalError(`Unknown export format “${value}”.`);
@@ -82,7 +84,10 @@ export function parseCliArguments(arguments_: string[]): CliCommand | undefined 
   if (!batch) throw new CliRefusalError('Batch export requires --batch or -b.');
   if (positional.length !== 1) throw new CliRefusalError(`Batch export requires exactly one input .aidraw file; received ${positional.length}.`);
   if (!outputPath) throw new CliRefusalError('Batch export requires --save-as <output>.');
-  return { kind: 'batch-export', inputPath: positional[0], outputPath, format, scale, animationTag, overwrite };
+  const paletteCycleRequested = paletteCycle !== undefined || paletteCycleFrame !== undefined;
+  if (paletteCycleRequested && (!paletteCycle || !paletteCycleFrame)) throw new CliRefusalError('Palette-cycle export requires both --palette-cycle and --palette-cycle-frame.');
+  if (paletteCycleRequested && animationTag) throw new CliRefusalError('Choose either --animation-tag or a palette cycle, not both.');
+  return { kind: 'batch-export', inputPath: positional[0], outputPath, format, scale, animationTag, paletteCycle, paletteCycleFrame, overwrite };
 }
 
 export function cliHelp(executable = 'AIDraw.exe'): string {
@@ -97,6 +102,8 @@ export function cliHelp(executable = 'AIDraw.exe'): string {
     '  --format <format>    Optional explicit format (required for sprite-sheet)',
     '  --scale <1-64>       Integer nearest-neighbor scale for pixel presentation exports',
     '  --animation-tag <id/name>  Export one exact ID or unambiguous name (GIF/APNG/sprite-sheet)',
+    '  --palette-cycle <id/name>  Exact cycle; GIF requires 10 ms step multiples',
+    '  --palette-cycle-frame <id/name>  Exact source frame for --palette-cycle',
     '  --overwrite          Replace every admitted member of the complete output set',
     '  -h, --help           Show this help',
     '  --version            Show the AIDraw version',
@@ -107,6 +114,7 @@ export function cliHelp(executable = 'AIDraw.exe'): string {
     'Examples:',
     `  ${executable} -b slime.aidraw --scale 8 --save-as slime-x8.gif`,
     `  ${executable} -b hero.aidraw --format sprite-sheet --scale 4 --save-as hero-x4.png`,
+    `  ${executable} -b hero.aidraw --format sprite-sheet --palette-cycle "Glow" --palette-cycle-frame "Idle" --save-as glow.png`,
   ].join('\n');
 }
 
@@ -150,6 +158,15 @@ function outputEntries(artifact: ExportArtifact, format: ExportFormat, target: s
   return entries;
 }
 
+function resolveExactOrUniqueNamed<T extends { id: string; name: string }>(entries: T[], selector: string, label: string, idLabel: string): T {
+  const exactId = entries.find((entry) => entry.id === selector);
+  const named = exactId ? [] : entries.filter((entry) => entry.name.toLocaleLowerCase() === selector.toLocaleLowerCase());
+  if (!exactId && named.length > 1) throw new CliRefusalError(`${label} name “${selector}” is ambiguous; use an exact ${idLabel} ID.`);
+  const selected = exactId ?? named[0];
+  if (!selected) throw new CliRefusalError(`${label} “${selector}” does not exist.`);
+  return selected;
+}
+
 export async function executeBatchExport(
   command: Extract<CliCommand, { kind: 'batch-export' }>,
   imageDecoder?: ImageDecodeValidator,
@@ -162,23 +179,31 @@ export async function executeBatchExport(
     const format = command.format ?? inferFormat(command.outputPath);
     if (!format) throw new CliRefusalError('Cannot infer the export format. Add --format <format>.');
     if (!extensionMatches(format, command.outputPath)) throw new CliRefusalError(`The output extension does not match --format ${format}.`);
+    const paletteCycleRequested = command.paletteCycle !== undefined || command.paletteCycleFrame !== undefined;
+    if (paletteCycleRequested && (!command.paletteCycle || !command.paletteCycleFrame)) throw new CliRefusalError('Palette-cycle export requires both --palette-cycle and --palette-cycle-frame.');
+    if (paletteCycleRequested && command.animationTag) throw new CliRefusalError('Choose either --animation-tag or a palette cycle, not both.');
+    if (paletteCycleRequested && !['gif', 'apng', 'sprite-sheet'].includes(format)) {
+      throw new CliRefusalError('--palette-cycle requires a GIF, APNG, or sprite-sheet export from a pixel sprite.');
+    }
     if (command.animationTag && !['gif', 'apng', 'sprite-sheet'].includes(format)) {
       throw new CliRefusalError('--animation-tag requires a GIF, APNG, or sprite-sheet export from a pixel sprite.');
     }
     const loaded = await readNativeDocument(inputPath, decode);
-    let animationTagId: string | undefined;
-    if (command.animationTag) {
-      if (loaded.document.kind !== 'pixel') throw new CliRefusalError('--animation-tag requires a GIF, APNG, or sprite-sheet export from a pixel sprite.');
+    let animationTagId: string | undefined; let paletteCycleId: string | undefined; let paletteCycleFrameId: string | undefined;
+    if (command.animationTag || paletteCycleRequested) {
+      if (loaded.document.kind !== 'pixel') throw new CliRefusalError(`${paletteCycleRequested ? '--palette-cycle' : '--animation-tag'} requires a GIF, APNG, or sprite-sheet export from a pixel sprite.`);
       const sprite = loaded.document.pixelAssets[loaded.document.activeAssetId];
-      if (sprite.type !== 'sprite') throw new CliRefusalError('--animation-tag requires an active pixel sprite.');
-      const exactId = sprite.tags.find((entry) => entry.id === command.animationTag);
-      const named = exactId ? [] : sprite.tags.filter((entry) => entry.name.toLocaleLowerCase() === command.animationTag!.toLocaleLowerCase());
-      if (!exactId && named.length > 1) throw new CliRefusalError(`Animation tag name “${command.animationTag}” is ambiguous; use an exact tag ID.`);
-      const tag = exactId ?? named[0];
-      if (!tag) throw new CliRefusalError(`Animation tag “${command.animationTag}” does not exist.`);
-      animationTagId = tag.id;
+      if (sprite.type !== 'sprite') throw new CliRefusalError(`${paletteCycleRequested ? '--palette-cycle' : '--animation-tag'} requires an active pixel sprite.`);
+      if (command.animationTag) animationTagId = resolveExactOrUniqueNamed(sprite.tags, command.animationTag, 'Animation tag', 'tag').id;
+      if (paletteCycleRequested) {
+        const cycle = resolveExactOrUniqueNamed(loaded.document.paletteCycles, command.paletteCycle!, 'Palette cycle', 'cycle');
+        const frame = resolveExactOrUniqueNamed(sprite.frameIds.map((frameId) => sprite.frames[frameId]), command.paletteCycleFrame!, 'Palette-cycle frame', 'frame');
+        if (format === 'gif' && cycle.stepMs % 10 !== 0) throw new CliRefusalError(`Palette cycle “${cycle.name}” uses ${cycle.stepMs} ms steps, which GIF cannot represent exactly; export APNG or use a 10-millisecond multiple.`);
+        paletteCycleId = cycle.id;
+        paletteCycleFrameId = frame.id;
+      }
     }
-    const artifact = await exportDocument(loaded.document, format, { scale: command.scale, animationTagId });
+    const artifact = await exportDocument(loaded.document, format, { scale: command.scale, animationTagId, paletteCycleId, paletteCycleFrameId });
     const requested = resolve(command.outputPath);
     if ((format === 'tiled-json' || format === 'tiled-xml') && extname(requested)
       && extname(requested).toLowerCase() !== `.${artifact.extension}`) {

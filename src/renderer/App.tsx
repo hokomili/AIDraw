@@ -1424,7 +1424,7 @@ function TopBar({
                 </label>
               )}
               {exportSprite && exportSprite.tags.length > 0 && <label className="export-scale-control"><span><strong>Animation range</strong><small>GIF, APNG, sheet</small></span><select aria-label="Animation export range" disabled={Boolean(selectedExportCycle)} value={exportSprite.tags.some((tag) => tag.id === exportTagId) ? exportTagId : ""} onChange={(event) => { setExportTagId(event.target.value); setExportPaletteCycleId(""); }}><option value="">Full timeline</option>{exportSprite.tags.map((tag) => <option key={tag.id} value={tag.id}>{tag.name} · {tag.direction}</option>)}</select></label>}
-              {exportSprite && document?.kind === "pixel" && document.paletteCycles.length > 0 && <label className="export-scale-control"><span><strong>Palette-cycle output</strong><small>{selectedExportCycle && selectedExportCycle.stepMs % 10 !== 0 ? "APNG exact · GIF needs 10 ms steps" : "GIF/APNG · active frame"}</small></span><select aria-label="Palette-cycle export" value={selectedExportCycle?.id ?? ""} onChange={(event) => { setExportPaletteCycleId(event.target.value); if (event.target.value) setExportTagId(""); }}><option value="">Timeline or tag animation</option>{document.paletteCycles.map((cycle) => <option key={cycle.id} value={cycle.id}>{cycle.name} · {cycle.toIndex - cycle.fromIndex + 1} steps · {cycle.stepMs} ms</option>)}</select></label>}
+              {exportSprite && document?.kind === "pixel" && document.paletteCycles.length > 0 && <label className="export-scale-control"><span><strong>Palette-cycle output</strong><small>{selectedExportCycle && selectedExportCycle.stepMs % 10 !== 0 ? "APNG/sheet exact · GIF needs 10 ms steps" : "GIF/APNG/sheet · active frame"}</small></span><select aria-label="Palette-cycle export" value={selectedExportCycle?.id ?? ""} onChange={(event) => { setExportPaletteCycleId(event.target.value); if (event.target.value) setExportTagId(""); }}><option value="">Timeline or tag animation</option>{document.paletteCycles.map((cycle) => <option key={cycle.id} value={cycle.id}>{cycle.name} · {cycle.toIndex - cycle.fromIndex + 1} steps · {cycle.stepMs} ms</option>)}</select></label>}
               {exportChoices.map((format) => {
                 const scalable =
                   document?.kind === "pixel" &&
@@ -1433,7 +1433,8 @@ function TopBar({
                 return (
                   <button
                     key={format}
-                    disabled={format === "gif" && Boolean(selectedExportCycle && selectedExportCycle.stepMs % 10 !== 0)}
+                    disabled={Boolean(selectedExportCycle && (!['gif', 'apng', 'sprite-sheet'].includes(format) || (format === "gif" && selectedExportCycle.stepMs % 10 !== 0)))}
+                    title={selectedExportCycle && !['gif', 'apng', 'sprite-sheet'].includes(format) ? "Palette-cycle output is available only for GIF, APNG, and sprite sheet." : undefined}
                     onClick={async () => {
                       setExporting(false);
                       exportButtonRef.current?.focus();
@@ -1444,8 +1445,8 @@ function TopBar({
                         {
                           scale,
                           animationTagId: ["gif", "apng", "sprite-sheet"].includes(format) && !selectedExportCycle && exportTagId ? exportTagId : undefined,
-                          paletteCycleId: ["gif", "apng"].includes(format) ? selectedExportCycle?.id : undefined,
-                          paletteCycleFrameId: ["gif", "apng"].includes(format) && selectedExportCycle ? exportFrameId : undefined,
+                          paletteCycleId: ["gif", "apng", "sprite-sheet"].includes(format) ? selectedExportCycle?.id : undefined,
+                          paletteCycleFrameId: ["gif", "apng", "sprite-sheet"].includes(format) && selectedExportCycle ? exportFrameId : undefined,
                         },
                       );
                       if (result.exported)
@@ -1458,7 +1459,7 @@ function TopBar({
                     }}
                   >
                     <span>{format.replace("-", " ").toUpperCase()}</span>
-                    {selectedExportCycle && ["gif", "apng"].includes(format) ? <small>{selectedExportCycle.name}</small> : scale > 1 && <small>{scale}×</small>}
+                    {selectedExportCycle && ["gif", "apng", "sprite-sheet"].includes(format) ? <small>{selectedExportCycle.name}</small> : scale > 1 && <small>{scale}×</small>}
                   </button>
                 );
               })}

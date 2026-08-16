@@ -960,6 +960,11 @@ interface PixelAnimationExportFrame {
   delayMs: number;
 }
 
+interface SpriteSheetExportEntry extends PixelAnimationExportFrame {
+  key?: string;
+  metadata?: Record<string, unknown>;
+}
+
 function paletteCycleFrameSprite(
   document: PixelDocument,
   sprite: PixelSprite,
@@ -999,19 +1004,28 @@ function paletteCycleExportFrames(
   };
 }
 
-async function spriteSheet(document: PixelDocument, sprite: PixelSprite, scale = 1, tagId?: string): Promise<ExportArtifact> {
-  const frameIds = pixelAnimationSequence(sprite, tagId); const columns = Math.ceil(Math.sqrt(frameIds.length)); const rows = Math.ceil(frameIds.length / columns);
+async function spriteSheetEntries(
+  document: PixelDocument,
+  sprite: PixelSprite,
+  scale: number,
+  entries: SpriteSheetExportEntry[],
+  metadata: Record<string, unknown>,
+  warnings: string[],
+): Promise<ExportArtifact> {
+  const columns = Math.ceil(Math.sqrt(entries.length)); const rows = Math.ceil(entries.length / columns);
   assertScaledDimensions(columns * sprite.width, rows * sprite.height, scale);
   const frameWidth = sprite.width * scale; const frameHeight = sprite.height * scale;
   const sheetWidth = columns * frameWidth; const sheetHeight = rows * frameHeight;
   const frames: Record<string, unknown> = {};
-  frameIds.forEach((frameId, index) => {
+  entries.forEach((entry, index) => {
     const x = index % columns * frameWidth; const y = Math.floor(index / columns) * frameHeight;
-    const key = frames[frameId] ? `${frameId}#${index}` : frameId; frames[key] = { frame: { x, y, w: frameWidth, h: frameHeight }, sourceFrameId: frameId, sourceSize: { w: sprite.width, h: sprite.height }, scale, duration: sprite.frames[frameId]?.durationMs ?? 100 };
+    const key = entry.key ?? (frames[entry.frameId] ? `${entry.frameId}#${index}` : entry.frameId);
+    frames[key] = { frame: { x, y, w: frameWidth, h: frameHeight }, sourceFrameId: entry.frameId, sourceSize: { w: sprite.width, h: sprite.height }, scale, duration: entry.delayMs, ...(entry.metadata ?? {}) };
   });
-  const firstExact = exactNormalCompositeAnimationFrame(document.palette, sprite, frameIds[0]); let exactSheet = firstExact ? new Uint8Array(sheetWidth * sheetHeight * 4) : undefined;
-  if (exactSheet) for (let index = 0; index < frameIds.length; index += 1) {
-    const frame = index === 0 ? firstExact : exactNormalCompositeAnimationFrame(document.palette, sprite, frameIds[index]);
+  const firstExact = exactNormalCompositeAnimationFrame(document.palette, entries[0].sprite, entries[0].frameId); let exactSheet = firstExact ? new Uint8Array(sheetWidth * sheetHeight * 4) : undefined;
+  if (exactSheet) for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index];
+    const frame = index === 0 ? firstExact : exactNormalCompositeAnimationFrame(document.palette, entry.sprite, entry.frameId);
     if (!frame) { exactSheet = undefined; break; }
     const scaled = nearestNeighborFrame(frame, sprite.width, sprite.height, scale); const targetX = index % columns * frameWidth; const targetY = Math.floor(index / columns) * frameHeight;
     for (let y = 0; y < frameHeight; y += 1) exactSheet.set(scaled.subarray(y * frameWidth * 4, (y + 1) * frameWidth * 4), ((targetY + y) * sheetWidth + targetX) * 4);
@@ -1020,9 +1034,55 @@ async function spriteSheet(document: PixelDocument, sprite: PixelSprite, scale =
   if (exactSheet) data = encodeLosslessRgbaPng(exactSheet, sheetWidth, sheetHeight);
   else {
     const canvas = createCanvas(sheetWidth, sheetHeight); const context = canvas.getContext('2d'); context.imageSmoothingEnabled = false;
-    frameIds.forEach((frameId, index) => context.drawImage(renderSprite(document, sprite, frameId), index % columns * frameWidth, Math.floor(index / columns) * frameHeight, frameWidth, frameHeight)); data = canvas.toBuffer('image/png');
+    entries.forEach((entry, index) => context.drawImage(renderSprite(document, entry.sprite, entry.frameId), index % columns * frameWidth, Math.floor(index / columns) * frameHeight, frameWidth, frameHeight)); data = canvas.toBuffer('image/png');
   }
-  return { data, mimeType: 'image/png', extension: 'png', companion: { data: Buffer.from(JSON.stringify({ frames, meta: { app: 'AIDraw', image: `${sprite.name}.png`, size: { w: sheetWidth, h: sheetHeight }, scale, frameOrder: frameIds, selectedTagId: tagId, tags: sprite.tags } }, null, 2)), extension: 'json', mimeType: 'application/json' }, report: { warnings: animationExportWarnings(sprite, tagId, scale), rasterized: [] } };
+  return { data, mimeType: 'image/png', extension: 'png', companion: { data: Buffer.from(JSON.stringify({ frames, meta: { app: 'AIDraw', image: `${sprite.name}.png`, size: { w: sheetWidth, h: sheetHeight }, scale, ...metadata } }, null, 2)), extension: 'json', mimeType: 'application/json' }, report: { warnings, rasterized: [] } };
+}
+
+async function spriteSheet(document: PixelDocument, sprite: PixelSprite, scale = 1, tagId?: string): Promise<ExportArtifact> {
+  const frameIds = pixelAnimationSequence(sprite, tagId);
+  return spriteSheetEntries(
+    document,
+    sprite,
+    scale,
+    frameIds.map((frameId) => ({ frameId, sprite, delayMs: sprite.frames[frameId]?.durationMs ?? 100 })),
+    { frameOrder: frameIds, selectedTagId: tagId, tags: sprite.tags },
+    animationExportWarnings(sprite, tagId, scale),
+  );
+}
+
+async function paletteCycleSpriteSheet(
+  document: PixelDocument,
+  sprite: PixelSprite,
+  scale: number,
+  cycleId: string,
+  frameId: string,
+): Promise<ExportArtifact> {
+  const planned = paletteCycleExportFrames(document, sprite, cycleId, frameId);
+  const entryOrder = planned.frames.map((_frame, index) => `cycle-step-${index + 1}`);
+  const warning = `Exported one complete ${planned.frames.length}-step palette cycle “${planned.cycle.name}” from frame “${planned.frameName}” using ${planned.cycle.direction} rotation at ${planned.cycle.stepMs} ms per step.`;
+  return spriteSheetEntries(
+    document,
+    sprite,
+    scale,
+    planned.frames.map((frame, index) => ({ ...frame, key: entryOrder[index], metadata: { paletteCycleOffset: index } })),
+    {
+      entryOrder,
+      schedule: {
+        kind: 'palette-cycle',
+        paletteCycle: {
+          id: planned.cycle.id,
+          name: planned.cycle.name,
+          fromIndex: planned.cycle.fromIndex,
+          toIndex: planned.cycle.toIndex,
+          direction: planned.cycle.direction,
+          stepMs: planned.cycle.stepMs,
+        },
+        sourceFrame: { id: frameId, name: planned.frameName },
+      },
+    },
+    [...scaleWarnings(scale), warning, 'Sprite-sheet entries are ordered palette-cycle steps derived from one canonical source frame, not distinct animation frames.'],
+  );
 }
 
 async function encodePixelAnimation(
@@ -1132,7 +1192,7 @@ export async function exportDocument(document: AIDrawDocument, format: ExportFor
     throw new Error('Palette-cycle export requires both a named cycle and an exact source frame.');
   }
   if (paletteCycleRequested && document.kind !== 'pixel') throw new Error('Palette-cycle export requires an active pixel sprite.');
-  if (paletteCycleRequested && format !== 'gif' && format !== 'apng') throw new Error('Palette-cycle export is available only for GIF and APNG.');
+  if (paletteCycleRequested && format !== 'gif' && format !== 'apng' && format !== 'sprite-sheet') throw new Error('Palette-cycle export is available only for GIF, APNG, and sprite sheets.');
   if (paletteCycleRequested && (options.animationTagId || options.animationTagName)) throw new Error('Choose either a timeline/tag animation or a palette cycle, not both.');
   if (format === 'png' || format === 'jpeg' || format === 'webp') return raster(document, format, scale);
   if (format === 'svg') {
@@ -1155,7 +1215,9 @@ export async function exportDocument(document: AIDrawDocument, format: ExportFor
   if (format === 'sprite-sheet') {
     if (document.kind !== 'pixel') throw new Error('Sprite sheet export requires pixel mode.');
     const sprite = document.pixelAssets[document.activeAssetId]; if (sprite?.type !== 'sprite') throw new Error('Choose a sprite before exporting a sprite sheet.');
-    return spriteSheet(document, sprite, scale, options.animationTagId);
+    return paletteCycleRequested
+      ? paletteCycleSpriteSheet(document, sprite, scale, options.paletteCycleId!, options.paletteCycleFrameId!)
+      : spriteSheet(document, sprite, scale, options.animationTagId);
   }
   if (format === 'tiled-json' || format === 'tiled-xml') { if (document.kind !== 'pixel') throw new Error('Tiled export requires pixel mode.'); return tiled(document, format); }
   throw new Error(`Unsupported export format: ${format}`);

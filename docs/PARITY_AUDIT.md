@@ -1,6 +1,6 @@
 # Human/agent parity audit
 
-Last audited: 2026-08-04
+Last audited: 2026-08-16
 
 ## Verdict
 
@@ -46,6 +46,7 @@ Both entry surfaces also receive the same completed-document canonical gate. Can
 | Throughput | Pixel/tile RLE runs support one million cells, cross 32×32 chunks, exact inverse, progressive reveal/cancel, and sample-based backpressure. Numbered durable batches add progress, idempotent resume, cross-session token rebinding, cancellation, and crash reconciliation from the transaction trace. |
 | Attribution | Actor metadata can declare model, reasoning effort, and task ID. UI labels never synthesize `undefined`; metadata is explicitly client-declared rather than platform-attested. |
 | Project links | Humans and agents share immutable hash/cache transition kernels. MCP semantic operations embed or pack without UI; explicit approved `asset_import.projectLinkId` and `document_export.projectLinkId` requests relink or extract without filesystem enumeration. |
+| Derived cycle export | The human Export popover, headless batch CLI, and approval-backed `document_export` share one exact palette-cycle schedule/export kernel for GIF, APNG, and sprite-sheet output. MCP retains exact-ID and human-approval authority while CLI retains exact-ID-or-unambiguous-name selection; both refuse non-centisecond-exact GIF timing before approval/publication while APNG and sheet metadata retain authored milliseconds. Neither path gains document mutation or combines cycle and timeline scheduling. |
 | Hardening | Entity attribution is server-authored, inline rasters and addressed imports are decoded/parsed under explicit byte and expansion budgets, companion paths are contained, asset references are protected, conversion settings are strict, and verified provenance is engine-only. |
 
 ## Remaining parity backlog

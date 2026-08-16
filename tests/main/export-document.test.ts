@@ -286,6 +286,32 @@ describe('interchange exporters', () => {
     expect(gifFrames.map((frame) => frame.delay)).toEqual([80, 80, 80]);
     expect(gifFrames.map((frame) => [...frame.patch.subarray(0, 4)])).toEqual(rgbaFrames);
     expect(gif.report.warnings).toContain('Exported one complete 3-step palette cycle “Signal” from frame “Frame 1” using reverse rotation at 80 ms per step.');
+
+    const sheet = await exportDocument(document, 'sprite-sheet', { ...options, scale: 2 });
+    const decodedSheet = UPNG.decode(Uint8Array.from(sheet.data).buffer);
+    const sheetPixels = new Uint8Array(UPNG.toRGBA8(decodedSheet)[0]);
+    const sheetPixel = (x: number, y: number) => [...sheetPixels.subarray((y * decodedSheet.width + x) * 4, (y * decodedSheet.width + x + 1) * 4)];
+    expect({ width: decodedSheet.width, height: decodedSheet.height }).toEqual({ width: 4, height: 4 });
+    expect([sheetPixel(0, 0), sheetPixel(2, 0), sheetPixel(0, 2)]).toEqual(rgbaFrames);
+    const metadata = JSON.parse(sheet.companion!.data.toString()) as {
+      frames: Record<string, { sourceFrameId: string; duration: number; paletteCycleOffset: number; scale: number }>;
+      meta: { scale: number; entryOrder: string[]; schedule: { kind: string; paletteCycle: Record<string, unknown>; sourceFrame: Record<string, unknown> } };
+    };
+    expect(metadata.meta).toEqual(expect.objectContaining({
+      scale: 2,
+      entryOrder: ['cycle-step-1', 'cycle-step-2', 'cycle-step-3'],
+      schedule: {
+        kind: 'palette-cycle',
+        paletteCycle: { id: 'signal', name: 'Signal', fromIndex: 1, toIndex: 3, direction: 'reverse', stepMs: 80 },
+        sourceFrame: { id: frameId, name: 'Frame 1' },
+      },
+    }));
+    expect(Object.values(metadata.frames)).toEqual([
+      expect.objectContaining({ sourceFrameId: frameId, duration: 80, paletteCycleOffset: 0, scale: 2 }),
+      expect.objectContaining({ sourceFrameId: frameId, duration: 80, paletteCycleOffset: 1, scale: 2 }),
+      expect.objectContaining({ sourceFrameId: frameId, duration: 80, paletteCycleOffset: 2, scale: 2 }),
+    ]);
+    expect(sheet.report.warnings).toContain('Sprite-sheet entries are ordered palette-cycle steps derived from one canonical source frame, not distinct animation frames.');
     expect(JSON.stringify(document)).toBe(before);
   });
 
@@ -295,7 +321,7 @@ describe('interchange exporters', () => {
     const frameId = sprite.frameIds[0];
     document.paletteCycles = [{ id: 'pulse', name: 'Pulse', fromIndex: 1, toIndex: 2, direction: 'forward', stepMs: 120 }];
     await expect(exportDocument(document, 'gif', { paletteCycleId: 'pulse' })).rejects.toThrow(/both a named cycle and an exact source frame/);
-    await expect(exportDocument(document, 'png', { paletteCycleId: 'pulse', paletteCycleFrameId: frameId })).rejects.toThrow(/only for GIF and APNG/);
+    await expect(exportDocument(document, 'png', { paletteCycleId: 'pulse', paletteCycleFrameId: frameId })).rejects.toThrow(/only for GIF, APNG, and sprite sheets/);
     await expect(exportDocument(document, 'gif', { paletteCycleId: 'missing', paletteCycleFrameId: frameId })).rejects.toThrow(/does not exist/);
     await expect(exportDocument(document, 'gif', { paletteCycleId: 'pulse', paletteCycleFrameId: 'missing' })).rejects.toThrow(/does not exist in the active sprite/);
     await expect(exportDocument(document, 'gif', { animationTagId: 'tag', paletteCycleId: 'pulse', paletteCycleFrameId: frameId })).rejects.toThrow(/either a timeline\/tag animation or a palette cycle/);
@@ -303,6 +329,9 @@ describe('interchange exporters', () => {
     document.paletteCycles[0].stepMs = 17;
     const apng = UPNG.decode(Uint8Array.from((await exportDocument(document, 'apng', { paletteCycleId: 'pulse', paletteCycleFrameId: frameId })).data).buffer);
     expect(apng.frames.map((frame) => frame.delay)).toEqual([17, 17]);
+    const sheet = await exportDocument(document, 'sprite-sheet', { paletteCycleId: 'pulse', paletteCycleFrameId: frameId });
+    const metadata = JSON.parse(sheet.companion!.data.toString());
+    expect(Object.values(metadata.frames).map((entry) => (entry as { duration: number }).duration)).toEqual([17, 17]);
     await expect(exportDocument(document, 'gif', { paletteCycleId: 'pulse', paletteCycleFrameId: frameId })).rejects.toThrow(/GIF cannot represent exactly/);
   });
 
