@@ -12,7 +12,7 @@ import {
   type PixelSprite,
 } from '@aidraw/core';
 import type { PixelSelectionFragment } from '@common/document-fragment';
-import { planPixelSelectionPaste } from '@common/pixel-selection-clipboard';
+import { planPixelSelectionPaste, planPixelSelectionPngPaste } from '@common/pixel-selection-clipboard';
 import { describe, expect, it } from 'vitest';
 
 function spriteTarget(document: PixelDocument) {
@@ -57,6 +57,7 @@ describe('indexed pixel-selection clipboard planning', () => {
       dropped: 0,
       addedPaletteEntries: 1,
     });
+    expect(plan.expectedDocumentRevision).toBeUndefined();
     expect(plan.operations.map((operation) => operation.kind)).toEqual(['pixel.palette.replace', 'pixel.cel.set']);
     expect(plan.operations[1]).toMatchObject({
       kind: 'pixel.cel.set',
@@ -154,6 +155,54 @@ describe('indexed pixel-selection clipboard planning', () => {
     expect(plan.operations).toEqual([
       expect.objectContaining({ kind: 'pixel.cel.set', celId: first.cel.id, changes: [{ x: 5, y: 6, index: 1 }] }),
     ]);
+
+    const pngPlan = planPixelSelectionPngPaste({
+      document,
+      spriteId: linked.id,
+      frameId: duplicate.frame.id,
+      celId: resolved!.id,
+      origin: { x: 7, y: 8 },
+    }, {
+      width: 2,
+      height: 1,
+      changes: [{ x: 0, y: 0, index: 1 }, { x: 1, y: 0, index: 0 }],
+    });
+    expect(pngPlan).toMatchObject({
+      expectedDocumentRevision: document.revision,
+      selection: [{ x: 7, y: 8 }, { x: 8, y: 8 }],
+      operations: [expect.objectContaining({
+        kind: 'pixel.cel.set',
+        celId: first.cel.id,
+        changes: [{ x: 7, y: 8, index: 1 }, { x: 8, y: 8, index: 0 }],
+      })],
+    });
+  });
+
+  it('requires a complete bounded standard-PNG cell rectangle before returning one no-palette operation', () => {
+    const document = createPixelDocument('sprite', 'PNG planner bounds');
+    const { sprite, frameId, cel } = spriteTarget(document);
+    const target = { document, spriteId: sprite.id, frameId, celId: cel.id, origin: { x: 0, y: 0 } };
+    expect(() => planPixelSelectionPngPaste(target, {
+      width: 2,
+      height: 1,
+      changes: [{ x: 0, y: 0, index: 1 }],
+    })).toThrow(/every visible and transparent cell/);
+    expect(() => planPixelSelectionPngPaste(target, {
+      width: 2,
+      height: 1,
+      changes: [{ x: 0, y: 0, index: 1 }, { x: 0, y: 0, index: 1 }],
+    })).toThrow(/duplicate/);
+    expect(() => planPixelSelectionPngPaste(target, {
+      width: 1_001,
+      height: 1_000,
+      changes: [],
+    })).toThrow(/one million cells/);
+    sprite.layers[cel.layerId].locked = true;
+    expect(() => planPixelSelectionPngPaste(target, {
+      width: 1,
+      height: 1,
+      changes: [{ x: 0, y: 0, index: 1 }],
+    })).toThrow(/visible, unlocked pixel layer/);
   });
 
   it('clips deterministically and refuses a missing color before returning operations when the palette is full', () => {

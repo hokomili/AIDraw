@@ -124,6 +124,7 @@ export interface CanvasTransaction {
   id: Id;
   clientOperationId: string;
   documentId: Id;
+  expectedDocumentRevision?: number;
   actor: Actor;
   label: string;
   createdAt: string;

@@ -68,7 +68,7 @@ interface EditorState {
   notify(message: string, tone?: ToastTone): void;
   newDocument(options: NewDocumentOptions): Promise<void>;
   activate(documentId: Id): Promise<void>;
-  apply(label: string, operations: CanvasOperation[], expectedDocumentId?: Id): Promise<boolean>;
+  apply(label: string, operations: CanvasOperation[], expectedDocumentId?: Id, expectedDocumentRevision?: number): Promise<boolean>;
   undo(): Promise<void>;
   redo(): Promise<void>;
   save(saveAs?: boolean): Promise<void>;
@@ -247,13 +247,14 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const snapshot = await window.aidraw.activateDocument(documentId);
     set((state) => reconcileWorkspaceSnapshot(state, snapshot));
   },
-  apply: async (label, operations, expectedDocumentId) => {
+  apply: async (label, operations, expectedDocumentId, expectedDocumentRevision) => {
     const document = get().snapshot?.activeDocument;
     if (!document || operations.length === 0 || (expectedDocumentId && document.id !== expectedDocumentId)) return false;
     const response = await window.aidraw.applyTransaction({
       id: createId('tx'),
       clientOperationId: createId('human-op'),
       documentId: document.id,
+      ...(expectedDocumentRevision === undefined ? {} : { expectedDocumentRevision }),
       actor: HUMAN_ACTOR,
       label,
       createdAt: nowIso(),

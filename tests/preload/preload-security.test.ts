@@ -163,6 +163,20 @@ describe('preload window.aidraw security contract', () => {
     expect(electronMock.invoke.mock.calls.flat()).not.toContain('renderer-owned-input');
   });
 
+  it('keeps indexed-selection PNG planning on the existing fixed clipboard channel without exposing image bytes', async () => {
+    const request = {
+      documentId: 'document-one', expectedDocumentRevision: 7, spriteId: 'sprite-one', frameId: 'frame-two',
+      celId: 'cel-linked-source', origin: { x: -3, y: 5 },
+    };
+    await bridge.readPixelSelectionClipboard(request);
+    expect(electronMock.invoke).toHaveBeenCalledWith(IPC.readPixelSelectionClipboard, request);
+    expect(JSON.stringify(request)).not.toContain('bytes');
+    electronMock.invoke.mockClear();
+    const fragment = { version: 1, kind: 'pixel-selection', sourceDocumentId: 'document-one' };
+    await bridge.writePixelSelectionClipboard(fragment);
+    expect(electronMock.invoke).toHaveBeenCalledWith(IPC.writePixelSelectionClipboard, fragment);
+  });
+
   it('subscribes only to the two documented events and never passes the Electron event object across the bridge', () => {
     const rawElectronEvent = { sender: 'must-not-cross-contextBridge' };
 

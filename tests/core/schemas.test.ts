@@ -56,6 +56,15 @@ describe('canvas operation schemas', () => {
       expectedRevision: 0,
     }).success).toBe(true);
 
+    const guarded = {
+      id: 'guarded-transaction', clientOperationId: 'guarded-operation', documentId: 'document-1', expectedDocumentRevision: 4,
+      actor: HUMAN_ACTOR, label: 'Guarded pixels', createdAt: nowIso(),
+      operations: [{ kind: 'pixel.cel.set', spriteId: 'sprite-1', celId: 'cel-1', changes: [{ x: 0, y: 0, index: 1 }], expectedRevision: 0 }],
+    };
+    expect(CanvasTransactionSchema.safeParse(guarded).success).toBe(true);
+    expect(CanvasTransactionSchema.safeParse({ ...guarded, expectedDocumentRevision: -1 }).success).toBe(false);
+    expect(CanvasTransactionSchema.safeParse({ ...guarded, expectedDocumentRevision: 1.5 }).success).toBe(false);
+
     expect(CanvasOperationSchema.safeParse({
       kind: 'pixel.asset.add',
       asset: createPixelSprite('Validated sprite', 32, 32),

@@ -822,6 +822,7 @@ export function rebaseTransactionExpectedRevisions(
 ): CanvasTransaction {
   if (source.id !== transaction.documentId) throw new Error('Transaction document ID does not match');
   const value = structuredClone(transaction);
+  if (value.expectedDocumentRevision !== undefined) value.expectedDocumentRevision = source.revision;
   value.operations = rebaseInverseRevisions(source, value.operations, nowIso());
   return value;
 }
@@ -832,6 +833,16 @@ export function applyTransaction(
   options: ApplyTransactionOptions = {},
 ): ApplyTransactionResult {
   if (source.id !== transaction.documentId) throw new Error('Transaction document ID does not match');
+  if (transaction.expectedDocumentRevision !== undefined && source.revision !== transaction.expectedDocumentRevision) {
+    throw new TransactionConflictError({
+      operationIndex: 0,
+      entityId: source.id,
+      expectedRevision: transaction.expectedDocumentRevision,
+      actualRevision: source.revision,
+      message: 'Document revision changed before the transaction could be applied',
+      retryable: true,
+    });
+  }
   const document = structuredClone(source);
   const timestamp = nowIso();
   const inverseOperations: CanvasOperation[] = [];

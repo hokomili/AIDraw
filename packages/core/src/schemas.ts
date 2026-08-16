@@ -949,6 +949,7 @@ export const CanvasTransactionSchema = z
     id: z.string().min(1),
     clientOperationId: z.string().min(1).max(200),
     documentId: z.string().min(1),
+    expectedDocumentRevision: ExpectedRevisionSchema,
     actor: ActorSchema,
     label: z.string().min(1).max(200),
     createdAt: z.string(),

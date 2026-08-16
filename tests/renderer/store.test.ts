@@ -386,4 +386,23 @@ describe('renderer workspace ordering and document isolation', () => {
     await expect(useEditorStore.getState().apply('Late first-tab preview', [{ kind: 'document.rename', name: 'Wrong target' }], first.id)).resolves.toBe(false);
     expect(applyTransaction).not.toHaveBeenCalled();
   });
+
+  it('forwards an exact planning revision as a canonical transaction precondition', async () => {
+    const document = createPixelDocument('sprite', 'Guarded renderer transaction');
+    const applyTransaction = vi.fn(async () => ({ status: 'committed' as const, revision: document.revision + 1 }));
+    Object.defineProperty(globalThis, 'window', { configurable: true, value: { aidraw: { applyTransaction } } });
+    useEditorStore.setState({ snapshot: snapshot(7, document) });
+
+    await expect(useEditorStore.getState().apply(
+      'Paste standard PNG selection',
+      [{ kind: 'document.rename', name: 'Guard carrier' }],
+      document.id,
+      document.revision,
+    )).resolves.toBe(true);
+    expect(applyTransaction).toHaveBeenCalledWith(expect.objectContaining({
+      documentId: document.id,
+      expectedDocumentRevision: document.revision,
+      label: 'Paste standard PNG selection',
+    }));
+  });
 });

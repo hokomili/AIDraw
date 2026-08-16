@@ -3,15 +3,18 @@ import {
   HUMAN_ACTOR,
   IDENTITY_TRANSFORM,
   createId,
+  createPixelDocument,
   nowIso,
+  writePixels,
   type AIDrawDocument,
   type CanvasOperation,
   type CanvasTransaction,
   type DocumentAsset,
   type ImageObject,
   type PaletteEntry,
+  type PixelDocument,
 } from '@aidraw/core';
-import type { ApplyTransactionResponse, PixelSelectionClipboardReadResult } from '../common/contracts';
+import type { ApplyTransactionResponse, PixelSelectionClipboardReadResult, PixelSelectionPngPasteRequest } from '../common/contracts';
 import {
   MAX_FRAGMENT_BYTES,
   exportIllustrationFragment,
@@ -20,6 +23,7 @@ import {
   parseDocumentFragment,
   type AIDrawFragment,
 } from '../common/document-fragment';
+import { assertPixelSelectionPngGeometry, planPixelSelectionPngPaste } from '../common/pixel-selection-clipboard';
 import { illustrationToSvg } from './export-document';
 import {
   inspectDocumentImageAsset,
@@ -36,6 +40,7 @@ export interface ClipboardWriteData {
   text: string;
   html: string;
   png?: Buffer;
+  pngSize?: { width: number; height: number };
 }
 
 export interface ClipboardPng {
@@ -57,7 +62,7 @@ export interface ClipboardRasterGateway {
     width: number,
     height: number,
     palette: PaletteEntry[],
-    settings: { alphaThreshold: number; dithering: 'none' | 'bayer-4x4' | 'floyd-steinberg' },
+    settings: { alphaThreshold: number; dithering: 'none' | 'bayer-4x4' | 'floyd-steinberg'; includeTransparent?: boolean },
   ): Promise<Array<{ x: number; y: number; index: number }>>;
 }
 
@@ -140,32 +145,116 @@ export function parseAIDrawClipboardHtml(html: string): ParsedClipboardHtml {
   }
 }
 
-export function copyPixelSelectionToClipboard(
-  clipboard: ClipboardGateway,
-  value: unknown,
-): { copied: true } {
+export function pixelSelectionPngDocument(value: unknown): PixelDocument {
   const fragment = parseDocumentFragment(value);
   if (fragment.kind !== 'pixel-selection') throw new Error('Only an indexed pixel selection can use the pixel-selection clipboard route.');
-  clipboard.write({
+  assertClipboardImageGeometry(fragment.grid.width, fragment.grid.height);
+  const document = createPixelDocument('sprite', 'Clipboard pixel selection');
+  document.palette = fragment.palette.map((color, index) => ({
+    id: `clipboard-palette-${index}`,
+    name: index === 0 ? 'Transparent' : `Clipboard ${index}`,
+    color,
+  }));
+  const sprite = document.pixelAssets[document.activeAssetId];
+  if (!sprite || sprite.type !== 'sprite') throw new Error('The clipboard selection preview sprite is unavailable.');
+  sprite.width = fragment.grid.width;
+  sprite.height = fragment.grid.height;
+  const cel = Object.values(sprite.cels)[0];
+  if (!cel) throw new Error('The clipboard selection preview cel is unavailable.');
+  writePixels(cel, fragment.grid.cells.map((cell) => ({ x: cell.x, y: cell.y, index: cell.value })));
+  return document;
+}
+
+export async function copyPixelSelectionToClipboard(
+  dependencies: Pick<ClipboardWorkflowDependencies, 'clipboard' | 'raster'>,
+  value: unknown,
+): Promise<{ copied: true }> {
+  const fragment = parseDocumentFragment(value);
+  if (fragment.kind !== 'pixel-selection') throw new Error('Only an indexed pixel selection can use the pixel-selection clipboard route.');
+  const standardDocument = pixelSelectionPngDocument(fragment);
+  const png = await dependencies.raster.renderPng(standardDocument);
+  clipboardPngAsset({ bytes: png, width: fragment.grid.width, height: fragment.grid.height });
+  dependencies.clipboard.write({
     text: JSON.stringify(fragment),
     html: serializeAIDrawClipboardHtml(fragment, '<span>AIDraw indexed pixel selection</span>'),
+    png,
+    pngSize: { width: fragment.grid.width, height: fragment.grid.height },
   });
   return { copied: true };
 }
 
-export function readPixelSelectionFromClipboard(clipboard: ClipboardGateway): PixelSelectionClipboardReadResult {
+function parsedPixelSelectionPngPasteRequest(value: unknown): PixelSelectionPngPasteRequest {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('The standard PNG paste target is invalid.');
+  const request = value as Partial<PixelSelectionPngPasteRequest>;
+  const keys = Object.keys(value).sort();
+  if (keys.length !== 6 || keys.some((key, index) => key !== ['celId', 'documentId', 'expectedDocumentRevision', 'frameId', 'origin', 'spriteId'][index])) {
+    throw new Error('The standard PNG paste target is invalid.');
+  }
+  if (![request.documentId, request.spriteId, request.frameId, request.celId].every((entry) => typeof entry === 'string' && entry.length > 0)
+    || !Number.isSafeInteger(request.expectedDocumentRevision) || Number(request.expectedDocumentRevision) < 0
+    || !request.origin || Object.keys(request.origin).sort().join(',') !== 'x,y'
+    || !Number.isSafeInteger(request.origin.x) || !Number.isSafeInteger(request.origin.y)) {
+    throw new Error('The standard PNG paste target is invalid.');
+  }
+  return request as PixelSelectionPngPasteRequest;
+}
+
+function selectedSpriteId(document: PixelDocument): string | undefined {
+  const active = document.pixelAssets[document.activeAssetId];
+  if (active?.type === 'sprite') return active.id;
+  if (active?.type === 'tileset') return active.spriteAssetId;
+  return undefined;
+}
+
+export async function readPixelSelectionFromClipboard(
+  dependencies: Pick<ClipboardWorkflowDependencies, 'clipboard' | 'raster' | 'getActiveDocument'>,
+  requestValue?: unknown,
+): Promise<PixelSelectionClipboardReadResult> {
   let parsed: ParsedClipboardHtml;
   try {
-    parsed = parseAIDrawClipboardHtml(clipboard.readHtml());
+    parsed = parseAIDrawClipboardHtml(dependencies.clipboard.readHtml());
   } catch {
     return { status: 'invalid', message: 'The system clipboard could not be read safely.' };
   }
-  if (parsed.status === 'absent') return { status: 'absent', message: 'The system clipboard has no AIDraw indexed pixel selection.' };
   if (parsed.status === 'invalid') return parsed;
-  if (parsed.fragment.kind !== 'pixel-selection') {
-    return { status: 'incompatible', message: 'The AIDraw clipboard contains whole artwork rather than an indexed pixel selection.' };
+  if (parsed.status === 'valid') {
+    if (parsed.fragment.kind !== 'pixel-selection') {
+      return { status: 'incompatible', message: 'The AIDraw clipboard contains whole artwork rather than an indexed pixel selection.' };
+    }
+    return { status: 'valid', fragment: parsed.fragment };
   }
-  return { status: 'valid', fragment: parsed.fragment };
+
+  try {
+    const png = dependencies.clipboard.readPng();
+    if (!png) return { status: 'absent', message: 'The system clipboard has no AIDraw indexed selection or standard PNG.' };
+    clipboardPngAsset(png);
+    if (requestValue === undefined) return { status: 'png', width: png.width, height: png.height };
+    const request = parsedPixelSelectionPngPasteRequest(requestValue);
+    const active = dependencies.getActiveDocument();
+    if (!active || active.kind !== 'pixel' || active.id !== request.documentId) throw new Error('The active pixel document changed before the standard PNG could be pasted.');
+    if (active.revision !== request.expectedDocumentRevision) throw new Error('The active pixel document changed; observe it again before pasting the standard PNG.');
+    if (selectedSpriteId(active) !== request.spriteId) throw new Error('The selected sprite changed before the standard PNG could be pasted.');
+    assertPixelSelectionPngGeometry(png.width, png.height);
+    const sprite = active.pixelAssets[request.spriteId];
+    if (!sprite || sprite.type !== 'sprite') throw new Error('The selected sprite is no longer available.');
+    const palette = sprite.paletteOverrides[request.frameId] ?? active.palette;
+    if (palette.length !== active.palette.length) throw new Error('The destination frame palette does not align with the document palette.');
+    const changes = await dependencies.raster.quantizePng(png.bytes, png.width, png.height, palette, {
+      alphaThreshold: active.conversionDefaults.alphaThreshold,
+      dithering: active.conversionDefaults.dithering,
+      includeTransparent: true,
+    });
+    const plan = planPixelSelectionPngPaste({
+      document: active,
+      spriteId: request.spriteId,
+      frameId: request.frameId,
+      celId: request.celId,
+      origin: request.origin,
+    }, { width: png.width, height: png.height, changes });
+    return { status: 'png', width: png.width, height: png.height, plan };
+  } catch (error) {
+    return { status: 'invalid', message: error instanceof Error ? error.message : 'The standard PNG clipboard image is invalid.' };
+  }
 }
 
 export function assertClipboardImageGeometry(width: number, height: number): void {

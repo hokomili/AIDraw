@@ -14,6 +14,7 @@ import type { AgentClientId, AgentClientSetupResult } from './agent-clients';
 import type { DesktopPlatformInfo } from './platform';
 import type { InterchangeFidelityEntry } from './interchange-fidelity';
 import type { PixelSelectionFragment } from './document-fragment';
+import type { PixelSelectionPastePlan } from './pixel-selection-clipboard';
 import type { OnionSkinPreferences } from './onion-skin';
 import type { OrderedDitherPreferences } from './ordered-dither-preferences';
 import type { SpriteSymmetryPreferences } from './sprite-symmetry';
@@ -128,9 +129,19 @@ export interface McpCredentialLifecycleResult {
 
 export type PixelSelectionClipboardReadResult =
   | { status: 'valid'; fragment: PixelSelectionFragment }
+  | { status: 'png'; width: number; height: number; plan?: PixelSelectionPastePlan }
   | { status: 'absent'; message: string }
   | { status: 'invalid'; message: string }
   | { status: 'incompatible'; message: string };
+
+export interface PixelSelectionPngPasteRequest {
+  documentId: Id;
+  expectedDocumentRevision: number;
+  spriteId: Id;
+  frameId: Id;
+  celId: Id;
+  origin: { x: number; y: number };
+}
 
 export interface EngineStatus {
   running: boolean;
@@ -399,7 +410,7 @@ export interface AIDrawDesktopAPI {
   copySelection(objectIds: Id[]): Promise<{ copied: boolean; kind?: string }>;
   pasteClipboard(): Promise<ApplyTransactionResponse>;
   writePixelSelectionClipboard(fragment: PixelSelectionFragment): Promise<{ copied: true }>;
-  readPixelSelectionClipboard(): Promise<PixelSelectionClipboardReadResult>;
+  readPixelSelectionClipboard(request?: PixelSelectionPngPasteRequest): Promise<PixelSelectionClipboardReadResult>;
   replayTrace(documentId: Id, transactionId: Id): Promise<{ replaying: boolean; reason?: string }>;
   updateEditorAdvisory(state: EditorAdvisoryInput): Promise<void>;
   setOnionSkinPreferences(preferences: OnionSkinPreferences): Promise<OnionSkinPreferenceSaveResult>;

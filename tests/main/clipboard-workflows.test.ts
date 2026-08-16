@@ -1,13 +1,18 @@
 import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createCanvas } from '@napi-rs/canvas';
+import { createCanvas, loadImage } from '@napi-rs/canvas';
 import {
   HUMAN_ACTOR,
   IDENTITY_TRANSFORM,
+  applyTransaction,
+  createId,
   createIllustrationDocument,
   createPixelDocument,
   nowIso,
+  readPixel,
+  writePixels,
   type AIDrawDocument,
   type ShapeObject,
 } from '@aidraw/core';
@@ -22,12 +27,17 @@ import {
   copySelectionToClipboard,
   parseAIDrawClipboardHtml,
   pasteFromClipboard,
+  pixelSelectionPngDocument,
   readPixelSelectionFromClipboard,
   serializeAIDrawClipboardHtml,
   type ClipboardPng,
   type ClipboardWorkflowDependencies,
   type ClipboardWriteData,
 } from '@main/clipboard-workflows';
+import { exportDocument } from '@main/export-document';
+import { DocumentService } from '@main/document-service';
+import { RecoveryJournal } from '@main/journal';
+import { quantizeImageToPalette } from '@main/quantize-image';
 import { MAX_INLINE_ASSET_BYTES } from '@main/transaction-policy';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -113,21 +123,61 @@ describe('clipboard workflows', () => {
     });
   });
 
-  it('publishes and reads exact indexed selections without manufacturing a PNG fallback', () => {
-    const fragment = pixelSelectionFragment();
+  it('publishes a private indexed selection plus an exact transparent-hole PNG and gives the private marker precedence', async () => {
+    const fragment: PixelSelectionFragment = {
+      version: 1,
+      kind: 'pixel-selection',
+      sourceDocumentId: 'clipboard-pixel-source',
+      palette: ['#00000000', '#ff0000', '#00ff00'],
+      grid: {
+        version: 1,
+        originX: 2,
+        originY: 3,
+        width: 3,
+        height: 2,
+        cells: [{ x: 0, y: 0, value: 1 }, { x: 0, y: 1, value: 0 }, { x: 2, y: 1, value: 2 }],
+      },
+    };
+    const document = createPixelDocument('sprite', 'Clipboard copy');
+    const beforeDocument = structuredClone(document);
+    const beforeFragment = structuredClone(fragment);
     const write = vi.fn<(data: ClipboardWriteData) => void>();
-    expect(copyPixelSelectionToClipboard({ write, readHtml: () => '', readPng: () => undefined }, fragment)).toEqual({ copied: true });
+    const dependencies = workflowDependencies(document, {
+      write,
+      renderPng: async (source) => (await exportDocument(source, 'png')).data,
+    });
+    await expect(copyPixelSelectionToClipboard(dependencies, fragment)).resolves.toEqual({ copied: true });
     expect(write).toHaveBeenCalledOnce();
     const written = write.mock.calls[0][0];
-    expect(written.png).toBeUndefined();
+    expect(written.pngSize).toEqual({ width: 3, height: 2 });
+    const image = await loadImage(written.png!);
+    const decoded = createCanvas(image.width, image.height);
+    const context = decoded.getContext('2d');
+    context.drawImage(image, 0, 0);
+    const rgba = [...context.getImageData(0, 0, 3, 2).data];
+    expect([image.width, image.height]).toEqual([3, 2]);
+    expect(rgba.slice(0, 4)).toEqual([255, 0, 0, 255]);
+    expect(rgba.slice(4, 12)).toEqual([0, 0, 0, 0, 0, 0, 0, 0]);
+    expect(rgba.slice(12, 20)).toEqual([0, 0, 0, 0, 0, 0, 0, 0]);
+    expect(rgba.slice(20, 24)).toEqual([0, 255, 0, 255]);
     expect(JSON.parse(written.text)).toEqual(fragment);
-    expect(readPixelSelectionFromClipboard({ write: () => undefined, readHtml: () => written.html, readPng: () => undefined })).toEqual({ status: 'valid', fragment });
-    expect(readPixelSelectionFromClipboard({ write: () => undefined, readHtml: () => '<p>ordinary HTML</p>', readPng: () => undefined })).toMatchObject({ status: 'absent' });
+    const privateReadPng = vi.fn(() => tinyPng());
+    await expect(readPixelSelectionFromClipboard(workflowDependencies(document, { html: written.html, readPng: privateReadPng }))).resolves.toEqual({ status: 'valid', fragment });
+    expect(privateReadPng).not.toHaveBeenCalled();
+    await expect(readPixelSelectionFromClipboard(workflowDependencies(document, { html: '<p>ordinary HTML</p>' }))).resolves.toMatchObject({ status: 'absent' });
+    await expect(readPixelSelectionFromClipboard(workflowDependencies(document, { html: '<p>ordinary HTML</p>', png: tinyPng(2, 1) }))).resolves.toEqual({ status: 'png', width: 2, height: 1 });
 
     const illustration = illustrationFixture();
     const incompatible = serializeAIDrawClipboardHtml(exportIllustrationFragment(illustration.document, [illustration.shape.id]), '<svg></svg>');
-    expect(readPixelSelectionFromClipboard({ write: () => undefined, readHtml: () => incompatible, readPng: () => undefined })).toMatchObject({ status: 'incompatible', message: expect.stringContaining('whole artwork') });
-    expect(readPixelSelectionFromClipboard({ write: () => undefined, readHtml: () => '<div data-aidraw="abcd===="></div>', readPng: () => undefined })).toMatchObject({ status: 'invalid' });
+    const incompatiblePng = vi.fn(() => tinyPng());
+    await expect(readPixelSelectionFromClipboard(workflowDependencies(document, { html: incompatible, readPng: incompatiblePng }))).resolves.toMatchObject({ status: 'incompatible', message: expect.stringContaining('whole artwork') });
+    await expect(readPixelSelectionFromClipboard(workflowDependencies(document, { html: '<div data-aidraw="abcd===="></div>', readPng: incompatiblePng }))).resolves.toMatchObject({ status: 'invalid' });
+    const checksumMismatch = written.html.replace(/data-aidraw-sha256="([0-9a-f])/u, (_match, first: string) => `data-aidraw-sha256="${first === '0' ? '1' : '0'}`);
+    await expect(readPixelSelectionFromClipboard(workflowDependencies(document, { html: checksumMismatch, readPng: incompatiblePng }))).resolves.toMatchObject({ status: 'invalid', message: expect.stringContaining('SHA-256') });
+    expect(incompatiblePng).not.toHaveBeenCalled();
+    expect(pixelSelectionPngDocument(fragment).palette.map((entry) => entry.color)).toEqual(fragment.palette);
+    expect(fragment).toEqual(beforeFragment);
+    expect(document).toEqual(beforeDocument);
   });
 
   it('accepts the exact legacy private attribute while failing malformed or amplified envelopes closed', () => {
@@ -191,6 +241,207 @@ describe('clipboard workflows', () => {
     expect(() => assertClipboardImageGeometry(8_193, 1)).toThrow(/8192px/);
     expect(() => assertClipboardImageGeometry(4_097, 4_096)).toThrow(/16,777,216 pixels/);
     expect(() => clipboardPngAsset({ bytes: Buffer.alloc(MAX_INLINE_ASSET_BYTES + 1), width: 1, height: 1 })).toThrow(/editable-asset limit/);
+  });
+
+  it('plans an arbitrary standard PNG into the active frame palette at the requested origin with transparent clearing, clipping, and exact inverse', async () => {
+    const document = createPixelDocument('sprite', 'Standard PNG selection target');
+    const sprite = document.pixelAssets[document.activeAssetId];
+    if (!sprite || sprite.type !== 'sprite') throw new Error('Expected sprite');
+    sprite.width = 4;
+    sprite.height = 3;
+    const frameId = sprite.frameIds[0];
+    const cel = Object.values(sprite.cels)[0];
+    sprite.paletteOverrides[frameId] = structuredClone(document.palette);
+    sprite.paletteOverrides[frameId][1].color = '#00ff00';
+    writePixels(cel, [{ x: 3, y: 2, index: 2 }]);
+
+    const canvas = createCanvas(3, 2);
+    const context = canvas.getContext('2d');
+    context.clearRect(0, 0, 3, 2);
+    context.fillStyle = '#00ff00';
+    context.fillRect(0, 0, 1, 1);
+    context.fillRect(1, 1, 1, 1);
+    context.fillStyle = document.palette[2].color;
+    context.fillRect(2, 0, 1, 2);
+    const png = { bytes: canvas.toBuffer('image/png'), width: 3, height: 2 };
+    const beforePlanning = structuredClone(document);
+    const quantizePng = vi.fn<ClipboardWorkflowDependencies['raster']['quantizePng']>(quantizeImageToPalette);
+    const result = await readPixelSelectionFromClipboard(workflowDependencies(document, { png, quantizePng }), {
+      documentId: document.id,
+      expectedDocumentRevision: document.revision,
+      spriteId: sprite.id,
+      frameId,
+      celId: cel.id,
+      origin: { x: 3, y: 1 },
+    });
+    expect(quantizePng).toHaveBeenCalledWith(png.bytes, 3, 2, sprite.paletteOverrides[frameId], {
+      alphaThreshold: document.conversionDefaults.alphaThreshold,
+      dithering: document.conversionDefaults.dithering,
+      includeTransparent: true,
+    });
+    expect(result).toMatchObject({
+      status: 'png',
+      width: 3,
+      height: 2,
+      plan: {
+        expectedDocumentRevision: document.revision,
+        bounds: { x: 3, y: 1, width: 1, height: 2 },
+        selection: [{ x: 3, y: 1 }, { x: 3, y: 2 }],
+        dropped: 4,
+        addedPaletteEntries: 0,
+        operations: [expect.objectContaining({
+          kind: 'pixel.cel.set',
+          celId: cel.id,
+          changes: [{ x: 3, y: 1, index: 1 }, { x: 3, y: 2, index: 0 }],
+        })],
+      },
+    });
+    expect(document).toEqual(beforePlanning);
+    if (result.status !== 'png' || !result.plan) throw new Error('Expected standard PNG plan');
+    const transaction = {
+      id: 'standard-png-paste', clientOperationId: 'standard-png-paste-client', documentId: document.id,
+      expectedDocumentRevision: result.plan.expectedDocumentRevision,
+      actor: HUMAN_ACTOR, label: 'Paste standard PNG selection', createdAt: nowIso(), operations: result.plan.operations,
+      playback: { mode: 'instant' as const, speed: 1 },
+    };
+    const committed = applyTransaction(document, transaction);
+    if (committed.document.kind !== 'pixel') throw new Error('Expected pixel document');
+    expect(committed.document.revision).toBe(document.revision + 1);
+    expect(committed.document.activity.at(-1)).toMatchObject({
+      transactionId: transaction.id,
+      actor: HUMAN_ACTOR,
+      operationCount: 1,
+    });
+    expect(committed.document.palette).toEqual(document.palette);
+    const committedSprite = committed.document.pixelAssets[sprite.id];
+    if (!committedSprite || committedSprite.type !== 'sprite') throw new Error('Expected committed sprite');
+    expect(committedSprite.frames).toEqual(sprite.frames);
+    expect(committedSprite.paletteOverrides).toEqual(sprite.paletteOverrides);
+    expect(readPixel(committedSprite.cels[cel.id], 3, 1)).toBe(1);
+    expect(readPixel(committedSprite.cels[cel.id], 3, 2)).toBe(0);
+    const undone = applyTransaction(committed.document, committed.inverse, { recordActivity: false });
+    if (undone.document.kind !== 'pixel') throw new Error('Expected undone pixel document');
+    const undoneSprite = undone.document.pixelAssets[sprite.id];
+    if (!undoneSprite || undoneSprite.type !== 'sprite') throw new Error('Expected undone sprite');
+    expect(readPixel(undoneSprite.cels[cel.id], 3, 1)).toBe(0);
+    expect(readPixel(undoneSprite.cels[cel.id], 3, 2)).toBe(2);
+  });
+
+  it('refuses a stale PNG plan at the canonical boundary after palette drift during supervised quantization without adding paste history', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-clipboard-png-document-guard-'));
+    const service = new DocumentService(new RecoveryJournal(root), '1.0.0');
+    try {
+      const document = createPixelDocument('sprite', 'Guarded PNG paste');
+      const sprite = document.pixelAssets[document.activeAssetId]; if (!sprite || sprite.type !== 'sprite') throw new Error('Expected sprite');
+      const frameId = sprite.frameIds[0]; const cel = Object.values(sprite.cels)[0];
+      writePixels(cel, [{ x: 0, y: 0, index: 2 }]);
+      service.addDocument(document);
+
+      let markQuantizationStarted!: () => void;
+      const quantizationStarted = new Promise<void>((resolve) => { markQuantizationStarted = resolve; });
+      let finishQuantization!: (changes: Array<{ x: number; y: number; index: number }>) => void;
+      const quantizationResult = new Promise<Array<{ x: number; y: number; index: number }>>((resolve) => { finishQuantization = resolve; });
+      const quantizePng = vi.fn<ClipboardWorkflowDependencies['raster']['quantizePng']>(async () => {
+        markQuantizationStarted();
+        return quantizationResult;
+      });
+      const dependencies = workflowDependencies(document, { png: tinyPng(1, 1), quantizePng });
+      dependencies.getActiveDocument = () => service.getDocument(document.id);
+      dependencies.apply = (transaction) => service.apply(transaction);
+
+      const planning = readPixelSelectionFromClipboard(dependencies, {
+        documentId: document.id,
+        expectedDocumentRevision: document.revision,
+        spriteId: sprite.id,
+        frameId,
+        celId: cel.id,
+        origin: { x: 0, y: 0 },
+      });
+      await quantizationStarted;
+      const palette = structuredClone(document.palette); palette[1].color = '#123456';
+      await expect(service.apply({
+        id: createId('tx'), clientOperationId: createId('human-op'), documentId: document.id,
+        actor: HUMAN_ACTOR, label: 'Change palette while PNG quantizes', createdAt: nowIso(),
+        operations: [{ kind: 'pixel.palette.replace', palette }],
+      })).resolves.toMatchObject({ status: 'committed', revision: document.revision + 1 });
+      finishQuantization([{ x: 0, y: 0, index: 1 }]);
+
+      const result = await planning;
+      if (result.status !== 'png' || !result.plan) throw new Error('Expected standard PNG plan');
+      expect(result.plan.expectedDocumentRevision).toBe(document.revision);
+      await expect(service.apply({
+        id: createId('tx'), clientOperationId: createId('human-op'), documentId: document.id,
+        expectedDocumentRevision: result.plan.expectedDocumentRevision,
+        actor: HUMAN_ACTOR, label: 'Paste stale standard PNG', createdAt: nowIso(), operations: result.plan.operations,
+      })).resolves.toMatchObject({
+        status: 'conflict',
+        message: 'Document revision changed before the transaction could be applied',
+        conflict: { entityId: document.id, expectedRevision: document.revision, actualRevision: document.revision + 1, retryable: true },
+      });
+
+      const current = service.getDocument(document.id); if (current?.kind !== 'pixel') throw new Error('Expected pixel document');
+      const currentSprite = current.pixelAssets[sprite.id]; if (currentSprite.type !== 'sprite') throw new Error('Expected sprite');
+      expect(readPixel(currentSprite.cels[cel.id], 0, 0)).toBe(2);
+      expect(current.activity.map(({ label }) => label)).toEqual(['Change palette while PNG quantizes']);
+      expect(service.snapshot().canUndo).toBe(true);
+      await expect(service.undo(document.id, HUMAN_ACTOR)).resolves.toMatchObject({ status: 'committed' });
+      expect(service.snapshot()).toMatchObject({ canUndo: false, canRedo: true });
+      const restored = service.getDocument(document.id); if (restored?.kind !== 'pixel') throw new Error('Expected pixel document');
+      const restoredSprite = restored.pixelAssets[sprite.id]; if (restoredSprite.type !== 'sprite') throw new Error('Expected sprite');
+      expect(readPixel(restoredSprite.cels[cel.id], 0, 0)).toBe(2);
+      expect(restored.palette).toEqual(document.palette);
+    } finally {
+      await service.flushRecovery();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('fails malformed or oversized standard PNG fallback inputs before quantization and never consults them for private ownership', async () => {
+    const document = createPixelDocument('sprite', 'Refusal target');
+    const quantizePng = vi.fn<ClipboardWorkflowDependencies['raster']['quantizePng']>(async () => []);
+    await expect(readPixelSelectionFromClipboard(workflowDependencies(document, {
+      png: { ...tinyPng(2, 1), width: 1 },
+      quantizePng,
+    }), {
+      documentId: document.id, expectedDocumentRevision: document.revision, spriteId: document.activeAssetId, frameId: 'frame', celId: 'cel', origin: { x: 0, y: 0 },
+    })).resolves.toMatchObject({ status: 'invalid', message: expect.stringContaining('decoded geometry') });
+    await expect(readPixelSelectionFromClipboard(workflowDependencies(document, {
+      png: { bytes: Buffer.alloc(MAX_INLINE_ASSET_BYTES + 1), width: 1, height: 1 },
+      quantizePng,
+    }))).resolves.toMatchObject({ status: 'invalid', message: expect.stringContaining('editable-asset limit') });
+    await expect(readPixelSelectionFromClipboard(workflowDependencies(document, {
+      png: tinyPng(1_001, 1_000),
+      quantizePng,
+    }), {
+      documentId: document.id,
+      expectedDocumentRevision: document.revision,
+      spriteId: document.activeAssetId,
+      frameId: 'frame',
+      celId: 'cel',
+      origin: { x: 0, y: 0 },
+    })).resolves.toMatchObject({ status: 'invalid', message: expect.stringContaining('one million cells') });
+    const sprite = document.pixelAssets[document.activeAssetId];
+    if (!sprite || sprite.type !== 'sprite') throw new Error('Expected sprite');
+    const cel = Object.values(sprite.cels)[0];
+    await expect(readPixelSelectionFromClipboard(workflowDependencies(document, { png: tinyPng(), quantizePng }), {
+      documentId: document.id,
+      expectedDocumentRevision: document.revision + 1,
+      spriteId: sprite.id,
+      frameId: sprite.frameIds[0],
+      celId: cel.id,
+      origin: { x: 0, y: 0 },
+    })).resolves.toMatchObject({ status: 'invalid', message: expect.stringContaining('observe it again') });
+    expect(quantizePng).not.toHaveBeenCalled();
+  });
+
+  it('does not write a partial indexed clipboard when supervised PNG rendering or admission fails', async () => {
+    const document = createPixelDocument('sprite', 'Copy failure target');
+    const write = vi.fn<(data: ClipboardWriteData) => void>();
+    await expect(copyPixelSelectionToClipboard(workflowDependencies(document, {
+      write,
+      renderPng: async () => Buffer.alloc(MAX_INLINE_ASSET_BYTES + 1),
+    }), pixelSelectionFragment())).rejects.toThrow(/editable-asset limit/);
+    expect(write).not.toHaveBeenCalled();
   });
 
   it('renders copy output through the injected raster lane and writes private plus standard fallbacks', async () => {
@@ -276,8 +527,10 @@ describe('clipboard workflows', () => {
     expect(source).toContain('rasterUtilities.quantizeImage(bytes, width, height, palette, settings)');
     expect(source).toContain('assertClipboardImageGeometry(size.width, size.height)');
     expect(source).toContain('if (!data.png) { clipboard.write({ text: data.text, html: data.html }); return; }');
+    expect(source).toContain('size.width !== data.pngSize.width || size.height !== data.pngSize.height');
     expect(source).toContain('handle(IPC.writePixelSelectionClipboard');
     expect(source).toContain('handle(IPC.readPixelSelectionClipboard');
+    expect(source).toContain('readPixelSelectionFromClipboard(clipboardDependencies(), request)');
     expect(source).not.toContain('quantizeToPalette');
   });
 });

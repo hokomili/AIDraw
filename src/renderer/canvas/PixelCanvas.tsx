@@ -346,6 +346,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const ditherMixIndex = Math.min(document.palette.length - 1, useEditorStore((state) => state.ditherMixIndex));
   const applyToActiveDocument = useEditorStore((state) => state.apply);
   const apply = useCallback((label: string, operations: CanvasOperation[]) => mountedRef.current ? applyToActiveDocument(label, operations, document.id) : Promise.resolve(false), [applyToActiveDocument, document.id]);
+  const applyGuarded = useCallback((label: string, operations: CanvasOperation[], expectedDocumentRevision: number) => mountedRef.current ? applyToActiveDocument(label, operations, document.id, expectedDocumentRevision) : Promise.resolve(false), [applyToActiveDocument, document.id]);
   const currentBitmapFonts = useCallback((): BitmapFont[] => {
     const activeDocument = useEditorStore.getState().snapshot?.activeDocument;
     if (!activeDocument || activeDocument.id !== document.id || activeDocument.kind !== 'pixel') throw new Error('The active pixel document changed. Reopen Bitmap font assets and try again.');
@@ -431,7 +432,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     let current = true;
     const refreshClipboardAvailability = () => {
       void window.aidraw.readPixelSelectionClipboard().then(
-        (result) => { if (current) setClipboardAvailable(result.status === 'valid'); },
+        (result) => { if (current) setClipboardAvailable(result.status === 'valid' || result.status === 'png'); },
         () => { if (current) setClipboardAvailable(false); },
       );
     };
@@ -1055,10 +1056,10 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     try {
       await window.aidraw.writePixelSelectionClipboard(fragment);
       setClipboardAvailable(true);
-      notify(`Copied ${selection.length} selected pixel${selection.length === 1 ? '' : 's'} to the system clipboard.`, 'success');
+      notify(`Copied ${selection.length} selected pixel${selection.length === 1 ? '' : 's'} as private indexed data plus a standard PNG.`, 'success');
       return true;
-    } catch {
-      notify('The indexed pixel selection could not be written to the system clipboard.', 'warning');
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'The indexed pixel selection and standard PNG could not be written to the system clipboard.', 'warning');
       return false;
     }
   };
@@ -1082,25 +1083,51 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     if (!sprite || !activeFrameId) return;
     const layerId = editableSpriteLayer(sprite, selectedEntityId)?.id; const cel = layerId ? celFor(sprite, layerId, activeFrameId) : undefined; if (!cel) return;
     let clipboard: Awaited<ReturnType<typeof window.aidraw.readPixelSelectionClipboard>>;
-    try { clipboard = await window.aidraw.readPixelSelectionClipboard(); }
-    catch { notify('The system clipboard could not be read safely.', 'warning'); return; }
-    if (clipboard.status !== 'valid') { notify(clipboard.message, 'warning'); return; }
-    let plan: ReturnType<typeof planPixelSelectionPaste>;
     try {
-      plan = planPixelSelectionPaste({
-        document,
+      clipboard = await window.aidraw.readPixelSelectionClipboard({
+        documentId: document.id,
+        expectedDocumentRevision: document.revision,
         spriteId: sprite.id,
         frameId: activeFrameId,
         celId: cel.id,
-        origin: cursor ?? { x: clipboard.fragment.grid.originX, y: clipboard.fragment.grid.originY },
-      }, clipboard.fragment);
-    } catch (error) {
-      notify(error instanceof Error ? error.message : 'The indexed pixel selection cannot be pasted.', 'warning');
+        origin: cursor ?? { x: 0, y: 0 },
+      });
+    }
+    catch { notify('The system clipboard could not be read safely.', 'warning'); return; }
+    let plan: ReturnType<typeof planPixelSelectionPaste>;
+    const standardPng = clipboard.status === 'png';
+    if (clipboard.status === 'valid') {
+      try {
+        plan = planPixelSelectionPaste({
+          document,
+          spriteId: sprite.id,
+          frameId: activeFrameId,
+          celId: cel.id,
+          origin: cursor ?? { x: clipboard.fragment.grid.originX, y: clipboard.fragment.grid.originY },
+        }, clipboard.fragment);
+      } catch (error) {
+        notify(error instanceof Error ? error.message : 'The indexed pixel selection cannot be pasted.', 'warning');
+        return;
+      }
+    } else if (clipboard.status === 'png' && clipboard.plan) {
+      plan = clipboard.plan;
+    } else {
+      notify(clipboard.status === 'png' ? 'The standard PNG paste plan is unavailable.' : clipboard.message, 'warning');
       return;
     }
+    const expectedPngDocumentRevision = standardPng ? plan.expectedDocumentRevision : undefined;
+    if (standardPng && expectedPngDocumentRevision === undefined) { notify('The standard PNG paste plan is missing its document revision guard.', 'warning'); return; }
     const lock = await window.aidraw.acquireHumanLock({ documentId: document.id, region: { kind: 'pixel', assetId: sprite.id, ...plan.bounds } }); if (!lock.acquired) return;
     try {
-      if (await apply('Paste pixel selection', plan.operations)) setSelection(plan.selection);
+      let committed: boolean;
+      if (standardPng) {
+        if (expectedPngDocumentRevision === undefined) return;
+        committed = await applyGuarded('Paste standard PNG selection', plan.operations, expectedPngDocumentRevision);
+      } else committed = await apply('Paste pixel selection', plan.operations);
+      if (committed) {
+        setSelection(plan.selection);
+        if (standardPng) notify('Pasted the standard PNG through the active frame palette; bitmap transparency became clear selected cells.', 'success');
+      }
       if (plan.dropped) notify(`${plan.dropped} pasted pixel${plan.dropped === 1 ? '' : 's'} fell outside the sprite.`, 'warning');
     } finally { if (lock.lockId) await window.aidraw.releaseHumanLock(lock.lockId); }
   };
@@ -1731,7 +1758,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
           <button onClick={() => void deleteSelection()} title="Delete selected pixels"><Trash2 size={13} /></button>
           <button onClick={() => { setSelection([]); setSelectionOffset(undefined); }} title="Clear selection">Clear</button>
         </>}
-        {clipboardAvailable && <button onClick={() => void pasteLocalSelection()} title={tilemap ? 'Paste the project-local tile selection at the cursor (Ctrl+V)' : 'Paste the AIDraw indexed system-clipboard selection at the cursor (Ctrl+V)'}><ClipboardPaste size={13} /> Paste</button>}
+        {clipboardAvailable && <button onClick={() => void pasteLocalSelection()} title={tilemap ? 'Paste the project-local tile selection at the cursor (Ctrl+V)' : 'Paste the private indexed selection or standard PNG at the cursor (Ctrl+V)'}><ClipboardPaste size={13} /> Paste</button>}
         <span>{cursor ? `${cursor.x}, ${cursor.y}` : '—, —'}</span>
       </div>
       {tileTransformPickerOpen && tilemap && tool !== 'terrain' && terrainTileset?.type === 'tileset' && <TileTransformPicker

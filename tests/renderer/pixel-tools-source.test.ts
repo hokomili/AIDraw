@@ -143,16 +143,26 @@ describe('pixel tool renderer wiring', () => {
     expect(lifecycle).toContain('Existing bitmap text remains rasterized in its cels.');
   });
 
-  it('publishes pixel selections cross-process while retaining the project-local tile clipboard fail closed', async () => {
+  it('publishes private plus standard-PNG sprite selections while retaining the project-local tile clipboard fail closed', async () => {
     const source = await readFile(new URL('../../src/renderer/canvas/PixelCanvas.tsx', import.meta.url), 'utf8');
     expect(source).toContain("type LocalSelectionClipboard = { kind: 'tile'");
     expect(source.match(/localSelectionClipboard\s*=/gu)).toHaveLength(1); // the tile-only copy assignment
     expect(source).toContain('await window.aidraw.writePixelSelectionClipboard(fragment)');
+    expect(source).toContain('const activePalette = sprite.paletteOverrides[activeFrameId] ?? document.palette');
+    expect(source).toContain('palette: activePalette.map((entry) => entry.color)');
     expect(source).toContain("if (await copyLocalSelection()) await deleteSelection()");
     expect(source).toContain("window.addEventListener('focus', refreshClipboardAvailability)");
     expect(source).toContain("window.removeEventListener('focus', refreshClipboardAvailability)");
-    expect(source).toContain('clipboard = await window.aidraw.readPixelSelectionClipboard()');
-    expect(source).toContain("if (clipboard.status !== 'valid') { notify(clipboard.message, 'warning'); return; }");
+    expect(source).toContain('clipboard = await window.aidraw.readPixelSelectionClipboard({');
+    expect(source).toContain('expectedDocumentRevision: document.revision');
+    expect(source).toContain('origin: cursor ?? { x: 0, y: 0 }');
+    expect(source).toContain("const standardPng = clipboard.status === 'png'");
+    expect(source).toContain("clipboard.status === 'png' && clipboard.plan");
+    expect(source).toContain("applyGuarded('Paste standard PNG selection', plan.operations, expectedPngDocumentRevision)");
+    expect(source).toContain('The standard PNG paste plan is missing its document revision guard.');
+    expect(source).toContain("region: { kind: 'pixel', assetId: sprite.id, ...plan.bounds }");
+    expect(source).toContain("result.status === 'valid' || result.status === 'png'");
+    expect(source).toContain('bitmap transparency became clear selected cells');
     expect(source).toContain("if (tilemap) {\n      const clipboard = localSelectionClipboard;");
     expect(source).not.toContain("localSelectionClipboard = { kind: 'pixel'");
   });

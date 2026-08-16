@@ -15,6 +15,7 @@ import {
   nowIso,
   pixelCelForFrame,
   readPixel,
+  rebaseTransactionExpectedRevisions,
   setPixelFrameCelsLinked,
   writePixels,
   type CanvasTransaction,
@@ -161,6 +162,46 @@ describe('transaction reducer', () => {
     const restoredSprite = restored.pixelAssets[sprite.id]; if (restoredSprite.type !== 'sprite') throw new Error('Expected sprite');
     expect(Array.from({ length: 12 }, (_, offset) => readPixel(restoredSprite.cels[cel.id], 2 + offset, 3))).toEqual(new Array(12).fill(0));
     expect(() => applyTransaction(document, { ...transaction, id: createId('tx'), clientOperationId: createId('op'), operations: [{ kind: 'pixel.cel.region', spriteId: sprite.id, celId: cel.id, runs: [{ x: 60, y: 3, length: 8, index: 6 }] }] })).toThrow(/outside sprite/);
+  });
+
+  it('atomically guards a planned pixel transaction by document revision while keeping inverse and replay rebase usable', () => {
+    const document = createPixelDocument('sprite', 'Guarded pixel transaction');
+    const sprite = document.pixelAssets[document.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('Expected sprite');
+    const cel = Object.values(sprite.cels)[0];
+    const transaction: CanvasTransaction = {
+      id: createId('tx'), clientOperationId: createId('op'), documentId: document.id,
+      expectedDocumentRevision: document.revision,
+      actor: HUMAN_ACTOR, label: 'Apply planned pixels', createdAt: nowIso(),
+      operations: [{ kind: 'pixel.cel.set', spriteId: sprite.id, celId: cel.id, changes: [{ x: 2, y: 3, index: 4 }], expectedRevision: cel.revision }],
+    };
+    const renamed = applyTransaction(document, {
+      id: createId('tx'), clientOperationId: createId('op'), documentId: document.id,
+      actor: HUMAN_ACTOR, label: 'Intervening rename', createdAt: nowIso(), operations: [{ kind: 'document.rename', name: 'Changed first' }],
+    });
+    try {
+      applyTransaction(renamed.document, transaction);
+      throw new Error('Expected guarded transaction conflict');
+    } catch (error) {
+      expect(error).toBeInstanceOf(TransactionConflictError);
+      expect(error).toMatchObject({ conflict: { entityId: document.id, expectedRevision: document.revision, actualRevision: renamed.document.revision, retryable: true } });
+    }
+    if (renamed.document.kind !== 'pixel') throw new Error('Expected pixel document');
+    const renamedSprite = renamed.document.pixelAssets[sprite.id]; if (renamedSprite.type !== 'sprite') throw new Error('Expected sprite');
+    expect(readPixel(renamedSprite.cels[cel.id], 2, 3)).toBe(0);
+
+    const applied = applyTransaction(document, transaction);
+    if (applied.document.kind !== 'pixel') throw new Error('Expected pixel document');
+    const appliedSprite = applied.document.pixelAssets[sprite.id]; if (appliedSprite.type !== 'sprite') throw new Error('Expected sprite');
+    expect(readPixel(appliedSprite.cels[cel.id], 2, 3)).toBe(4);
+    expect(applied.inverse.expectedDocumentRevision).toBeUndefined();
+    const restored = applyTransaction(applied.document, applied.inverse).document;
+    if (restored.kind !== 'pixel') throw new Error('Expected pixel document');
+    const restoredSprite = restored.pixelAssets[sprite.id]; if (restoredSprite.type !== 'sprite') throw new Error('Expected sprite');
+    expect(readPixel(restoredSprite.cels[cel.id], 2, 3)).toBe(0);
+
+    const replay = rebaseTransactionExpectedRevisions(renamed.document, transaction);
+    expect(replay.expectedDocumentRevision).toBe(renamed.document.revision);
+    expect(() => applyTransaction(renamed.document, replay)).not.toThrow();
   });
 
   it('materializes linked dependents before frame deletion and exactly restores the link graph on undo', () => {

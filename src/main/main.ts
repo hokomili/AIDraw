@@ -466,6 +466,13 @@ function clipboardDependencies(): ClipboardWorkflowDependencies {
         if (!data.png) { clipboard.write({ text: data.text, html: data.html }); return; }
         const image = nativeImage.createFromBuffer(data.png);
         if (image.isEmpty()) throw new Error('Clipboard PNG output could not be decoded for the system clipboard.');
+        if (data.pngSize) {
+          const size = image.getSize();
+          assertClipboardImageGeometry(size.width, size.height);
+          if (size.width !== data.pngSize.width || size.height !== data.pngSize.height) {
+            throw new Error('Clipboard PNG output geometry changed before the system clipboard write.');
+          }
+        }
         clipboard.write({ text: data.text, html: data.html, image });
       },
       readHtml: () => clipboard.readHTML(),
@@ -482,8 +489,8 @@ function clipboardDependencies(): ClipboardWorkflowDependencies {
 
 const copySelection = (objectIds: string[]) => copySelectionToClipboard(clipboardDependencies(), objectIds);
 const pasteClipboard = () => pasteFromClipboard(clipboardDependencies());
-const writePixelSelectionClipboard = (value: unknown) => copyPixelSelectionToClipboard(clipboardDependencies().clipboard, value);
-const readPixelSelectionClipboard = () => readPixelSelectionFromClipboard(clipboardDependencies().clipboard);
+const writePixelSelectionClipboard = (value: unknown) => copyPixelSelectionToClipboard(clipboardDependencies(), value);
+const readPixelSelectionClipboard = (request?: unknown) => readPixelSelectionFromClipboard(clipboardDependencies(), request);
 
 async function confirmMcpCredentialChange(action: 'rotate' | 'revoke'): Promise<McpCredentialLifecycleResult> {
   const window = mainWindow;
@@ -815,7 +822,7 @@ function registerIpc(): void {
   handle(IPC.copySelection, (_event, objectIds: string[]) => copySelection(Array.isArray(objectIds) ? objectIds : []));
   handle(IPC.pasteClipboard, () => pasteClipboard());
   handle(IPC.writePixelSelectionClipboard, (_event, value: unknown) => writePixelSelectionClipboard(value));
-  handle(IPC.readPixelSelectionClipboard, () => readPixelSelectionClipboard());
+  handle(IPC.readPixelSelectionClipboard, (_event, request?: unknown) => readPixelSelectionClipboard(request));
   handle(IPC.replayTrace, async (_event, documentId: string, transactionId: string) => {
     const trace = await service.findTrace(documentId, transactionId);
     if (!trace) return { replaying: false, reason: 'The durable transaction trace is unavailable.' };
