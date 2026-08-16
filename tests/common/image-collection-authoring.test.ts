@@ -110,7 +110,7 @@ describe('image-collection authoring boundary', () => {
     tileset.tiles[7] = { id: 7, sourceX: 0, sourceY: 0, imageAssetId: source7.id, probability: 0.25, animation: [], collisions: [], properties: { retained: true } };
     tileset.tileWidth = source3.width; tileset.tileHeight = source7.height;
     tileset.tiles[0].animation = [{ tileId: 7, durationMs: 90 }];
-    const map = createPixelTilemap('Unused source map'); map.tilesetIds = [tileset.id]; map.width = 2; map.height = 1;
+    const map = createPixelTilemap('Unused source map'); map.orientation = 'isometric'; map.infinite = true; map.tilesetIds = [tileset.id]; map.width = 2; map.height = 1;
     document.assetIds.push(source7.id, map.id); document.pixelAssets[source7.id] = source7; document.pixelAssets[map.id] = map;
     const beforeSources = JSON.stringify([source0, source3, source7]);
     const beforeMap = JSON.stringify(map);
@@ -149,14 +149,14 @@ describe('image-collection authoring boundary', () => {
     expect(() => removeUnusedImageCollectionSource(animationReference, tileset.id, 3)).toThrow(/tile 0 animation still references tile 3/);
 
     const mapReference = structuredClone(document);
-    const map = createPixelTilemap('Reference map'); map.tilesetIds = [tileset.id]; map.width = 1; map.height = 1; map.infinite = true;
+    const map = createPixelTilemap('Reference map'); map.orientation = 'isometric'; map.tilesetIds = [tileset.id]; map.width = 1; map.height = 1; map.infinite = true;
     const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile' || !layer.chunks) throw new Error('Expected tile layer');
     writeTiles(layer.chunks, [{ x: -33, y: 35, gid: encodeTiledGid(tileset.firstGid + 3, { hFlip: true, vFlip: true, diagonal: true }) }]);
     mapReference.assetIds.push(map.id); mapReference.pixelAssets[map.id] = map;
     expect(() => removeUnusedImageCollectionSource(mapReference, tileset.id, 3)).toThrow(/tile layer .* still references.*tile 3/);
 
     const objectReference = structuredClone(document);
-    const objectMap = createPixelTilemap('Object reference map'); objectMap.tilesetIds = [tileset.id];
+    const objectMap = createPixelTilemap('Object reference map'); objectMap.orientation = 'isometric'; objectMap.tilesetIds = [tileset.id];
     const createdAt = nowIso(); const objectLayerId = createId('map-layer');
     objectMap.layerIds.push(objectLayerId); objectMap.layers[objectLayerId] = {
       id: objectLayerId, revision: 0, name: 'Objects', type: 'object', visible: true, locked: false, opacity: 1, createdBy: 'human',
@@ -243,7 +243,9 @@ describe('image-collection authoring boundary', () => {
     document.assetIds.push(sparseShadow.id); document.pixelAssets[sparseShadow.id] = sparseShadow; map.tilesetIds = [tileset.id, sparseShadow.id];
     expect(() => replaceImageCollectionSource(document, tileset.id, 3, replacement.id)).toThrow(/one exact attached GID range/);
     map.tilesetIds = [tileset.id]; map.orientation = 'isometric';
-    expect(() => replaceImageCollectionSource(document, tileset.id, 3, replacement.id)).toThrow(/must remain orthogonal/);
+    const isometric = replaceImageCollectionSource(document, tileset.id, 3, replacement.id);
+    expect(isometric.tileset.tiles[3].imageAssetId).toBe(replacement.id);
+    expect(isometric.impact).toMatchObject({ attachedMapCount: 1, directMapCellCount: 1 });
   });
 
   it('selects only exact sparse IDs and replaces metadata without changing source topology', () => {

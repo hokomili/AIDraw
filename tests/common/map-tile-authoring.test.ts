@@ -118,7 +118,7 @@ describe('exact map-tile human authoring', () => {
     expect(plan.expectedSpriteDependencies).toBeUndefined();
   });
 
-  it('admits sparse-infinite maps while refusing gaps, isometric mode, missing sources, transforms, ambiguity, and precedence shadows', () => {
+  it('admits finite and sparse-infinite isometric maps while refusing gaps, missing sources, transforms, ambiguity, and precedence shadows', () => {
     const source = fixture();
     const request = {
       mapId: source.map.id,
@@ -128,8 +128,10 @@ describe('exact map-tile human authoring', () => {
     };
     expect(() => planMapTileAuthoringSelection(source.document, { ...request, tileId: 2 })).toThrow('sparse gap');
     source.map.orientation = 'isometric';
-    expect(() => planMapTileAuthoringSelection(source.document, request)).toThrow('orthogonal map');
-    source.map.orientation = 'orthogonal'; source.map.infinite = true;
+    expect(planMapTileAuthoringSelection(source.document, request)).toMatchObject({ rawGid: 20, tileId: 3, imageCollection: true });
+    source.map.infinite = true;
+    expect(planMapTileAuthoringSelection(source.document, request)).toMatchObject({ rawGid: 20, tileId: 3, imageCollection: true });
+    source.map.orientation = 'orthogonal';
     expect(planMapTileAuthoringSelection(source.document, request)).toMatchObject({ rawGid: 20, tileId: 3, imageCollection: true });
 
     source.collection.transformations = { hFlip: false, vFlip: false, rotate: false };
@@ -183,7 +185,7 @@ describe('exact map-tile human authoring', () => {
 
   it('captures and places the exact transformed collection GID through a persistent saved stamp on signed sparse coordinates', () => {
     const source = fixture();
-    source.map.infinite = true;
+    source.map.orientation = 'isometric'; source.map.infinite = true;
     const plan = planMapTileAuthoringSelection(source.document, {
       mapId: source.map.id,
       tilesetId: source.collection.id,

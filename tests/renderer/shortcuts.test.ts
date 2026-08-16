@@ -183,9 +183,9 @@ describe('keyboard shortcut reference', () => {
     expect(readme).toContain('exactly 40 eligible bindings: all 39 tools displayed across the illustration (19) and pixel (20) rails plus the renderer-owned inspector toggle');
     expect(readme).toContain('Later still-free new mnemonics are reserved before fallback selection');
     expect(readme).toContain('remaining command/native-menu remapping');
-    expect(tracker).toContain('clean and live-synchronized through base `a11ac5d4f6cd77c477231b8b2d680af687ed159b`');
-    expect(tracker).toContain('The current bounded MAP-07/MAP-13 source/headless candidate changes only image-collection storage admission and its exact dependent workflows');
-    expect(tracker).toContain('A deliberate previewed version-2 portable kit carries every and only reached atlas or orthogonal image-collection dependency');
+    expect(tracker).toContain('clean and live-synchronized through base `6aa413bc92c9fb33e100741fd7480d3086930189`');
+    expect(tracker).toContain('The current bounded MAP-08/MAP-13 source/headless candidate completes image-collection isometric projection before admitting its exact dependent workflows');
+    expect(tracker).toContain('A deliberate previewed version-2 portable kit carries every and only reached atlas or image-collection dependency');
     expect(tracker).toContain('all **39 displayed tool activations**—19 illustration and 20 pixel—plus the renderer-owned inspector toggle');
     expect(tracker).toContain('later still-free new mnemonics remain reserved from earlier fallbacks');
     expect(tracker).toContain('remapping beyond the later bounded UX-08 tool/inspector slice');

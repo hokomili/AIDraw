@@ -456,9 +456,9 @@ describe('representative Tiled JSON interchange', () => {
     expect([...originalRaster].filter((_, index) => Math.floor(index / 4) % 4 < 2 && index % 4 === 3).every((alpha) => alpha === 255)).toBe(true);
     const rightRegion = renderTilemapRegion(document, map, { x: 3, y: 0, width: 1, height: 2 });
     expect(Buffer.from(rightRegion.getContext('2d').getImageData(0, 0, 1, 2).data)).toEqual(Buffer.from(originalRaster.filter((_, index) => Math.floor(index / 4) % 4 === 3)));
-    const rejectedDocument = structuredClone(document); const rejectedMap = rejectedDocument.pixelAssets[rejectedDocument.activeAssetId];
-    if (rejectedMap.type !== 'tilemap') throw new Error('Expected rejected image-collection tilemap'); rejectedMap.orientation = 'isometric';
-    expect(() => renderTilemap(rejectedDocument, rejectedMap)).toThrow(/must remain orthogonal/);
+    const isometricDocument = structuredClone(document); const isometricMap = isometricDocument.pixelAssets[isometricDocument.activeAssetId];
+    if (isometricMap.type !== 'tilemap') throw new Error('Expected image-collection tilemap'); isometricMap.orientation = 'isometric';
+    expect(renderTilemap(isometricDocument, isometricMap).getContext('2d').getImageData(0, 0, 1, 1).data).toHaveLength(4);
 
     const nativePath = await writeNativeDocument(join(directory, 'collection-native'), document, '1.0.0');
     const native = await readNativeDocument(nativePath); if (native.document.kind !== 'pixel') throw new Error('Expected persisted image-collection document');
@@ -576,6 +576,62 @@ describe('representative Tiled JSON interchange', () => {
       const reopenedTileset = reopenedDocument.pixelAssets[reopenedMap.tilesetIds[0]]; if (reopenedTileset.type !== 'tileset') throw new Error('Expected reopened collection');
       expect({ ids: Object.keys(reopenedTileset.tiles), offset: reopenedTileset.tileOffset, wangSets: reopenedTileset.wangSets }).toMatchObject({ ids: ['0', '3'], offset: { x: -1, y: 2 }, wangSets: [{ colors: [{ tileId: 3 }], tiles: [{ tileId: 0 }, { tileId: 3 }] }] });
       expect(Buffer.from(renderTilemapRegion(reopenedDocument, reopenedMap, negativeRegion, undefined, 60).getContext('2d').getImageData(0, 0, 12, 12).data)).toEqual(negativeRaster);
+    }
+  });
+
+  it('persists, renders, and JSON/XML round-trips signed sparse-infinite isometric collection sources without atlas synthesis', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'aidraw-tiled-infinite-isometric-collection-')); temporaryDirectories.push(directory);
+    const document = createPixelDocument('project', 'Infinite isometric collection round trip'); document.assetIds = []; document.pixelAssets = {};
+    const base = createPixelSprite('Tall isometric source', 2, 3); writePixels(Object.values(base.cels)[0], Array.from({ length: 6 }, (_, index) => ({ x: index % 2, y: Math.floor(index / 2), index: 2 })));
+    const animated = createPixelSprite('Wide isometric source', 4, 2); writePixels(Object.values(animated.cels)[0], Array.from({ length: 8 }, (_, index) => ({ x: index % 4, y: Math.floor(index / 4), index: 3 })));
+    const tileset = createPixelTileset('Signed isometric collection', base.id, 4, 3, 1, 1);
+    delete tileset.spriteAssetId; tileset.firstGid = 31; tileset.columns = 2; tileset.rows = 0; tileset.tileOffset = { x: -1, y: 1 };
+    tileset.tiles = {
+      0: { id: 0, sourceX: 0, sourceY: 0, imageAssetId: base.id, probability: 0.25, animation: [{ tileId: 0, durationMs: 50 }, { tileId: 3, durationMs: 70 }], collisions: [], properties: { base: true } },
+      3: { id: 3, sourceX: 0, sourceY: 0, imageAssetId: animated.id, probability: 0.75, animation: [], collisions: [], properties: { wide: true } },
+    };
+    tileset.wangSets = [{ id: 'isometric-wang', name: 'Isometric Wang', type: 'mixed', colors: [{ id: 1, name: 'Ground', color: '#55aa44', tileId: 3, probability: 1 }], tiles: [{ tileId: 0, wangId: [0, 0, 0, 0, 0, 0, 0, 0] }, { tileId: 3, wangId: [1, 1, 1, 1, 1, 1, 1, 1] }] }];
+    const map = createPixelTilemap('Signed isometric map'); map.orientation = 'isometric'; map.infinite = true; map.width = 3; map.height = 3; map.tileWidth = 4; map.tileHeight = 2; map.tilesetIds = [tileset.id];
+    const tileLayer = map.layers[map.layerIds[0]]; if (tileLayer.type !== 'tile' || !tileLayer.chunks) throw new Error('Expected tile layer');
+    const negativeRaw = encodeTiledGid(tileset.firstGid, { diagonal: true, hFlip: true });
+    const positiveRaw = encodeTiledGid(tileset.firstGid + 3, { vFlip: true });
+    writeTiles(tileLayer.chunks, [{ x: 1, y: 0, gid: positiveRaw }, { x: -1, y: 1, gid: negativeRaw }]);
+    const timestamp = nowIso(); const objectLayer = {
+      id: 'isometric-objects', revision: 0, name: 'Isometric objects', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
+      type: 'object' as const, visible: true, locked: false, opacity: 1, offsetX: 0, offsetY: 0, parallaxX: 1, parallaxY: 1,
+      objects: [{ id: 'isometric-object', type: 'tile' as const, gid: positiveRaw, x: 4, y: 4, width: 4, height: 2, rotation: 0, name: 'Exact source', className: 'actor', properties: { exact: true } }],
+    };
+    map.layers[objectLayer.id] = objectLayer; map.layerIds.push(objectLayer.id);
+    document.pixelAssets = { [base.id]: base, [animated.id]: animated, [tileset.id]: tileset, [map.id]: map };
+    document.assetIds = [base.id, animated.id, tileset.id, map.id]; document.activeAssetId = map.id;
+    const originalRaster = Buffer.from(renderTilemap(document, map, undefined, 60).getContext('2d').getImageData(0, 0, 12, 6).data);
+    expect(originalRaster.some((value, index) => index % 4 === 3 && value > 0)).toBe(true);
+
+    const nativePath = await writeNativeDocument(join(directory, 'isometric-native'), document, '1.0.0');
+    const native = await readNativeDocument(nativePath); if (native.document.kind !== 'pixel') throw new Error('Expected pixel document');
+    const nativeMap = native.document.pixelAssets[map.id]; if (nativeMap.type !== 'tilemap') throw new Error('Expected tilemap');
+    expect(nativeMap).toMatchObject({ orientation: 'isometric', infinite: true, width: 3, height: 3 });
+    expect(Buffer.from(renderTilemap(native.document, nativeMap, undefined, 60).getContext('2d').getImageData(0, 0, 12, 6).data)).toEqual(originalRaster);
+
+    for (const format of ['tiled-json', 'tiled-xml'] as const) {
+      const artifact = await exportDocument(native.document, format);
+      expect(artifact.report).toEqual({ warnings: [], rasterized: [] });
+      expect(artifact.companions?.map(({ name }) => name)).toEqual(['Signed isometric collection tile 0.png', 'Signed isometric collection tile 3.png']);
+      const text = artifact.data.toString();
+      if (format === 'tiled-json') expect(JSON.parse(text)).toMatchObject({ orientation: 'isometric', infinite: true });
+      else { expect(text).toContain('orientation="isometric"'); expect(text).toContain('infinite="1"'); }
+      const outputDirectory = join(directory, format); await mkdir(outputDirectory);
+      const outputPath = join(outputDirectory, format === 'tiled-json' ? 'isometric.tmj' : 'isometric.tmx');
+      await Promise.all([writeFile(outputPath, artifact.data), ...artifact.companions!.map((entry) => writeFile(join(outputDirectory, entry.name), entry.data))]);
+      const reopened = await importDocument(outputPath, true); expect(reopened.warnings).toEqual([]);
+      const reopenedDocument = reopened.documents[0]; if (reopenedDocument.kind !== 'pixel') throw new Error('Expected pixel document');
+      const reopenedMap = reopenedDocument.pixelAssets[reopenedDocument.activeAssetId]; if (reopenedMap.type !== 'tilemap') throw new Error('Expected tilemap');
+      const reopenedLayer = reopenedMap.layers[reopenedMap.layerIds.find((id) => reopenedMap.layers[id]?.type === 'tile')!]; if (reopenedLayer.type !== 'tile' || !reopenedLayer.chunks) throw new Error('Expected tile layer');
+      expect(reopenedMap).toMatchObject({ orientation: 'isometric', infinite: true });
+      expect(readTileAt(reopenedLayer.chunks, -1, 1)).toBe(negativeRaw); expect(readTileAt(reopenedLayer.chunks, 1, 0)).toBe(positiveRaw);
+      const reopenedTileset = reopenedDocument.pixelAssets[reopenedMap.tilesetIds[0]]; if (reopenedTileset.type !== 'tileset') throw new Error('Expected tileset');
+      expect({ ids: Object.keys(reopenedTileset.tiles), offset: reopenedTileset.tileOffset, wangSets: reopenedTileset.wangSets }).toMatchObject({ ids: ['0', '3'], offset: { x: -1, y: 1 }, wangSets: [{ colors: [{ tileId: 3 }] }] });
+      expect(Buffer.from(renderTilemap(reopenedDocument, reopenedMap, undefined, 60).getContext('2d').getImageData(0, 0, 12, 6).data)).toEqual(originalRaster);
     }
   });
 
@@ -735,7 +791,7 @@ describe('representative Tiled JSON interchange', () => {
     await expect(importDocument(join(directory, 'bad-per-tile.tsx'), true)).rejects.toThrow('Tiled tile 0 image source must be a nonempty string path.');
   });
 
-  it('fails closed for incompatible sources, ambiguous IDs/ranges, sparse gaps, and isometric maps while admitting exact tile objects', async () => {
+  it('fails closed for incompatible sources, ambiguous IDs/ranges, and sparse gaps while admitting isometric cells and exact tile objects', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'aidraw-tiled-image-collection-refusal-')); temporaryDirectories.push(directory);
     await writeFile(join(directory, 'tile.png'), exactPng(1, 1, [255, 107, 122, 255]));
     const tileset = { type: 'tileset', name: 'Collection', tilewidth: 1, tileheight: 1, tilecount: 1, columns: 0, tiles: [{ id: 2, image: 'tile.png', imagewidth: 1, imageheight: 1 }] };
@@ -744,7 +800,10 @@ describe('representative Tiled JSON interchange', () => {
     await writeFile(join(directory, 'gap.tmj'), JSON.stringify(map({ layers: [{ id: 1, name: 'Gap', type: 'tilelayer', width: 1, height: 1, data: [7] }] })));
     await expect(importDocument(join(directory, 'gap.tmj'), true)).rejects.toThrow('missing sparse image-collection GID 7');
     await writeFile(join(directory, 'isometric.tmj'), JSON.stringify(map({ orientation: 'isometric' })));
-    await expect(importDocument(join(directory, 'isometric.tmj'), true)).rejects.toThrow('only orthogonal');
+    const isometricImport = await importDocument(join(directory, 'isometric.tmj'), true); const isometricDocument = isometricImport.documents[0]; if (isometricDocument.kind !== 'pixel') throw new Error('Expected isometric collection document');
+    const isometricMap = isometricDocument.pixelAssets[isometricDocument.activeAssetId]; if (isometricMap.type !== 'tilemap') throw new Error('Expected isometric tilemap');
+    const isometricLayer = isometricMap.layers[isometricMap.layerIds[0]]; if (isometricLayer.type !== 'tile' || !isometricLayer.chunks) throw new Error('Expected tile layer');
+    expect(isometricMap.orientation).toBe('isometric'); expect(readTileAt(isometricLayer.chunks, 0, 0)).toBe(9);
     const transformedObjectGid = encodeTiledGid(9, { hFlip: true, diagonal: true });
     await writeFile(join(directory, 'object.tmj'), JSON.stringify(map({ layers: [{ id: 1, name: 'Objects', type: 'objectgroup', objects: [
       { id: 'default-size', gid: transformedObjectGid, x: 3, y: 5, name: 'Exact sparse tile', class: 'actor', properties: [{ name: 'solid', type: 'bool', value: true }] },

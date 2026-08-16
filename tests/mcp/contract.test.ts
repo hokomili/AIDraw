@@ -905,7 +905,7 @@ describe('authenticated stateful MCP contract', () => {
       return [tileId, { id: tileId, sourceX: 0, sourceY: 0, imageAssetId: mask === 0 ? source0.id : source3.id, probability: 1, animation: [], collisions: [], properties: {} }];
     }));
     tileset.wangSets = [{ id: 'sparse-wang', name: 'Sparse Wang', type: 'mixed', colors: [{ id: 1, name: 'Ground', color: '#55aa44', tileId: 510, probability: 1 }], tiles: Array.from({ length: 256 }, (_, mask) => ({ tileId: mask * 2, wangId: wangIdFromMask(mask) })) }];
-    const map = createPixelTilemap('Sparse-infinite terrain'); map.infinite = true; map.width = 1; map.height = 1; map.tilesetIds = [tileset.id]; const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile') throw new Error('Expected tile layer');
+    const map = createPixelTilemap('Sparse-infinite terrain'); map.orientation = 'isometric'; map.infinite = true; map.width = 1; map.height = 1; map.tilesetIds = [tileset.id]; const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile') throw new Error('Expected tile layer');
     document.assetIds = [source0.id, source3.id, tileset.id, map.id]; document.pixelAssets = { [source0.id]: source0, [source3.id]: source3, [tileset.id]: tileset, [map.id]: map }; document.activeAssetId = map.id; documents.addDocument(document);
     const host = new McpHost(documents, '1.0.0', join(root, 'port.json')); hosts.push(host); const started = await host.start('collection-terrain-token');
     const client = await initializeClient(started.url, 'collection-terrain-token', 'collection-terrain-client');
@@ -1198,7 +1198,7 @@ describe('authenticated stateful MCP contract', () => {
     expect(Object.keys(undoneCollection.tiles)).toEqual(['0', '1']);
   });
 
-  it('creates one exact sparse-infinite orthogonal image-collection tile object through the shared semantic planner', async () => {
+  it('creates one exact sparse-infinite isometric image-collection tile object through the shared semantic planner', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aidraw-mcp-collection-object-')); temporaryPaths.push(root);
     const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0'); documents.initialize();
     const host = new McpHost(documents, '1.0.0', join(root, 'port.json')); hosts.push(host); const started = await host.start('collection-object-token');
@@ -1208,7 +1208,7 @@ describe('authenticated stateful MCP contract', () => {
     const source = document.pixelAssets[document.activeAssetId]; if (source.type !== 'sprite') throw new Error('Expected source sprite');
     const collection = createPixelTileset('Semantic sparse collection', source.id, source.width, source.height, 1, 1); collection.spriteAssetId = undefined; collection.firstGid = 31; collection.columns = 0; collection.rows = 0; collection.wangSets = [];
     collection.tiles = { 3: { id: 3, sourceX: 0, sourceY: 0, imageAssetId: source.id, probability: 1, animation: [], collisions: [], properties: {} } };
-    const map = createPixelTilemap('Semantic sparse-infinite map'); map.infinite = true; map.tilesetIds = [collection.id]; const layer = map.layers[map.layerIds[0]]; layer.type = 'object'; delete layer.chunks; layer.objects = [];
+    const map = createPixelTilemap('Semantic sparse-infinite map'); map.orientation = 'isometric'; map.infinite = true; map.tilesetIds = [collection.id]; const layer = map.layers[map.layerIds[0]]; layer.type = 'object'; delete layer.chunks; layer.objects = [];
     expect(await callTool(started.url, client.headers, 3, 'canvas_apply', { documentId: document.id, clientOperationId: 'collection-object-setup', label: 'Add exact collection map', playback: { mode: 'instant', speed: 1 }, operations: [{ kind: 'pixel.asset.add', asset: collection }, { kind: 'pixel.asset.add', asset: map }] })).toMatchObject({ status: 'committed' });
     const setup = documents.getDocument(document.id); if (!setup || setup.kind !== 'pixel') throw new Error('Expected pixel project'); const setupMap = setup.pixelAssets[map.id]; const setupCollection = setup.pixelAssets[collection.id]; if (setupMap.type !== 'tilemap' || setupCollection.type !== 'tileset') throw new Error('Expected collection map');
     expect(await callTool(started.url, client.headers, 4, 'canvas_apply', {

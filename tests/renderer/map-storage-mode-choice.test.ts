@@ -84,7 +84,7 @@ describe('existing map storage mode presentation', () => {
     expect(geometry).toEqual({ width: 640, height: 360, tileWidth: 32, tileHeight: 16, orientation: 'orthogonal' });
   });
 
-  it('keeps mode authority, activity labels, collection refusal, disclosure, and package selectors on their predecessor routes', async () => {
+  it('keeps mode authority, activity labels, collection admission, disclosure, and package selectors on their predecessor routes', async () => {
     const [app, e2e] = await Promise.all([
       readFile(new URL('../../src/renderer/App.tsx', import.meta.url), 'utf8'),
       readFile(new URL('../e2e/editor.spec.ts', import.meta.url), 'utf8'),
@@ -93,8 +93,8 @@ describe('existing map storage mode presentation', () => {
     expect(app).toContain('onChange={(infinite) => updateMapMode(');
     expect(app).toContain('{ ...asset, infinite }');
     expect(app).toContain('infinite ? "Enable infinite map" : "Use finite map"');
-    expect(app).toContain('imageCollectionTilemapModeError(document, next)');
-    expect(app).toContain('if (error) { notify(error, "warning"); return; }');
+    expect(app).not.toContain('imageCollectionTilemapModeError');
+    expect(app).toContain('const updateMapMode = (next: typeof asset, label: string) => updateAsset(next, label)');
     expect(app).toContain('kind: "pixel.asset.replace"');
     expect(app).toContain('expectedRevision: asset.revision');
     expect(app).toContain('updateMapMode({ ...asset, orientation: event.target.value as typeof asset.orientation }, "Change map orientation")');
@@ -175,7 +175,7 @@ describe('existing map storage mode presentation', () => {
     expect(changelog).toContain('UX-01/MAP-07/MAP-08 existing-map mode presentation correction');
     expect(architecture).toContain('Expanded existing-map geometry reuses the same renderer-only finite/sparse choice projection');
     expect(tracker).toContain('A bounded source/headless UX-01/MAP-07/MAP-08 checkpoint (2026-08-17)');
-    expect(tracker).toContain('The current bounded MAP-07/MAP-13 source/headless candidate changes only image-collection storage admission and its exact dependent workflows');
+    expect(tracker).toContain('The current bounded MAP-08/MAP-13 source/headless candidate completes image-collection isometric projection before admitting its exact dependent workflows');
     expect(testing).toContain('Prior source/headless existing-map mode presentation checkpoint');
     for (const truth of [changelog, architecture, tracker, testing]) {
       expect(truth).toContain('Finite map');

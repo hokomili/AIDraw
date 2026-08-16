@@ -80,8 +80,8 @@ describe('tile-object human authoring', () => {
     map.tilesetIds = [collection.id];
     expect(() => planTileObjectCreation(source.document, { ...request, tileId: 2, objectId: 'gap' })).toThrow('sparse gap');
     map.orientation = 'isometric';
-    expect(() => planTileObjectCreation(source.document, { ...request, tileId: 0, objectId: 'isometric' })).toThrow('orthogonal map');
-    map.orientation = 'orthogonal'; map.infinite = true;
+    expect(planTileObjectCreation(source.document, { ...request, tileId: 0, objectId: 'isometric' }).object).toMatchObject({ gid: 41, width: 7, height: 13 });
+    map.infinite = true;
     expect(planTileObjectCreation(source.document, { ...request, tileId: 3, point: { x: -37, y: 91 }, objectId: 'sparse-infinite' }).object).toMatchObject({
       gid: 44,
       x: -37,
@@ -89,6 +89,7 @@ describe('tile-object human authoring', () => {
       width: 19,
       height: 5,
     });
+    map.orientation = 'orthogonal';
     delete source.document.pixelAssets[wide.id];
     expect(() => planTileObjectCreation(source.document, { ...request, tileId: 3, objectId: 'missing' })).toThrow('missing its sprite source');
   });

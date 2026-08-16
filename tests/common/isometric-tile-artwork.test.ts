@@ -84,6 +84,24 @@ describe('isometric native tile artwork geometry', () => {
     expect(isometricMapTileArtworkEnvelope(document, map)).toEqual({ left: 0, top: 0, right: 4, bottom: 2 });
   });
 
+  it('unions every exact sparse collection source and its diagonal footprint without borrowing a missing source', () => {
+    const document = createPixelDocument('project', 'Isometric collection envelope'); document.assetIds = []; document.pixelAssets = {};
+    const tall = createPixelSprite('Tall source', 3, 11);
+    const wide = createPixelSprite('Wide source', 13, 4);
+    const collection = createPixelTileset('Sparse collection', tall.id, 13, 11, 1, 1);
+    delete collection.spriteAssetId; collection.columns = 2; collection.rows = 0; collection.tileOffset = { x: -2, y: 1 };
+    collection.tiles = {
+      0: { id: 0, sourceX: 0, sourceY: 0, imageAssetId: tall.id, probability: 1, animation: [{ tileId: 5, durationMs: 100 }], collisions: [], properties: {} },
+      5: { id: 5, sourceX: 0, sourceY: 0, imageAssetId: wide.id, probability: 1, animation: [], collisions: [], properties: {} },
+      8: { id: 8, sourceX: 0, sourceY: 0, imageAssetId: 'missing-source', probability: 1, animation: [], collisions: [], properties: {} },
+    };
+    const map = createPixelTilemap('Isometric map'); map.orientation = 'isometric'; map.tileWidth = 4; map.tileHeight = 2; map.tilesetIds = [collection.id];
+    document.pixelAssets = { [tall.id]: tall, [wide.id]: wide, [collection.id]: collection, [map.id]: map };
+
+    expect(isometricMapTileArtworkEnvelope(document, map)).toEqual({ left: -2, top: -10, right: 11, bottom: 3 });
+    expect(collection.tiles[0].animation).toEqual([{ tileId: 5, durationMs: 100 }]);
+  });
+
   it('uses strict raster intersection and rejects unsafe geometry', () => {
     const bounds = { left: 12, top: 13, right: 18, bottom: 21 };
     expect(isometricTileArtworkIntersects(bounds, { x: 17, y: 20, width: 1, height: 1 })).toBe(true);

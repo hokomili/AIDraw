@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
 
-describe('orthogonal projection source parity', () => {
+describe('map projection source parity', () => {
   it('shares authored-aspect extent and cell geometry across render surfaces', async () => {
     const interactive = await readFile(new URL('../../src/renderer/canvas/PixelCanvas.tsx', import.meta.url), 'utf8');
     const headless = await readFile(new URL('../../src/main/render-document.ts', import.meta.url), 'utf8');
@@ -24,7 +24,7 @@ describe('orthogonal projection source parity', () => {
       expect(source).toContain('orthogonalTileArtworkPlacement(');
       expect(source).toContain('orthogonalTileArtworkIntersects(');
       expect(source).toContain('resolved && sourceIsRenderable');
-      expect(source).toContain('{ width: resolved.tileset.tileWidth, height: resolved.tileset.tileHeight }');
+      expect(source).toContain('renderedTilesetArtworkSize(resolved.tileset,');
       expect(source).toContain('resolved.tileset.tileOffset');
     }
     expect(headless).toContain("const sourceIsRenderable = sourceAsset?.type === 'sprite'");
@@ -41,21 +41,22 @@ describe('orthogonal projection source parity', () => {
     expect(interactive).toContain('orthogonalCellRect(point.x, point.y, view.scale, orthogonalCellHeight)');
   });
 
-  it('selects sparse per-tile image sprites for rendering, Current tile authoring, and explicit Wang terrain', async () => {
+  it('selects sparse per-tile image sprites for orthogonal/isometric rendering, Current tile authoring, and explicit Wang terrain', async () => {
     const app = await readFile(new URL('../../src/renderer/App.tsx', import.meta.url), 'utf8');
     const interactive = await readFile(new URL('../../src/renderer/canvas/PixelCanvas.tsx', import.meta.url), 'utf8');
     const headless = await readFile(new URL('../../src/main/render-document.ts', import.meta.url), 'utf8');
     for (const source of [interactive, headless]) {
       expect(source).toContain('tilesetTileSourceAssetId(');
-      expect(source).toContain('isImageCollectionTileset(');
+      expect(source).toContain('renderedTilesetArtworkSize(resolved.tileset,');
+      expect(source).toContain('isometricMapTileArtworkEnvelope(document,');
+      expect(source).toContain('isometricTileArtworkPlacement(');
+      expect(source).toContain('isometricTileArtworkIntersects(');
     }
-    expect(headless).toContain('sourceAsset.width'); expect(headless).toContain('sourceAsset.height');
-    expect(interactive).toContain('mapSourceAsset.width'); expect(interactive).toContain('mapSourceAsset.height');
     expect(interactive).toContain('const atlasMapTilesets = attachedMapTilesets.filter((entry) => Boolean(entry.spriteAssetId))');
-    expect(interactive).toContain("const orthogonalCollectionTilesets = attachedMapTilesets.filter((entry) => isImageCollectionTileset(entry) && tilemap?.orientation === 'orthogonal')");
-    expect(interactive).toContain('const authorableMapTileTilesets = [...atlasMapTilesets, ...orthogonalCollectionTilesets]');
+    expect(interactive).toContain('const imageCollectionMapTilesets = attachedMapTilesets.filter(isImageCollectionTileset)');
+    expect(interactive).toContain('const authorableMapTileTilesets = [...atlasMapTilesets, ...imageCollectionMapTilesets]');
     expect(interactive).toContain("currentMapTileChoice?.documentId === document.id");
-    expect(interactive).toContain('const wangTerrainTilesets = [\n    ...atlasMapTilesets,\n    ...orthogonalCollectionTilesets.filter((entry) => entry.wangSets.length > 0)');
+    expect(interactive).toContain('const wangTerrainTilesets = [\n    ...atlasMapTilesets,\n    ...imageCollectionMapTilesets.filter((entry) => entry.wangSets.length > 0)');
     expect(interactive).toContain("tool === 'terrain'\n      ? selectedTerrainTileset\n      : currentMapTileTileset");
     expect(interactive).toContain('aria-label="Wang terrain tileset"');
     expect(interactive).toContain('<CurrentMapTileControl');
@@ -71,14 +72,13 @@ describe('orthogonal projection source parity', () => {
     expect(interactive).toContain('tilesetTileSourceAssetId(resolved.tileset, visibleLocalId)');
     expect(headless).toContain('tilesetTileSourceAssetId(resolved.tileset, renderedLocalId)');
     expect(app).toContain('nextTilesetFirstGid(assets.filter((asset): asset is PixelTileset => asset.type === "tileset"))');
-    expect(app).toContain('imageCollectionTilemapModeError(document, next)');
-    expect(interactive).toContain('const tilemapModeError = tilemap ? imageCollectionTilemapModeError(document, tilemap) : undefined');
-    expect(interactive).toContain('else if (tilemap && !tilemapModeError)');
-    expect(interactive).toContain('<strong>Unsupported image-collection map mode</strong>');
+    expect(app).not.toContain('imageCollectionTilemapModeError');
+    expect(interactive).toContain('else if (tilemap)');
+    expect(interactive).not.toContain('<strong>Unsupported image-collection map mode</strong>');
     expect(interactive).toContain('<strong>Image collection tileset</strong>');
-    expect(interactive).toContain('sparse PNG tile(s) · {asset.columns} display column(s). Per-tile artwork is read-only here; use this tileset from an orthogonal map.');
+    expect(interactive).toContain('sparse PNG tile(s) · {asset.columns} display column(s). Per-tile artwork is read-only here; use this tileset from an orthogonal or isometric map.');
     expect(interactive.indexOf("asset.type === 'tileset' && isImageCollectionTileset(asset)")).toBeLessThan(interactive.indexOf("asset.type === 'tileset' && !sprite"));
-    expect(headless).toContain('assertImageCollectionTilemapMode(document, map);');
+    expect(headless).not.toContain('assertImageCollectionTilemapMode');
   });
 
   it('uses the rectangular cell for objects, pointers, parallax, and grid rows', async () => {

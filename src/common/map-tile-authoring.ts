@@ -157,9 +157,6 @@ export function planMapTileAuthoringSelection(
   if (imageCollection && !tileset.tiles[request.tileId]?.imageAssetId) {
     throw new Error(`Tile ${request.tileId} is a sparse gap in image collection “${tileset.name}”. Choose one exact existing tile ID.`);
   }
-  if (imageCollection && map.orientation !== 'orthogonal') {
-    throw new Error('Image-collection tile painting and the Current tile stamp require an orthogonal map.');
-  }
   if (!tileTransformFlagsAllowed(request.transforms, tileset.transformations)) {
     throw new Error(`The selected H/V/diagonal transform is not permitted by tileset “${tileset.name}”.`);
   }

@@ -2,7 +2,6 @@ import { z } from 'zod';
 import type { AIDrawDocument, PixelDocument } from './model';
 import type { CanvasOperation, CanvasTransaction } from './operations';
 import { assertPixelDocumentPaletteReferences } from './palette';
-import { assertImageCollectionTilemapModes } from './pixel';
 import { assertAcyclicReferences } from './reference-graph';
 
 const OperationKindSchema = z.enum([
@@ -1043,11 +1042,6 @@ export function validateNormalizedPixelDocument(document: PixelDocument): PixelD
   document.assetIds = assets.data.assetIds;
   document.pixelAssets = assets.data.pixelAssets as PixelDocument['pixelAssets'];
   document.activeAssetId = assets.data.activeAssetId;
-  try {
-    assertImageCollectionTilemapModes(document);
-  } catch (error) {
-    throw new Error(error instanceof Error ? error.message : 'Invalid persisted image-collection map mode.');
-  }
   document.linkedAssets = links.data;
   document.conversionDefaults = conversion.data;
   for (const asset of Object.values(document.pixelAssets)) {

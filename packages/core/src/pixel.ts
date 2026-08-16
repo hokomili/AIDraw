@@ -68,23 +68,6 @@ export function nextTilesetFirstGid(tilesets: readonly PixelTileset[]): number {
   return next;
 }
 
-export function imageCollectionTilemapModeError(document: PixelDocument, map: PixelTilemap): string | undefined {
-  const collection = map.tilesetIds
-    .map((id) => document.pixelAssets[id])
-    .find((asset): asset is PixelTileset => asset?.type === 'tileset' && isImageCollectionTileset(asset));
-  if (!collection || map.orientation === 'orthogonal') return undefined;
-  return `Map “${map.name}” uses image-collection tileset “${collection.name}” and must remain orthogonal. Detach the collection before changing orientation.`;
-}
-
-export function assertImageCollectionTilemapMode(document: PixelDocument, map: PixelTilemap): void {
-  const error = imageCollectionTilemapModeError(document, map);
-  if (error) throw new Error(error);
-}
-
-export function assertImageCollectionTilemapModes(document: PixelDocument): void {
-  for (const asset of Object.values(document.pixelAssets)) if (asset.type === 'tilemap') assertImageCollectionTilemapMode(document, asset);
-}
-
 export function tilesetTileSourceAssetId(tileset: PixelTileset, localId: number): string | undefined {
   return isImageCollectionTileset(tileset) ? tileset.tiles[localId]?.imageAssetId : tileset.spriteAssetId;
 }

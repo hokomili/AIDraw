@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createPixelDocument, createPixelSprite, createPixelTileset } from '@aidraw/core';
 
-import { moveTileAnimationFrame, resolveRenderedTilesetTileSource, resolveTilesetTileSource, tileAnimationFrameAt, tilesetTileSourceRect } from '../../src/common/tile-animation';
+import { moveTileAnimationFrame, renderedTilesetArtworkSize, resolveRenderedTilesetTileSource, resolveTilesetTileSource, tileAnimationFrameAt, tilesetTileSourceRect } from '../../src/common/tile-animation';
 
 describe('tile animation authoring', () => {
   it('samples exact frame boundaries and loops without unsafe duration summation', () => {
@@ -87,5 +87,13 @@ describe('tile animation authoring', () => {
     tileset.tiles[0].animation = [{ tileId: 0, durationMs: 40 }, { tileId: 3, durationMs: 60 }];
     expect(resolveRenderedTilesetTileSource(document, tileset, 0, 0)).toEqual({ localId: 0, sprite: narrow, rect: { x: 0, y: 0, width: 7, height: 13 } });
     expect(resolveRenderedTilesetTileSource(document, tileset, 0, 40)).toEqual({ localId: 3, sprite: wide, rect: { x: 0, y: 0, width: 19, height: 5 } });
+    expect(renderedTilesetArtworkSize(tileset, narrow)).toEqual({ width: 7, height: 13 });
+    expect(renderedTilesetArtworkSize(tileset, wide)).toEqual({ width: 19, height: 5 });
+  });
+
+  it('keeps atlas placement on declared tile geometry even when its source sheet is larger', () => {
+    const source = createPixelSprite('Atlas sheet', 96, 48);
+    const tileset = createPixelTileset('Atlas', source.id, 16, 12, 6, 4);
+    expect(renderedTilesetArtworkSize(tileset, source)).toEqual({ width: 16, height: 12 });
   });
 });

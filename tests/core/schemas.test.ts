@@ -96,6 +96,13 @@ describe('canvas operation schemas', () => {
     expect(CanvasOperationSchema.safeParse({ kind: 'pixel.asset.add', asset: missingRepresentative }).success).toBe(false);
     const atlas = createPixelTileset('Atlas', source.id, 2, 2, 1, 1); atlas.tiles[0] = { ...collection.tiles[3], id: 0 };
     expect(CanvasOperationSchema.safeParse({ kind: 'pixel.asset.add', asset: atlas }).success).toBe(false);
+
+    const document = createPixelDocument('project', 'Persisted isometric collection');
+    const map = createPixelTilemap('Sparse isometric map'); map.orientation = 'isometric'; map.infinite = true; map.tilesetIds = [collection.id];
+    document.assetIds = [source.id, collection.id, map.id]; document.pixelAssets = { [source.id]: source, [collection.id]: collection, [map.id]: map }; document.activeAssetId = map.id;
+    const migrated = migrateDocument(structuredClone(document));
+    if (migrated.kind !== 'pixel') throw new Error('Expected pixel document');
+    expect(migrated.pixelAssets[map.id]).toMatchObject({ orientation: 'isometric', infinite: true, tilesetIds: [collection.id] });
   });
 
   it('rejects overlapping, oversized, and malformed compact region runs', () => {

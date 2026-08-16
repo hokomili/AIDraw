@@ -96,7 +96,6 @@ import {
   createPixelTilemap,
   createPixelTileset,
   decodeTiledGid,
-  imageCollectionTilemapModeError,
   illustrationAtTime,
   nextTilesetFirstGid,
   nowIso,
@@ -3602,13 +3601,7 @@ function PixelLayers({ document }: { document: PixelDocument }) {
         expectedRevision: asset.revision,
       },
     ]);
-  const updateMapMode = (next: typeof asset, label: string) => {
-    if (next.type === "tilemap") {
-      const error = imageCollectionTilemapModeError(document, next);
-      if (error) { notify(error, "warning"); return; }
-    }
-    updateAsset(next, label);
-  };
+  const updateMapMode = (next: typeof asset, label: string) => updateAsset(next, label);
   const updateLayer = (
     layer: PixelLayer | TilemapLayer,
     patch: Partial<PixelLayer | TilemapLayer>,

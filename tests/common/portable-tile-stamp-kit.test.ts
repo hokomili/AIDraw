@@ -387,13 +387,13 @@ describe('portable tile stamp kits', () => {
     expect(() => parseStampLibraryJson(`${JSON.stringify(bundle)}\n`)).toThrow(/Unreachable tileset.*not reached by any nonzero stamp cell/);
   });
 
-  it('copies sparse image collections into a sparse-infinite orthogonal map without densifying IDs or collapsing their per-tile sprites', () => {
+  it('copies sparse image collections between sparse-infinite isometric maps without densifying IDs or collapsing their per-tile sprites', () => {
     const source = collectionKitProject();
-    source.map.infinite = true;
+    source.map.orientation = 'isometric'; source.map.infinite = true;
     const parsed = parseStampLibraryJson(serializePortableTileStampKit(source.document, source.map));
     expect(parsed).toMatchObject({ version: 2, assets: [{ id: source.small.id }, { id: source.large.id }, { id: source.tileset.id }] });
     const target = destinationWithAtlas(9);
-    target.map.infinite = true;
+    target.map.orientation = 'isometric'; target.map.infinite = true;
     const plan = prepareStampLibraryImport(target.document, parsed, 'replace', { map: target.map, makeId: deterministicIds() });
     expect(plan.portable).toMatchObject({ copiedSpriteCount: 2, copiedTilesetCount: 1, rebasedCellCount: 2 });
     const result = commit(target.document, plan.operations).document;
@@ -413,7 +413,7 @@ describe('portable tile stamp kits', () => {
     expect(decodeTiledGid(stamp.cells[1]!.gid)).toMatchObject({ gid: copied.firstGid + 3, diagonal: true });
   });
 
-  it('fails closed for palette exhaustion, unsupported collection maps, shadowed gaps, malformed graphs, and exhausted ranges', () => {
+  it('admits isometric collection destinations while failing closed for palette exhaustion, shadowed gaps, malformed graphs, and exhausted ranges', () => {
     const atlas = atlasKitProject();
     const atlasBundle = parseStampLibraryJson(serializePortableTileStampKit(atlas.document, atlas.map));
     const full = destinationWithAtlas();
@@ -427,7 +427,9 @@ describe('portable tile stamp kits', () => {
     const collectionBundle = parseStampLibraryJson(serializePortableTileStampKit(collection.document, collection.map));
     const isometric = destinationWithAtlas();
     isometric.map.orientation = 'isometric';
-    expect(() => prepareStampLibraryImport(isometric.document, collectionBundle, 'append', { map: isometric.map, makeId: deterministicIds() })).toThrow(/orthogonal destination/);
+    const isometricPlan = prepareStampLibraryImport(isometric.document, collectionBundle, 'append', { map: isometric.map, makeId: deterministicIds() });
+    expect(isometricPlan.portable).toMatchObject({ copiedSpriteCount: 2, copiedTilesetCount: 1, rebasedCellCount: 2 });
+    expect(isometric.map.orientation).toBe('isometric');
 
     const shadowed = structuredClone(collectionBundle) as PortableTileStampKitBundle;
     const collectionTileset = shadowed.assets.find((asset): asset is PixelTileset => asset.type === 'tileset')!;

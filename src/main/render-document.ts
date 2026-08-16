@@ -1,10 +1,8 @@
 import { Canvas, Path2D, createCanvas, loadImage } from '@napi-rs/canvas';
 import { getStroke } from 'perfect-freehand';
 import {
-  assertImageCollectionTilemapMode,
   decodeTiledGid,
   decodeTilemapChunk,
-  isImageCollectionTileset,
   resolveTilesetForGid,
   tilesetTileSourceAssetId,
   type AIDrawDocument,
@@ -32,7 +30,7 @@ import { renderRasterStroke } from '../common/raster-brush';
 import { drawPixelSpriteRegion, pixelSpriteRegionPlan, type PixelSpriteRegion } from '../common/pixel-sprite-render';
 import { MAX_STATIC_RASTER_PIXELS, MAX_STATIC_RASTER_SIDE, assertStaticRasterDimensions } from '../common/static-raster';
 import { renderStyledText } from '../common/text-layout';
-import { resolveRenderedTilesetTileSource, tileAnimationFrameAt, tilesetTileSourceRect } from '../common/tile-animation';
+import { renderedTilesetArtworkSize, resolveRenderedTilesetTileSource, tileAnimationFrameAt, tilesetTileSourceRect } from '../common/tile-animation';
 import { isometricTileRenderCells } from '../common/tile-render-order';
 import { tilemapChunksIntersectingRegion } from '../common/tilemap-region';
 import { composedVisibleTilemapLayers } from '../common/tilemap-layer-composition';
@@ -386,7 +384,6 @@ function assertTilemapRasterRegion(
 }
 
 function renderTilemapSurface(document: PixelDocument, map: PixelTilemap, region: PixelSpriteRegion, onlyLayerId?: string, tileAnimationTimeMs = 0): Canvas {
-  assertImageCollectionTilemapMode(document, map);
   const isometric = map.orientation === 'isometric';
   const dimensions = renderTilemapDimensions(map);
   const orthogonalArtworkEnvelope = isometric ? undefined : orthogonalMapTileArtworkEnvelope(document, map);
@@ -459,8 +456,8 @@ function renderTilemapSurface(document: PixelDocument, map: PixelTilemap, region
       const sourceIsRenderable = sourceAsset?.type === 'sprite';
       const artworkPlacement = resolved && sourceIsRenderable
         ? isometric
-          ? isometricTileArtworkPlacement(rect, map.tileWidth, map.tileHeight, { width: resolved.tileset.tileWidth, height: resolved.tileset.tileHeight }, decoded, resolved.tileset.tileOffset)
-          : orthogonalTileArtworkPlacement(rect, map.tileWidth, map.tileHeight, { width: isImageCollectionTileset(resolved.tileset) ? sourceAsset.width : resolved.tileset.tileWidth, height: isImageCollectionTileset(resolved.tileset) ? sourceAsset.height : resolved.tileset.tileHeight }, decoded, resolved.tileset.tileOffset)
+          ? isometricTileArtworkPlacement(rect, map.tileWidth, map.tileHeight, renderedTilesetArtworkSize(resolved.tileset, sourceAsset), decoded, resolved.tileset.tileOffset)
+          : orthogonalTileArtworkPlacement(rect, map.tileWidth, map.tileHeight, renderedTilesetArtworkSize(resolved.tileset, sourceAsset), decoded, resolved.tileset.tileOffset)
         : undefined;
       const artworkIntersects = artworkPlacement
         ? isometric

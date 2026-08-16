@@ -990,7 +990,6 @@ async function importTiled(bytes: Buffer, name: string, filePath: string): Promi
     const companionCount = map.tilesetIds.reduce((total, id) => { const asset = document.pixelAssets[id]; return total + (asset?.type === 'tileset' && isImageCollectionTileset(asset) ? Object.keys(asset.tiles).length : asset?.type === 'tileset' ? 1 : 0); }, 0);
     if (companionCount > MAX_IMAGE_COLLECTION_TILES) throw new Error(`The imported Tiled map would require more than ${MAX_IMAGE_COLLECTION_TILES.toLocaleString('en-US')} PNG companions on re-export.`);
   }
-  if (collectionTilesets.length && map.orientation !== 'orthogonal') throw new Error('This image-collection checkpoint supports only orthogonal Tiled maps.');
   if (collectionTilesets.length) {
     const ranges = map.tilesetIds.map((id) => document.pixelAssets[id]).filter((asset): asset is PixelTileset => asset?.type === 'tileset').map((tileset) => ({ tileset, first: tileset.firstGid, last: tileset.firstGid + tilesetLocalIdSpan(tileset) - 1 })).sort((left, right) => left.first - right.first);
     for (let index = 1; index < ranges.length; index += 1) if (ranges[index].first <= ranges[index - 1].last) throw new Error(`Tiled image-collection import cannot admit overlapping GID ranges for “${ranges[index - 1].tileset.name}” and “${ranges[index].tileset.name}”.`);

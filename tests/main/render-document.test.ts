@@ -5,6 +5,7 @@ import { HUMAN_ACTOR, IDENTITY_TRANSFORM, applyTransaction, bitmapTextCells, cre
 import { exportDocument } from '@main/export-document';
 import { materializePaintTiles } from '@main/persistence';
 import { renderIllustration, renderIllustrationRegion, renderSprite, renderSpriteRegion, renderTilemap, renderTilemapRegion } from '@main/render-document';
+import { isometricCellRect } from '../../src/common/isometric-projection';
 
 describe('native document rendering', () => {
   it('renders and exports newly bundled printable-ASCII glyph pixels exactly', async () => {
@@ -417,6 +418,61 @@ describe('native document rendering', () => {
     expect(overhangsCell).toBe(true);
     const baseFrame = renderTilemapRegion(document, map, rendered[0].region, undefined, 0).getContext('2d').getImageData(0, 0, 20, 20).data;
     expect(Buffer.from(baseFrame)).not.toEqual(Buffer.from(rendered[0].pixels));
+    expect(document).toEqual(canonical);
+  });
+
+  it('uses animated collection source dimensions for isometric transforms, culling, and reverse-inserted sparse depth', () => {
+    const document = createPixelDocument('project', 'Isometric collection source geometry'); document.assetIds = []; document.pixelAssets = {};
+    document.palette[2].color = '#ef476fff'; document.palette[3].color = '#06d6a0ff'; document.palette[8].color = '#8338ecff';
+    const base = createPixelSprite('Two by two base', 2, 2); writePixels(Object.values(base.cels)[0], Array.from({ length: 4 }, (_, index) => ({ x: index % 2, y: Math.floor(index / 2), index: 2 })));
+    const diagonalFrame = createPixelSprite('Three by eight animated frame', 3, 8); writePixels(Object.values(diagonalFrame.cels)[0], Array.from({ length: 24 }, (_, index) => ({ x: index % 3, y: Math.floor(index / 3), index: 3 })));
+    const back = createPixelSprite('Eight by four back tile', 8, 4); writePixels(Object.values(back.cels)[0], Array.from({ length: 32 }, (_, index) => ({ x: index % 8, y: Math.floor(index / 8), index: 8 })));
+    const tileset = createPixelTileset('Sparse isometric collection', base.id, 8, 8, 1, 1);
+    delete tileset.spriteAssetId; tileset.firstGid = 41; tileset.columns = 3; tileset.rows = 0; tileset.tileOffset = { x: -1, y: 1 }; tileset.wangSets = [];
+    tileset.tiles = {
+      0: { id: 0, sourceX: 0, sourceY: 0, imageAssetId: base.id, probability: 1, animation: [{ tileId: 0, durationMs: 50 }, { tileId: 3, durationMs: 50 }], collisions: [], properties: {} },
+      3: { id: 3, sourceX: 0, sourceY: 0, imageAssetId: diagonalFrame.id, probability: 1, animation: [], collisions: [], properties: {} },
+      5: { id: 5, sourceX: 0, sourceY: 0, imageAssetId: back.id, probability: 1, animation: [], collisions: [], properties: {} },
+    };
+    const map = createPixelTilemap('Signed isometric sparse map'); map.orientation = 'isometric'; map.infinite = true; map.width = 4; map.height = 64; map.tileWidth = 4; map.tileHeight = 2; map.tilesetIds = [tileset.id];
+    const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile') throw new Error('Expected tile layer');
+    const frontCell = { x: -1, y: 33, gid: encodeTiledGid(tileset.firstGid, { hFlip: true, diagonal: true }) };
+    const backCell = { x: 0, y: 31, gid: tileset.firstGid + 5 };
+    document.pixelAssets = { [base.id]: base, [diagonalFrame.id]: diagonalFrame, [back.id]: back, [tileset.id]: tileset, [map.id]: map };
+    document.assetIds = [base.id, diagonalFrame.id, back.id, tileset.id, map.id]; document.activeAssetId = map.id;
+    const renderCells = (cells: typeof frontCell[], timeMs: number) => {
+      layer.chunks = {}; writeTiles(layer.chunks, cells);
+      const canvas = renderTilemap(document, map, undefined, timeMs);
+      return { canvas, pixels: Buffer.from(canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data) };
+    };
+    const firstFrame = renderCells([frontCell], 0);
+    const plainFront = renderCells([{ ...frontCell, gid: tileset.firstGid }], 60);
+    const frontOnly = renderCells([frontCell], 60);
+    const backOnly = renderCells([backCell], 60);
+    const combined = renderCells([frontCell, backCell], 60);
+    expect(Object.keys(layer.chunks!)).toEqual(['-1,1', '0,0']);
+    expect(firstFrame.pixels).not.toEqual(frontOnly.pixels);
+    expect(plainFront.pixels).not.toEqual(frontOnly.pixels);
+
+    let overlapCount = 0;
+    for (let offset = 0; offset < combined.pixels.length; offset += 4) {
+      if (!frontOnly.pixels[offset + 3] || !backOnly.pixels[offset + 3]) continue;
+      overlapCount += 1;
+      expect([...combined.pixels.subarray(offset, offset + 4)]).toEqual([...frontOnly.pixels.subarray(offset, offset + 4)]);
+    }
+    expect(overlapCount).toBeGreaterThan(0);
+
+    const nominal = isometricCellRect(frontCell.x, frontCell.y, map.height, map.tileWidth, map.tileHeight);
+    let overhang: { x: number; y: number } | undefined;
+    for (let y = 0; y < frontOnly.canvas.height && !overhang; y += 1) for (let x = 0; x < frontOnly.canvas.width; x += 1) {
+      const alpha = frontOnly.pixels[(y * frontOnly.canvas.width + x) * 4 + 3];
+      if (alpha && (x < nominal.x || x >= nominal.x + nominal.width || y < nominal.y || y >= nominal.y + nominal.height)) { overhang = { x, y }; break; }
+    }
+    expect(overhang).toBeDefined();
+    const region = renderTilemapRegion(document, map, { x: overhang!.x, y: overhang!.y, width: 1, height: 1 }, undefined, 60);
+    expect(Buffer.from(region.getContext('2d').getImageData(0, 0, 1, 1).data)).toEqual(frontOnly.pixels.subarray((overhang!.y * frontOnly.canvas.width + overhang!.x) * 4, (overhang!.y * frontOnly.canvas.width + overhang!.x) * 4 + 4));
+    const canonical = structuredClone(document);
+    renderTilemap(document, map, undefined, 60);
     expect(document).toEqual(canonical);
   });
 

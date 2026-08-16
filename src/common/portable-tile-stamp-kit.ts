@@ -2,7 +2,6 @@ import {
   CanvasOperationSchema,
   HUMAN_ACTOR,
   TILED_GID_MASK,
-  assertImageCollectionTilemapMode,
   assertPixelSpriteUsesPalette,
   createId,
   decodePixelChunk,
@@ -251,7 +250,6 @@ function requiredTilesetsForStamps(document: PixelDocument, map: PixelTilemap, s
 export function createPortableTileStampKit(document: PixelDocument, map: PixelTilemap, stamps: TileStamp[]): PortableTileStampKitBundle {
   const tilesets = requiredTilesetsForStamps(document, map, stamps);
   if (!tilesets.length) throw new Error('Portable tile kits require at least one nonempty tile-stamp cell.');
-  if (tilesets.some(isImageCollectionTileset)) assertImageCollectionTilemapMode(document, map);
   const sourceIds = new Set(tilesets.flatMap(sourceIdsForTileset));
   const sprites = document.assetIds.flatMap((id) => {
     const asset = document.pixelAssets[id];
@@ -461,11 +459,6 @@ export function preparePortableTileStampKitImport(
   if (!canonicalMap || canonicalMap.type !== 'tilemap' || !jsonEqual(canonicalMap, map)) {
     throw new Error('The destination map changed before portable tile kit planning. Reopen the reviewed import.');
   }
-  const importsImageCollection = bundle.assets.some((asset) => asset.type === 'tileset' && isImageCollectionTileset(asset));
-  if (importsImageCollection && map.orientation !== 'orthogonal') {
-    throw new Error('Portable image-collection tile kits require an orthogonal destination map.');
-  }
-  if (importsImageCollection) assertImageCollectionTilemapMode(document, map);
   const makeId = options.makeId ?? createId;
   const timestamp = options.timestamp ?? new Date().toISOString();
   const actorId = options.actorId ?? HUMAN_ACTOR.id;

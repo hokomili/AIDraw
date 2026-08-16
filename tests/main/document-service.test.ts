@@ -631,7 +631,7 @@ describe('document service collaboration semantics', () => {
         0: { id: 0, sourceX: 0, sourceY: 0, imageAssetId: source0.id, probability: 1, animation: [], collisions: [], properties: {} },
         3: { id: 3, sourceX: 0, sourceY: 0, imageAssetId: source3.id, probability: 1, animation: [], collisions: [], properties: {} },
       };
-      const map = createPixelTilemap('Collection paint map'); map.infinite = true; map.tilesetIds = [tileset.id];
+      const map = createPixelTilemap('Collection paint map'); map.orientation = 'isometric'; map.infinite = true; map.tilesetIds = [tileset.id];
       const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile' || !layer.chunks) throw new Error('Expected tile layer');
       document.assetIds = [source0.id, source3.id, tileset.id, map.id];
       document.pixelAssets = { [source0.id]: source0, [source3.id]: source3, [tileset.id]: tileset, [map.id]: map };
@@ -711,7 +711,7 @@ describe('document service collaboration semantics', () => {
       3: { id: 3, sourceX: 0, sourceY: 0, imageAssetId: source3.id, probability: 1, animation: [], collisions: [], properties: {} },
     };
     tileset.wangSets = [{ id: 'collection-wang', name: 'Collection Wang', type: 'mixed', colors: [{ id: 1, name: 'Land', color: '#55aa44', tileId: 3, probability: 1 }], tiles: [{ tileId: 0, wangId: [0, 0, 0, 0, 0, 0, 0, 0] }, { tileId: 3, wangId: [1, 1, 1, 1, 1, 1, 1, 1] }] }];
-    const map = createPixelTilemap('Collection Wang map'); map.infinite = true; map.tilesetIds = [tileset.id];
+    const map = createPixelTilemap('Collection Wang map'); map.orientation = 'isometric'; map.infinite = true; map.tilesetIds = [tileset.id];
     const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile' || !layer.chunks) throw new Error('Expected tile layer');
     document.assetIds = [source0.id, source3.id, tileset.id, map.id]; document.pixelAssets = { [source0.id]: source0, [source3.id]: source3, [tileset.id]: tileset, [map.id]: map }; document.activeAssetId = map.id;
     service.addDocument(document);
@@ -813,7 +813,7 @@ describe('document service collaboration semantics', () => {
       0: { id: 0, sourceX: 0, sourceY: 0, imageAssetId: source0.id, probability: 1, animation: [], collisions: [], properties: {} },
       3: { id: 3, sourceX: 0, sourceY: 0, imageAssetId: source3.id, probability: 1, animation: [], collisions: [], properties: {} },
     };
-    const map = createPixelTilemap('Collection object map'); map.infinite = true; map.tilesetIds = [tileset.id];
+    const map = createPixelTilemap('Collection object map'); map.orientation = 'isometric'; map.infinite = true; map.tilesetIds = [tileset.id];
     const layer = map.layers[map.layerIds[0]]; layer.type = 'object'; delete layer.chunks; layer.objects = [];
     document.assetIds = [source0.id, source3.id, tileset.id, map.id];
     document.pixelAssets = { [source0.id]: source0, [source3.id]: source3, [tileset.id]: tileset, [map.id]: map };
@@ -861,7 +861,7 @@ describe('document service collaboration semantics', () => {
       0: { id: 0, sourceX: 0, sourceY: 0, imageAssetId: source0.id, probability: 1, animation: [], collisions: [], properties: {} },
       3: { id: 3, sourceX: 0, sourceY: 0, imageAssetId: source3.id, probability: 1, animation: [], collisions: [], properties: {} },
     };
-    const map = createPixelTilemap('Collection object map'); map.infinite = true; map.tilesetIds = [tileset.id];
+    const map = createPixelTilemap('Collection object map'); map.orientation = 'isometric'; map.infinite = true; map.tilesetIds = [tileset.id];
     const layer = map.layers[map.layerIds[0]]; layer.type = 'object'; delete layer.chunks; layer.objects = [];
     document.assetIds = [source0.id, source3.id, tileset.id, map.id];
     document.pixelAssets = { [source0.id]: source0, [source3.id]: source3, [tileset.id]: tileset, [map.id]: map };

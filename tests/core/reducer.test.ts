@@ -77,7 +77,7 @@ describe('transaction reducer', () => {
     expect(restored.palette).toEqual(document.palette);
   });
 
-  it('admits sparse-infinite orthogonal image-collection maps but refuses isometric mode before canonical mutation', () => {
+  it('admits finite and sparse-infinite isometric image-collection maps through canonical mutation and inverse', () => {
     const document = createPixelDocument('project', 'Collection mode guard');
     const tileImage = createPixelSprite('Sparse tile', 2, 2);
     const collection = createPixelTileset('Sparse collection', tileImage.id, 2, 2, 1, 1);
@@ -92,16 +92,27 @@ describe('transaction reducer', () => {
       operations: [{ kind: 'pixel.asset.replace', asset, expectedRevision: map.revision }],
     });
 
-    expect(() => applyTransaction(document, replace({ ...map, orientation: 'isometric' }, 'Use isometric mode'))).toThrow(/must remain orthogonal/);
+    const isometric = applyTransaction(document, replace({ ...map, orientation: 'isometric' }, 'Use isometric mode'));
+    if (isometric.document.kind !== 'pixel') throw new Error('Expected pixel document');
+    expect(isometric.document.pixelAssets[map.id]).toMatchObject({ orientation: 'isometric', infinite: false, revision: map.revision + 1 });
+    expect(isometric.document.activity.at(-1)).toMatchObject({ label: 'Use isometric mode', actor: HUMAN_ACTOR });
     expect(document).toEqual(before);
+    const finiteRestored = applyTransaction(isometric.document, isometric.inverse, { recordActivity: false }).document;
+    if (finiteRestored.kind !== 'pixel') throw new Error('Expected pixel document');
+    expect(finiteRestored.pixelAssets[map.id]).toMatchObject({ orientation: 'orthogonal', infinite: false });
 
-    const applied = applyTransaction(document, replace({ ...map, infinite: true }, 'Enable sparse infinite chunks'));
+    const currentMap = isometric.document.pixelAssets[map.id]; if (currentMap.type !== 'tilemap') throw new Error('Expected tilemap');
+    const applied = applyTransaction(isometric.document, {
+      id: createId('tx'), clientOperationId: createId('op'), documentId: document.id, actor: HUMAN_ACTOR,
+      label: 'Enable sparse infinite chunks', createdAt: nowIso(),
+      operations: [{ kind: 'pixel.asset.replace', asset: { ...currentMap, infinite: true }, expectedRevision: currentMap.revision }],
+    });
     if (applied.document.kind !== 'pixel') throw new Error('Expected pixel document');
-    expect(applied.document.pixelAssets[map.id]).toMatchObject({ orientation: 'orthogonal', infinite: true, revision: map.revision + 1 });
+    expect(applied.document.pixelAssets[map.id]).toMatchObject({ orientation: 'isometric', infinite: true, revision: map.revision + 2 });
     expect(applied.document.activity.at(-1)).toMatchObject({ label: 'Enable sparse infinite chunks', actor: HUMAN_ACTOR });
     const restored = applyTransaction(applied.document, applied.inverse, { recordActivity: false }).document;
     if (restored.kind !== 'pixel') throw new Error('Expected pixel document');
-    expect(restored.pixelAssets[map.id]).toMatchObject({ orientation: 'orthogonal', infinite: false });
+    expect(restored.pixelAssets[map.id]).toMatchObject({ orientation: 'isometric', infinite: false });
   });
 
   it('authors a tilemap layer offset through one revisioned replacement with an exact inverse', () => {

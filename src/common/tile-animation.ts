@@ -71,6 +71,20 @@ export function tilesetTileSourceRect(tileset: PixelTileset, tileId: number, col
   };
 }
 
+/**
+ * Returns the native artwork footprint used to place one rendered tile.
+ * Atlas tiles retain their declared slice geometry; image collections use the
+ * exact sampled per-tile sprite dimensions.
+ */
+export function renderedTilesetArtworkSize(
+  tileset: PixelTileset,
+  source: Pick<PixelSprite, 'width' | 'height'>,
+): { width: number; height: number } {
+  return isImageCollectionTileset(tileset)
+    ? { width: source.width, height: source.height }
+    : { width: tileset.tileWidth, height: tileset.tileHeight };
+}
+
 export function resolveTilesetTileSource(
   document: PixelDocument,
   tileset: PixelTileset,
