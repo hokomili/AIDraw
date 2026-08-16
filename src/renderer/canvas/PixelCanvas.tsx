@@ -133,6 +133,11 @@ import {
   type CurrentMapTileScope,
   type MapTileAuthoringPlan,
 } from '../../common/map-tile-authoring';
+import {
+  planWangTerrainSelection,
+  wangTerrainSelectionPlansMatch,
+  type WangTerrainSelectionPlan,
+} from '../../common/wang-terrain-authoring';
 import { editableSpriteLayer, spriteRegionBitmap, visibleSpriteLayers, type SpriteRegionBitmap } from './pixel-bitmap';
 
 interface PixelPoint { x: number; y: number }
@@ -339,11 +344,13 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const [terrainSetId, setTerrainSetId] = useState<string>();
   const [terrainColorId, setTerrainColorId] = useState<number>();
   const [terrainErase, setTerrainErase] = useState(false);
+  const [terrainTilesetChoice, setTerrainTilesetChoice] = useState<CurrentMapTileScope>();
   const [tileTransforms, setTileTransforms] = useState({ hFlip: false, vFlip: false, diagonal: false });
   const [tileTransformPickerOpen, setTileTransformPickerOpen] = useState(false);
   const [currentMapTileChoice, setCurrentMapTileChoice] = useState<CurrentMapTileScope>();
   const [currentMapTileDraft, setCurrentMapTileDraft] = useState<CurrentMapTileDraft>();
   const mapTileGesturePlanRef = useRef<MapTileAuthoringPlan | undefined>(undefined);
+  const wangTerrainGesturePlanRef = useRef<WangTerrainSelectionPlan | undefined>(undefined);
   const [tileObjectTilesetChoice, setTileObjectTilesetChoice] = useState<CurrentMapTileScope>();
   const [tileObjectTileDraft, setTileObjectTileDraft] = useState<CurrentMapTileDraft>();
   const [bitmapTextPoint, setBitmapTextPoint] = useState<PixelPoint>();
@@ -414,12 +421,18 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const finiteOrthogonalCollectionTilesets = attachedMapTilesets.filter((entry) => isImageCollectionTileset(entry) && tilemap?.orientation === 'orthogonal' && !tilemap.infinite);
   const authorableMapTileTilesets = [...atlasMapTilesets, ...finiteOrthogonalCollectionTilesets];
   const authorableTileObjectTilesets = attachedMapTilesets.filter((entry) => Boolean(entry.spriteAssetId) || finiteOrthogonalCollectionTilesets.some((collection) => collection.id === entry.id));
+  const wangTerrainTilesets = [
+    ...atlasMapTilesets,
+    ...finiteOrthogonalCollectionTilesets.filter((entry) => entry.wangSets.length > 0),
+  ];
   const currentMapTileTilesetId = tilemap && currentMapTileChoice?.documentId === document.id && currentMapTileChoice.mapId === tilemap.id
     ? currentMapTileChoice.tilesetId
     : atlasMapTilesets[0]?.id ?? finiteOrthogonalCollectionTilesets[0]?.id;
   const currentMapTileTileset = authorableMapTileTilesets.find((entry) => entry.id === currentMapTileTilesetId);
   const tileObjectTilesetId = tilemap && tileObjectTilesetChoice?.documentId === document.id && tileObjectTilesetChoice.mapId === tilemap.id ? tileObjectTilesetChoice.tilesetId : authorableTileObjectTilesets[0]?.id;
   const tileObjectTileset = authorableTileObjectTilesets.find((entry) => entry.id === tileObjectTilesetId);
+  const terrainTilesetId = tilemap && terrainTilesetChoice?.documentId === document.id && terrainTilesetChoice.mapId === tilemap.id ? terrainTilesetChoice.tilesetId : wangTerrainTilesets[0]?.id;
+  const selectedTerrainTileset = wangTerrainTilesets.find((entry) => entry.id === terrainTilesetId);
   const selectedTileId = Math.max(1, pixelIndex) - 1;
   const currentMapTileCollectionIds = currentMapTileTileset ? imageCollectionAuthoringTileIds(currentMapTileTileset) : [];
   const currentMapTileDefaultTileId = currentMapTileCollectionIds.length && !currentMapTileCollectionIds.includes(selectedTileId)
@@ -442,7 +455,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const terrainTileset = tool === 'tile-object'
     ? tileObjectTileset
     : tool === 'terrain'
-      ? atlasMapTilesets[0]
+      ? selectedTerrainTileset
       : currentMapTileTileset;
   const authoringTileId = tool === 'tile-object'
     ? tileObjectPlacementTileId
@@ -491,6 +504,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     return () => {
       mountedRef.current = false;
       mapTileGesturePlanRef.current = undefined;
+      wangTerrainGesturePlanRef.current = undefined;
       const pendingLocks = [lockPromiseRef.current, mapObjectGestureRef.current?.lockPromise].filter((value): value is Promise<{ acquired: boolean; lockId?: string }> => Boolean(value));
       void releasePendingPixelLocks(pendingLocks, (lockId) => window.aidraw.releaseHumanLock(lockId));
     };
@@ -1270,6 +1284,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       gestureEpochRef.current += 1;
       lockPromiseRef.current = undefined; mapObjectGestureRef.current = undefined;
       mapTileGesturePlanRef.current = undefined;
+      wangTerrainGesturePlanRef.current = undefined;
       lassoDraftRef.current = undefined;
       setStart(undefined); setPreview([]); setBulkPreview([]); setLassoPath([]); setStampPreview([]); setTileStampPreview([]); setSelectionOffset(undefined); setLockPromise(undefined); setMapObjectGesture(undefined);
     }, pendingLocks, (lockId) => window.aidraw.releaseHumanLock(lockId));
@@ -1356,6 +1371,18 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     return current;
   };
 
+  const observeWangTerrainGesturePlan = (): WangTerrainSelectionPlan | undefined => {
+    if (!tilemap || tool !== 'terrain') return undefined;
+    if (!terrainTileset || !terrainSet || !terrainColor) throw new Error('Choose one exact attached tileset, Wang set, and Wang color before painting terrain.');
+    const request = { mapId: tilemap.id, tilesetId: terrainTileset.id, wangSetId: terrainSet.id, colorId: terrainColor.id };
+    const observed = planWangTerrainSelection(document, request);
+    const liveDocument = useEditorStore.getState().snapshot?.activeDocument;
+    if (!liveDocument || liveDocument.kind !== 'pixel' || liveDocument.id !== document.id) throw new Error('The active pixel document changed before Wang terrain authoring.');
+    const current = planWangTerrainSelection(liveDocument, request);
+    if (!wangTerrainSelectionPlansMatch(observed, current)) throw new Error('The visible map, Wang metadata, attached range, or collection source changed before terrain authoring.');
+    return current;
+  };
+
   const updatePreview = (from: PixelPoint, point: PixelPoint): void => {
     if (tool === 'select') setPreview(rectangleFill(from, point));
     else if (['line', 'rectangle', 'ellipse'].includes(tool)) setPreview(withSymmetry(frameChanges(tool, from, point)));
@@ -1389,6 +1416,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
 
   const onPointerDown = async (event: ReactPointerEvent<HTMLCanvasElement>) => {
     mapTileGesturePlanRef.current = undefined;
+    wangTerrainGesturePlanRef.current = undefined;
     event.currentTarget.setPointerCapture(event.pointerId);
     const point = toPixel(event);
     const spritePoint = sprite && wrapEditing ? wrapPixelPoint(point, sprite.width, sprite.height) : point;
@@ -1460,9 +1488,10 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     }
     if (tilemap) {
       try {
-        mapTileGesturePlanRef.current = observeMapTileGesturePlan();
+        if (tool === 'terrain') wangTerrainGesturePlanRef.current = observeWangTerrainGesturePlan();
+        else mapTileGesturePlanRef.current = observeMapTileGesturePlan();
       } catch (error) {
-        notify(`${error instanceof Error ? error.message : 'The Current tile choice could not be admitted.'} Re-select the exact tile and try again. No map cell changed.`, 'warning');
+        notify(`${error instanceof Error ? error.message : 'The map authoring choice could not be admitted.'} Re-select the exact choice and try again. No map cell changed.`, 'warning');
         return;
       }
     }
@@ -1542,6 +1571,8 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     const pendingRuns = bulkPreview;
     const pendingMapTilePlan = mapTileGesturePlanRef.current;
     mapTileGesturePlanRef.current = undefined;
+    const pendingWangTerrainPlan = wangTerrainGesturePlanRef.current;
+    wangTerrainGesturePlanRef.current = undefined;
     const pendingLassoPath = lassoDraftRef.current?.points ?? [];
     if (tool === 'lasso' && pendingLassoPath.length === 0) return;
     const points = sprite && wrapEditing && tool !== 'select' && tool !== 'lasso'
@@ -1584,24 +1615,25 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     } else if (tilemap) {
       const layer = activeTileLayerEntry?.layer;
       const layerId = layer?.type === 'tile' ? layer.id : undefined;
-      const firstGid = terrainTileset?.type === 'tileset' ? terrainTileset.firstGid : 1;
       if (layerId && layer?.type === 'tile' && layer.chunks) {
         if (tool === 'stamp' && placedTiles.length) {
           const operations: CanvasOperation[] = [{ kind: 'pixel.tilemap.set', mapId: tilemap.id, layerId, changes: placedTiles, expectedRevision: layer.revision }];
           if (pendingMapTilePlan?.expectedDocumentRevision !== undefined) await applyGuarded('Place Current tile stamp', operations, pendingMapTilePlan.expectedDocumentRevision);
           else await apply(pendingMapTilePlan ? 'Place Current tile stamp' : 'Place reusable tile stamp', operations);
-        } else if (tool === 'terrain' && terrainTileset?.type === 'tileset' && terrainSet && terrainColor) {
+        } else if (tool === 'terrain' && pendingWangTerrainPlan) {
+          const gestureTileset = pendingWangTerrainPlan.tileset;
+          const gestureSet = pendingWangTerrainPlan.wangSet;
           const terrainTileAt = (x: number, y: number) => {
             const gid = decodeTiledGid(readTileAt(layer.chunks!, x, y)).gid;
             if (gid === 0) return undefined;
             const resolved = resolveTilesetForGid(document, tilemap, gid);
-            if (!resolved || resolved.tileset.id !== terrainTileset.id) throw new Error(`Terrain stroke cell (${x}, ${y}) contains GID ${gid} outside tileset ${terrainTileset.id}.`);
+            if (!resolved || resolved.tileset.id !== gestureTileset.id) throw new Error(`Terrain stroke cell (${x}, ${y}) contains GID ${gid} outside tileset ${gestureTileset.id}.`);
             return resolved.localId;
           };
           const contains = (x: number, y: number) => tilemap.infinite || (x >= 0 && y >= 0 && x < tilemap.width && y < tilemap.height);
           let plan: ReturnType<typeof planWangTerrainStroke>;
           try {
-            plan = planWangTerrainStroke(terrainSet, points, terrainColor.id, terrainTileAt, { erase: terrainErase, contains });
+            plan = planWangTerrainStroke(gestureSet, points, pendingWangTerrainPlan.colorId, terrainTileAt, { erase: terrainErase, contains });
           } catch (error) {
             notify(`${error instanceof Error ? error.message : 'The Wang terrain stroke could not be planned.'} No terrain tiles changed.`, 'warning');
             return;
@@ -1609,13 +1641,20 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
           if (plan.status === 'unmatched') {
             const examples = plan.unmatched.slice(0, 3).map((entry) => `(${entry.x}, ${entry.y}) [${entry.wangId.join(',')}]`).join('; ');
             const remainder = plan.unmatched.length > 3 ? `; +${plan.unmatched.length - 3} more` : '';
-            notify(`Terrain stroke was not applied: ${plan.unmatched.length} in-map cell${plan.unmatched.length === 1 ? '' : 's'} need exact Wang mappings: ${examples}${remainder}. No terrain tiles changed; add those mappings to “${terrainSet.name}” and retry.`, 'warning');
+            notify(`Terrain stroke was not applied: ${plan.unmatched.length} in-map cell${plan.unmatched.length === 1 ? '' : 's'} need exact Wang mappings: ${examples}${remainder}. No terrain tiles changed; add those mappings to “${gestureSet.name}” and retry.`, 'warning');
             return;
           }
-          const changes = plan.changes.map((change) => ({ x: change.x, y: change.y, gid: change.tileId + firstGid }));
+          const changes = plan.changes.map((change) => ({ x: change.x, y: change.y, gid: change.tileId + gestureTileset.firstGid }));
           if (!changes.length) notify('The terrain stroke already matches the selected terrain; no tiles changed.', 'info');
-          else if (await apply(terrainErase ? 'Erase Wang terrain' : 'Paint Wang terrain', [{ kind: 'pixel.tilemap.set', mapId: tilemap.id, layerId, changes, expectedRevision: layer.revision }]) && plan.strokePointCount > 1) {
-            notify(`${terrainErase ? 'Erased' : 'Painted'} ${plan.strokePointCount} terrain stroke cells with ${plan.repairChangeCount} neighboring repair${plan.repairChangeCount === 1 ? '' : 's'} in one undoable change.`, 'info');
+          else {
+            const label = terrainErase ? 'Erase Wang terrain' : 'Paint Wang terrain';
+            const operations: CanvasOperation[] = [{ kind: 'pixel.tilemap.set', mapId: tilemap.id, layerId, changes, expectedRevision: layer.revision }];
+            const committed = pendingWangTerrainPlan.expectedDocumentRevision === undefined
+              ? await apply(label, operations)
+              : await applyGuarded(label, operations, pendingWangTerrainPlan.expectedDocumentRevision);
+            if (committed && plan.strokePointCount > 1) {
+              notify(`${terrainErase ? 'Erased' : 'Painted'} ${plan.strokePointCount} terrain stroke cells with ${plan.repairChangeCount} neighboring repair${plan.repairChangeCount === 1 ? '' : 's'} in one undoable change.`, 'info');
+            }
           }
         } else {
           if (tool !== 'eraser' && !pendingMapTilePlan) {
@@ -1885,7 +1924,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
         {sprite && <button className={symmetrySettingsOpen ? 'is-active' : ''} aria-expanded={symmetrySettingsOpen} aria-controls="sprite-symmetry-settings" onClick={() => { setSymmetrySettingsOpen((open) => !open); setOnionSettingsOpen(false); }} title="Set exact half-pixel symmetry axes for this sprite"><SlidersHorizontal size={13} /> Symmetry setup</button>}
         {sprite && <button className={paletteCycling ? 'is-active' : ''} onClick={() => { if (paletteCycling) setPaletteOffset(0); setPaletteCycling(!paletteCycling); }} title="Palette cycling preview"><Repeat2 size={14} /> Cycle</button>}
         {paletteCycling && document.paletteCycles.length > 0 && <select aria-label="Active palette cycle" value={activePaletteCycle?.id} onChange={(event) => { setActivePaletteCycleId(event.target.value); setPaletteOffset(0); }} title="Named palette cycle">{document.paletteCycles.map((cycle) => <option key={cycle.id} value={cycle.id}>{cycle.name}</option>)}</select>}
-        {tool === 'terrain' && terrainTileset?.type === 'tileset' && <><select aria-label="Active Wang set" value={terrainSet?.id ?? ''} onChange={(event) => { setTerrainSetId(event.target.value); setTerrainColorId(undefined); }}><option value="" disabled>Wang set</option>{terrainTileset.wangSets.map((set) => <option key={set.id} value={set.id}>{set.name}</option>)}</select><select aria-label="Active Wang color" value={terrainColor?.id ?? ''} onChange={(event) => setTerrainColorId(Number(event.target.value))}><option value="" disabled>Terrain color</option>{terrainSet?.colors.map((color) => <option key={color.id} value={color.id}>{color.name}</option>)}</select><button className={terrainErase ? 'is-active' : ''} onClick={() => setTerrainErase((value) => !value)} title="Toggle terrain erase and neighbor repair"><Eraser size={13} /> {terrainErase ? 'Erase' : 'Paint'}</button></>}
+        {tool === 'terrain' && <><select aria-label="Wang terrain tileset" value={terrainTileset?.id ?? ''} onChange={(event) => { if (!tilemap) return; setTerrainTilesetChoice({ documentId: document.id, mapId: tilemap.id, tilesetId: event.target.value }); setTerrainSetId(undefined); setTerrainColorId(undefined); }}><option value="" disabled>Terrain tileset</option>{wangTerrainTilesets.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}</select>{terrainTileset?.type === 'tileset' && <><select aria-label="Active Wang set" value={terrainSet?.id ?? ''} onChange={(event) => { setTerrainSetId(event.target.value); setTerrainColorId(undefined); }}><option value="" disabled>Wang set</option>{terrainTileset.wangSets.map((set) => <option key={set.id} value={set.id}>{set.name}</option>)}</select><select aria-label="Active Wang color" value={terrainColor?.id ?? ''} onChange={(event) => setTerrainColorId(Number(event.target.value))}><option value="" disabled>Terrain color</option>{terrainSet?.colors.map((color) => <option key={color.id} value={color.id}>{color.name}</option>)}</select><button className={terrainErase ? 'is-active' : ''} onClick={() => setTerrainErase((value) => !value)} title="Toggle terrain erase and neighbor repair"><Eraser size={13} /> {terrainErase ? 'Erase' : 'Paint'}</button></>}</>}
         {tilemap && tool !== 'terrain' && tool !== 'tile-object' && <CurrentMapTileControl
           document={document}
           map={tilemap}

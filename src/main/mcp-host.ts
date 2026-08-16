@@ -24,6 +24,7 @@ import {
   duplicatePixelFrame,
   encodeTiledGid,
   floodPixelRegion,
+  isImageCollectionTileset,
   nowIso,
   orderedDitherIndex,
   placePixelStamp,
@@ -68,6 +69,7 @@ import { createBooleanPath } from '../common/path-boolean';
 import { convertPathArcsToCubics } from '../common/path-conversion';
 import { joinPathObjects } from '../common/path-topology';
 import { assignWangTile, deleteWangColor, deleteWangSet, upsertWangColor, upsertWangSet } from '../common/wang-authoring';
+import { planImageCollectionWangMutation, planWangTerrainSelection } from '../common/wang-terrain-authoring';
 import { TILE_VARIANT_SEED_PROPERTY, chooseTileVariant } from '../common/tile-variants';
 import { validateGenerationRequest } from '../common/generation-capabilities';
 import type { GenerationRequest } from '../common/generation';
@@ -297,7 +299,7 @@ const PixelTileObjectCreateSchema = z.object({
 const PixelStampPlaceSchema = z.object({ kind: z.literal('pixel.stamp.place'), stampId: z.string().min(1), spriteId: z.string().min(1), celId: z.string().min(1), x: z.number().int().min(-8_192).max(16_384), y: z.number().int().min(-8_192).max(16_384), transform: z.enum(['flip-horizontal', 'flip-vertical', 'rotate-clockwise', 'rotate-counterclockwise']).optional(), expectedRevision: z.number().int().nonnegative() }).strict();
 const PixelTileStampPlaceSchema = z.object({ kind: z.literal('pixel.tile-stamp.place'), stampId: z.string().min(1), mapId: z.string().min(1), layerId: z.string().min(1), x: z.number().int().min(-16_777_216).max(16_777_216), y: z.number().int().min(-16_777_216).max(16_777_216), transform: z.enum(['flip-horizontal', 'flip-vertical', 'rotate-clockwise', 'rotate-counterclockwise']).optional(), expectedRevision: z.number().int().nonnegative() }).strict();
 const PixelTileVariantsPaintSchema = z.object({ kind: z.literal('pixel.tile-variants.paint'), mapId: z.string().min(1), layerId: z.string().min(1), tilesetId: z.string().min(1), tileId: z.number().int().nonnegative(), points: z.array(z.object({ x: z.number().int().min(-16_777_216).max(16_777_216), y: z.number().int().min(-16_777_216).max(16_777_216) }).strict()).min(1).max(65_536), seed: z.number().int().min(-2_147_483_648).max(2_147_483_647).optional(), transforms: z.object({ hFlip: z.boolean().default(false), vFlip: z.boolean().default(false), diagonal: z.boolean().default(false) }).strict().optional(), expectedRevision: z.number().int().nonnegative() }).strict();
-const PixelWangTerrainStrokeSchema = z.object({ kind: z.literal('pixel.wang-terrain.stroke'), mapId: z.string().min(1).max(200), layerId: z.string().min(1).max(200), tilesetId: z.string().min(1).max(200), wangSetId: z.string().min(1).max(200), colorId: z.number().int().min(1).max(255), mode: z.enum(['paint', 'erase']), points: z.array(z.object({ x: z.number().int().min(-MAX_WANG_TERRAIN_COORDINATE).max(MAX_WANG_TERRAIN_COORDINATE), y: z.number().int().min(-MAX_WANG_TERRAIN_COORDINATE).max(MAX_WANG_TERRAIN_COORDINATE) }).strict()).min(1).max(MAX_WANG_TERRAIN_STROKE_POINTS), expectedRevision: z.number().int().nonnegative() }).strict();
+const PixelWangTerrainStrokeSchema = z.object({ kind: z.literal('pixel.wang-terrain.stroke'), mapId: z.string().min(1).max(200), layerId: z.string().min(1).max(200), tilesetId: z.string().min(1).max(200), wangSetId: z.string().min(1).max(200), colorId: z.number().int().min(1).max(255), mode: z.enum(['paint', 'erase']), points: z.array(z.object({ x: z.number().int().min(-MAX_WANG_TERRAIN_COORDINATE).max(MAX_WANG_TERRAIN_COORDINATE), y: z.number().int().min(-MAX_WANG_TERRAIN_COORDINATE).max(MAX_WANG_TERRAIN_COORDINATE) }).strict()).min(1).max(MAX_WANG_TERRAIN_STROKE_POINTS), expectedRevision: z.number().int().nonnegative(), expectedDocumentRevision: z.number().int().nonnegative().optional() }).strict();
 const MapObjectInputSchema = z.object({ id: z.string().min(1), type: z.enum(['rectangle', 'ellipse', 'polygon', 'polyline']), x: z.number().finite().min(-16_777_216).max(16_777_216), y: z.number().finite().min(-16_777_216).max(16_777_216), width: z.number().finite().positive().max(16_777_216).optional(), height: z.number().finite().positive().max(16_777_216).optional(), points: z.array(z.object({ x: z.number().finite(), y: z.number().finite() }).strict()).max(65_536).optional(), properties: z.record(z.string(), z.union([z.string(), z.number().finite(), z.boolean()])) }).strict().superRefine((object, context) => { if ((object.type === 'rectangle' || object.type === 'ellipse') && (object.width === undefined || object.height === undefined)) context.addIssue({ code: 'custom', message: 'Rectangle and ellipse map objects require width and height.' }); if ((object.type === 'polygon' || object.type === 'polyline') && (!object.points || object.points.length < 2)) context.addIssue({ code: 'custom', path: ['points'], message: 'Polygon and polyline map objects require at least two points.' }); });
 const PixelMapObjectUpsertSchema = z.object({ kind: z.literal('pixel.map-object.upsert'), mapId: z.string().min(1), layerId: z.string().min(1), object: MapObjectInputSchema, expectedRevision: z.number().int().nonnegative() }).strict();
 const PixelMapObjectDeleteSchema = z.object({ kind: z.literal('pixel.map-object.delete'), mapId: z.string().min(1), layerId: z.string().min(1), objectId: z.string().min(1), expectedRevision: z.number().int().nonnegative() }).strict();
@@ -307,11 +309,12 @@ const WangColorInputSchema = z.object({ id: z.number().int().min(1).max(255), na
 const WangIdInputSchema = z.tuple([z.number().int().min(0).max(255), z.number().int().min(0).max(255), z.number().int().min(0).max(255), z.number().int().min(0).max(255), z.number().int().min(0).max(255), z.number().int().min(0).max(255), z.number().int().min(0).max(255), z.number().int().min(0).max(255)]);
 const WangTileInputSchema = z.object({ tileId: z.number().int().nonnegative(), wangId: WangIdInputSchema }).strict();
 const WangSetInputSchema = z.object({ id: z.string().min(1).max(200), name: z.string().trim().min(1).max(100), type: z.enum(['edge', 'corner', 'mixed']), colors: z.array(WangColorInputSchema).max(255), tiles: z.array(WangTileInputSchema).max(65_536) }).strict();
-const PixelWangSetUpsertSchema = z.object({ kind: z.literal('pixel.wang-set.upsert'), tilesetId: z.string().min(1), wangSet: WangSetInputSchema, expectedRevision: z.number().int().nonnegative() }).strict();
-const PixelWangSetDeleteSchema = z.object({ kind: z.literal('pixel.wang-set.delete'), tilesetId: z.string().min(1), wangSetId: z.string().min(1), expectedRevision: z.number().int().nonnegative() }).strict();
-const PixelWangColorUpsertSchema = z.object({ kind: z.literal('pixel.wang-color.upsert'), tilesetId: z.string().min(1), wangSetId: z.string().min(1), color: WangColorInputSchema, expectedRevision: z.number().int().nonnegative() }).strict();
-const PixelWangColorDeleteSchema = z.object({ kind: z.literal('pixel.wang-color.delete'), tilesetId: z.string().min(1), wangSetId: z.string().min(1), colorId: z.number().int().min(1).max(255), expectedRevision: z.number().int().nonnegative() }).strict();
-const PixelWangTileAssignSchema = z.object({ kind: z.literal('pixel.wang-tile.assign'), tilesetId: z.string().min(1), wangSetId: z.string().min(1), tile: WangTileInputSchema, expectedRevision: z.number().int().nonnegative() }).strict();
+const WangDocumentRevisionShape = { expectedDocumentRevision: z.number().int().nonnegative().optional() };
+const PixelWangSetUpsertSchema = z.object({ kind: z.literal('pixel.wang-set.upsert'), tilesetId: z.string().min(1), wangSet: WangSetInputSchema, expectedRevision: z.number().int().nonnegative(), ...WangDocumentRevisionShape }).strict();
+const PixelWangSetDeleteSchema = z.object({ kind: z.literal('pixel.wang-set.delete'), tilesetId: z.string().min(1), wangSetId: z.string().min(1), expectedRevision: z.number().int().nonnegative(), ...WangDocumentRevisionShape }).strict();
+const PixelWangColorUpsertSchema = z.object({ kind: z.literal('pixel.wang-color.upsert'), tilesetId: z.string().min(1), wangSetId: z.string().min(1), color: WangColorInputSchema, expectedRevision: z.number().int().nonnegative(), ...WangDocumentRevisionShape }).strict();
+const PixelWangColorDeleteSchema = z.object({ kind: z.literal('pixel.wang-color.delete'), tilesetId: z.string().min(1), wangSetId: z.string().min(1), colorId: z.number().int().min(1).max(255), expectedRevision: z.number().int().nonnegative(), ...WangDocumentRevisionShape }).strict();
+const PixelWangTileAssignSchema = z.object({ kind: z.literal('pixel.wang-tile.assign'), tilesetId: z.string().min(1), wangSetId: z.string().min(1), tile: WangTileInputSchema, expectedRevision: z.number().int().nonnegative(), ...WangDocumentRevisionShape }).strict();
 const IllustrationAlignSchema = z.object({ kind: z.literal('illustration.objects.align'), objectIds: z.array(z.string().min(1)).min(1).max(256), expectedRevisions: ExpectedRevisionsSchema, mode: z.enum(['left', 'center-x', 'right', 'top', 'center-y', 'bottom']), target: z.enum(['artboard', 'selection', 'key-object']).default('selection'), keyObjectId: z.string().min(1).optional() }).strict();
 const IllustrationDistributeSchema = z.object({ kind: z.literal('illustration.objects.distribute'), objectIds: z.array(z.string().min(1)).min(3).max(256), expectedRevisions: ExpectedRevisionsSchema, axis: z.enum(['x', 'y']), mode: z.enum(['centers', 'spacing']).default('centers') }).strict();
 const IllustrationBooleanSchema = z.object({ kind: z.literal('illustration.path.boolean'), objectIds: z.tuple([z.string().min(1), z.string().min(1)]), expectedRevisions: ExpectedRevisionsSchema, mode: z.enum(['union', 'subtract', 'intersect', 'exclude']) }).strict();
@@ -903,13 +906,11 @@ async function expandAgentCanvasOperation(document: AIDrawDocument, value: Recor
     const layer = map.layers[operation.layerId];
     if (!layer || layer.type !== 'tile' || !layer.chunks) throw new Error(`Tile layer ${operation.layerId} does not exist.`);
     if (operation.expectedRevision !== layer.revision) throw new Error(`Tile layer ${layer.id} revision changed from ${operation.expectedRevision} to ${layer.revision}; observe and retry. No terrain tiles changed.`);
-    const tileset = document.pixelAssets[operation.tilesetId];
-    if (!tileset || tileset.type !== 'tileset' || !map.tilesetIds.includes(tileset.id)) throw new Error(`Tileset ${operation.tilesetId} is not attached to tilemap ${map.id}.`);
-    const wangSet = tileset.wangSets.find((entry) => entry.id === operation.wangSetId);
-    if (!wangSet) throw new Error(`Wang set ${operation.wangSetId} does not exist in tileset ${tileset.id}.`);
-    if (!wangSet.colors.some((color) => color.id === operation.colorId)) throw new Error(`Wang color ${operation.colorId} does not exist in ${wangSet.name}.`);
-    const tileCount = tileset.columns * tileset.rows;
-    if (wangSet.tiles.some((tile) => tile.tileId < 0 || tile.tileId >= tileCount)) throw new Error(`Wang set ${wangSet.id} addresses a tile outside tileset ${tileset.id}; no terrain tiles changed.`);
+    const selection = planWangTerrainSelection(document, operation);
+    const tileset = selection.tileset;
+    const wangSet = selection.wangSet;
+    if (selection.imageCollection && operation.expectedDocumentRevision === undefined) throw new Error('Image-collection Wang terrain requires expectedDocumentRevision from the exact observed pixel document. No terrain tiles changed.');
+    if (operation.expectedDocumentRevision !== undefined && operation.expectedDocumentRevision !== document.revision) throw new Error(`Pixel document revision changed from ${operation.expectedDocumentRevision} to ${document.revision}; observe and retry. No terrain tiles changed.`);
     const contains = (x: number, y: number) => map.infinite || (x >= 0 && y >= 0 && x < map.width && y < map.height);
     const localTileAt = (x: number, y: number): number | undefined => {
       const gid = decodeTiledGid(readTileAt(layer.chunks!, x, y)).gid;
@@ -968,6 +969,12 @@ async function expandAgentCanvasOperation(document: AIDrawDocument, value: Recor
         : parsed.kind === 'pixel.wang-color.upsert' ? upsertWangColor(source, parsed.wangSetId, parsed.color)
           : parsed.kind === 'pixel.wang-color.delete' ? deleteWangColor(source, parsed.wangSetId, parsed.colorId)
             : assignWangTile(source, parsed.wangSetId, parsed.tile);
+    if (isImageCollectionTileset(source)) {
+      if (parsed.expectedDocumentRevision === undefined) throw new Error('Image-collection Wang metadata authoring requires expectedDocumentRevision from the exact observed pixel document.');
+      if (parsed.expectedDocumentRevision !== document.revision) throw new Error(`Pixel document revision changed from ${parsed.expectedDocumentRevision} to ${document.revision}; observe and retry.`);
+      const plan = planImageCollectionWangMutation(document, source, asset);
+      return [{ kind: 'pixel.asset.replace', asset, expectedRevision: parsed.expectedRevision, expectedSpriteDependencies: plan.expectedSpriteDependencies }];
+    }
     return [{ kind: 'pixel.asset.replace', asset, expectedRevision: parsed.expectedRevision }];
   }
   if (value.kind === 'illustration.objects.align') {
@@ -1077,14 +1084,20 @@ function jsonText(value: unknown) {
 }
 
 function exactIntentDocumentRevision(operations: Array<Record<string, unknown>>): number | undefined {
-  const exactIntent = operations.filter((operation) => operation.kind === 'pixel.image-collection.create' || operation.kind === 'pixel.image-collection.append' || operation.kind === 'pixel.image-collection.source.replace' || operation.kind === 'pixel.image-collection.source.remove' || operation.kind === 'pixel.tile-object.create');
+  const exactIntent = operations.filter((operation) => operation.kind === 'pixel.image-collection.create' || operation.kind === 'pixel.image-collection.append' || operation.kind === 'pixel.image-collection.source.replace' || operation.kind === 'pixel.image-collection.source.remove' || operation.kind === 'pixel.tile-object.create' || (String(operation.kind).startsWith('pixel.wang-') && operation.expectedDocumentRevision !== undefined));
   if (!exactIntent.length) return undefined;
-  if (operations.length !== 1 || exactIntent.length !== 1) throw new Error('Image-collection lifecycle and exact tile-object creation requests must be the only request in their transaction so one observed document revision owns the complete change.');
+  if (operations.length !== 1 || exactIntent.length !== 1) throw new Error('Image-collection lifecycle, collection Wang terrain, and exact tile-object creation requests must be the only request in their transaction so one observed document revision owns the complete change.');
   if (exactIntent[0].kind === 'pixel.image-collection.create') return PixelImageCollectionCreateSchema.parse(exactIntent[0]).expectedDocumentRevision;
   if (exactIntent[0].kind === 'pixel.image-collection.append') return PixelImageCollectionAppendSchema.parse(exactIntent[0]).expectedDocumentRevision;
   if (exactIntent[0].kind === 'pixel.image-collection.source.replace') return PixelImageCollectionSourceReplaceSchema.parse(exactIntent[0]).expectedDocumentRevision;
   if (exactIntent[0].kind === 'pixel.image-collection.source.remove') return PixelImageCollectionSourceRemoveSchema.parse(exactIntent[0]).expectedDocumentRevision;
-  return PixelTileObjectCreateSchema.parse(exactIntent[0]).expectedDocumentRevision;
+  if (exactIntent[0].kind === 'pixel.tile-object.create') return PixelTileObjectCreateSchema.parse(exactIntent[0]).expectedDocumentRevision;
+  if (exactIntent[0].kind === 'pixel.wang-terrain.stroke') return PixelWangTerrainStrokeSchema.parse(exactIntent[0]).expectedDocumentRevision;
+  if (exactIntent[0].kind === 'pixel.wang-set.upsert') return PixelWangSetUpsertSchema.parse(exactIntent[0]).expectedDocumentRevision;
+  if (exactIntent[0].kind === 'pixel.wang-set.delete') return PixelWangSetDeleteSchema.parse(exactIntent[0]).expectedDocumentRevision;
+  if (exactIntent[0].kind === 'pixel.wang-color.upsert') return PixelWangColorUpsertSchema.parse(exactIntent[0]).expectedDocumentRevision;
+  if (exactIntent[0].kind === 'pixel.wang-color.delete') return PixelWangColorDeleteSchema.parse(exactIntent[0]).expectedDocumentRevision;
+  return PixelWangTileAssignSchema.parse(exactIntent[0]).expectedDocumentRevision;
 }
 
 function normalizeColor(value: string | undefined, fallback: string): string {

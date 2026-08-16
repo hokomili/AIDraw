@@ -1,4 +1,13 @@
-import type { PixelTileset, WangColor, WangSet, WangTile } from '@aidraw/core';
+import { isImageCollectionTileset, type PixelTileset, type WangColor, type WangSet, type WangTile } from '@aidraw/core';
+
+function validateTileId(tileset: PixelTileset, tileId: number, label: string): void {
+  if (!Number.isInteger(tileId) || tileId < 0) throw new Error(`${label} must be a non-negative integer.`);
+  if (isImageCollectionTileset(tileset)) {
+    if (!tileset.tiles[tileId]?.imageAssetId) throw new Error(`${label} ${tileId} is a sparse gap or missing source in the image collection.`);
+    return;
+  }
+  if (tileId >= tileset.columns * tileset.rows) throw new Error(`${label} ${tileId} falls outside the tileset slice.`);
+}
 
 function validateColor(color: WangColor): void {
   if (!Number.isInteger(color.id) || color.id <= 0 || color.id > 255) throw new Error('Wang color IDs must be integers from 1 to 255.');
@@ -9,7 +18,7 @@ function validateColor(color: WangColor): void {
 }
 
 function validateTile(tileset: PixelTileset, tile: WangTile, colorIds: Set<number>): void {
-  if (!Number.isInteger(tile.tileId) || tile.tileId < 0 || tile.tileId >= tileset.columns * tileset.rows) throw new Error(`Wang tile ${tile.tileId} falls outside the tileset slice.`);
+  validateTileId(tileset, tile.tileId, 'Wang tile');
   if (!Array.isArray(tile.wangId) || tile.wangId.length !== 8) throw new Error('Wang tile assignments require exactly eight clockwise edge/corner slots.');
   for (const colorId of tile.wangId) if (!Number.isInteger(colorId) || colorId < 0 || (colorId > 0 && !colorIds.has(colorId))) throw new Error(`Wang tile ${tile.tileId} references missing color ${colorId}.`);
 }
@@ -18,9 +27,10 @@ export function validateWangSet(tileset: PixelTileset, set: WangSet): void {
   if (!set.id.trim() || set.id.length > 200) throw new Error('Wang set IDs must contain 1–200 characters.');
   if (!set.name.trim() || set.name.length > 100) throw new Error('Wang set names must contain 1–100 characters.');
   if (!['edge', 'corner', 'mixed'].includes(set.type)) throw new Error('Wang set type must be edge, corner, or mixed.');
-  if (set.colors.length > 255 || set.tiles.length > tileset.columns * tileset.rows) throw new Error('Wang set exceeds the tileset authoring limits.');
+  const tileLimit = isImageCollectionTileset(tileset) ? Object.keys(tileset.tiles).length : tileset.columns * tileset.rows;
+  if (set.colors.length > 255 || set.tiles.length > tileLimit) throw new Error('Wang set exceeds the tileset authoring limits.');
   const colorIds = new Set<number>();
-  for (const color of set.colors) { validateColor(color); if (colorIds.has(color.id)) throw new Error(`Wang color ${color.id} is duplicated.`); colorIds.add(color.id); if (color.tileId >= tileset.columns * tileset.rows) throw new Error(`Wang color ${color.id} representative tile falls outside the tileset slice.`); }
+  for (const color of set.colors) { validateColor(color); if (colorIds.has(color.id)) throw new Error(`Wang color ${color.id} is duplicated.`); colorIds.add(color.id); validateTileId(tileset, color.tileId, `Wang color ${color.id} representative tile`); }
   const tileIds = new Set<number>();
   for (const tile of set.tiles) { validateTile(tileset, tile, colorIds); if (tileIds.has(tile.tileId)) throw new Error(`Wang tile ${tile.tileId} is assigned more than once.`); tileIds.add(tile.tileId); }
 }
@@ -45,7 +55,7 @@ export function upsertWangColor(tileset: PixelTileset, setId: string, color: Wan
   const source = tileset.wangSets.find((set) => set.id === setId);
   if (!source) throw new Error(`Wang set ${setId} does not exist.`);
   validateColor(color);
-  if (color.tileId >= tileset.columns * tileset.rows) throw new Error('The Wang color representative tile falls outside the tileset slice.');
+  validateTileId(tileset, color.tileId, 'The Wang color representative tile');
   const set = structuredClone(source);
   const index = set.colors.findIndex((entry) => entry.id === color.id);
   if (index < 0) set.colors.push(structuredClone(color)); else set.colors[index] = structuredClone(color);

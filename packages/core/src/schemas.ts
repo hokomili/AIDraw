@@ -699,7 +699,6 @@ const PixelTilesetInputSchema = z.object({
     if (tileset.rows !== 0) context.addIssue({ code: 'custom', path: ['rows'], message: 'Image-collection tilesets require zero atlas rows' });
     if (tileset.margin !== 0 || tileset.spacing !== 0) context.addIssue({ code: 'custom', path: ['margin'], message: 'Image-collection tilesets cannot use atlas margin or spacing' });
     if (!tileDefinitions.length) context.addIssue({ code: 'custom', path: ['tiles'], message: 'Image-collection tilesets require at least one tile image' });
-    if (tileset.wangSets.length) context.addIssue({ code: 'custom', path: ['wangSets'], message: 'Image-collection Wang metadata is not supported' });
   } else {
     if (tileset.columns < 1 || tileset.rows < 1) context.addIssue({ code: 'custom', path: ['columns'], message: 'Atlas tilesets require positive columns and rows' });
     if (!Number.isSafeInteger(tileCount) || tileCount > MAX_TILESET_TILES) context.addIssue({ code: 'custom', path: ['columns'], message: 'Tileset slice exceeds the established one-million-tile limit' });
@@ -725,8 +724,12 @@ const PixelTilesetInputSchema = z.object({
   tileset.wangSets.forEach((set, setIndex) => {
     if (wangSetIds.has(set.id)) context.addIssue({ code: 'custom', path: ['wangSets', setIndex, 'id'], message: 'Wang set IDs must be unique' });
     wangSetIds.add(set.id); wangTiles += set.tiles.length;
-    set.colors.forEach((color, colorIndex) => { if (!imageCollection && color.tileId >= tileCount) context.addIssue({ code: 'custom', path: ['wangSets', setIndex, 'colors', colorIndex, 'tileId'], message: 'Wang color representative tile falls outside the tileset slice' }); });
-    set.tiles.forEach((tile, tileIndex) => { if (!imageCollection && tile.tileId >= tileCount) context.addIssue({ code: 'custom', path: ['wangSets', setIndex, 'tiles', tileIndex, 'tileId'], message: 'Wang tile falls outside the tileset slice' }); });
+    set.colors.forEach((color, colorIndex) => {
+      if (imageCollection ? !tileset.tiles[String(color.tileId)]?.imageAssetId : color.tileId >= tileCount) context.addIssue({ code: 'custom', path: ['wangSets', setIndex, 'colors', colorIndex, 'tileId'], message: imageCollection ? 'Wang color representative tile is missing from the image collection' : 'Wang color representative tile falls outside the tileset slice' });
+    });
+    set.tiles.forEach((tile, tileIndex) => {
+      if (imageCollection ? !tileset.tiles[String(tile.tileId)]?.imageAssetId : tile.tileId >= tileCount) context.addIssue({ code: 'custom', path: ['wangSets', setIndex, 'tiles', tileIndex, 'tileId'], message: imageCollection ? 'Wang tile is missing from the image collection' : 'Wang tile falls outside the tileset slice' });
+    });
   });
   if (wangTiles > MAX_TILESET_TILES) context.addIssue({ code: 'custom', path: ['wangSets'], message: 'Wang terrain metadata exceeds the established one-million-tile limit' });
 });

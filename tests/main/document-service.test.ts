@@ -8,6 +8,7 @@ import type { TransactionTraceEntry } from '@common/contracts';
 import { appendImageCollectionSource, createImageCollectionTileset, imageCollectionSourceDependencyGuards, removeUnusedImageCollectionSource, replaceImageCollectionSource, replaceImageCollectionTileMetadata } from '@common/image-collection-authoring';
 import { planTileObjectCreation } from '@common/tile-object-authoring';
 import { planMapTileAuthoringSelection } from '@common/map-tile-authoring';
+import { planWangTerrainSelection } from '@common/wang-terrain-authoring';
 import { parseStampLibraryJson, prepareStampLibraryImport, serializePortableTileStampKit } from '@common/stamp-library-interchange';
 import { DocumentService, type NativeDocumentPreviewRenderer } from '@main/document-service';
 import { RecoveryJournal } from '@main/journal';
@@ -696,6 +697,44 @@ describe('document service collaboration semantics', () => {
       const undoneLayer = undoneMap.layers[layer.id]; if (undoneLayer.type !== 'tile' || !undoneLayer.chunks) throw new Error('Expected tile layer');
       expect(readTileAt(undoneLayer.chunks, 2, 4)).toBe(0);
     }
+  });
+
+  it('atomically refuses a queued collection Wang stroke after an earlier tileset-only change', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-service-collection-wang-guard-')); temporaryPaths.push(root);
+    const service = new DocumentService(new RecoveryJournal(root), '1.0.0'); services.push(service);
+    const document = createPixelDocument('project', 'Queued collection Wang guard'); document.assetIds = []; document.pixelAssets = {};
+    const source0 = createPixelSprite('Wang zero', 8, 8); const source3 = createPixelSprite('Wang three', 9, 7);
+    const tileset = createPixelTileset('Collection Wang', source0.id, 9, 8, 1, 1);
+    delete tileset.spriteAssetId; tileset.firstGid = 20; tileset.columns = 0; tileset.rows = 0; tileset.margin = 0; tileset.spacing = 0;
+    tileset.tiles = {
+      0: { id: 0, sourceX: 0, sourceY: 0, imageAssetId: source0.id, probability: 1, animation: [], collisions: [], properties: {} },
+      3: { id: 3, sourceX: 0, sourceY: 0, imageAssetId: source3.id, probability: 1, animation: [], collisions: [], properties: {} },
+    };
+    tileset.wangSets = [{ id: 'collection-wang', name: 'Collection Wang', type: 'mixed', colors: [{ id: 1, name: 'Land', color: '#55aa44', tileId: 3, probability: 1 }], tiles: [{ tileId: 0, wangId: [0, 0, 0, 0, 0, 0, 0, 0] }, { tileId: 3, wangId: [1, 1, 1, 1, 1, 1, 1, 1] }] }];
+    const map = createPixelTilemap('Collection Wang map'); map.tilesetIds = [tileset.id];
+    const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile' || !layer.chunks) throw new Error('Expected tile layer');
+    document.assetIds = [source0.id, source3.id, tileset.id, map.id]; document.pixelAssets = { [source0.id]: source0, [source3.id]: source3, [tileset.id]: tileset, [map.id]: map }; document.activeAssetId = map.id;
+    service.addDocument(document);
+
+    const stale = planWangTerrainSelection(document, { mapId: map.id, tilesetId: tileset.id, wangSetId: 'collection-wang', colorId: 1 });
+    if (stale.expectedDocumentRevision === undefined) throw new Error('Expected collection Wang document guard');
+    const renamed = structuredClone(tileset); renamed.wangSets[0].name = 'Changed before stroke';
+    const metadataChange = service.apply({ id: createId('tx'), clientOperationId: createId('human-op'), documentId: document.id, actor: HUMAN_ACTOR, label: 'Change Wang metadata first', createdAt: nowIso(), operations: [{ kind: 'pixel.asset.replace', asset: renamed, expectedRevision: tileset.revision }] });
+    const staleStroke = service.apply({ id: createId('tx'), clientOperationId: createId('human-op'), documentId: document.id, expectedDocumentRevision: stale.expectedDocumentRevision, actor: HUMAN_ACTOR, label: 'Paint stale collection Wang', createdAt: nowIso(), operations: [{ kind: 'pixel.tilemap.set', mapId: map.id, layerId: layer.id, changes: [{ x: 1, y: 1, gid: tileset.firstGid + 3 }], expectedRevision: layer.revision }] });
+    expect(await metadataChange).toMatchObject({ status: 'committed' });
+    expect(await staleStroke).toMatchObject({ status: 'conflict', conflict: { entityId: document.id, expectedRevision: document.revision, actualRevision: document.revision + 1 } });
+    const after = service.getDocument(document.id); if (!after || after.kind !== 'pixel') throw new Error('Expected pixel document');
+    const afterMap = after.pixelAssets[map.id]; if (afterMap.type !== 'tilemap') throw new Error('Expected map'); const afterLayer = afterMap.layers[layer.id]; if (afterLayer.type !== 'tile' || !afterLayer.chunks) throw new Error('Expected tile layer');
+    expect(readTileAt(afterLayer.chunks, 1, 1)).toBe(0);
+    expect(after.activity.map((entry) => entry.label)).toEqual(['Change Wang metadata first']);
+    expect(service.getChanges(document.id, document.revision)).toHaveLength(1);
+
+    const currentTileset = after.pixelAssets[tileset.id]; if (currentTileset.type !== 'tileset') throw new Error('Expected tileset');
+    const fresh = planWangTerrainSelection(after, { mapId: map.id, tilesetId: currentTileset.id, wangSetId: 'collection-wang', colorId: 1 });
+    expect(await service.apply({ id: createId('tx'), clientOperationId: createId('human-op'), documentId: document.id, expectedDocumentRevision: fresh.expectedDocumentRevision, actor: HUMAN_ACTOR, label: 'Paint current collection Wang', createdAt: nowIso(), operations: [{ kind: 'pixel.tilemap.set', mapId: map.id, layerId: layer.id, changes: [{ x: 1, y: 1, gid: currentTileset.firstGid + 3 }], expectedRevision: afterLayer.revision }] })).toMatchObject({ status: 'committed' });
+    expect(await service.undo(document.id)).toMatchObject({ status: 'committed' });
+    const undone = service.getDocument(document.id); if (!undone || undone.kind !== 'pixel') throw new Error('Expected pixel document'); const undoneMap = undone.pixelAssets[map.id]; if (undoneMap.type !== 'tilemap') throw new Error('Expected map'); const undoneLayer = undoneMap.layers[layer.id]; if (undoneLayer.type !== 'tile' || !undoneLayer.chunks) throw new Error('Expected tile layer');
+    expect(readTileAt(undoneLayer.chunks, 1, 1)).toBe(0);
   });
 
   it('atomically refuses a queued portable tile-kit plan after an earlier palette change, then admits a fresh import and undo', async () => {

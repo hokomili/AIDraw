@@ -430,6 +430,7 @@ describe('representative Tiled JSON interchange', () => {
       writeFile(join(directory, 'collection.tsj'), JSON.stringify({
         type: 'tileset', name: 'Sparse collection', tilewidth: 2, tileheight: 2, tilecount: 2, columns: 2,
         transformations: { hflip: true, vflip: true, rotate: true, preferuntransformed: false },
+        wangsets: [{ name: 'Sparse Wang', type: 'mixed', colors: [{ name: 'Stone', color: '#777777', tile: 3, probability: 1 }], wangtiles: [{ tileid: 0, wangid: [0, 0, 0, 0, 0, 0, 0, 0] }, { tileid: 3, wangid: [1, 1, 1, 1, 1, 1, 1, 1] }] }],
         tiles: [
           { id: 0, image: 'tile-zero.png', imagewidth: 2, imageheight: 2, probability: 0.25, animation: [{ tileid: 0, duration: 80 }, { tileid: 3, duration: 120 }], properties: [{ name: 'walkable', type: 'bool', value: true }], objectgroup: { objects: [{ id: 7, name: 'Solid', type: 'collision', x: 0, y: 1, width: 2, height: 1, properties: [{ name: 'damage', type: 'int', value: 2 }] }] } },
           { id: 3, image: 'tile-three.png', imagewidth: 1, imageheight: 2, probability: 0.75, properties: [{ name: 'terrain', type: 'string', value: 'stone' }] },
@@ -447,6 +448,7 @@ describe('representative Tiled JSON interchange', () => {
     expect(Object.keys(tileset.tiles)).toEqual(['0', '3']);
     expect(tileset.tiles[0]).toMatchObject({ probability: 0.25, animation: [{ tileId: 0, durationMs: 80 }, { tileId: 3, durationMs: 120 }], properties: { walkable: true }, collisions: [expect.objectContaining({ type: 'rectangle', properties: { name: 'Solid', class: 'collision', damage: 2 } })] });
     expect(tileset.tiles[3]).toMatchObject({ probability: 0.75, properties: { terrain: 'stone' } });
+    expect(tileset.wangSets).toMatchObject([{ name: 'Sparse Wang', type: 'mixed', colors: [{ id: 1, name: 'Stone', tileId: 3 }], tiles: [{ tileId: 0 }, { tileId: 3 }] }]);
     expect(new Set([tileset.tiles[0].imageAssetId, tileset.tiles[3].imageAssetId]).size).toBe(2);
     const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile' || !layer.chunks) throw new Error('Expected image-collection tile layer');
     expect([readTileAt(layer.chunks, 0, 0), readTileAt(layer.chunks, 1, 0)]).toEqual([5, encodeTiledGid(8, { hFlip: true, diagonal: true })]);
@@ -465,6 +467,7 @@ describe('representative Tiled JSON interchange', () => {
     const nativeMap = native.document.pixelAssets[native.document.activeAssetId]; if (nativeMap.type !== 'tilemap') throw new Error('Expected persisted tilemap');
     const nativeTileset = native.document.pixelAssets[nativeMap.tilesetIds[0]]; if (nativeTileset.type !== 'tileset') throw new Error('Expected persisted tileset');
     expect({ columns: nativeTileset.columns, rows: nativeTileset.rows, spriteAssetId: nativeTileset.spriteAssetId, ids: Object.keys(nativeTileset.tiles) }).toEqual({ columns: 2, rows: 0, spriteAssetId: undefined, ids: ['0', '3'] });
+    expect(nativeTileset.wangSets).toEqual(tileset.wangSets);
     expect(Buffer.from(renderTilemap(native.document, nativeMap).getContext('2d').getImageData(0, 0, 4, 2).data)).toEqual(originalRaster);
 
     for (const format of ['tiled-json', 'tiled-xml'] as const) {
@@ -475,10 +478,13 @@ describe('representative Tiled JSON interchange', () => {
         expect(exported).toMatchObject({ firstgid: 5, tilecount: 2, columns: 2 }); expect(exported.image).toBeUndefined();
         expect(exported.tiles.map((tile: any) => ({ id: tile.id, image: tile.image }))).toEqual([{ id: 0, image: 'Sparse collection tile 0.png' }, { id: 3, image: 'Sparse collection tile 3.png' }]);
         expect(exported.tiles[0]).toMatchObject({ probability: 0.25, animation: [{ tileid: 0, duration: 80 }, { tileid: 3, duration: 120 }], properties: [expect.objectContaining({ name: 'walkable', type: 'bool', value: true })] });
+        expect(exported.wangsets).toEqual([{ name: 'Sparse Wang', type: 'mixed', colors: [{ name: 'Stone', color: '#777777', tile: 3, probability: 1 }], wangtiles: [{ tileid: 0, wangid: [0, 0, 0, 0, 0, 0, 0, 0] }, { tileid: 3, wangid: [1, 1, 1, 1, 1, 1, 1, 1] }] }]);
       } else {
         expect(text).toContain('tilecount="2" columns="2"'); expect(text).not.toMatch(/<tileset[^>]*>[^<]*<image /);
         expect(text).toContain('<image source="Sparse collection tile 0.png" width="2" height="2"/>');
         expect(text).toContain('<image source="Sparse collection tile 3.png" width="1" height="2"/>');
+        expect(text).toContain('<wangcolor name="Stone" color="#777777" tile="3" probability="1"/>');
+        expect(text).toContain('<wangtile tileid="3" wangid="1,1,1,1,1,1,1,1"/>');
         const tileZero = text.match(/<tile id="0"[^>]*>([\s\S]*?)<\/tile>/)?.[1]; expect(tileZero).toBeDefined();
         const childOrder = ['<properties>', '<image ', '<objectgroup>', '<animation>'].map((child) => tileZero!.indexOf(child));
         expect(childOrder.every((index) => index >= 0)).toBe(true); expect(childOrder).toEqual([...childOrder].sort((left, right) => left - right));
@@ -491,6 +497,7 @@ describe('representative Tiled JSON interchange', () => {
       const reopenedTileset = reopenedDocument.pixelAssets[reopenedMap.tilesetIds[0]]; if (reopenedTileset.type !== 'tileset') throw new Error('Expected reopened image-collection tileset');
       expect(reopenedTileset.columns).toBe(2);
       expect(Object.keys(reopenedTileset.tiles)).toEqual(['0', '3']);
+      expect(reopenedTileset.wangSets).toMatchObject([{ name: 'Sparse Wang', colors: [{ tileId: 3 }], tiles: [{ tileId: 0 }, { tileId: 3 }] }]);
       expect(Buffer.from(renderTilemap(reopenedDocument, reopenedMap).getContext('2d').getImageData(0, 0, 4, 2).data)).toEqual(originalRaster);
     }
 
@@ -712,6 +719,10 @@ describe('representative Tiled JSON interchange', () => {
       await writeFile(join(directory, `${name}.tmj`), JSON.stringify({ ...map(), tilesets: [{ firstgid: 7, source: `${name}.tsj` }] }));
       await expect(importDocument(join(directory, `${name}.tmj`), true)).rejects.toThrow(message);
     }
+    await writeFile(join(directory, 'missing-animation-target.tsj'), JSON.stringify({ ...tileset, tiles: [{ ...tileset.tiles[0], animation: [{ tileid: 1, duration: 100 }] }] }));
+    await expect(importDocument(join(directory, 'missing-animation-target.tsj'), true)).rejects.toThrow('animation references missing tile 1');
+    await writeFile(join(directory, 'missing-wang-target.tsj'), JSON.stringify({ ...tileset, wangsets: [{ name: 'Invalid sparse Wang', type: 'mixed', colors: [{ name: 'Exact representative', color: '#777777', tile: 2, probability: 1 }], wangtiles: [{ tileid: 1, wangid: [1, 1, 1, 1, 1, 1, 1, 1] }] }] }));
+    await expect(importDocument(join(directory, 'missing-wang-target.tsj'), true)).rejects.toThrow('Wang mapping references missing tile 1');
     await writeFile(join(directory, 'duplicate.tsj'), JSON.stringify({ ...tileset, tilecount: 2, tiles: [tileset.tiles[0], tileset.tiles[0]] }));
     await writeFile(join(directory, 'duplicate.tmj'), JSON.stringify({ ...map(), tilesets: [{ firstgid: 7, source: 'duplicate.tsj' }] }));
     await expect(importDocument(join(directory, 'duplicate.tmj'), true)).rejects.toThrow('tile ID 2 is duplicated');

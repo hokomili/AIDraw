@@ -893,6 +893,36 @@ describe('authenticated stateful MCP contract', () => {
     expect(documents.getDocument(document.id)).toEqual(beforeRefusals);
   });
 
+  it('authors and paints exact sparse image-collection Wang terrain through document-bound semantic requests', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-mcp-collection-wang-')); temporaryPaths.push(root);
+    const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0'); documents.initialize();
+    const document = createPixelDocument('project', 'Semantic collection terrain'); document.assetIds = []; document.pixelAssets = {};
+    const source0 = createPixelSprite('Terrain zero', 8, 8); const source3 = createPixelSprite('Terrain three', 11, 7);
+    const tileset = createPixelTileset('Sparse terrain', source0.id, 11, 8, 1, 1); delete tileset.spriteAssetId; tileset.firstGid = 20; tileset.columns = 0; tileset.rows = 0; tileset.margin = 0; tileset.spacing = 0;
+    tileset.tiles = {
+      0: { id: 0, sourceX: 0, sourceY: 0, imageAssetId: source0.id, probability: 1, animation: [], collisions: [], properties: {} },
+      3: { id: 3, sourceX: 0, sourceY: 0, imageAssetId: source3.id, probability: 1, animation: [], collisions: [], properties: {} },
+    };
+    tileset.wangSets = [{ id: 'sparse-wang', name: 'Sparse Wang', type: 'mixed', colors: [{ id: 1, name: 'Ground', color: '#55aa44', tileId: 3, probability: 1 }], tiles: [{ tileId: 0, wangId: [0, 0, 0, 0, 0, 0, 0, 0] }, { tileId: 3, wangId: [1, 1, 1, 1, 1, 1, 1, 1] }] }];
+    const map = createPixelTilemap('One-cell terrain'); map.width = 1; map.height = 1; map.tilesetIds = [tileset.id]; const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile') throw new Error('Expected tile layer');
+    document.assetIds = [source0.id, source3.id, tileset.id, map.id]; document.pixelAssets = { [source0.id]: source0, [source3.id]: source3, [tileset.id]: tileset, [map.id]: map }; document.activeAssetId = map.id; documents.addDocument(document);
+    const host = new McpHost(documents, '1.0.0', join(root, 'port.json')); hosts.push(host); const started = await host.start('collection-terrain-token');
+    const client = await initializeClient(started.url, 'collection-terrain-token', 'collection-terrain-client');
+
+    const missingGuard = await callToolMessage(started.url, client.headers, 2, 'canvas_apply', { documentId: document.id, clientOperationId: 'collection-terrain-missing-guard', label: 'Refuse unguarded collection terrain', playback: { mode: 'instant', speed: 1 }, operations: [{ kind: 'pixel.wang-terrain.stroke', mapId: map.id, layerId: layer.id, tilesetId: tileset.id, wangSetId: 'sparse-wang', colorId: 1, mode: 'paint', points: [{ x: 0, y: 0 }], expectedRevision: layer.revision }] });
+    expect(missingGuard.result?.isError).toBe(true); expect(JSON.stringify(missingGuard)).toContain('expectedDocumentRevision');
+    expect(documents.getDocument(document.id)?.activity).toEqual([]);
+
+    expect(await callTool(started.url, client.headers, 3, 'canvas_apply', { documentId: document.id, clientOperationId: 'collection-terrain-paint', label: 'Paint collection terrain', playback: { mode: 'instant', speed: 1 }, operations: [{ kind: 'pixel.wang-terrain.stroke', mapId: map.id, layerId: layer.id, tilesetId: tileset.id, wangSetId: 'sparse-wang', colorId: 1, mode: 'paint', points: [{ x: 0, y: 0 }], expectedRevision: layer.revision, expectedDocumentRevision: document.revision }] })).toMatchObject({ status: 'committed' });
+    const painted = documents.getDocument(document.id); if (!painted || painted.kind !== 'pixel') throw new Error('Expected pixel document'); const paintedMap = painted.pixelAssets[map.id]; if (paintedMap.type !== 'tilemap') throw new Error('Expected map'); const paintedLayer = paintedMap.layers[layer.id]; if (paintedLayer.type !== 'tile' || !paintedLayer.chunks) throw new Error('Expected tile layer');
+    expect(readTileAt(paintedLayer.chunks, 0, 0)).toBe(tileset.firstGid + 3);
+
+    const currentTileset = painted.pixelAssets[tileset.id]; if (currentTileset.type !== 'tileset') throw new Error('Expected tileset');
+    const renamedSet = { ...structuredClone(currentTileset.wangSets[0]), name: 'Semantic sparse terrain' };
+    expect(await callTool(started.url, client.headers, 4, 'canvas_apply', { documentId: document.id, clientOperationId: 'collection-terrain-metadata', label: 'Rename collection Wang set', playback: { mode: 'instant', speed: 1 }, operations: [{ kind: 'pixel.wang-set.upsert', tilesetId: tileset.id, wangSet: renamedSet, expectedRevision: currentTileset.revision, expectedDocumentRevision: painted.revision }] })).toMatchObject({ status: 'committed' });
+    const renamed = documents.getDocument(document.id); if (!renamed || renamed.kind !== 'pixel') throw new Error('Expected pixel document'); const renamedTileset = renamed.pixelAssets[tileset.id]; if (renamedTileset.type !== 'tileset') throw new Error('Expected tileset'); expect(renamedTileset.wangSets[0].name).toBe('Semantic sparse terrain');
+  });
+
   it('propagates authenticated Wang repairs beyond one cell and refuses a foreign-GID frontier atomically', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aidraw-mcp-')); temporaryPaths.push(root);
     const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0'); documents.initialize();

@@ -799,6 +799,10 @@ function tiledImageKey(tilesetId: string, tileId?: number): string {
   return tileId === undefined ? tilesetId : `${tilesetId}\0${tileId}`;
 }
 
+function wangSetsJson(tileset: PixelTileset) {
+  return tileset.wangSets.map((set) => ({ name: set.name, type: set.type, colors: set.colors.map((color) => ({ name: color.name, color: color.color, tile: color.tileId, probability: color.probability })), wangtiles: set.tiles.map((tile) => ({ tileid: tile.tileId, wangid: tile.wangId })) }));
+}
+
 function tilesetJson(document: PixelDocument, tileset: PixelTileset, images: Record<string, string>, objectIds: TiledObjectIdAllocator) {
   if (isImageCollectionTileset(tileset)) {
     const tiles = Object.values(tileset.tiles).sort((left, right) => left.id - right.id).map((tile) => {
@@ -815,7 +819,7 @@ function tilesetJson(document: PixelDocument, tileset: PixelTileset, images: Rec
       tilecount: tiles.length, columns: tileset.columns,
       transformations: { hflip: tileset.transformations.hFlip, vflip: tileset.transformations.vFlip, rotate: tileset.transformations.rotate, preferuntransformed: false },
       tiles,
-      wangsets: [],
+      wangsets: wangSetsJson(tileset),
     };
   }
   const sprite = tileset.spriteAssetId ? document.pixelAssets[tileset.spriteAssetId] : undefined;
@@ -828,7 +832,7 @@ function tilesetJson(document: PixelDocument, tileset: PixelTileset, images: Rec
     image, imagewidth: sprite?.type === 'sprite' ? sprite.width : undefined, imageheight: sprite?.type === 'sprite' ? sprite.height : undefined,
     transformations: { hflip: tileset.transformations.hFlip, vflip: tileset.transformations.vFlip, rotate: tileset.transformations.rotate, preferuntransformed: false },
     tiles: Object.values(tileset.tiles).map((tile) => ({ id: tile.id, probability: tile.probability, animation: tile.animation.map((frame) => ({ tileid: frame.tileId, duration: frame.durationMs })), properties: tiledPropertyJson(tile.properties), objectgroup: tile.collisions.length ? { draworder: 'index', objects: tile.collisions.map((shape) => tiledObjectJson(shape, objectIds)) } : undefined })),
-    wangsets: tileset.wangSets.map((set) => ({ name: set.name, type: set.type, colors: set.colors.map((color) => ({ name: color.name, color: color.color, tile: color.tileId, probability: color.probability })), wangtiles: set.tiles.map((tile) => ({ tileid: tile.tileId, wangid: tile.wangId })) })),
+    wangsets: wangSetsJson(tileset),
   };
 }
 
@@ -892,6 +896,10 @@ function mapObjectXml(object: MapObject, objectIds: TiledObjectIdAllocator): str
   return `<object id="${objectIds.next(object.id)}" name="${xml(object.name)}" type="${xml(object.className)}" gid="${object.gid}" x="${object.x}" y="${object.y}" width="${object.width}" height="${object.height}"${object.rotation ? ` rotation="${object.rotation}"` : ''}>${tiledPropertyXml(object.properties)}</object>`;
 }
 
+function wangSetsXml(tileset: PixelTileset): string {
+  return tileset.wangSets.length ? `<wangsets>${tileset.wangSets.map((set) => `<wangset name="${xml(set.name)}" type="${set.type}">${set.colors.map((color) => `<wangcolor name="${xml(color.name)}" color="${xml(color.color)}" tile="${color.tileId}" probability="${color.probability}"/>`).join('')}${set.tiles.map((tile) => `<wangtile tileid="${tile.tileId}" wangid="${tile.wangId.join(',')}"/>`).join('')}</wangset>`).join('')}</wangsets>` : '';
+}
+
 function tilesetXml(document: PixelDocument, tileset: PixelTileset, images: Record<string, string>, objectIds: TiledObjectIdAllocator): string {
   if (isImageCollectionTileset(tileset)) {
     const tileOffset = tileset.tileOffset.x || tileset.tileOffset.y ? `<tileoffset x="${tileset.tileOffset.x}" y="${tileset.tileOffset.y}"/>` : '';
@@ -902,12 +910,12 @@ function tilesetXml(document: PixelDocument, tileset: PixelTileset, images: Reco
       if (!image) throw new Error(`Tiled image-collection tile ${tile.id} is missing its planned PNG companion.`);
       return `<tile id="${tile.id}" probability="${tile.probability}">${tiledPropertyXml(tile.properties)}<image source="${xml(image)}" width="${sprite.width}" height="${sprite.height}"/>${tile.collisions.length ? `<objectgroup>${tile.collisions.map((shape) => collisionXml(shape, objectIds)).join('')}</objectgroup>` : ''}${tile.animation.length ? `<animation>${tile.animation.map((frame) => `<frame tileid="${frame.tileId}" duration="${frame.durationMs}"/>`).join('')}</animation>` : ''}</tile>`;
     }).join('');
-    return `<tileset version="1.10" tiledversion="1.11.2" name="${xml(tileset.name)}" tilewidth="${tileset.tileWidth}" tileheight="${tileset.tileHeight}" margin="0" spacing="0" tilecount="${Object.keys(tileset.tiles).length}" columns="${tileset.columns}"${tileset.objectAlignment === 'unspecified' ? '' : ` objectalignment="${tileset.objectAlignment}"`}>${tileOffset}<transformations hflip="${Number(tileset.transformations.hFlip)}" vflip="${Number(tileset.transformations.vFlip)}" rotate="${Number(tileset.transformations.rotate)}" preferuntransformed="0"/>${tiles}</tileset>`;
+    return `<tileset version="1.10" tiledversion="1.11.2" name="${xml(tileset.name)}" tilewidth="${tileset.tileWidth}" tileheight="${tileset.tileHeight}" margin="0" spacing="0" tilecount="${Object.keys(tileset.tiles).length}" columns="${tileset.columns}"${tileset.objectAlignment === 'unspecified' ? '' : ` objectalignment="${tileset.objectAlignment}"`}>${tileOffset}<transformations hflip="${Number(tileset.transformations.hFlip)}" vflip="${Number(tileset.transformations.vFlip)}" rotate="${Number(tileset.transformations.rotate)}" preferuntransformed="0"/>${tiles}${wangSetsXml(tileset)}</tileset>`;
   }
   const sprite = tileset.spriteAssetId ? document.pixelAssets[tileset.spriteAssetId] : undefined;
   const image = images[tiledImageKey(tileset.id)];
   const tiles = Object.values(tileset.tiles).filter((tile) => tile.probability !== 1 || tile.animation.length || tile.collisions.length || Object.keys(tile.properties).length).map((tile) => `<tile id="${tile.id}" probability="${tile.probability}">${tiledPropertyXml(tile.properties)}${tile.animation.length ? `<animation>${tile.animation.map((frame) => `<frame tileid="${frame.tileId}" duration="${frame.durationMs}"/>`).join('')}</animation>` : ''}${tile.collisions.length ? `<objectgroup>${tile.collisions.map((shape) => collisionXml(shape, objectIds)).join('')}</objectgroup>` : ''}</tile>`).join('');
-  const wangsets = tileset.wangSets.length ? `<wangsets>${tileset.wangSets.map((set) => `<wangset name="${xml(set.name)}" type="${set.type}">${set.colors.map((color) => `<wangcolor name="${xml(color.name)}" color="${xml(color.color)}" tile="${color.tileId}" probability="${color.probability}"/>`).join('')}${set.tiles.map((tile) => `<wangtile tileid="${tile.tileId}" wangid="${tile.wangId.join(',')}"/>`).join('')}</wangset>`).join('')}</wangsets>` : '';
+  const wangsets = wangSetsXml(tileset);
   const tileOffset = tileset.tileOffset.x || tileset.tileOffset.y ? `<tileoffset x="${tileset.tileOffset.x}" y="${tileset.tileOffset.y}"/>` : '';
   return `<tileset version="1.10" tiledversion="1.11.2" name="${xml(tileset.name)}" tilewidth="${tileset.tileWidth}" tileheight="${tileset.tileHeight}" margin="${tileset.margin}" spacing="${tileset.spacing}" tilecount="${tileset.columns * tileset.rows}" columns="${tileset.columns}"${tileset.objectAlignment === 'unspecified' ? '' : ` objectalignment="${tileset.objectAlignment}"`}>${tileOffset}<image source="${xml(image)}" width="${sprite?.type === 'sprite' ? sprite.width : tileset.columns * tileset.tileWidth}" height="${sprite?.type === 'sprite' ? sprite.height : tileset.rows * tileset.tileHeight}"/><transformations hflip="${Number(tileset.transformations.hFlip)}" vflip="${Number(tileset.transformations.vFlip)}" rotate="${Number(tileset.transformations.rotate)}" preferuntransformed="0"/>${tiles}${wangsets}</tileset>`;
 }

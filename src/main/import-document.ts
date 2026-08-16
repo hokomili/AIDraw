@@ -795,7 +795,16 @@ function validateTilesetStructure(source: any, fallbackTileWidth: number, fallba
       const frameId = integerInRange(frame.tileid ?? frame.tileId, 0, MAX_TILESET_TILES - 1, 'Image-collection animation tile ID');
       if (!ids.has(frameId)) throw new Error(`Tiled image-collection animation references missing tile ${frameId}.`);
     }
-    if (arrayify(source.wangsets).length) throw new Error('Tiled image-collection Wang metadata is outside this supported slice.');
+    for (const set of arrayify(source.wangsets)) {
+      for (const color of arrayify(set.colors ?? set.wangcolors)) {
+        const representative = integerInRange(color.tile, 0, MAX_TILESET_TILES - 1, 'Image-collection Wang representative tile ID');
+        if (!ids.has(representative)) throw new Error(`Tiled image-collection Wang representative references missing tile ${representative}.`);
+      }
+      for (const tile of arrayify(set.wangtiles)) {
+        const tileId = integerInRange(tile.tileid, 0, MAX_TILESET_TILES - 1, 'Image-collection Wang tile ID');
+        if (!ids.has(tileId)) throw new Error(`Tiled image-collection Wang mapping references missing tile ${tileId}.`);
+      }
+    }
   } else {
     const imageColumns = imageWidth ? Math.max(1, Math.floor(imageWidth / tileWidth)) : 1; const imageRows = imageHeight ? Math.max(1, Math.floor(imageHeight / tileHeight)) : 1;
     const tileCount = integerInRange(source.tilecount ?? Math.max(1, imageColumns * imageRows, tiles.length), 0, MAX_TILESET_TILES, 'Tileset tile count');
@@ -871,6 +880,22 @@ function wangId(value: unknown): WangSet['tiles'][number]['wangId'] {
   const values = (Array.isArray(value) ? value : String(value ?? '').split(',')).map(Number); while (values.length < 8) values.push(0); return values.slice(0, 8) as WangSet['tiles'][number]['wangId'];
 }
 
+function tiledWangSets(source: any): WangSet[] {
+  return arrayify(source.wangsets).map((set: any): WangSet => ({
+    id: createId('wang'),
+    name: String(set.name ?? 'Terrain'),
+    type: set.type === 'corner' || set.type === 'edge' ? set.type : 'mixed',
+    colors: arrayify(set.colors ?? set.wangcolors).map((color: any, index) => ({
+      id: index + 1,
+      name: String(color.name ?? `Terrain ${index + 1}`),
+      color: String(color.color ?? '#ff00ff'),
+      tileId: Number(color.tile ?? -1),
+      probability: Number(color.probability ?? 1),
+    })),
+    tiles: arrayify(set.wangtiles).map((tile: any) => ({ tileId: Number(tile.tileid), wangId: wangId(tile.wangid) })),
+  }));
+}
+
 async function attachTileset(document: ReturnType<typeof createPixelDocument>, sourceReference: any, rootFilePath: string, fallbackTileWidth: number, fallbackTileHeight: number, warnings: string[]) {
   let source = sourceReference; let sourceFilePath = rootFilePath;
   if (sourceReference.source) {
@@ -934,6 +959,7 @@ async function attachTileset(document: ReturnType<typeof createPixelDocument>, s
         collisions: arrayify(tile.objectgroup?.objects ?? tile.collisions).map(tiledCollisionShape), properties: tiledProperties(tile.properties),
       };
     }
+    tileset.wangSets = tiledWangSets(source);
     const transforms = source.transformations;
     if (transforms) tileset.transformations = { hFlip: transforms.hflip !== false && transforms.hflip !== 0, vFlip: transforms.vflip !== false && transforms.vflip !== 0, rotate: transforms.rotate !== false && transforms.rotate !== 0 };
     document.pixelAssets[tileset.id] = tileset; document.assetIds.push(tileset.id); return tileset;
@@ -946,7 +972,7 @@ async function attachTileset(document: ReturnType<typeof createPixelDocument>, s
   if (imageBytes) { const cel = Object.values(sprite.cels)[0]; writePixels(cel, await quantizeImageToPalette(imageBytes, sprite.width, sprite.height, document.palette, { alphaThreshold: document.conversionDefaults.alphaThreshold, dithering: document.conversionDefaults.dithering })); const embedded = imageAsset(basename(imagePath!), `image/${extname(imagePath!).slice(1).replace('jpg', 'jpeg') || 'png'}`, imageBytes); document.assets[embedded.id] = embedded; document.linkedAssets.push({ id: createId('link'), name: basename(imagePath!), mode: 'linked', relativePath: relative(dirname(rootFilePath), imagePath!).replace(/\\/g, '/'), sha256: embedded.sha256, cachedPreviewAssetId: embedded.id }); }
   const tileset = createPixelTileset(String(source.name ?? 'Tileset'), sprite.id, tileWidth, tileHeight, columns, rows); tileset.firstGid = Math.max(1, Number(sourceReference.firstgid ?? 1)); const margin = Number(source.margin ?? 0); const spacing = Number(source.spacing ?? 0); tileset.margin = margin; tileset.spacing = spacing; tileset.tileOffset = { x: Number(source.tileoffset?.x ?? 0), y: Number(source.tileoffset?.y ?? 0) }; tileset.objectAlignment = String(source.objectalignment ?? 'unspecified') as typeof tileset.objectAlignment; const metadata = new Map(arrayify(source.tiles ?? source.tile).map((tile: any) => [Number(tile.id), tile]));
   for (let id = 0; id < tileCount; id += 1) { const tile = metadata.get(id); const definition: TileDefinition = { id, sourceX: margin + id % columns * (tileWidth + spacing), sourceY: margin + Math.floor(id / columns) * (tileHeight + spacing), probability: Number(tile?.probability ?? 1), animation: arrayify(tile?.animation).map((frame: any) => ({ tileId: Number(frame.tileid ?? frame.tileId), durationMs: Number(frame.duration ?? frame.durationMs ?? 100) })), collisions: arrayify(tile?.objectgroup?.objects ?? tile?.collisions).map(tiledCollisionShape), properties: tiledProperties(tile?.properties) }; tileset.tiles[id] = definition; }
-  tileset.wangSets = arrayify(source.wangsets).map((set: any): WangSet => ({ id: createId('wang'), name: String(set.name ?? 'Terrain'), type: set.type === 'corner' || set.type === 'edge' ? set.type : 'mixed', colors: arrayify(set.colors ?? set.wangcolors).map((color: any, index) => ({ id: index + 1, name: String(color.name ?? `Terrain ${index + 1}`), color: String(color.color ?? '#ff00ff'), tileId: Number(color.tile ?? -1), probability: Number(color.probability ?? 1) })), tiles: arrayify(set.wangtiles).map((tile: any) => ({ tileId: Number(tile.tileid), wangId: wangId(tile.wangid) })) }));
+  tileset.wangSets = tiledWangSets(source);
   const transforms = source.transformations; if (transforms) tileset.transformations = { hFlip: transforms.hflip !== false && transforms.hflip !== 0, vFlip: transforms.vflip !== false && transforms.vflip !== 0, rotate: transforms.rotate !== false && transforms.rotate !== 0 };
   document.pixelAssets[sprite.id] = sprite; document.assetIds.push(sprite.id); document.pixelAssets[tileset.id] = tileset; document.assetIds.push(tileset.id); return tileset;
 }

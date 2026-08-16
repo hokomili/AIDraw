@@ -28,6 +28,16 @@ function fixture() {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('image-collection authoring surface', () => {
+  it('exposes exact sparse Wang metadata controls through the guarded collection mutation planner', async () => {
+    const source = await readFile(new URL('../../src/renderer/App.tsx', import.meta.url), 'utf8');
+    expect(source).toContain('planImageCollectionWangMutation(active, tileset, next)');
+    expect(source).toContain('expectedSpriteDependencies: plan.expectedSpriteDependencies');
+    expect(source).toContain('active.id, plan.expectedDocumentRevision');
+    expect(source).toContain('tileId: effectiveSelectedTileId');
+    expect(source).toContain('Tile {effectiveSelectedTileId} Wang slots');
+    expect(source).not.toContain('{!imageCollection && <>\n      <div className="section-heading">\n        <span>Wang terrain</span>');
+  });
+
   it('presents exact authored-order source choices with bounded named controls and honest exclusions', () => {
     const document = createPixelDocument('project', 'Chooser');
     const wide = createPixelSprite('Wide source', 19, 5);

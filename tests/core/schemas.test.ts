@@ -87,6 +87,13 @@ describe('canvas operation schemas', () => {
     expect(CanvasOperationSchema.safeParse({ kind: 'pixel.asset.add', asset: missingImage }).success).toBe(false);
     const missingAnimationTarget = structuredClone(collection); missingAnimationTarget.tiles[3].animation[0].tileId = 2;
     expect(CanvasOperationSchema.safeParse({ kind: 'pixel.asset.add', asset: missingAnimationTarget }).success).toBe(false);
+    const wangCollection = structuredClone(collection);
+    wangCollection.wangSets = [{ id: 'sparse-wang', name: 'Sparse Wang', type: 'mixed', colors: [{ id: 1, name: 'Stone', color: '#777777', tileId: 3, probability: 1 }], tiles: [{ tileId: 3, wangId: [1, 1, 1, 1, 1, 1, 1, 1] }] }];
+    expect(CanvasOperationSchema.safeParse({ kind: 'pixel.asset.add', asset: wangCollection }).success).toBe(true);
+    const missingWangTile = structuredClone(wangCollection); missingWangTile.wangSets[0].tiles[0].tileId = 2;
+    expect(CanvasOperationSchema.safeParse({ kind: 'pixel.asset.add', asset: missingWangTile }).success).toBe(false);
+    const missingRepresentative = structuredClone(wangCollection); missingRepresentative.wangSets[0].colors[0].tileId = 2;
+    expect(CanvasOperationSchema.safeParse({ kind: 'pixel.asset.add', asset: missingRepresentative }).success).toBe(false);
     const atlas = createPixelTileset('Atlas', source.id, 2, 2, 1, 1); atlas.tiles[0] = { ...collection.tiles[3], id: 0 };
     expect(CanvasOperationSchema.safeParse({ kind: 'pixel.asset.add', asset: atlas }).success).toBe(false);
   });

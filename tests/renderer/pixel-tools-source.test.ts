@@ -49,10 +49,13 @@ describe('pixel tool renderer wiring', () => {
     const branch = source.slice(start, end);
     expect(start).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(start);
-    expect(branch).toContain('planWangTerrainStroke(terrainSet, points, terrainColor.id, terrainTileAt');
+    expect(source).toContain('planWangTerrainSelection(document, request)');
+    expect(source).toContain('wangTerrainSelectionPlansMatch(observed, current)');
+    expect(source).toContain('aria-label="Wang terrain tileset"');
+    expect(branch).toContain('planWangTerrainStroke(gestureSet, points, pendingWangTerrainPlan.colorId, terrainTileAt');
     expect(branch).toContain("{ erase: terrainErase, contains }");
     expect(branch).toContain('resolveTilesetForGid(document, tilemap, gid)');
-    expect(branch).toContain('resolved.tileset.id !== terrainTileset.id');
+    expect(branch).toContain('resolved.tileset.id !== gestureTileset.id');
     expect(branch).not.toContain('decoded.gid - firstGid');
     expect(branch).toContain("if (plan.status === 'unmatched')");
     expect(branch).toContain('entry.wangId.join');
@@ -60,6 +63,8 @@ describe('pixel tool renderer wiring', () => {
     expect(branch.indexOf("if (plan.status === 'unmatched')")).toBeLessThan(branch.indexOf("kind: 'pixel.tilemap.set'"));
     expect(branch.match(/kind: 'pixel\.tilemap\.set'/gu)).toHaveLength(1);
     expect(branch).toContain('expectedRevision: layer.revision');
+    expect(branch).toContain('applyGuarded(');
+    expect(branch).toContain('pendingWangTerrainPlan.expectedDocumentRevision');
     expect(branch).toContain('in one undoable change');
     expect(branch).not.toContain('terrain neighbor');
   });

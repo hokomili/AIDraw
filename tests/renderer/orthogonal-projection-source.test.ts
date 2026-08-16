@@ -41,7 +41,7 @@ describe('orthogonal projection source parity', () => {
     expect(interactive).toContain('orthogonalCellRect(point.x, point.y, view.scale, orthogonalCellHeight)');
   });
 
-  it('selects sparse per-tile image sprites for rendering and exact finite-orthogonal Current tile authoring', async () => {
+  it('selects sparse per-tile image sprites for rendering, Current tile authoring, and explicit Wang terrain', async () => {
     const app = await readFile(new URL('../../src/renderer/App.tsx', import.meta.url), 'utf8');
     const interactive = await readFile(new URL('../../src/renderer/canvas/PixelCanvas.tsx', import.meta.url), 'utf8');
     const headless = await readFile(new URL('../../src/main/render-document.ts', import.meta.url), 'utf8');
@@ -55,7 +55,9 @@ describe('orthogonal projection source parity', () => {
     expect(interactive).toContain("const finiteOrthogonalCollectionTilesets = attachedMapTilesets.filter((entry) => isImageCollectionTileset(entry) && tilemap?.orientation === 'orthogonal' && !tilemap.infinite)");
     expect(interactive).toContain('const authorableMapTileTilesets = [...atlasMapTilesets, ...finiteOrthogonalCollectionTilesets]');
     expect(interactive).toContain("currentMapTileChoice?.documentId === document.id");
-    expect(interactive).toContain("tool === 'terrain'\n      ? atlasMapTilesets[0]\n      : currentMapTileTileset");
+    expect(interactive).toContain('const wangTerrainTilesets = [\n    ...atlasMapTilesets,\n    ...finiteOrthogonalCollectionTilesets.filter((entry) => entry.wangSets.length > 0)');
+    expect(interactive).toContain("tool === 'terrain'\n      ? selectedTerrainTileset\n      : currentMapTileTileset");
+    expect(interactive).toContain('aria-label="Wang terrain tileset"');
     expect(interactive).toContain('<CurrentMapTileControl');
     expect(interactive).toContain('planMapTileAuthoringSelection(document, request)');
     expect(interactive).toContain('mapTileAuthoringPlansMatch(observed, current)');
