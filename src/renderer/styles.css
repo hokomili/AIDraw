@@ -643,6 +643,30 @@ html[data-native-titlebar="hidden-inset"] .brand { width: max(calc(118px + var(-
 .tile-animation-frame-actions button:disabled { opacity: .4; cursor: default; }
 .tile-animation-frame-actions .tile-animation-delete { background: var(--coral-soft); color: var(--coral); }
 
+/* Map, tile, and collision custom properties share one exact, density-compliant presentation. */
+.custom-property-editor { min-width: 0; }
+.custom-property-heading { padding: 7px 0; }
+.custom-property-fields { min-width: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.custom-property-field { min-width: 0; display: grid; gap: 4px; color: var(--muted); font-size: var(--ui-type-caption); font-weight: 700; }
+.custom-property-field input { width: 100%; min-width: 0; height: var(--ui-hit-secondary); padding: 0 7px; border: 1px solid var(--border); border-radius: 7px; background: #fff; color: var(--ink); font-size: var(--ui-type-label); }
+.custom-property-set { min-height: var(--ui-hit-secondary); padding: 0 9px; grid-column: 1 / -1; display: inline-flex; align-items: center; justify-content: center; gap: 5px; border-radius: 7px; background: var(--teal-soft); color: #267f79; font-size: var(--ui-type-caption); font-weight: 700; cursor: pointer; }
+.custom-property-set:disabled, .custom-property-entry-heading button:disabled { opacity: .4; cursor: default; }
+.custom-property-set svg, .custom-property-entry-heading button svg { width: var(--ui-icon-secondary); height: var(--ui-icon-secondary); flex: 0 0 auto; }
+.custom-property-inference { margin: 6px 0; color: var(--muted); font-size: var(--ui-type-caption); line-height: 1.4; }
+.custom-property-list { min-width: 0; display: grid; gap: 6px; }
+.custom-property-empty { margin: 0; padding: 9px; border: 1px dashed var(--border); border-radius: 8px; color: var(--muted); font-size: var(--ui-type-caption); line-height: 1.4; }
+.custom-property-entry { min-width: 0; padding: 7px; display: grid; gap: 7px; border: 1px solid var(--border-soft); border-radius: 8px; background: #fff; }
+.custom-property-entry:focus-within { border-color: #267f79; box-shadow: 0 0 0 2px rgba(38, 127, 121, .16); }
+.custom-property-entry-heading { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 7px; }
+.custom-property-entry-heading > strong { min-width: 0; color: var(--ink); font-size: var(--ui-type-label); }
+.custom-property-entry-heading button { min-height: var(--ui-hit-secondary); padding: 0 8px; flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; gap: 5px; border-radius: 7px; background: var(--coral-soft); color: var(--coral); font-size: var(--ui-type-caption); cursor: pointer; }
+.custom-property-details { min-width: 0; margin: 0; display: grid; grid-template-columns: minmax(0, 1fr) 72px; gap: 6px; }
+.custom-property-details > div { min-width: 0; padding: 6px 7px; border-radius: 7px; background: #f5f1eb; }
+.custom-property-details dt { color: var(--muted); font-size: var(--ui-type-caption); font-weight: 700; }
+.custom-property-details dd { min-width: 0; margin: 3px 0 0; color: var(--ink); font-size: var(--ui-type-label); line-height: 1.4; overflow-wrap: anywhere; white-space: pre-wrap; }
+.custom-property-details code { font: inherit; }
+.custom-property-value { grid-column: 1 / -1; }
+
 @media (max-width: 1120px) {
   .wang-signature-fields { grid-template-columns: minmax(0, 1fr); }
   .wang-set-row { grid-template-columns: var(--ui-hit-secondary) minmax(0, 1fr); }
@@ -663,6 +687,10 @@ html[data-native-titlebar="hidden-inset"] .brand { width: max(calc(118px + var(-
   .tile-animation-frame-fields { grid-template-columns: minmax(0, 1fr); }
   .tile-animation-frame-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .tile-animation-frame-actions .tile-animation-delete { grid-column: 1 / -1; }
+  .custom-property-fields, .custom-property-details { grid-template-columns: minmax(0, 1fr); }
+  .custom-property-type, .custom-property-value { grid-column: 1; }
+  .custom-property-entry-heading { align-items: stretch; flex-direction: column; }
+  .custom-property-entry-heading button { width: 100%; }
 }
 
 @media (prefers-reduced-motion: reduce) {

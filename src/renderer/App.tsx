@@ -145,6 +145,7 @@ import { interchangeFidelityCodeLabel } from "../common/interchange-fidelity";
 import { AGENT_CLIENTS, type AgentClientId, type AgentClientSetupResult } from "../common/agent-clients";
 import { cropImageToAspect, resetImageCrop } from "../common/image-crop";
 import { BrushLibraryDialog } from "./components/BrushLibraryDialog";
+import { CustomPropertyEditor } from "./components/CustomPropertyEditor";
 import { DitherPresetDialog, OrderedDitherPhaseInput } from "./components/DitherPresetDialog";
 import { ImageCropFields } from "./components/ImageCropFields";
 import { MapSetupDisclosure } from "./components/MapSetupDisclosure";
@@ -3817,9 +3818,16 @@ function PixelLayers({ document }: { document: PixelDocument }) {
           <label className="field"><span>Orientation</span><select value={asset.orientation} onChange={(event) => updateMapMode({ ...asset, orientation: event.target.value as typeof asset.orientation }, "Change map orientation")}><option value="orthogonal">Orthogonal</option><option value="isometric">Isometric</option></select></label>
           <label className="map-infinite-toggle"><input type="checkbox" checked={asset.infinite} onChange={(event) => updateMapMode({ ...asset, infinite: event.target.checked }, event.target.checked ? "Enable infinite map" : "Use finite map")} /><span>Infinite 32×32 chunks</span></label>
         </div>
-        <div className="section-heading"><span>Map properties</span></div>
-        <div className="tile-property-add"><input aria-label="Map property name" placeholder="name" value={mapPropertyName} onChange={(event) => setMapPropertyName(event.target.value)} /><input aria-label="Map property value" placeholder="value" value={mapPropertyValue} onChange={(event) => setMapPropertyValue(event.target.value)} /><button disabled={!mapPropertyName.trim()} onClick={() => { const value = mapPropertyValue === "true" ? true : mapPropertyValue === "false" ? false : mapPropertyValue.trim() !== "" && Number.isFinite(Number(mapPropertyValue)) ? Number(mapPropertyValue) : mapPropertyValue; updateAsset({ ...asset, properties: { ...asset.properties, [mapPropertyName.trim()]: value } }, "Set map property"); setMapPropertyName(""); setMapPropertyValue(""); }}>Add</button></div>
-        <div className="tile-property-list">{Object.entries(asset.properties).map(([key, value]) => <span key={key}><strong>{key}</strong> = {String(value)}<button onClick={() => { const properties = { ...asset.properties }; delete properties[key]; updateAsset({ ...asset, properties }, "Delete map property"); }}>×</button></span>)}</div>
+        <CustomPropertyEditor
+          title="Map properties"
+          scopeLabel="Map"
+          properties={asset.properties}
+          nameDraft={mapPropertyName}
+          valueDraft={mapPropertyValue}
+          onNameDraftChange={setMapPropertyName}
+          onValueDraftChange={setMapPropertyValue}
+          onChange={(properties, action) => updateAsset({ ...asset, properties }, action === "set" ? "Set map property" : "Delete map property")}
+        />
       </div></MapSetupDisclosure>}
       <div className="panel-list layer-list">
         {flattenedLayers.map(({ entry: layer, depth }) => (
@@ -4376,9 +4384,16 @@ function TilesetPanel({
         <label className="field"><span>Random variant group</span><input key={"variant-" + effectiveSelectedTileId + "-" + String(selectedTile.properties[TILE_VARIANT_GROUP_PROPERTY] ?? "")} maxLength={100} defaultValue={String(selectedTile.properties[TILE_VARIANT_GROUP_PROPERTY] ?? "")} placeholder="e.g. grass" onBlur={(event) => { const properties = { ...selectedTile.properties }; const group = event.target.value.trim(); if (group) properties[TILE_VARIANT_GROUP_PROPERTY] = group; else delete properties[TILE_VARIANT_GROUP_PROPERTY]; updateTile({ properties }, "Change random variant group"); }} /><small>{selectedVariantCandidates.length || 1} weighted tile variant{(selectedVariantCandidates.length || 1) === 1 ? "" : "s"} share this group.</small></label>
         <TileVariantPreview document={document} tileset={tileset} selectedTileId={effectiveSelectedTileId} group={selectedVariantGroup} candidates={selectedVariantCandidates} onSelect={(tileId) => { setSelectedTileId(tileId); setSelectedCollisionIds([]); }} />
         <TileAnimationEditor document={document} tileset={tileset} tile={selectedTile} tileCount={tileCount} availableTileIds={collectionTileIds} onChange={(animation, label) => updateTile({ animation }, label)} />
-        <div className="section-heading"><span>Custom properties</span></div>
-        <div className="tile-property-add"><input aria-label="Property name" placeholder="name" value={propertyName} onChange={(event) => setPropertyName(event.target.value)} /><input aria-label="Property value" placeholder="value" value={propertyValue} onChange={(event) => setPropertyValue(event.target.value)} /><button disabled={!propertyName.trim()} onClick={() => { const parsed = propertyValue === "true" ? true : propertyValue === "false" ? false : propertyValue.trim() !== "" && Number.isFinite(Number(propertyValue)) ? Number(propertyValue) : propertyValue; updateTile({ properties: { ...selectedTile.properties, [propertyName.trim()]: parsed } }, "Set tile property"); setPropertyName(""); setPropertyValue(""); }}>Add</button></div>
-        <div className="tile-property-list">{Object.entries(selectedTile.properties).map(([key, value]) => <span key={key}><strong>{key}</strong> = {String(value)}<button title="Delete property" onClick={() => { const properties = { ...selectedTile.properties }; delete properties[key]; updateTile({ properties }, "Delete tile property"); }}>×</button></span>)}</div>
+        <CustomPropertyEditor
+          title="Custom properties"
+          scopeLabel="Tile"
+          properties={selectedTile.properties}
+          nameDraft={propertyName}
+          valueDraft={propertyValue}
+          onNameDraftChange={setPropertyName}
+          onValueDraftChange={setPropertyValue}
+          onChange={(properties, action) => updateTile({ properties }, action === "set" ? "Set tile property" : "Delete tile property")}
+        />
       </div>
       <>
       <div className="section-heading">
@@ -4422,7 +4437,17 @@ function TilesetPanel({
         <CollisionShapeEditor documentId={document.id} tilesetId={tileset.id} sprite={selectedSource?.sprite ?? (sourceSprite?.type === "sprite" ? sourceSprite : undefined)} palette={document.palette} sourceX={selectedSource?.rect.x ?? selectedTile.sourceX} sourceY={selectedSource?.rect.y ?? selectedTile.sourceY} width={selectedSource?.rect.width ?? tileset.tileWidth} height={selectedSource?.rect.height ?? tileset.tileHeight} shapes={selectedTile.collisions} selectedIds={selectedCollisionIds} onSelect={setSelectedCollisionIds} onCommit={(shapes, label) => { const changed = new Map(shapes.map((shape) => [shape.id, shape])); updateTile({ collisions: selectedTile.collisions.map((entry) => changed.get(entry.id) ?? entry) }, label); }} />
       </CollisionShapeManager>
       {selectedCollisions.length > 1 && <small className="collision-selection-note">Drag the highlighted shapes together, or select exactly one collision to edit its points and custom properties.</small>}
-      {selectedCollision && <div className="collision-property-editor"><div className="section-heading"><span>Collision properties</span><small>{Object.keys(selectedCollision.properties).length}</small></div><div className="tile-property-add"><input aria-label="Collision property name" placeholder="name" value={collisionPropertyName} onChange={(event) => setCollisionPropertyName(event.target.value)} /><input aria-label="Collision property value" placeholder="value" value={collisionPropertyValue} onChange={(event) => setCollisionPropertyValue(event.target.value)} /><button disabled={!collisionPropertyName.trim()} onClick={() => { const parsed = collisionPropertyValue === "true" ? true : collisionPropertyValue === "false" ? false : collisionPropertyValue.trim() !== "" && Number.isFinite(Number(collisionPropertyValue)) ? Number(collisionPropertyValue) : collisionPropertyValue; updateTile({ collisions: selectedTile.collisions.map((entry) => entry.id === selectedCollision.id ? { ...entry, properties: { ...entry.properties, [collisionPropertyName.trim()]: parsed } } : entry) }, "Set collision property"); setCollisionPropertyName(""); setCollisionPropertyValue(""); }}>Add</button></div><div className="tile-property-list">{Object.entries(selectedCollision.properties).map(([key, value]) => <span key={key}><strong>{key}</strong> = {String(value)}<button title="Delete collision property" onClick={() => { const properties = { ...selectedCollision.properties }; delete properties[key]; updateTile({ collisions: selectedTile.collisions.map((entry) => entry.id === selectedCollision.id ? { ...entry, properties } : entry) }, "Delete collision property"); }}>×</button></span>)}</div></div>}
+      {selectedCollision && <CustomPropertyEditor
+        title="Collision properties"
+        scopeLabel="Collision"
+        className="collision-property-editor"
+        properties={selectedCollision.properties}
+        nameDraft={collisionPropertyName}
+        valueDraft={collisionPropertyValue}
+        onNameDraftChange={setCollisionPropertyName}
+        onValueDraftChange={setCollisionPropertyValue}
+        onChange={(properties, action) => updateTile({ collisions: selectedTile.collisions.map((entry) => entry.id === selectedCollision.id ? { ...entry, properties } : entry) }, action === "set" ? "Set collision property" : "Delete collision property")}
+      />}
       <div className="section-heading"><span>Drawing offset</span><small>map pixels</small></div>
       <div className="two-fields">
         {(["x", "y"] as const).map((axis) => (

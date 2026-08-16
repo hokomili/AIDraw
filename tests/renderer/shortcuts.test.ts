@@ -183,8 +183,8 @@ describe('keyboard shortcut reference', () => {
     expect(readme).toContain('exactly 40 eligible bindings: all 39 tools displayed across the illustration (19) and pixel (20) rails plus the renderer-owned inspector toggle');
     expect(readme).toContain('Later still-free new mnemonics are reserved before fallback selection');
     expect(readme).toContain('remaining command/native-menu remapping');
-    expect(tracker).toContain('clean and live-synchronized through base `89c8a1d8ad80694dc7d5fe5c463fe5b24294bb92`');
-    expect(tracker).toContain('The current bounded UX-01/MAP-03 source/headless candidate changes only the selected-tile animation-editor presentation');
+    expect(tracker).toContain('clean and live-synchronized through base `cba8ffc6f364e9e273006825303f725dcc34d1fb`');
+    expect(tracker).toContain('The current bounded UX-01/MAP-03/MAP-04/MAP-07 source/headless candidate changes only the three legacy custom-property editor presentations');
     expect(tracker).toContain('A deliberate previewed version-2 portable kit carries every and only reached atlas or finite-orthogonal image-collection dependency');
     expect(tracker).toContain('all **39 displayed tool activations**—19 illustration and 20 pixel—plus the renderer-owned inspector toggle');
     expect(tracker).toContain('later still-free new mnemonics remain reserved from earlier fallbacks');

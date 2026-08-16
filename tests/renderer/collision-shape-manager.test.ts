@@ -172,7 +172,7 @@ describe("tile collision shape manager", () => {
     expect(app).toContain('kind: "pixel.asset.replace"');
     expect(app).toContain("expectedRevision: tileset.revision");
     expect(app).toContain("expectedSpriteDependencies");
-    expect(app).toContain("entry.id === selectedCollision.id ? { ...entry, properties:");
+    expect(app).toContain("entry.id === selectedCollision.id ? { ...entry, properties } : entry");
     expect(canvas).toContain("moveMapObjectSelection");
     expect(canvas).toContain("event.shiftKey");
     expect(canvas).toContain("onPointerCancel={(event) => void finishGesture(event, false)}");
