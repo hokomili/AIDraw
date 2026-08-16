@@ -59,6 +59,11 @@ import { MAX_IMPORT_UTILITY_DOCUMENTS, MAX_IMPORT_UTILITY_SERIALIZED_BYTES } fro
 import { jsonStringSerializedByteLength } from './utility-resource-policy';
 import { inspectSpriteSheetSource } from './sprite-sheet-preview';
 import { readBoundedRegularFile } from './bounded-file-read';
+import {
+  assertMetadataSpriteSheetAtlas,
+  planMetadataSpriteSheet,
+  reconstructMetadataSpriteSheetFrame,
+} from './sprite-sheet-metadata';
 
 initializePsdCanvas(createCanvas as unknown as (width: number, height: number) => HTMLCanvasElement);
 
@@ -68,8 +73,6 @@ const ANIMATION_PALETTE_FALLBACK_WARNING = 'One or more animation frames contain
 
 export const MAX_STRUCTURED_IMPORT_BYTES = 16 * 1024 * 1024;
 export const MAX_BINARY_IMPORT_BYTES = 256 * 1024 * 1024;
-const MAX_SPRITE_SHEET_FRAMES = 4_096;
-const MAX_SPRITE_SHEET_EXPANDED_PIXELS = 64 * 1024 * 1024;
 const MAX_PSD_DECODED_BYTES = (MAX_PSD_EXPANDED_LAYER_PIXELS + MAX_INLINE_IMAGE_PIXELS) * 4;
 const MAX_PDF_PAGES = MAX_IMPORT_UTILITY_DOCUMENTS;
 const MAX_PDF_EXPANDED_PIXELS = 64 * 1024 * 1024;
@@ -319,28 +322,30 @@ export function importGifBytes(bytes: Buffer, name: string): ImportResult {
 }
 
 async function importSpriteSheet(bytes: Buffer, name: string, filePath: string): Promise<ImportResult> {
-  const metadata = safeJson(bytes, 'Sprite-sheet metadata'); const frameSources = Array.isArray(metadata.frames) ? metadata.frames : Object.entries(metadata.frames ?? {}).map(([filename, frame]) => ({ filename, ...(frame as Record<string, unknown>) }));
-  if (!frameSources.length) throw new Error('Sprite-sheet metadata contains no frames.');
-  if (frameSources.length > MAX_SPRITE_SHEET_FRAMES) throw new Error(`Sprite-sheet metadata exceeds the ${MAX_SPRITE_SHEET_FRAMES.toLocaleString('en-US')}-frame limit.`);
-  const firstRect = frameSources[0].frame ?? frameSources[0]; const width = Number(firstRect.w ?? firstRect.width); const height = Number(firstRect.h ?? firstRect.height); assertImageDimensions(width, height, 'Sprite frame');
-  if (width * height * frameSources.length > MAX_SPRITE_SHEET_EXPANDED_PIXELS) throw new Error('Sprite-sheet frames exceed the 64-megapixel expanded import budget.');
-  const imageReference = String(metadata.meta?.image ?? `${name}.png`); const companion = await readCompanionFile(filePath, filePath, imageReference, MAX_BINARY_IMPORT_BYTES, 'Sprite-sheet image'); const imagePath = companion.path; const imageBytes = companion.bytes;
+  const metadata = safeJson(bytes, 'Sprite-sheet metadata');
+  const plan = planMetadataSpriteSheet(metadata, `${name}.png`);
+  const companion = await readCompanionFile(filePath, filePath, plan.imageReference, MAX_BINARY_IMPORT_BYTES, 'Sprite-sheet image'); const imagePath = companion.path; const imageBytes = companion.bytes;
   assertImportedInlineAssetBytes(imageBytes, 'Sprite-sheet image');
   const imageHeader = inspectImageHeader(imageBytes); assertImageDimensions(imageHeader.width, imageHeader.height, 'Sprite-sheet image');
   let sourceImage;
-  try { sourceImage = await loadImage(imageBytes); } catch { throw new Error(`Sprite-sheet image ${imageReference} is unreadable.`); }
+  try { sourceImage = await loadImage(imageBytes); } catch { throw new Error(`Sprite-sheet image ${plan.imageReference} is unreadable.`); }
   const sourceSize = { width: sourceImage.width, height: sourceImage.height }; if (sourceSize.width !== imageHeader.width || sourceSize.height !== imageHeader.height) throw new Error('Decoded sprite-sheet dimensions disagree with its file header.');
-  const document = createPixelDocument('sprite', name); const sprite = createPixelSprite(name, width, height); document.pixelAssets = { [sprite.id]: sprite }; document.assetIds = [sprite.id]; document.activeAssetId = sprite.id; const layerId = sprite.layerIds[0]; const importedFrameIds: string[] = [];
-  for (let index = 0; index < frameSources.length; index += 1) { const source = frameSources[index]; const rect = source.frame ?? source; let frameId: string; let celId: string;
-    const frameX = Number(rect.x ?? 0); const frameY = Number(rect.y ?? 0); const frameWidth = Number(rect.w ?? rect.width ?? width); const frameHeight = Number(rect.h ?? rect.height ?? height); const duration = Number(source.duration ?? 100);
-    if (![frameX, frameY, frameWidth, frameHeight].every(Number.isInteger) || frameX < 0 || frameY < 0 || frameWidth < 1 || frameHeight < 1 || frameX + frameWidth > sourceSize.width || frameY + frameHeight > sourceSize.height) throw new Error(`Sprite-sheet frame ${index + 1} has an invalid or out-of-bounds rectangle.`);
-    if (!Number.isFinite(duration) || duration < 1 || duration > 60_000) throw new Error(`Sprite-sheet frame ${index + 1} has an invalid duration.`);
-    const frameCanvas = createCanvas(width, height); const frameContext = frameCanvas.getContext('2d'); frameContext.imageSmoothingEnabled = true; frameContext.imageSmoothingQuality = 'high'; frameContext.drawImage(sourceImage, frameX, frameY, frameWidth, frameHeight, 0, 0, width, height);
-    if (index === 0) { frameId = sprite.frameIds[0]; celId = Object.values(sprite.cels)[0].id; sprite.frames[frameId].name = String(source.filename ?? source.name ?? 'Frame 1'); sprite.frames[frameId].durationMs = duration; }
-    else { const timestamp = nowIso(); frameId = createId('frame'); celId = createId('cel'); sprite.frameIds.push(frameId); sprite.frames[frameId] = { id: frameId, revision: 0, name: String(source.filename ?? source.name ?? `Frame ${index + 1}`), createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, durationMs: duration }; sprite.cels[celId] = { id: celId, revision: 0, name: `Pixels · Frame ${index + 1}`, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, layerId, frameId, chunks: {} }; }
-    importedFrameIds.push(frameId); writePixels(sprite.cels[celId], quantizeRgbaToPalette(frameContext.getImageData(0, 0, width, height).data, width, height, document.palette, { alphaThreshold: document.conversionDefaults.alphaThreshold, dithering: document.conversionDefaults.dithering }));
+  assertMetadataSpriteSheetAtlas(plan, sourceSize.width, sourceSize.height);
+  const atlasCanvas = createCanvas(sourceSize.width, sourceSize.height); let atlas: Uint8ClampedArray;
+  try {
+    const atlasContext = atlasCanvas.getContext('2d'); atlasContext.imageSmoothingEnabled = false; atlasContext.drawImage(sourceImage, 0, 0);
+    atlas = atlasContext.getImageData(0, 0, sourceSize.width, sourceSize.height).data;
+  } finally {
+    atlasCanvas.width = 1; atlasCanvas.height = 1;
   }
-  const tags = arrayify(metadata.meta?.frameTags ?? metadata.meta?.tags); if (tags.length > 1_024) throw new Error('Sprite-sheet metadata exceeds the 1,024-tag limit.'); sprite.tags = tags.map((tag: any) => { const from = typeof tag.from === 'number' ? importedFrameIds[tag.from] : importedFrameIds.includes(tag.fromFrameId) ? tag.fromFrameId : importedFrameIds[0]; const to = typeof tag.to === 'number' ? importedFrameIds[tag.to] : importedFrameIds.includes(tag.toFrameId) ? tag.toFrameId : importedFrameIds.at(-1)!; return { id: createId('tag'), name: String(tag.name ?? 'Animation'), fromFrameId: from, toFrameId: to, direction: tag.direction === 'reverse' || tag.direction === 'ping-pong' || tag.direction === 'pingpong' ? (tag.direction === 'reverse' ? 'reverse' : 'ping-pong') : 'forward', color: String(tag.color ?? '#9b87f5') }; });
+  const document = createPixelDocument('sprite', name); const sprite = createPixelSprite(name, plan.width, plan.height); document.pixelAssets = { [sprite.id]: sprite }; document.assetIds = [sprite.id]; document.activeAssetId = sprite.id; const layerId = sprite.layerIds[0]; const importedFrameIds: string[] = [];
+  plan.frames.forEach((source, index) => { let frameId: string; let celId: string;
+    const rgba = reconstructMetadataSpriteSheetFrame(atlas, sourceSize.width, sourceSize.height, source, plan.width, plan.height);
+    if (index === 0) { frameId = sprite.frameIds[0]; celId = Object.values(sprite.cels)[0].id; sprite.frames[frameId].name = source.name; sprite.frames[frameId].durationMs = source.durationMs; }
+    else { const timestamp = nowIso(); frameId = createId('frame'); celId = createId('cel'); sprite.frameIds.push(frameId); sprite.frames[frameId] = { id: frameId, revision: 0, name: source.name, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, durationMs: source.durationMs }; sprite.cels[celId] = { id: celId, revision: 0, name: `Pixels · Frame ${index + 1}`, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, layerId, frameId, chunks: {} }; }
+    importedFrameIds.push(frameId); writePixels(sprite.cels[celId], quantizeRgbaToPalette(rgba, plan.width, plan.height, document.palette, { alphaThreshold: document.conversionDefaults.alphaThreshold, dithering: document.conversionDefaults.dithering }));
+  });
+  sprite.tags = plan.tags.map((tag) => ({ id: createId('tag'), name: tag.name, fromFrameId: importedFrameIds[tag.fromIndex], toFrameId: importedFrameIds[tag.toIndex], direction: tag.direction, color: tag.color }));
   const embedded = imageAsset(basename(imagePath), `image/${extname(imagePath).slice(1).replace('jpg', 'jpeg') || 'png'}`, imageBytes); document.assets[embedded.id] = embedded; document.linkedAssets.push({ id: createId('link'), name: basename(imagePath), mode: 'linked', relativePath: relative(dirname(filePath), imagePath).replace(/\\/g, '/'), sha256: embedded.sha256, cachedPreviewAssetId: embedded.id }); document.dirty = true; return { documents: [document], warnings: [] };
 }
 
