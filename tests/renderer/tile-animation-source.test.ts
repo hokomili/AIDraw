@@ -15,12 +15,19 @@ describe('tile animation editor wiring', () => {
   it('renders a duration-aware, pausable tileset preview with reduced-motion protection', async () => {
     const source = await readFile(new URL('../../src/renderer/components/TileAnimationEditor.tsx', import.meta.url), 'utf8');
     expect(source).toContain('drawSpriteRegionThumbnail');
-    expect(source).toContain('tilesetTileSourceRect');
+    expect(source).toContain('resolveTilesetTileSource');
     expect(source).toContain('<canvas');
     expect(source).toContain('frame.durationMs');
     expect(source).toContain('Pause animation preview');
     expect(source).toContain('Play animation preview');
     expect(source).toContain('prefers-reduced-motion: reduce');
+  });
+
+  it('uses an exact sparse-ID chooser for image-collection animation frames', async () => {
+    const source = await readFile(new URL('../../src/renderer/components/TileAnimationEditor.tsx', import.meta.url), 'utf8');
+    expect(source).toContain('availableTileIds ? <select');
+    expect(source).toContain('Existing collection tile ID');
+    expect(source).toContain('availableTileIds.map((tileId)');
   });
 
   it('samples placed animations through one clock and one shared source-rectangle contract', async () => {

@@ -396,6 +396,12 @@ const MAX_PIXEL_COORDINATE = 16_777_216;
 export const MAX_TILESET_DRAWING_OFFSET = MAX_PIXEL_COORDINATE;
 export const MAX_TILEMAP_LAYER_OFFSET = MAX_PIXEL_COORDINATE;
 const MAX_PIXEL_DIMENSION = 8_192;
+const PixelSpriteDependencyGuardInputSchema = z.object({
+  spriteId: IdSchema,
+  expectedRevision: FiniteNumberSchema.int().nonnegative(),
+  width: FiniteNumberSchema.int().min(1).max(MAX_PIXEL_DIMENSION),
+  height: FiniteNumberSchema.int().min(1).max(MAX_PIXEL_DIMENSION),
+}).strict();
 // Match the established Tiled importer ceilings; this boundary adds no new resource policy.
 const MAX_TILESET_TILES = 1_048_576;
 const MAX_TILESET_COLLISION_OBJECTS = 100_000;
@@ -856,7 +862,17 @@ const TargetedOperationSchemas: Record<z.infer<typeof OperationKindSchema>, z.Zo
   'pixel.frame.replace': z.object({ spriteId: IdSchema, frame: FrameInputSchema, expectedRevision: ExpectedRevisionSchema }).loose(),
   'pixel.frame.delete': z.object({ spriteId: IdSchema, frameId: IdSchema, expectedRevision: ExpectedRevisionSchema }).loose(),
   'pixel.asset.add': z.object({ asset: PixelAssetInputSchema, index: z.number().int().nonnegative().optional() }).loose(),
-  'pixel.asset.replace': z.object({ asset: PixelAssetInputSchema, expectedRevision: ExpectedRevisionSchema }).loose(),
+  'pixel.asset.replace': z.object({
+    asset: PixelAssetInputSchema,
+    expectedRevision: ExpectedRevisionSchema,
+    expectedSpriteDependencies: z.array(PixelSpriteDependencyGuardInputSchema).min(1).max(1_024).optional(),
+  }).loose().superRefine(({ expectedSpriteDependencies }, context) => {
+    const ids = new Set<string>();
+    expectedSpriteDependencies?.forEach(({ spriteId }, index) => {
+      if (ids.has(spriteId)) context.addIssue({ code: 'custom', path: ['expectedSpriteDependencies', index, 'spriteId'], message: 'Expected sprite dependencies must be unique' });
+      ids.add(spriteId);
+    });
+  }),
   'pixel.asset.delete': z.object({ assetId: IdSchema, expectedRevision: ExpectedRevisionSchema }).loose(),
   'pixel.cel.set': z.object({
     spriteId: IdSchema,

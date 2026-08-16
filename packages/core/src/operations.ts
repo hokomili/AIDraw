@@ -37,6 +37,13 @@ export interface TileGidRun {
   gid: number;
 }
 
+export interface PixelSpriteDependencyGuard {
+  spriteId: Id;
+  expectedRevision: number;
+  width: number;
+  height: number;
+}
+
 export type CanvasOperation =
   | { kind: 'document.rename'; name: string }
   | { kind: 'illustration.artboard.replace'; artboard: IllustrationDocument['artboard']; expectedRevision?: number }
@@ -73,7 +80,7 @@ export type CanvasOperation =
   | { kind: 'pixel.frame.replace'; spriteId: Id; frame: PixelFrame; expectedRevision?: number }
   | { kind: 'pixel.frame.delete'; spriteId: Id; frameId: Id; expectedRevision?: number }
   | { kind: 'pixel.asset.add'; asset: PixelAsset; index?: number }
-  | { kind: 'pixel.asset.replace'; asset: PixelAsset; expectedRevision?: number }
+  | { kind: 'pixel.asset.replace'; asset: PixelAsset; expectedRevision?: number; expectedSpriteDependencies?: PixelSpriteDependencyGuard[] }
   | { kind: 'pixel.asset.delete'; assetId: Id; expectedRevision?: number }
   | {
       kind: 'pixel.cel.set';

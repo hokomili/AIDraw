@@ -8,7 +8,7 @@ import type {
   PixelSprite,
   PixelTilemap,
 } from './model';
-import type { CanvasOperation, CanvasTransaction } from './operations';
+import type { CanvasOperation, CanvasTransaction, PixelSpriteDependencyGuard } from './operations';
 import { TransactionConflictError } from './operations';
 import { createId, nowIso } from './ids';
 import { assertImageCollectionTilemapModes, remapPixelCelIndices, writePixelRuns, writePixels, writeTileRuns, writeTiles } from './pixel';
@@ -42,6 +42,28 @@ function assertRevision(entity: EntityBase, expected: number | undefined, operat
     message: `Revision conflict for ${entity.name}`,
     retryable: true,
   });
+}
+
+function assertSpriteDependencies(
+  document: PixelDocument,
+  dependencies: PixelSpriteDependencyGuard[] | undefined,
+  operationIndex: number,
+): void {
+  for (const dependency of dependencies ?? []) {
+    const current = document.pixelAssets[dependency.spriteId];
+    if (current?.type === 'sprite'
+      && current.revision === dependency.expectedRevision
+      && current.width === dependency.width
+      && current.height === dependency.height) continue;
+    throw new TransactionConflictError({
+      operationIndex,
+      entityId: dependency.spriteId,
+      expectedRevision: dependency.expectedRevision,
+      actualRevision: current?.revision,
+      message: 'A referenced source sprite changed before the asset replacement',
+      retryable: true,
+    });
+  }
 }
 
 function touch(entity: EntityBase, timestamp: string): void {
@@ -655,6 +677,7 @@ function applyOperation(
       const current = pixel.pixelAssets[operation.asset.id];
       if (!current) throw new Error(`Pixel asset ${operation.asset.id} does not exist`);
       assertRevision(current, operation.expectedRevision, operationIndex);
+      assertSpriteDependencies(pixel, operation.expectedSpriteDependencies, operationIndex);
       if (operation.asset.type === 'sprite') assertPixelSpriteUsesPalette(operation.asset, pixel.palette);
       const previous = structuredClone(current);
       pixel.pixelAssets[current.id] = structuredClone(operation.asset);

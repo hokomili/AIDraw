@@ -3,8 +3,9 @@ import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { HUMAN_ACTOR, IDENTITY_TRANSFORM, applyTransaction, createId, createIllustrationDocument, nowIso, type Actor, type CanvasTransaction, type ShapeObject } from '@aidraw/core';
+import { HUMAN_ACTOR, IDENTITY_TRANSFORM, applyTransaction, createId, createIllustrationDocument, createPixelDocument, createPixelSprite, createPixelTileset, nowIso, type Actor, type CanvasTransaction, type ShapeObject } from '@aidraw/core';
 import type { TransactionTraceEntry } from '@common/contracts';
+import { imageCollectionSourceDependencyGuards, replaceImageCollectionTileMetadata } from '@common/image-collection-authoring';
 import { DocumentService, type NativeDocumentPreviewRenderer } from '@main/document-service';
 import { RecoveryJournal } from '@main/journal';
 import { writeNativeDocument } from '@main/persistence';
@@ -570,6 +571,44 @@ describe('document service collaboration semantics', () => {
     expect((await new RecoveryJournal(root).recover()).find(({ id }) => id === document.id)).toMatchObject({
       name: 'Serialized result', revision: document.revision + 4, assets: { [asset.id]: asset }, dirty: true,
     });
+  });
+
+  it('atomically refuses queued collection metadata after an earlier source-sprite change', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-service-collection-source-guard-'));
+    temporaryPaths.push(root);
+    const service = new DocumentService(new RecoveryJournal(root), '1.0.0');
+    services.push(service);
+    const document = createPixelDocument('project', 'Queued collection source guard');
+    const source0 = createPixelSprite('Tile zero', 8, 12);
+    const source3 = createPixelSprite('Tile three', 17, 6);
+    const tileset = createPixelTileset('Collection', source0.id, 8, 12, 1, 1);
+    tileset.spriteAssetId = undefined; tileset.columns = 2; tileset.rows = 0; tileset.margin = 0; tileset.spacing = 0; tileset.wangSets = [];
+    tileset.tiles = {
+      0: { id: 0, sourceX: 0, sourceY: 0, imageAssetId: source0.id, probability: 1, animation: [], collisions: [], properties: {} },
+      3: { id: 3, sourceX: 0, sourceY: 0, imageAssetId: source3.id, probability: 0.5, animation: [], collisions: [], properties: {} },
+    };
+    document.assetIds = [source0.id, source3.id, tileset.id]; document.pixelAssets = { [source0.id]: source0, [source3.id]: source3, [tileset.id]: tileset }; document.activeAssetId = tileset.id;
+    service.addDocument(document);
+
+    const resizedSource = structuredClone(source3); resizedSource.width += 1;
+    const editedTileset = replaceImageCollectionTileMetadata(tileset, 3, { probability: 0.8 });
+    const sourceWrite = service.apply({
+      id: createId('tx'), clientOperationId: createId('human-op'), documentId: document.id, actor: HUMAN_ACTOR,
+      label: 'Resize collection source first', createdAt: nowIso(), operations: [{ kind: 'pixel.asset.replace', asset: resizedSource, expectedRevision: source3.revision }],
+    });
+    const metadataWrite = service.apply({
+      id: createId('tx'), clientOperationId: createId('human-op'), documentId: document.id, actor: HUMAN_ACTOR,
+      label: 'Edit stale collection metadata', createdAt: nowIso(), operations: [{ kind: 'pixel.asset.replace', asset: editedTileset, expectedRevision: tileset.revision, expectedSpriteDependencies: imageCollectionSourceDependencyGuards(document, tileset) }],
+    });
+    const [sourceResponse, metadataResponse] = await Promise.all([sourceWrite, metadataWrite]);
+
+    expect(sourceResponse).toMatchObject({ status: 'committed', revision: document.revision + 1 });
+    expect(metadataResponse).toMatchObject({ status: 'conflict', message: 'A referenced source sprite changed before the asset replacement', conflict: { entityId: source3.id, expectedRevision: source3.revision, actualRevision: source3.revision + 1, retryable: true } });
+    const current = service.getDocument(document.id); if (current?.kind !== 'pixel') throw new Error('Expected pixel document');
+    expect(current.revision).toBe(document.revision + 1);
+    expect(current.activity.map(({ label }) => label)).toEqual(['Resize collection source first']);
+    expect(current.pixelAssets[source3.id]).toMatchObject({ type: 'sprite', width: source3.width + 1, revision: source3.revision + 1 });
+    expect(current.pixelAssets[tileset.id]).toMatchObject({ type: 'tileset', revision: tileset.revision, tiles: { 3: { probability: 0.5 } } });
   });
 
   it('orders checkpoint restore behind a pending commit and preserves that committed branch', async () => {

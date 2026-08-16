@@ -183,8 +183,8 @@ describe('keyboard shortcut reference', () => {
     expect(readme).toContain('exactly 40 eligible bindings: all 39 tools displayed across the illustration (19) and pixel (20) rails plus the renderer-owned inspector toggle');
     expect(readme).toContain('Later still-free new mnemonics are reserved before fallback selection');
     expect(readme).toContain('remaining command/native-menu remapping');
-    expect(tracker).toContain('clean and live-synchronized through base `cbb480dd856bd0f3ad1ccc574d522b1ece4c118d`');
-    expect(tracker).toContain('The bounded PIX-08 palette-cycle sprite-sheet checkpoint is one exact reviewable source/headless candidate over that base');
+    expect(tracker).toContain('clean and live-synchronized through base `04177d9e3f6c2f7fd8db506d8651863ace0c6d1e`');
+    expect(tracker).toContain('The bounded MAP-03/MAP-07 image-collection authoring checkpoint is one reviewable source/headless candidate over that base');
     expect(tracker).toContain('all **39 displayed tool activations**—19 illustration and 20 pixel—plus the renderer-owned inspector toggle');
     expect(tracker).toContain('later still-free new mnemonics remain reserved from earlier fallbacks');
     expect(tracker).toContain('remapping beyond the later bounded UX-08 tool/inspector slice');

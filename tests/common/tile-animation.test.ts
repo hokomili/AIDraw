@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { createPixelTileset } from '@aidraw/core';
+import { createPixelDocument, createPixelSprite, createPixelTileset } from '@aidraw/core';
 
-import { moveTileAnimationFrame, tileAnimationFrameAt, tilesetTileSourceRect } from '../../src/common/tile-animation';
+import { moveTileAnimationFrame, resolveTilesetTileSource, tileAnimationFrameAt, tilesetTileSourceRect } from '../../src/common/tile-animation';
 
 describe('tile animation authoring', () => {
   it('samples exact frame boundaries and loops without unsafe duration summation', () => {
@@ -67,5 +67,21 @@ describe('tile animation authoring', () => {
     expect(tilesetTileSourceRect(tileset, 1)).toEqual({ x: 99, y: 77, width: 16, height: 8 });
     expect(tilesetTileSourceRect(tileset, 4)).toEqual({ x: 19, y: 11, width: 16, height: 8 });
     expect(() => tilesetTileSourceRect(tileset, 6)).toThrow(/outside the tileset slice/);
+  });
+
+  it('resolves each sparse image-collection tile to its own full-size sprite', () => {
+    const document = createPixelDocument('project', 'Collection previews');
+    const narrow = createPixelSprite('Narrow', 7, 13);
+    const wide = createPixelSprite('Wide', 19, 5);
+    const tileset = createPixelTileset('Collection', narrow.id, 7, 13, 1, 1);
+    tileset.spriteAssetId = undefined; tileset.columns = 2; tileset.rows = 0; tileset.margin = 0; tileset.spacing = 0; tileset.wangSets = [];
+    tileset.tiles = {
+      0: { id: 0, sourceX: 0, sourceY: 0, imageAssetId: narrow.id, probability: 1, animation: [], collisions: [], properties: {} },
+      3: { id: 3, sourceX: 0, sourceY: 0, imageAssetId: wide.id, probability: 1, animation: [], collisions: [], properties: {} },
+    };
+    document.assetIds = [narrow.id, wide.id, tileset.id]; document.pixelAssets = { [narrow.id]: narrow, [wide.id]: wide, [tileset.id]: tileset };
+    expect(resolveTilesetTileSource(document, tileset, 0)).toEqual({ sprite: narrow, rect: { x: 0, y: 0, width: 7, height: 13 } });
+    expect(resolveTilesetTileSource(document, tileset, 3)).toEqual({ sprite: wide, rect: { x: 0, y: 0, width: 19, height: 5 } });
+    expect(() => resolveTilesetTileSource(document, tileset, 2)).toThrow(/missing its sprite source/);
   });
 });

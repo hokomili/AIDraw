@@ -1,4 +1,11 @@
-import { isImageCollectionTileset, type PixelTileset, type TileDefinition } from '@aidraw/core';
+import {
+  isImageCollectionTileset,
+  tilesetTileSourceAssetId,
+  type PixelDocument,
+  type PixelSprite,
+  type PixelTileset,
+  type TileDefinition,
+} from '@aidraw/core';
 
 export type TileAnimationFrame = TileDefinition['animation'][number];
 
@@ -62,4 +69,15 @@ export function tilesetTileSourceRect(tileset: PixelTileset, tileId: number, col
     width: tileset.tileWidth,
     height: tileset.tileHeight,
   };
+}
+
+export function resolveTilesetTileSource(
+  document: PixelDocument,
+  tileset: PixelTileset,
+  tileId: number,
+): { sprite: PixelSprite; rect: { x: number; y: number; width: number; height: number } } {
+  const sourceId = tilesetTileSourceAssetId(tileset, tileId);
+  const sprite = sourceId ? document.pixelAssets[sourceId] : undefined;
+  if (sprite?.type !== 'sprite') throw new Error(`Tile ${tileId} is missing its sprite source.`);
+  return { sprite, rect: tilesetTileSourceRect(tileset, tileId, sprite) };
 }

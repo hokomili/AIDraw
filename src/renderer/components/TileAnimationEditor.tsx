@@ -1,16 +1,16 @@
-import { useEffect, useRef, useState, type DragEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
 import { ArrowDown, ArrowUp, GripVertical, Pause, Play, Trash2 } from 'lucide-react';
-import type { PixelDocument, PixelSprite, PixelTileset, TileDefinition } from '@aidraw/core';
+import type { PixelDocument, PixelTileset, TileDefinition } from '@aidraw/core';
 
-import { moveTileAnimationFrame, tilesetTileSourceRect, type TileAnimationFrame } from '../../common/tile-animation';
+import { moveTileAnimationFrame, resolveTilesetTileSource, type TileAnimationFrame } from '../../common/tile-animation';
 import { drawSpriteRegionThumbnail } from '../canvas/pixel-bitmap';
 
 interface TileAnimationEditorProps {
   document: PixelDocument;
   tileset: PixelTileset;
-  sourceSprite?: PixelSprite;
   tile: TileDefinition;
   tileCount: number;
+  availableTileIds?: number[];
   onChange: (animation: TileAnimationFrame[], label: string) => void;
 }
 
@@ -19,27 +19,32 @@ function integerInRange(value: string, minimum: number, maximum: number, fallbac
   return Number.isFinite(parsed) ? Math.max(minimum, Math.min(maximum, Math.round(parsed))) : fallback;
 }
 
-function TileAnimationPreview({ document, tileset, sourceSprite, tile }: Pick<TileAnimationEditorProps, 'document' | 'tileset' | 'sourceSprite' | 'tile'>) {
+function TileAnimationPreview({ document, tileset, tile }: Pick<TileAnimationEditorProps, 'document' | 'tileset' | 'tile'>) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const frames = tile.animation.length ? tile.animation : [{ tileId: tile.id, durationMs: 100 }];
   const [frameIndex, setFrameIndex] = useState(0);
   const [playing, setPlaying] = useState(() => tile.animation.length > 1 && !window.matchMedia?.('(prefers-reduced-motion: reduce)').matches);
   const activeIndex = Math.min(frameIndex, frames.length - 1);
   const frame = frames[activeIndex];
+  const source = useMemo(() => {
+    try { return resolveTilesetTileSource(document, tileset, frame.tileId); }
+    catch { return undefined; }
+  }, [document, frame.tileId, tileset]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const scale = Math.min(1, 40 / tileset.tileWidth, 40 / tileset.tileHeight);
-    canvas.width = Math.max(1, Math.round(tileset.tileWidth * scale));
-    canvas.height = Math.max(1, Math.round(tileset.tileHeight * scale));
+    const width = source?.rect.width ?? tileset.tileWidth;
+    const height = source?.rect.height ?? tileset.tileHeight;
+    const scale = Math.min(1, 40 / width, 40 / height);
+    canvas.width = Math.max(1, Math.round(width * scale));
+    canvas.height = Math.max(1, Math.round(height * scale));
     const context = canvas.getContext('2d');
     if (!context) return;
     context.clearRect(0, 0, canvas.width, canvas.height);
-    if (!sourceSprite) return;
-    const source = tilesetTileSourceRect(tileset, frame.tileId);
-    drawSpriteRegionThumbnail(context, sourceSprite, sourceSprite.frameIds[0], document.palette, source, canvas.width, canvas.height);
-  }, [document.palette, frame.tileId, sourceSprite, tileset]);
+    if (!source) return;
+    drawSpriteRegionThumbnail(context, source.sprite, source.sprite.frameIds[0], document.palette, source.rect, canvas.width, canvas.height);
+  }, [document.palette, source, tileset.tileHeight, tileset.tileWidth]);
 
   useEffect(() => {
     if (!playing || tile.animation.length < 2) return undefined;
@@ -54,14 +59,14 @@ function TileAnimationPreview({ document, tileset, sourceSprite, tile }: Pick<Ti
       </div>
       <div className="tile-animation-preview-copy">
         <strong>{tile.animation.length ? `Frame ${activeIndex + 1} of ${tile.animation.length}` : 'Static tile'}</strong>
-        <small>{sourceSprite ? `Tile ${frame.tileId}${tile.animation.length ? ` · ${frame.durationMs} ms` : ''}` : 'Source sprite unavailable'}</small>
+        <small>{source ? `Tile ${frame.tileId} · ${source.rect.width} × ${source.rect.height}px${tile.animation.length ? ` · ${frame.durationMs} ms` : ''}` : 'Source sprite unavailable'}</small>
       </div>
       {tile.animation.length > 1 && <button type="button" title={playing ? 'Pause animation preview' : 'Play animation preview'} aria-label={playing ? 'Pause animation preview' : 'Play animation preview'} onClick={() => setPlaying((value) => !value)}>{playing ? <Pause size={11} /> : <Play size={11} />}</button>}
     </div>
   );
 }
 
-export function TileAnimationEditor({ document, tileset, sourceSprite, tile, tileCount, onChange }: TileAnimationEditorProps) {
+export function TileAnimationEditor({ document, tileset, tile, tileCount, availableTileIds, onChange }: TileAnimationEditorProps) {
   const [draggedFrameIndex, setDraggedFrameIndex] = useState<number>();
   const [dropFrameIndex, setDropFrameIndex] = useState<number>();
   const moveFrame = (fromIndex: number, toIndex: number) => {
@@ -80,11 +85,11 @@ export function TileAnimationEditor({ document, tileset, sourceSprite, tile, til
   return (
     <>
       <div className="section-heading"><span>Animation</span><button type="button" onClick={() => onChange([...tile.animation, { tileId: tile.id, durationMs: 100 }], 'Add animated tile frame')}>+ Frame</button></div>
-      <TileAnimationPreview key={tile.id} document={document} tileset={tileset} sourceSprite={sourceSprite} tile={tile} />
+      <TileAnimationPreview key={tile.id} document={document} tileset={tileset} tile={tile} />
       {tile.animation.map((frame, frameIndex) => (
         <div className={`tile-animation-row${dropFrameIndex === frameIndex ? ' is-drop-target' : ''}`} key={`${frame.tileId}-${frame.durationMs}-${frameIndex}`} onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; setDropFrameIndex(frameIndex); }} onDragLeave={() => setDropFrameIndex((index) => index === frameIndex ? undefined : index)} onDrop={(event) => dropFrame(event, frameIndex)}>
           <button type="button" className="tile-animation-drag-handle" draggable aria-label={`Drag animation frame ${frameIndex + 1}`} title="Drag to reorder animation frame" onDragStart={(event) => { event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', String(frameIndex)); setDraggedFrameIndex(frameIndex); }} onDragEnd={endDrag}><GripVertical size={11} /></button>
-          <input aria-label={`Animation tile ${frameIndex + 1}`} title="Tile ID" type="number" min="0" max={tileCount - 1} value={frame.tileId} onChange={(event) => onChange(tile.animation.map((entry, index) => index === frameIndex ? { ...entry, tileId: integerInRange(event.target.value, 0, tileCount - 1, entry.tileId) } : entry), 'Edit animated tile frame')} />
+          {availableTileIds ? <select aria-label={`Animation tile ${frameIndex + 1}`} title="Existing collection tile ID" value={frame.tileId} onChange={(event) => onChange(tile.animation.map((entry, index) => index === frameIndex ? { ...entry, tileId: Number(event.target.value) } : entry), 'Edit animated tile frame')}>{availableTileIds.map((tileId) => <option key={tileId} value={tileId}>{tileId}</option>)}</select> : <input aria-label={`Animation tile ${frameIndex + 1}`} title="Tile ID" type="number" min="0" max={tileCount - 1} value={frame.tileId} onChange={(event) => onChange(tile.animation.map((entry, index) => index === frameIndex ? { ...entry, tileId: integerInRange(event.target.value, 0, tileCount - 1, entry.tileId) } : entry), 'Edit animated tile frame')} />}
           <input aria-label={`Animation duration ${frameIndex + 1}`} title="Duration (ms)" type="number" min="1" max="60000" value={frame.durationMs} onChange={(event) => onChange(tile.animation.map((entry, index) => index === frameIndex ? { ...entry, durationMs: integerInRange(event.target.value, 1, 60_000, entry.durationMs) } : entry), 'Edit animated tile timing')} />
           <div className="tile-animation-move-actions">
             <button type="button" title="Move animation frame up" aria-label={`Move animation frame ${frameIndex + 1} up`} disabled={frameIndex === 0} onClick={() => moveFrame(frameIndex, frameIndex - 1)}><ArrowUp size={10} /></button>

@@ -150,6 +150,14 @@ import { MapSetupDisclosure } from "./components/MapSetupDisclosure";
 import { flattenLayerTree, layerTreeDescendants, moveLayerTreeEntry } from "../common/layer-tree";
 import { assignWangTile, deleteWangColor, deleteWangSet, upsertWangColor, upsertWangSet } from "../common/wang-authoring";
 import { TILE_VARIANT_GROUP_PROPERTY, tileVariantCandidates, tileVariantGroup } from "../common/tile-variants";
+import {
+  imageCollectionAuthoringGuardError,
+  imageCollectionSourceDependencyGuards,
+  imageCollectionTileIds,
+  replaceImageCollectionTileMetadata,
+  type ImageCollectionTileMetadataPatch,
+} from "../common/image-collection-authoring";
+import { resolveTilesetTileSource } from "../common/tile-animation";
 import type {
   BatchDocumentResult,
   CheckpointComparisonResult,
@@ -3979,41 +3987,69 @@ function TilesetPanel({
   const [propertyValue, setPropertyValue] = useState("");
   const [selectedWangSetId, setSelectedWangSetId] = useState<string>();
   const [drawingOffsetDraft, setDrawingOffsetDraft] = useState<{ tilesetId: string; revision: number; x: string; y: string }>();
-  if (!tileset.spriteAssetId) {
-    const tiles = Object.values(tileset.tiles).sort((left, right) => left.id - right.id);
-    return <div className="tileset-panel">
-      <div className="asset-heading"><span className="asset-kind tileset"><Grid3X3 size={15} /></span><span><strong>{tileset.name}</strong><small>Image collection · {tiles.length} sparse PNG tile{tiles.length === 1 ? "" : "s"} · {tileset.columns} display column{tileset.columns === 1 ? "" : "s"}</small></span></div>
-      <p className="tileset-slice-summary">Imported per-tile artwork remains individually sourced. This checkpoint renders and re-exports finite orthogonal tile layers; atlas slicing, terrain authoring, and tile-object artwork stay unavailable for image collections.</p>
-      <div className="section-heading"><span>Preserved local tile IDs</span><small>{tiles.map((tile) => tile.id).join(", ")}</small></div>
-    </div>;
-  }
-  const replace = (next: PixelTileset, label: string) =>
+  const imageCollection = !tileset.spriteAssetId;
+  const collectionTileIds = imageCollection ? imageCollectionTileIds(tileset) : undefined;
+  const effectiveSelectedTileId = imageCollection && collectionTileIds && !collectionTileIds.includes(selectedTileId)
+    ? collectionTileIds[0]
+    : selectedTileId;
+  const replace = (next: PixelTileset, label: string) => {
+    let expectedSpriteDependencies: ReturnType<typeof imageCollectionSourceDependencyGuards> | undefined;
+    if (imageCollection) {
+      const active = useEditorStore.getState().snapshot?.activeDocument;
+      if (active?.kind !== "pixel") {
+        notify("The active document changed. Re-open the image collection before editing it.", "warning");
+        return;
+      }
+      const guardError = imageCollectionAuthoringGuardError(document, active, tileset.id);
+      if (guardError) {
+        notify(guardError, "warning");
+        return;
+      }
+      try {
+        expectedSpriteDependencies = imageCollectionSourceDependencyGuards(document, tileset);
+      } catch (error) {
+        notify(error instanceof Error ? error.message : "The image collection source is unavailable.", "warning");
+        return;
+      }
+    }
     void apply(label, [
       {
         kind: "pixel.asset.replace",
         asset: next,
         expectedRevision: tileset.revision,
+        ...(expectedSpriteDependencies ? { expectedSpriteDependencies } : {}),
       },
-    ]);
-  const sourceSprite = document.pixelAssets[tileset.spriteAssetId];
-  const tileCount = tileset.columns * tileset.rows;
-  const selectedTile = tileset.tiles[selectedTileId] ?? {
-    id: selectedTileId,
+    ], imageCollection ? document.id : undefined);
+  };
+  const sourceSprite = tileset.spriteAssetId ? document.pixelAssets[tileset.spriteAssetId] : undefined;
+  const tileCount = imageCollection ? collectionTileIds?.length ?? 0 : tileset.columns * tileset.rows;
+  const displayedTileIds = imageCollection
+    ? collectionTileIds ?? []
+    : Array.from({ length: Math.min(tileCount, 256) }, (_, id) => id);
+  const selectedTile = tileset.tiles[effectiveSelectedTileId] ?? (!imageCollection ? {
+    id: effectiveSelectedTileId,
     sourceX: tileset.margin + selectedTileId % tileset.columns * (tileset.tileWidth + tileset.spacing),
     sourceY: tileset.margin + Math.floor(selectedTileId / tileset.columns) * (tileset.tileHeight + tileset.spacing),
     probability: 1,
     animation: [],
     collisions: [],
     properties: {},
-  };
+  } : undefined);
+  if (!selectedTile) return <div className="tileset-panel"><div className="asset-heading"><span className="asset-kind tileset"><Grid3X3 size={15} /></span><span><strong>{tileset.name}</strong><small>Image collection unavailable</small></span></div><p className="tileset-slice-summary" role="status">This image collection has no selectable sprite-backed tile. Re-import or repair the source before editing metadata.</p></div>;
+  let selectedSource: ReturnType<typeof resolveTilesetTileSource> | undefined;
+  try { selectedSource = resolveTilesetTileSource(document, tileset, effectiveSelectedTileId); }
+  catch { selectedSource = undefined; }
+  if (imageCollection && !selectedSource) return <div className="tileset-panel"><div className="asset-heading"><span className="asset-kind tileset"><Grid3X3 size={15} /></span><span><strong>{tileset.name}</strong><small>Image collection · source unavailable</small></span></div><p className="tileset-slice-summary" role="status">Tile {effectiveSelectedTileId} is missing its sprite source. Metadata and drawing-offset edits are unavailable until the source is restored.</p></div>;
   const selectedVariantGroup = tileVariantGroup(selectedTile);
-  const selectedVariantCandidates = tileVariantCandidates(tileset, selectedTileId);
+  const selectedVariantCandidates = tileVariantCandidates(tileset, effectiveSelectedTileId);
   const selectedCollisionSet = new Set(selectedCollisionIds);
   const selectedCollisions = selectedTile.collisions.filter((shape) => selectedCollisionSet.has(shape.id));
   const selectedCollision = selectedCollisions.length === 1 ? selectedCollisions[0] : undefined;
-  const updateTile = (patch: Partial<typeof selectedTile>, label: string) => {
-    const next = structuredClone(tileset);
-    next.tiles[selectedTileId] = { ...structuredClone(selectedTile), ...patch };
+  const updateTile = (patch: ImageCollectionTileMetadataPatch, label: string) => {
+    const next = imageCollection
+      ? replaceImageCollectionTileMetadata(tileset, effectiveSelectedTileId, patch)
+      : structuredClone(tileset);
+    if (!imageCollection) next.tiles[effectiveSelectedTileId] = { ...structuredClone(selectedTile), ...patch };
     replace(next, label);
   };
   const currentDrawingOffsetDraft = drawingOffsetDraft?.tilesetId === tileset.id && drawingOffsetDraft.revision === tileset.revision
@@ -4081,10 +4117,10 @@ function TilesetPanel({
       type: collisionType,
       x: 0,
       y: 0,
-      width: tileset.tileWidth,
-      height: tileset.tileHeight,
+      width: selectedSource?.rect.width ?? tileset.tileWidth,
+      height: selectedSource?.rect.height ?? tileset.tileHeight,
       properties: {},
-      ...((collisionType === "polygon" || collisionType === "polyline") ? { points: [{ x: 0, y: 0 }, { x: tileset.tileWidth, y: 0 }, { x: tileset.tileWidth, y: tileset.tileHeight }, { x: 0, y: tileset.tileHeight }] } : {}),
+      ...((collisionType === "polygon" || collisionType === "polyline") ? { points: [{ x: 0, y: 0 }, { x: selectedSource?.rect.width ?? tileset.tileWidth, y: 0 }, { x: selectedSource?.rect.width ?? tileset.tileWidth, y: selectedSource?.rect.height ?? tileset.tileHeight }, { x: 0, y: selectedSource?.rect.height ?? tileset.tileHeight }] } : {}),
     } as (typeof selectedTile)["collisions"][number];
     updateTile({ collisions: [...selectedTile.collisions, shape] }, "Add tile collision");
     setSelectedCollisionIds([shape.id]);
@@ -4114,31 +4150,34 @@ function TilesetPanel({
         <span>
           <strong>{tileset.name}</strong>
           <small>
-            {tileset.columns} × {tileset.rows} · {tileset.tileWidth} ×{" "}
-            {tileset.tileHeight}px
+            {imageCollection
+              ? `Image collection · ${tileCount} sparse PNG tile${tileCount === 1 ? "" : "s"} · ${tileset.columns} display column${tileset.columns === 1 ? "" : "s"}`
+              : `${tileset.columns} × ${tileset.rows} · ${tileset.tileWidth} × ${tileset.tileHeight}px`}
           </small>
         </span>
       </div>
-      <TilesetSliceEditor key={`${tileset.id}:${tileset.revision}`} palette={document.palette} tileset={tileset} sourceSprite={sourceSprite?.type === "sprite" ? sourceSprite : undefined} selectedTileId={selectedTileId} onCommit={(next, nextSelectedTileId, impact) => {
+      {imageCollection && <p className="tileset-slice-summary">Choose an exact sparse local ID to preview its own source and edit metadata. Source images, IDs, membership, atlas slicing, Wang terrain, and tile-object artwork remain fixed or unavailable.</p>}
+      {!imageCollection && <TilesetSliceEditor key={`${tileset.id}:${tileset.revision}`} palette={document.palette} tileset={tileset} sourceSprite={sourceSprite?.type === "sprite" ? sourceSprite : undefined} selectedTileId={selectedTileId} onCommit={(next, nextSelectedTileId, impact) => {
         const droppedEntries = impact.droppedAnimationFrames + impact.droppedCollisionShapes + impact.droppedCustomProperties + impact.droppedWangColors + impact.droppedWangTiles;
         if (impact.droppedMetadataTiles > 0 || droppedEntries > 0) notify(`Re-sliced after explicit review; ${impact.droppedMetadataTiles} metadata-addressed tile${impact.droppedMetadataTiles === 1 ? "" : "s"} and ${droppedEntries} metadata entr${droppedEntries === 1 ? "y" : "ies"} no longer fit.`, "warning");
         replace(next, "Re-slice tileset");
         setSelectedTileId(nextSelectedTileId);
         setSelectedCollisionIds([]);
-      }} />
-      <div className="section-heading"><span>Tiles</span><small>Select one to edit metadata</small></div>
-      <div className="tile-definition-grid">{Array.from({ length: Math.min(tileCount, 256) }, (_, id) => <button key={id} className={selectedTileId === id ? "is-active" : ""} onClick={() => { setSelectedTileId(id); setSelectedCollisionIds([]); }}>{id}</button>)}</div>
-      {tileCount > 256 && <small className="tileset-slice-summary">Showing the first 256 of {tileCount} tiles.</small>}
+      }} />}
+      <div className="section-heading"><span>{imageCollection ? "Sparse tiles" : "Tiles"}</span><small>Select one to edit metadata</small></div>
+      <div className="tile-definition-grid">{displayedTileIds.map((id) => <button key={id} type="button" aria-label={`Select tile ${id}`} className={effectiveSelectedTileId === id ? "is-active" : ""} onClick={() => { setSelectedTileId(id); setSelectedCollisionIds([]); }}>{id}</button>)}</div>
+      {!imageCollection && tileCount > 256 && <small className="tileset-slice-summary">Showing the first 256 of {tileCount} tiles.</small>}
       <div className="tile-definition-editor">
-        <div className="section-heading"><span>Tile {selectedTileId}</span><small>{selectedTile.sourceX}, {selectedTile.sourceY}</small></div>
-        <label className="field"><span>Painting probability</span><input key={"probability-" + selectedTileId + "-" + selectedTile.probability} type="number" min="0" step="0.05" defaultValue={selectedTile.probability} onBlur={(event) => updateTile({ probability: Math.max(0, Number(event.target.value) || 0) }, "Change tile probability")} /></label>
-        <label className="field"><span>Random variant group</span><input key={"variant-" + selectedTileId + "-" + String(selectedTile.properties[TILE_VARIANT_GROUP_PROPERTY] ?? "")} maxLength={100} defaultValue={String(selectedTile.properties[TILE_VARIANT_GROUP_PROPERTY] ?? "")} placeholder="e.g. grass" onBlur={(event) => { const properties = { ...selectedTile.properties }; const group = event.target.value.trim(); if (group) properties[TILE_VARIANT_GROUP_PROPERTY] = group; else delete properties[TILE_VARIANT_GROUP_PROPERTY]; updateTile({ properties }, "Change random variant group"); }} /><small>{selectedVariantCandidates.length || 1} weighted tile variant{(selectedVariantCandidates.length || 1) === 1 ? "" : "s"} share this group.</small></label>
-        <TileVariantPreview palette={document.palette} sprite={sourceSprite?.type === "sprite" ? sourceSprite : undefined} tileset={tileset} selectedTileId={selectedTileId} group={selectedVariantGroup} candidates={selectedVariantCandidates} onSelect={(tileId) => { setSelectedTileId(tileId); setSelectedCollisionIds([]); }} />
-        <TileAnimationEditor document={document} tileset={tileset} sourceSprite={sourceSprite?.type === "sprite" ? sourceSprite : undefined} tile={selectedTile} tileCount={tileCount} onChange={(animation, label) => updateTile({ animation }, label)} />
+        <div className="section-heading"><span>Tile {effectiveSelectedTileId}</span><small>{imageCollection && selectedSource ? `${selectedSource.rect.width} × ${selectedSource.rect.height}px source` : `${selectedTile.sourceX}, ${selectedTile.sourceY}`}</small></div>
+        <label className="field"><span>Painting probability</span><input key={"probability-" + effectiveSelectedTileId + "-" + selectedTile.probability} type="number" min="0" step="0.05" defaultValue={selectedTile.probability} onBlur={(event) => updateTile({ probability: Math.max(0, Number(event.target.value) || 0) }, "Change tile probability")} /></label>
+        <label className="field"><span>Random variant group</span><input key={"variant-" + effectiveSelectedTileId + "-" + String(selectedTile.properties[TILE_VARIANT_GROUP_PROPERTY] ?? "")} maxLength={100} defaultValue={String(selectedTile.properties[TILE_VARIANT_GROUP_PROPERTY] ?? "")} placeholder="e.g. grass" onBlur={(event) => { const properties = { ...selectedTile.properties }; const group = event.target.value.trim(); if (group) properties[TILE_VARIANT_GROUP_PROPERTY] = group; else delete properties[TILE_VARIANT_GROUP_PROPERTY]; updateTile({ properties }, "Change random variant group"); }} /><small>{selectedVariantCandidates.length || 1} weighted tile variant{(selectedVariantCandidates.length || 1) === 1 ? "" : "s"} share this group.</small></label>
+        <TileVariantPreview document={document} tileset={tileset} selectedTileId={effectiveSelectedTileId} group={selectedVariantGroup} candidates={selectedVariantCandidates} onSelect={(tileId) => { setSelectedTileId(tileId); setSelectedCollisionIds([]); }} />
+        <TileAnimationEditor document={document} tileset={tileset} tile={selectedTile} tileCount={tileCount} availableTileIds={collectionTileIds} onChange={(animation, label) => updateTile({ animation }, label)} />
         <div className="section-heading"><span>Custom properties</span></div>
         <div className="tile-property-add"><input aria-label="Property name" placeholder="name" value={propertyName} onChange={(event) => setPropertyName(event.target.value)} /><input aria-label="Property value" placeholder="value" value={propertyValue} onChange={(event) => setPropertyValue(event.target.value)} /><button disabled={!propertyName.trim()} onClick={() => { const parsed = propertyValue === "true" ? true : propertyValue === "false" ? false : propertyValue.trim() !== "" && Number.isFinite(Number(propertyValue)) ? Number(propertyValue) : propertyValue; updateTile({ properties: { ...selectedTile.properties, [propertyName.trim()]: parsed } }, "Set tile property"); setPropertyName(""); setPropertyValue(""); }}>Add</button></div>
         <div className="tile-property-list">{Object.entries(selectedTile.properties).map(([key, value]) => <span key={key}><strong>{key}</strong> = {String(value)}<button title="Delete property" onClick={() => { const properties = { ...selectedTile.properties }; delete properties[key]; updateTile({ properties }, "Delete tile property"); }}>×</button></span>)}</div>
       </div>
+      {!imageCollection && <>
       <div className="section-heading">
         <span>Wang terrain</span>
         <small>{tileset.wangSets.length}</small>
@@ -4172,11 +4211,12 @@ function TilesetPanel({
         <div className="section-heading"><span>Tile {selectedTileId} Wang slots</span><small>edge / corner clockwise</small></div>
         <div className="wang-slot-grid">{["Top edge", "Top-right corner", "Right edge", "Bottom-right corner", "Bottom edge", "Bottom-left corner", "Left edge", "Top-left corner"].map((label, slot) => <label key={label}><span>{label}</span><select value={activeWangSet.tiles.find((tile) => tile.tileId === selectedTileId)?.wangId[slot] ?? 0} onChange={(event) => assignWangSlot(slot, Number(event.target.value))}><option value={0}>None</option>{activeWangSet.colors.map((color) => <option key={color.id} value={color.id}>{color.name}</option>)}</select></label>)}</div>
       </div>}
-      <div className="section-heading"><span>Tile {selectedTileId} collisions</span><small>{selectedTile.collisions.length}</small></div>
+      </>}
+      <div className="section-heading"><span>Tile {effectiveSelectedTileId} collisions</span><small>{selectedTile.collisions.length}</small></div>
       <div className="tileset-actions"><select aria-label="Collision shape type" value={collisionType} onChange={(event) => setCollisionType(event.target.value as typeof collisionType)}><option value="rectangle">Rectangle</option><option value="ellipse">Ellipse</option><option value="polygon">Polygon</option><option value="polyline">Polyline</option></select><button onClick={addCollision}>+ Shape</button></div>
       <div className="collision-selection-actions"><small>{selectedCollisions.length} selected</small><button disabled={selectedTile.collisions.length === 0 || selectedCollisions.length === selectedTile.collisions.length} onClick={() => setSelectedCollisionIds(selectedTile.collisions.map((shape) => shape.id))}>Select all</button><button disabled={selectedCollisions.length === 0} onClick={() => setSelectedCollisionIds([])}>Clear</button><button disabled={selectedCollisions.length === 0} onClick={() => { updateTile({ collisions: selectedTile.collisions.filter((shape) => !selectedCollisionSet.has(shape.id)) }, selectedCollisions.length === 1 ? "Delete collision" : `Delete ${selectedCollisions.length} collisions`); setSelectedCollisionIds([]); }}><Trash2 size={10} /> Delete selected</button></div>
-      <CollisionShapeEditor documentId={document.id} tilesetId={tileset.id} sprite={sourceSprite?.type === "sprite" ? sourceSprite : undefined} palette={document.palette} sourceX={selectedTile.sourceX} sourceY={selectedTile.sourceY} width={tileset.tileWidth} height={tileset.tileHeight} shapes={selectedTile.collisions} selectedIds={selectedCollisionIds} onSelect={setSelectedCollisionIds} onCommit={(shapes, label) => { const changed = new Map(shapes.map((shape) => [shape.id, shape])); updateTile({ collisions: selectedTile.collisions.map((entry) => changed.get(entry.id) ?? entry) }, label); }} />
-      <div className="collision-list">{selectedTile.collisions.map((shape, shapeIndex) => <div className={"collision-row " + (selectedCollisionSet.has(shape.id) ? "is-selected" : "")} key={shape.id} onClick={(event) => { if ((event.target as HTMLElement).closest("input, select, button")) return; setSelectedCollisionIds(event.shiftKey ? selectedCollisionSet.has(shape.id) ? selectedCollisionIds.filter((id) => id !== shape.id) : [...selectedCollisionIds, shape.id] : [shape.id]); }}><input aria-label={"Select collision " + (shapeIndex + 1)} type="checkbox" checked={selectedCollisionSet.has(shape.id)} onChange={(event) => setSelectedCollisionIds(event.target.checked ? [...selectedCollisionIds, shape.id] : selectedCollisionIds.filter((id) => id !== shape.id))} /><select aria-label={"Collision type " + (shapeIndex + 1)} value={shape.type} onChange={(event) => updateTile({ collisions: selectedTile.collisions.map((entry, index) => index === shapeIndex ? { ...entry, type: event.target.value as typeof shape.type } : entry) }, "Change collision type")}><option value="rectangle">Rectangle</option><option value="ellipse">Ellipse</option><option value="polygon">Polygon</option><option value="polyline">Polyline</option></select><input aria-label={"Collision x " + (shapeIndex + 1)} type="number" value={shape.x} onChange={(event) => updateTile({ collisions: selectedTile.collisions.map((entry, index) => index === shapeIndex ? { ...entry, x: Number(event.target.value) } : entry) }, "Move collision")} /><input aria-label={"Collision y " + (shapeIndex + 1)} type="number" value={shape.y} onChange={(event) => updateTile({ collisions: selectedTile.collisions.map((entry, index) => index === shapeIndex ? { ...entry, y: Number(event.target.value) } : entry) }, "Move collision")} /><input aria-label={"Collision width " + (shapeIndex + 1)} type="number" value={shape.width ?? tileset.tileWidth} onChange={(event) => updateTile({ collisions: selectedTile.collisions.map((entry, index) => index === shapeIndex ? { ...entry, width: Math.max(1, Number(event.target.value)) } : entry) }, "Resize collision")} /><input aria-label={"Collision height " + (shapeIndex + 1)} type="number" value={shape.height ?? tileset.tileHeight} onChange={(event) => updateTile({ collisions: selectedTile.collisions.map((entry, index) => index === shapeIndex ? { ...entry, height: Math.max(1, Number(event.target.value)) } : entry) }, "Resize collision")} /><button title="Delete collision" onClick={() => { updateTile({ collisions: selectedTile.collisions.filter((_, index) => index !== shapeIndex) }, "Delete collision"); setSelectedCollisionIds(selectedCollisionIds.filter((id) => id !== shape.id)); }}><Trash2 size={11} /></button></div>)}</div>
+      <CollisionShapeEditor documentId={document.id} tilesetId={tileset.id} sprite={selectedSource?.sprite ?? (sourceSprite?.type === "sprite" ? sourceSprite : undefined)} palette={document.palette} sourceX={selectedSource?.rect.x ?? selectedTile.sourceX} sourceY={selectedSource?.rect.y ?? selectedTile.sourceY} width={selectedSource?.rect.width ?? tileset.tileWidth} height={selectedSource?.rect.height ?? tileset.tileHeight} shapes={selectedTile.collisions} selectedIds={selectedCollisionIds} onSelect={setSelectedCollisionIds} onCommit={(shapes, label) => { const changed = new Map(shapes.map((shape) => [shape.id, shape])); updateTile({ collisions: selectedTile.collisions.map((entry) => changed.get(entry.id) ?? entry) }, label); }} />
+      <div className="collision-list">{selectedTile.collisions.map((shape, shapeIndex) => <div className={"collision-row " + (selectedCollisionSet.has(shape.id) ? "is-selected" : "")} key={shape.id} onClick={(event) => { if ((event.target as HTMLElement).closest("input, select, button")) return; setSelectedCollisionIds(event.shiftKey ? selectedCollisionSet.has(shape.id) ? selectedCollisionIds.filter((id) => id !== shape.id) : [...selectedCollisionIds, shape.id] : [shape.id]); }}><input aria-label={"Select collision " + (shapeIndex + 1)} type="checkbox" checked={selectedCollisionSet.has(shape.id)} onChange={(event) => setSelectedCollisionIds(event.target.checked ? [...selectedCollisionIds, shape.id] : selectedCollisionIds.filter((id) => id !== shape.id))} /><select aria-label={"Collision type " + (shapeIndex + 1)} value={shape.type} onChange={(event) => updateTile({ collisions: selectedTile.collisions.map((entry, index) => index === shapeIndex ? { ...entry, type: event.target.value as typeof shape.type } : entry) }, "Change collision type")}><option value="rectangle">Rectangle</option><option value="ellipse">Ellipse</option><option value="polygon">Polygon</option><option value="polyline">Polyline</option></select><input aria-label={"Collision x " + (shapeIndex + 1)} type="number" value={shape.x} onChange={(event) => updateTile({ collisions: selectedTile.collisions.map((entry, index) => index === shapeIndex ? { ...entry, x: Number(event.target.value) } : entry) }, "Move collision")} /><input aria-label={"Collision y " + (shapeIndex + 1)} type="number" value={shape.y} onChange={(event) => updateTile({ collisions: selectedTile.collisions.map((entry, index) => index === shapeIndex ? { ...entry, y: Number(event.target.value) } : entry) }, "Move collision")} /><input aria-label={"Collision width " + (shapeIndex + 1)} type="number" value={shape.width ?? selectedSource?.rect.width ?? tileset.tileWidth} onChange={(event) => updateTile({ collisions: selectedTile.collisions.map((entry, index) => index === shapeIndex ? { ...entry, width: Math.max(1, Number(event.target.value)) } : entry) }, "Resize collision")} /><input aria-label={"Collision height " + (shapeIndex + 1)} type="number" value={shape.height ?? selectedSource?.rect.height ?? tileset.tileHeight} onChange={(event) => updateTile({ collisions: selectedTile.collisions.map((entry, index) => index === shapeIndex ? { ...entry, height: Math.max(1, Number(event.target.value)) } : entry) }, "Resize collision")} /><button title="Delete collision" onClick={() => { updateTile({ collisions: selectedTile.collisions.filter((_, index) => index !== shapeIndex) }, "Delete collision"); setSelectedCollisionIds(selectedCollisionIds.filter((id) => id !== shape.id)); }}><Trash2 size={11} /></button></div>)}</div>
       {selectedCollisions.length > 1 && <small className="collision-selection-note">Drag the highlighted shapes together, or select exactly one collision to edit its points and custom properties.</small>}
       {selectedCollision && <div className="collision-property-editor"><div className="section-heading"><span>Collision properties</span><small>{Object.keys(selectedCollision.properties).length}</small></div><div className="tile-property-add"><input aria-label="Collision property name" placeholder="name" value={collisionPropertyName} onChange={(event) => setCollisionPropertyName(event.target.value)} /><input aria-label="Collision property value" placeholder="value" value={collisionPropertyValue} onChange={(event) => setCollisionPropertyValue(event.target.value)} /><button disabled={!collisionPropertyName.trim()} onClick={() => { const parsed = collisionPropertyValue === "true" ? true : collisionPropertyValue === "false" ? false : collisionPropertyValue.trim() !== "" && Number.isFinite(Number(collisionPropertyValue)) ? Number(collisionPropertyValue) : collisionPropertyValue; updateTile({ collisions: selectedTile.collisions.map((entry) => entry.id === selectedCollision.id ? { ...entry, properties: { ...entry.properties, [collisionPropertyName.trim()]: parsed } } : entry) }, "Set collision property"); setCollisionPropertyName(""); setCollisionPropertyValue(""); }}>Add</button></div><div className="tile-property-list">{Object.entries(selectedCollision.properties).map(([key, value]) => <span key={key}><strong>{key}</strong> = {String(value)}<button title="Delete collision property" onClick={() => { const properties = { ...selectedCollision.properties }; delete properties[key]; updateTile({ collisions: selectedTile.collisions.map((entry) => entry.id === selectedCollision.id ? { ...entry, properties } : entry) }, "Delete collision property"); }}>×</button></span>)}</div></div>}
       <div className="section-heading"><span>Drawing offset</span><small>map pixels</small></div>
@@ -4200,6 +4240,7 @@ function TilesetPanel({
       </div>
       <div className="tileset-actions"><button disabled={drawingOffsetDraftMatchesTileset} onClick={applyDrawingOffset}>Apply drawing offset</button></div>
       <p className="fine-print">Moves this tileset’s tile-layer sprite artwork without moving map cells, grid geometry, or collision data.</p>
+      {!imageCollection && <>
       <div className="section-heading"><span>Tile-object alignment</span><small>Tiled anchor</small></div>
       <label className="field tileset-object-alignment">
         <span>Object anchor</span>
@@ -4244,6 +4285,8 @@ function TilesetPanel({
         Edit the source pixels directly on canvas. Terrain rules, probabilities,
         animation, drawing offset, properties, and collision data export through Tiled.
       </p>
+      </>}
+      {imageCollection && <p className="fine-print">Probability, ordered animation, typed properties, collision metadata, and drawing offset use the existing complete tileset transaction and supported Tiled export. Per-tile sources and sparse IDs remain fixed.</p>}
     </div>
   );
 }
