@@ -7,6 +7,7 @@ import { HUMAN_ACTOR, IDENTITY_TRANSFORM, applyTransaction, createId, createIllu
 import type { TransactionTraceEntry } from '@common/contracts';
 import { appendImageCollectionSource, createImageCollectionTileset, imageCollectionSourceDependencyGuards, removeUnusedImageCollectionSource, replaceImageCollectionSource, replaceImageCollectionTileMetadata } from '@common/image-collection-authoring';
 import { planTileObjectCreation } from '@common/tile-object-authoring';
+import { planMapTileAuthoringSelection } from '@common/map-tile-authoring';
 import { parseStampLibraryJson, prepareStampLibraryImport, serializePortableTileStampKit } from '@common/stamp-library-interchange';
 import { DocumentService, type NativeDocumentPreviewRenderer } from '@main/document-service';
 import { RecoveryJournal } from '@main/journal';
@@ -611,6 +612,90 @@ describe('document service collaboration semantics', () => {
     expect(current.activity.map(({ label }) => label)).toEqual(['Resize collection source first']);
     expect(current.pixelAssets[source3.id]).toMatchObject({ type: 'sprite', width: source3.width + 1, revision: source3.revision + 1 });
     expect(current.pixelAssets[tileset.id]).toMatchObject({ type: 'tileset', revision: tileset.revision, tiles: { 3: { probability: 0.5 } } });
+  });
+
+  it('atomically refuses stale collection paint after queued document, tileset, or source drift and admits a fresh undoable retry', async () => {
+    for (const driftKind of ['document', 'tileset', 'source'] as const) {
+      const root = await mkdtemp(join(tmpdir(), `aidraw-service-collection-current-tile-${driftKind}-`));
+      temporaryPaths.push(root);
+      const service = new DocumentService(new RecoveryJournal(root), '1.0.0');
+      services.push(service);
+      const document = createPixelDocument('project', `Queued collection ${driftKind} guard`);
+      document.assetIds = []; document.pixelAssets = {};
+      const source0 = createPixelSprite('Tile zero', 8, 12);
+      const source3 = createPixelSprite('Tile three', 17, 6);
+      const tileset = createPixelTileset('Collection', source0.id, 17, 12, 1, 1);
+      tileset.spriteAssetId = undefined; tileset.firstGid = 20; tileset.columns = 0; tileset.rows = 0; tileset.margin = 0; tileset.spacing = 0; tileset.wangSets = [];
+      tileset.tiles = {
+        0: { id: 0, sourceX: 0, sourceY: 0, imageAssetId: source0.id, probability: 1, animation: [], collisions: [], properties: {} },
+        3: { id: 3, sourceX: 0, sourceY: 0, imageAssetId: source3.id, probability: 1, animation: [], collisions: [], properties: {} },
+      };
+      const map = createPixelTilemap('Collection paint map'); map.tilesetIds = [tileset.id];
+      const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile' || !layer.chunks) throw new Error('Expected tile layer');
+      document.assetIds = [source0.id, source3.id, tileset.id, map.id];
+      document.pixelAssets = { [source0.id]: source0, [source3.id]: source3, [tileset.id]: tileset, [map.id]: map };
+      document.activeAssetId = map.id;
+      service.addDocument(document);
+
+      const stalePlan = planMapTileAuthoringSelection(document, {
+        mapId: map.id,
+        tilesetId: tileset.id,
+        tileId: 3,
+        transforms: { hFlip: true, vFlip: false, diagonal: true },
+      });
+      if (stalePlan.expectedDocumentRevision === undefined) throw new Error('Expected collection document guard');
+      const driftOperation: CanvasTransaction['operations'][number] = driftKind === 'document'
+        ? { kind: 'document.rename', name: 'Document changed first' }
+        : driftKind === 'tileset'
+          ? { kind: 'pixel.asset.replace', asset: { ...structuredClone(tileset), transformations: { hFlip: false, vFlip: false, rotate: false } }, expectedRevision: tileset.revision }
+          : { kind: 'pixel.asset.replace', asset: { ...structuredClone(source3), width: source3.width + 1 }, expectedRevision: source3.revision };
+      const driftLabel = `Change ${driftKind} before collection paint`;
+      const drift = service.apply({
+        id: createId('tx'), clientOperationId: createId('human-op'), documentId: document.id, actor: HUMAN_ACTOR,
+        label: driftLabel, createdAt: nowIso(), operations: [driftOperation],
+      });
+      const stalePaint = service.apply({
+        id: createId('tx'), clientOperationId: createId('human-op'), documentId: document.id,
+        expectedDocumentRevision: stalePlan.expectedDocumentRevision, actor: HUMAN_ACTOR,
+        label: 'Paint stale collection tile', createdAt: nowIso(),
+        operations: [{ kind: 'pixel.tilemap.set', mapId: map.id, layerId: layer.id, changes: [{ x: 2, y: 4, gid: stalePlan.rawGid }], expectedRevision: layer.revision }],
+      });
+      const [driftResponse, staleResponse] = await Promise.all([drift, stalePaint]);
+      expect(driftResponse).toMatchObject({ status: 'committed', revision: document.revision + 1 });
+      expect(staleResponse).toMatchObject({
+        status: 'conflict',
+        conflict: { entityId: document.id, expectedRevision: document.revision, actualRevision: document.revision + 1, retryable: true },
+      });
+      const afterConflict = service.getDocument(document.id); if (!afterConflict || afterConflict.kind !== 'pixel') throw new Error('Expected pixel document');
+      const afterConflictMap = afterConflict.pixelAssets[map.id]; if (afterConflictMap.type !== 'tilemap') throw new Error('Expected tilemap');
+      const afterConflictLayer = afterConflictMap.layers[layer.id]; if (afterConflictLayer.type !== 'tile' || !afterConflictLayer.chunks) throw new Error('Expected tile layer');
+      expect(readTileAt(afterConflictLayer.chunks, 2, 4)).toBe(0);
+      expect(afterConflict.activity.map(({ label }) => label)).toEqual([driftLabel]);
+      expect(service.getChanges(document.id, document.revision)).toHaveLength(1);
+
+      const freshPlan = planMapTileAuthoringSelection(afterConflict, {
+        mapId: map.id,
+        tilesetId: tileset.id,
+        tileId: 3,
+        transforms: { hFlip: false, vFlip: false, diagonal: false },
+      });
+      if (freshPlan.expectedDocumentRevision === undefined) throw new Error('Expected collection document guard');
+      expect(await service.apply({
+        id: createId('tx'), clientOperationId: createId('human-op'), documentId: document.id,
+        expectedDocumentRevision: freshPlan.expectedDocumentRevision, actor: HUMAN_ACTOR,
+        label: 'Paint current collection tile', createdAt: nowIso(),
+        operations: [{ kind: 'pixel.tilemap.set', mapId: map.id, layerId: layer.id, changes: [{ x: 2, y: 4, gid: freshPlan.rawGid }], expectedRevision: afterConflictLayer.revision }],
+      })).toMatchObject({ status: 'committed', revision: document.revision + 2 });
+      const painted = service.getDocument(document.id); if (!painted || painted.kind !== 'pixel') throw new Error('Expected pixel document');
+      const paintedMap = painted.pixelAssets[map.id]; if (paintedMap.type !== 'tilemap') throw new Error('Expected tilemap');
+      const paintedLayer = paintedMap.layers[layer.id]; if (paintedLayer.type !== 'tile' || !paintedLayer.chunks) throw new Error('Expected tile layer');
+      expect(readTileAt(paintedLayer.chunks, 2, 4)).toBe(freshPlan.rawGid);
+      expect(await service.undo(document.id)).toMatchObject({ status: 'committed', revision: document.revision + 3 });
+      const undone = service.getDocument(document.id); if (!undone || undone.kind !== 'pixel') throw new Error('Expected pixel document');
+      const undoneMap = undone.pixelAssets[map.id]; if (undoneMap.type !== 'tilemap') throw new Error('Expected tilemap');
+      const undoneLayer = undoneMap.layers[layer.id]; if (undoneLayer.type !== 'tile' || !undoneLayer.chunks) throw new Error('Expected tile layer');
+      expect(readTileAt(undoneLayer.chunks, 2, 4)).toBe(0);
+    }
   });
 
   it('atomically refuses a queued portable tile-kit plan after an earlier palette change, then admits a fresh import and undo', async () => {

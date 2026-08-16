@@ -183,8 +183,8 @@ describe('keyboard shortcut reference', () => {
     expect(readme).toContain('exactly 40 eligible bindings: all 39 tools displayed across the illustration (19) and pixel (20) rails plus the renderer-owned inspector toggle');
     expect(readme).toContain('Later still-free new mnemonics are reserved before fallback selection');
     expect(readme).toContain('remaining command/native-menu remapping');
-    expect(tracker).toContain('clean and live-synchronized through base `dda1e76ba5cbb3166784cc682d27043fe979e6d5`');
-    expect(tracker).toContain('The current bounded MAP-11 source/headless checkpoint adds strict reviewed version-2 portable tile-stamp dependency copying/rebasing');
+    expect(tracker).toContain('clean and live-synchronized through base `e4de0632a0e1ecab0d803b03e41bc858aa10284d`');
+    expect(tracker).toContain('The current bounded MAP-07/MAP-11/MAP-13 source/headless candidate makes ordinary finite-orthogonal image-collection paint');
     expect(tracker).toContain('A deliberate previewed version-2 portable kit carries every and only reached atlas or finite-orthogonal image-collection dependency');
     expect(tracker).toContain('all **39 displayed tool activations**—19 illustration and 20 pixel—plus the renderer-owned inspector toggle');
     expect(tracker).toContain('later still-free new mnemonics remain reserved from earlier fallbacks');

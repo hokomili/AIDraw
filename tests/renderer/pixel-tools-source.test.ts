@@ -45,7 +45,7 @@ describe('pixel tool renderer wiring', () => {
   it('plans a complete Wang terrain drag before one canonical commit and fails closed with exact transition diagnostics', async () => {
     const source = await readFile(new URL('../../src/renderer/canvas/PixelCanvas.tsx', import.meta.url), 'utf8');
     const start = source.indexOf("} else if (tool === 'terrain'");
-    const end = source.indexOf("        } else {\n          const changes = points.map", start);
+    const end = source.indexOf("        } else {\n          if (tool !== 'eraser'", start);
     const branch = source.slice(start, end);
     expect(start).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(start);

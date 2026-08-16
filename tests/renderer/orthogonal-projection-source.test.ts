@@ -41,7 +41,7 @@ describe('orthogonal projection source parity', () => {
     expect(interactive).toContain('orthogonalCellRect(point.x, point.y, view.scale, orthogonalCellHeight)');
   });
 
-  it('selects sparse per-tile image sprites before orthogonal placement without admitting them to atlas-only authoring', async () => {
+  it('selects sparse per-tile image sprites for rendering and exact finite-orthogonal Current tile authoring', async () => {
     const app = await readFile(new URL('../../src/renderer/App.tsx', import.meta.url), 'utf8');
     const interactive = await readFile(new URL('../../src/renderer/canvas/PixelCanvas.tsx', import.meta.url), 'utf8');
     const headless = await readFile(new URL('../../src/main/render-document.ts', import.meta.url), 'utf8');
@@ -52,8 +52,20 @@ describe('orthogonal projection source parity', () => {
     expect(headless).toContain('sourceAsset.width'); expect(headless).toContain('sourceAsset.height');
     expect(interactive).toContain('mapSourceAsset.width'); expect(interactive).toContain('mapSourceAsset.height');
     expect(interactive).toContain('const atlasMapTilesets = attachedMapTilesets.filter((entry) => Boolean(entry.spriteAssetId))');
-    expect(interactive).toContain("const authorableTileObjectTilesets = attachedMapTilesets.filter((entry) => Boolean(entry.spriteAssetId) || (isImageCollectionTileset(entry) && tilemap?.orientation === 'orthogonal' && !tilemap.infinite))");
-    expect(interactive).toContain("const terrainTileset = tool === 'tile-object' ? tileObjectTileset : atlasMapTilesets[0]");
+    expect(interactive).toContain("const finiteOrthogonalCollectionTilesets = attachedMapTilesets.filter((entry) => isImageCollectionTileset(entry) && tilemap?.orientation === 'orthogonal' && !tilemap.infinite)");
+    expect(interactive).toContain('const authorableMapTileTilesets = [...atlasMapTilesets, ...finiteOrthogonalCollectionTilesets]');
+    expect(interactive).toContain("currentMapTileChoice?.documentId === document.id");
+    expect(interactive).toContain("tool === 'terrain'\n      ? atlasMapTilesets[0]\n      : currentMapTileTileset");
+    expect(interactive).toContain('<CurrentMapTileControl');
+    expect(interactive).toContain('planMapTileAuthoringSelection(document, request)');
+    expect(interactive).toContain('mapTileAuthoringPlansMatch(observed, current)');
+    expect(interactive).toContain('selectCurrentMapTileset({ documentId: document.id, mapId: tilemap.id }, next, selectedTileId)');
+    expect(interactive).toContain('selectScopedMapTileId({ documentId: document.id, mapId: tilemap.id, tilesetId: currentMapTileTileset.id }, currentMapTileTileset, value)');
+    expect(interactive).toContain('selectScopedMapTileId({ documentId: document.id, mapId: tilemap.id, tilesetId: tileObjectTileset.id }, tileObjectTileset, event.target.value)');
+    expect(interactive).toContain("applyGuarded('Place Current tile stamp', operations, pendingMapTilePlan.expectedDocumentRevision)");
+    expect(interactive).toContain('await applyGuarded(label, operations, pendingMapTilePlan.expectedDocumentRevision)');
+    expect(interactive).toContain("const activeTileStamp = activeTileStampId === 'builtin-tile'");
+    expect(interactive).toContain('onChange={(event) => setActiveTileStampId(event.target.value)}');
     expect(interactive).toContain('tilesetTileSourceAssetId(resolved.tileset, visibleLocalId)');
     expect(headless).toContain('tilesetTileSourceAssetId(resolved.tileset, renderedLocalId)');
     expect(app).toContain('nextTilesetFirstGid(assets.filter((asset): asset is PixelTileset => asset.type === "tileset"))');

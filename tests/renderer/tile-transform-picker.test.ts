@@ -71,8 +71,10 @@ describe('tile transform picker', () => {
     ]);
     expect(canvasSource).toContain('const constrainedTileTransforms = constrainTileTransformFlags(tileTransforms');
     expect(canvasSource).toContain("const activeTileTransforms = tool === 'tile-object' ? { ...tileTransforms } : constrainedTileTransforms");
-    expect(canvasSource).toContain('encodeTiledGid((terrainTileset?.type');
-    expect(canvasSource).toContain('selectedTileId), activeTileTransforms)');
+    expect(canvasSource).toContain('transforms: activeTileTransforms');
+    expect(canvasSource).toContain('gid: gesturePlan.rawGid');
+    expect(canvasSource).toContain('pendingMapTilePlan!.rawGid');
+    expect(canvasSource).toContain('pendingMapTilePlan!.transforms');
     expect(canvasSource).toContain('<TileTransformPicker');
     expect(canvasSource).toContain('value={activeTileTransforms}');
     expect(canvasSource).toContain("Toggle Tiled's diagonal-first flag when the resulting transform is permitted");

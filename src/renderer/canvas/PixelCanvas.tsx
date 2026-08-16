@@ -40,6 +40,7 @@ import {
   reorderPixelFrame,
   renameBitmapFont,
   resolveTilesetForGid,
+  tilesetHasLocalId,
   tilesetTileSourceAssetId,
   setPixelCelLinked,
   setPixelFrameCelsLinked,
@@ -89,6 +90,7 @@ import {
 import { PlaybackLanes } from '../components/PlaybackLanes';
 import { StampLibraryDialog } from '../components/StampLibraryDialog';
 import { TileTransformPicker } from '../components/TileTransformPicker';
+import { CurrentMapTileControl } from '../components/CurrentMapTileControl';
 import { collectReplayMasks, replayPointKey, replayTileLayerKey } from '../replay';
 import { EditorDialog, EntryDialog } from '../components/EditorDialog';
 import { bresenham } from './geometry';
@@ -119,6 +121,18 @@ import { drawPixelSpriteRegion, pixelSpriteRegionPlan } from '../../common/pixel
 import { constrainTileTransformFlags, tileTransformFlagsAllowed } from '../../common/tile-transform-options';
 import { EDITOR_DENSITY } from '../../common/editor-layout';
 import { planTileObjectCreation, requireTileObjectPlacementTileset, requireWritableTileObject } from '../../common/tile-object-authoring';
+import {
+  attachedMapTileAuthoringTilesets,
+  imageCollectionAuthoringTileIds,
+  mapTileAuthoringPlansMatch,
+  planMapTileAuthoringSelection,
+  resolveCurrentMapTileDraftValue,
+  selectScopedMapTileId,
+  selectCurrentMapTileset,
+  type CurrentMapTileDraft,
+  type CurrentMapTileScope,
+  type MapTileAuthoringPlan,
+} from '../../common/map-tile-authoring';
 import { editableSpriteLayer, spriteRegionBitmap, visibleSpriteLayers, type SpriteRegionBitmap } from './pixel-bitmap';
 
 interface PixelPoint { x: number; y: number }
@@ -327,8 +341,11 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const [terrainErase, setTerrainErase] = useState(false);
   const [tileTransforms, setTileTransforms] = useState({ hFlip: false, vFlip: false, diagonal: false });
   const [tileTransformPickerOpen, setTileTransformPickerOpen] = useState(false);
-  const [tileObjectTilesetChoice, setTileObjectTilesetChoice] = useState<{ mapId: string; tilesetId: string }>();
-  const [tileObjectTileDraft, setTileObjectTileDraft] = useState<{ mapId: string; tilesetId: string; value: string }>();
+  const [currentMapTileChoice, setCurrentMapTileChoice] = useState<CurrentMapTileScope>();
+  const [currentMapTileDraft, setCurrentMapTileDraft] = useState<CurrentMapTileDraft>();
+  const mapTileGesturePlanRef = useRef<MapTileAuthoringPlan | undefined>(undefined);
+  const [tileObjectTilesetChoice, setTileObjectTilesetChoice] = useState<CurrentMapTileScope>();
+  const [tileObjectTileDraft, setTileObjectTileDraft] = useState<CurrentMapTileDraft>();
   const [bitmapTextPoint, setBitmapTextPoint] = useState<PixelPoint>();
   const [durationFrameId, setDurationFrameId] = useState<string>();
   const [exposureGridOpen, setExposureGridOpen] = useState(false);
@@ -392,28 +409,51 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const activeStamp = document.stamps.find((stamp) => stamp.id === activeStampId) ?? document.stamps[0];
   const placementStamp: PixelStamp = activeStamp ?? { id: 'builtin-plus', name: 'Built-in plus', width: 3, height: 3, anchorX: 1, anchorY: 1, cells: [{ x: 1, y: 1, index: pixelIndex }, { x: 0, y: 1, index: pixelIndex }, { x: 2, y: 1, index: pixelIndex }, { x: 1, y: 0, index: pixelIndex }, { x: 1, y: 2, index: pixelIndex }] };
   const activePaletteCycle = document.paletteCycles.find((cycle) => cycle.id === activePaletteCycleId) ?? document.paletteCycles[0];
-  const attachedMapTilesets = useMemo(() => tilemap?.tilesetIds.flatMap((id) => {
-    const entry = document.pixelAssets[id];
-    return entry?.type === 'tileset' ? [entry] : [];
-  }) ?? [], [document.pixelAssets, tilemap]);
+  const attachedMapTilesets = useMemo(() => tilemap ? attachedMapTileAuthoringTilesets(document, tilemap) : [], [document, tilemap]);
   const atlasMapTilesets = attachedMapTilesets.filter((entry) => Boolean(entry.spriteAssetId));
-  const authorableTileObjectTilesets = attachedMapTilesets.filter((entry) => Boolean(entry.spriteAssetId) || (isImageCollectionTileset(entry) && tilemap?.orientation === 'orthogonal' && !tilemap.infinite));
-  const tileObjectTilesetId = tilemap && tileObjectTilesetChoice?.mapId === tilemap.id ? tileObjectTilesetChoice.tilesetId : authorableTileObjectTilesets[0]?.id;
+  const finiteOrthogonalCollectionTilesets = attachedMapTilesets.filter((entry) => isImageCollectionTileset(entry) && tilemap?.orientation === 'orthogonal' && !tilemap.infinite);
+  const authorableMapTileTilesets = [...atlasMapTilesets, ...finiteOrthogonalCollectionTilesets];
+  const authorableTileObjectTilesets = attachedMapTilesets.filter((entry) => Boolean(entry.spriteAssetId) || finiteOrthogonalCollectionTilesets.some((collection) => collection.id === entry.id));
+  const currentMapTileTilesetId = tilemap && currentMapTileChoice?.documentId === document.id && currentMapTileChoice.mapId === tilemap.id
+    ? currentMapTileChoice.tilesetId
+    : atlasMapTilesets[0]?.id ?? finiteOrthogonalCollectionTilesets[0]?.id;
+  const currentMapTileTileset = authorableMapTileTilesets.find((entry) => entry.id === currentMapTileTilesetId);
+  const tileObjectTilesetId = tilemap && tileObjectTilesetChoice?.documentId === document.id && tileObjectTilesetChoice.mapId === tilemap.id ? tileObjectTilesetChoice.tilesetId : authorableTileObjectTilesets[0]?.id;
   const tileObjectTileset = authorableTileObjectTilesets.find((entry) => entry.id === tileObjectTilesetId);
   const selectedTileId = Math.max(1, pixelIndex) - 1;
-  const tileObjectCollectionIds = tileObjectTileset && isImageCollectionTileset(tileObjectTileset)
-    ? Object.values(tileObjectTileset.tiles).map((tile) => tile.id).sort((left, right) => left - right)
-    : [];
+  const currentMapTileCollectionIds = currentMapTileTileset ? imageCollectionAuthoringTileIds(currentMapTileTileset) : [];
+  const currentMapTileDefaultTileId = currentMapTileCollectionIds.length && !currentMapTileCollectionIds.includes(selectedTileId)
+    ? currentMapTileCollectionIds[0]
+    : selectedTileId;
+  const currentMapTileDraftValue = tilemap && currentMapTileTilesetId
+    ? resolveCurrentMapTileDraftValue(currentMapTileDraft, {
+        documentId: document.id,
+        mapId: tilemap.id,
+        tilesetId: currentMapTileTilesetId,
+      }, currentMapTileDefaultTileId)
+    : String(currentMapTileDefaultTileId);
+  const currentMapTileId = currentMapTileDraftValue.trim() ? Number(currentMapTileDraftValue) : Number.NaN;
+  const tileObjectCollectionIds = tileObjectTileset ? imageCollectionAuthoringTileIds(tileObjectTileset) : [];
   const tileObjectDefaultTileId = tileObjectCollectionIds.length && !tileObjectCollectionIds.includes(selectedTileId) ? tileObjectCollectionIds[0] : selectedTileId;
-  const tileObjectTileDraftValue = tilemap && tileObjectTileDraft?.mapId === tilemap.id && tileObjectTileDraft.tilesetId === tileObjectTilesetId
+  const tileObjectTileDraftValue = tilemap && tileObjectTileDraft?.documentId === document.id && tileObjectTileDraft.mapId === tilemap.id && tileObjectTileDraft.tilesetId === tileObjectTilesetId
     ? tileObjectTileDraft.value
     : String(tileObjectDefaultTileId);
   const tileObjectPlacementTileId = tileObjectTileDraftValue.trim() ? Number(tileObjectTileDraftValue) : Number.NaN;
-  const terrainTileset = tool === 'tile-object' ? tileObjectTileset : atlasMapTilesets[0];
+  const terrainTileset = tool === 'tile-object'
+    ? tileObjectTileset
+    : tool === 'terrain'
+      ? atlasMapTilesets[0]
+      : currentMapTileTileset;
+  const authoringTileId = tool === 'tile-object'
+    ? tileObjectPlacementTileId
+    : tool === 'terrain'
+      ? selectedTileId
+      : currentMapTileId;
+  const validAuthoringTileId = Number.isSafeInteger(authoringTileId) && authoringTileId >= 0 ? authoringTileId : undefined;
   const terrainSet = terrainTileset?.type === 'tileset' ? terrainTileset.wangSets.find((set) => set.id === terrainSetId) ?? terrainTileset.wangSets[0] : undefined;
   const terrainColor = terrainSet?.colors.find((color) => color.id === terrainColorId) ?? terrainSet?.colors[0];
-  const terrainSourceId = terrainTileset?.type === 'tileset'
-    ? tilesetTileSourceAssetId(terrainTileset, tool === 'tile-object' ? tileObjectPlacementTileId : selectedTileId)
+  const terrainSourceId = terrainTileset?.type === 'tileset' && validAuthoringTileId !== undefined
+    ? tilesetTileSourceAssetId(terrainTileset, validAuthoringTileId)
     : undefined;
   const terrainSource = terrainSourceId ? document.pixelAssets[terrainSourceId] : undefined;
   const terrainSourceSprite = terrainSource?.type === 'sprite' ? terrainSource : undefined;
@@ -424,10 +464,15 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     vFlip: { ...activeTileTransforms, vFlip: !activeTileTransforms.vFlip },
     diagonal: { ...activeTileTransforms, diagonal: !activeTileTransforms.diagonal },
   };
-  const activeTileStamp = document.tileStamps.find((stamp) => stamp.id === activeTileStampId) ?? document.tileStamps[0];
-  const placementTileStamp: TileStamp = activeTileStamp ?? { id: 'builtin-tile', name: 'Current tile', width: 1, height: 1, anchorX: 0, anchorY: 0, cells: [{ x: 0, y: 0, gid: encodeTiledGid((terrainTileset?.type === 'tileset' ? terrainTileset.firstGid : 1) + Math.max(1, pixelIndex) - 1, activeTileTransforms) }] };
-  const selectedVariantGroup = terrainTileset?.type === 'tileset' ? tileVariantGroup(terrainTileset.tiles[selectedTileId]) : undefined;
-  const selectedVariantCandidates = terrainTileset?.type === 'tileset' ? tileVariantCandidates(terrainTileset, selectedTileId) : [];
+  const activeTileStamp = activeTileStampId === 'builtin-tile'
+    ? undefined
+    : document.tileStamps.find((stamp) => stamp.id === activeTileStampId) ?? document.tileStamps[0];
+  const idleCurrentTileGid = terrainTileset?.type === 'tileset' && validAuthoringTileId !== undefined && tilesetHasLocalId(terrainTileset, validAuthoringTileId)
+    ? encodeTiledGid(terrainTileset.firstGid + validAuthoringTileId, activeTileTransforms)
+    : 0;
+  const placementTileStamp: TileStamp = activeTileStamp ?? { id: 'builtin-tile', name: 'Current tile', width: 1, height: 1, anchorX: 0, anchorY: 0, cells: [{ x: 0, y: 0, gid: idleCurrentTileGid }] };
+  const selectedVariantGroup = terrainTileset?.type === 'tileset' && validAuthoringTileId !== undefined && !isImageCollectionTileset(terrainTileset) ? tileVariantGroup(terrainTileset.tiles[validAuthoringTileId]) : undefined;
+  const selectedVariantCandidates = terrainTileset?.type === 'tileset' && validAuthoringTileId !== undefined && !isImageCollectionTileset(terrainTileset) ? tileVariantCandidates(terrainTileset, validAuthoringTileId) : [];
   const selectedVariantCount = selectedVariantCandidates.length;
   const variantSeed = tilemap ? Math.trunc(Number(tilemap.properties[TILE_VARIANT_SEED_PROPERTY]) || 0) : 0;
   const hasTimeline = Boolean(sprite && !tileset);
@@ -445,6 +490,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      mapTileGesturePlanRef.current = undefined;
       const pendingLocks = [lockPromiseRef.current, mapObjectGestureRef.current?.lockPromise].filter((value): value is Promise<{ acquired: boolean; lockId?: string }> => Boolean(value));
       void releasePendingPixelLocks(pendingLocks, (lockId) => window.aidraw.releaseHumanLock(lockId));
     };
@@ -1223,6 +1269,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     return cancelPixelGesture(() => {
       gestureEpochRef.current += 1;
       lockPromiseRef.current = undefined; mapObjectGestureRef.current = undefined;
+      mapTileGesturePlanRef.current = undefined;
       lassoDraftRef.current = undefined;
       setStart(undefined); setPreview([]); setBulkPreview([]); setLassoPath([]); setStampPreview([]); setTileStampPreview([]); setSelectionOffset(undefined); setLockPromise(undefined); setMapObjectGesture(undefined);
     }, pendingLocks, (lockId) => window.aidraw.releaseHumanLock(lockId));
@@ -1288,6 +1335,27 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     }
   };
 
+  const observeMapTileGesturePlan = (): MapTileAuthoringPlan | undefined => {
+    if (!tilemap || tool === 'eraser' || tool === 'terrain' || tool === 'tile-object' || tool === 'select' || (tool === 'stamp' && activeTileStamp)) return undefined;
+    if (!currentMapTileTilesetId || !currentMapTileTileset) throw new Error('No exact attached tileset is selected for the Current tile choice.');
+    const request = {
+      mapId: tilemap.id,
+      tilesetId: currentMapTileTilesetId,
+      tileId: currentMapTileId,
+      transforms: activeTileTransforms,
+    };
+    const observed = planMapTileAuthoringSelection(document, request);
+    const liveDocument = useEditorStore.getState().snapshot?.activeDocument;
+    if (!liveDocument || liveDocument.kind !== 'pixel' || liveDocument.id !== document.id) {
+      throw new Error('The active pixel document changed before tile authoring.');
+    }
+    const current = planMapTileAuthoringSelection(liveDocument, request);
+    if (!mapTileAuthoringPlansMatch(observed, current)) {
+      throw new Error('The visible map, tileset, source sprite, or transform policy changed before tile authoring.');
+    }
+    return current;
+  };
+
   const updatePreview = (from: PixelPoint, point: PixelPoint): void => {
     if (tool === 'select') setPreview(rectangleFill(from, point));
     else if (['line', 'rectangle', 'ellipse'].includes(tool)) setPreview(withSymmetry(frameChanges(tool, from, point)));
@@ -1301,7 +1369,11 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       }
       if (tool === 'stamp' && tilemap) {
         const bounds = tilemap.infinite ? undefined : { width: tilemap.width, height: tilemap.height };
-        const placed = line.flatMap((entry) => placeTileStamp(placementTileStamp, entry.x, entry.y, bounds).changes);
+        const gesturePlan = mapTileGesturePlanRef.current;
+        const exactPlacementStamp = activeTileStamp ?? (gesturePlan
+          ? { ...placementTileStamp, cells: [{ x: 0, y: 0, gid: gesturePlan.rawGid }] }
+          : placementTileStamp);
+        const placed = line.flatMap((entry) => placeTileStamp(exactPlacementStamp, entry.x, entry.y, bounds).changes);
         setTileStampPreview((current) => [...new Map([...current, ...placed].map((entry) => [entry.x + ',' + entry.y, entry])).values()]);
         setPreview((current) => [...new Map([...current, ...placed].map((entry) => [entry.x + ',' + entry.y, { x: entry.x, y: entry.y }])).values()]);
         return;
@@ -1316,6 +1388,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   };
 
   const onPointerDown = async (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    mapTileGesturePlanRef.current = undefined;
     event.currentTarget.setPointerCapture(event.pointerId);
     const point = toPixel(event);
     const spritePoint = sprite && wrapEditing ? wrapPixelPoint(point, sprite.width, sprite.height) : point;
@@ -1384,6 +1457,14 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     if (tool === 'text' && sprite && activeFrameId) {
       setBitmapTextPoint(spritePoint);
       return;
+    }
+    if (tilemap) {
+      try {
+        mapTileGesturePlanRef.current = observeMapTileGesturePlan();
+      } catch (error) {
+        notify(`${error instanceof Error ? error.message : 'The Current tile choice could not be admitted.'} Re-select the exact tile and try again. No map cell changed.`, 'warning');
+        return;
+      }
     }
     const bounds = sprite ? { width: sprite.width, height: sprite.height, kind: 'pixel' as const } : { width: tilemap!.width, height: tilemap!.height, kind: 'tile' as const };
     if ((tool === 'fill' || tool === 'replace') && sprite && activeFrameId) {
@@ -1459,6 +1540,8 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     if (!start && !selectionOffset && !lockPromise) return;
     const pendingLock = lockPromise;
     const pendingRuns = bulkPreview;
+    const pendingMapTilePlan = mapTileGesturePlanRef.current;
+    mapTileGesturePlanRef.current = undefined;
     const pendingLassoPath = lassoDraftRef.current?.points ?? [];
     if (tool === 'lasso' && pendingLassoPath.length === 0) return;
     const points = sprite && wrapEditing && tool !== 'select' && tool !== 'lasso'
@@ -1504,7 +1587,9 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       const firstGid = terrainTileset?.type === 'tileset' ? terrainTileset.firstGid : 1;
       if (layerId && layer?.type === 'tile' && layer.chunks) {
         if (tool === 'stamp' && placedTiles.length) {
-          await apply('Place reusable tile stamp', [{ kind: 'pixel.tilemap.set', mapId: tilemap.id, layerId, changes: placedTiles, expectedRevision: layer.revision }]);
+          const operations: CanvasOperation[] = [{ kind: 'pixel.tilemap.set', mapId: tilemap.id, layerId, changes: placedTiles, expectedRevision: layer.revision }];
+          if (pendingMapTilePlan?.expectedDocumentRevision !== undefined) await applyGuarded('Place Current tile stamp', operations, pendingMapTilePlan.expectedDocumentRevision);
+          else await apply(pendingMapTilePlan ? 'Place Current tile stamp' : 'Place reusable tile stamp', operations);
         } else if (tool === 'terrain' && terrainTileset?.type === 'tileset' && terrainSet && terrainColor) {
           const terrainTileAt = (x: number, y: number) => {
             const gid = decodeTiledGid(readTileAt(layer.chunks!, x, y)).gid;
@@ -1533,8 +1618,29 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
             notify(`${terrainErase ? 'Erased' : 'Painted'} ${plan.strokePointCount} terrain stroke cells with ${plan.repairChangeCount} neighboring repair${plan.repairChangeCount === 1 ? '' : 's'} in one undoable change.`, 'info');
           }
         } else {
-          const changes = points.map((point) => ({ ...point, gid: tool === 'eraser' ? 0 : encodeTiledGid(firstGid + (terrainTileset?.type === 'tileset' ? chooseTileVariant(terrainTileset, selectedTileId, point.x, point.y, variantSeed) : selectedTileId), activeTileTransforms) }));
-          await apply(selectedVariantGroup ? `Paint ${selectedVariantGroup} variants` : 'Paint tiles', [{ kind: 'pixel.tilemap.set', mapId: tilemap.id, layerId, changes, expectedRevision: layer.revision }]);
+          if (tool !== 'eraser' && !pendingMapTilePlan) {
+            notify('The Current tile choice was not retained for this gesture. No map cell changed; re-select the tile and try again.', 'warning');
+            return;
+          }
+          const gestureTileset = pendingMapTilePlan?.tileset;
+          const gestureVariantGroup = gestureTileset && !pendingMapTilePlan.imageCollection
+            ? tileVariantGroup(gestureTileset.tiles[pendingMapTilePlan.tileId])
+            : undefined;
+          const changes = points.map((point) => ({
+            ...point,
+            gid: tool === 'eraser'
+              ? 0
+              : pendingMapTilePlan!.imageCollection
+                ? pendingMapTilePlan!.rawGid
+                : encodeTiledGid(
+                    pendingMapTilePlan!.tileset.firstGid + chooseTileVariant(pendingMapTilePlan!.tileset, pendingMapTilePlan!.tileId, point.x, point.y, variantSeed),
+                    pendingMapTilePlan!.transforms,
+                  ),
+          }));
+          const operations: CanvasOperation[] = [{ kind: 'pixel.tilemap.set', mapId: tilemap.id, layerId, changes, expectedRevision: layer.revision }];
+          const label = gestureVariantGroup ? `Paint ${gestureVariantGroup} variants` : 'Paint tiles';
+          if (pendingMapTilePlan?.expectedDocumentRevision !== undefined) await applyGuarded(label, operations, pendingMapTilePlan.expectedDocumentRevision);
+          else await apply(label, operations);
         }
       }
     } } finally { if (lock.lockId) await window.aidraw.releaseHumanLock(lock.lockId); }
@@ -1780,11 +1886,32 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
         {sprite && <button className={paletteCycling ? 'is-active' : ''} onClick={() => { if (paletteCycling) setPaletteOffset(0); setPaletteCycling(!paletteCycling); }} title="Palette cycling preview"><Repeat2 size={14} /> Cycle</button>}
         {paletteCycling && document.paletteCycles.length > 0 && <select aria-label="Active palette cycle" value={activePaletteCycle?.id} onChange={(event) => { setActivePaletteCycleId(event.target.value); setPaletteOffset(0); }} title="Named palette cycle">{document.paletteCycles.map((cycle) => <option key={cycle.id} value={cycle.id}>{cycle.name}</option>)}</select>}
         {tool === 'terrain' && terrainTileset?.type === 'tileset' && <><select aria-label="Active Wang set" value={terrainSet?.id ?? ''} onChange={(event) => { setTerrainSetId(event.target.value); setTerrainColorId(undefined); }}><option value="" disabled>Wang set</option>{terrainTileset.wangSets.map((set) => <option key={set.id} value={set.id}>{set.name}</option>)}</select><select aria-label="Active Wang color" value={terrainColor?.id ?? ''} onChange={(event) => setTerrainColorId(Number(event.target.value))}><option value="" disabled>Terrain color</option>{terrainSet?.colors.map((color) => <option key={color.id} value={color.id}>{color.name}</option>)}</select><button className={terrainErase ? 'is-active' : ''} onClick={() => setTerrainErase((value) => !value)} title="Toggle terrain erase and neighbor repair"><Eraser size={13} /> {terrainErase ? 'Erase' : 'Paint'}</button></>}
+        {tilemap && tool !== 'terrain' && tool !== 'tile-object' && <CurrentMapTileControl
+          document={document}
+          map={tilemap}
+          tilesets={authorableMapTileTilesets}
+          tilesetId={currentMapTileTileset?.id}
+          tileIdDraft={currentMapTileDraftValue}
+          onTilesetChange={(tilesetId) => {
+            const next = authorableMapTileTilesets.find((entry) => entry.id === tilesetId);
+            if (!next) return;
+            const update = selectCurrentMapTileset({ documentId: document.id, mapId: tilemap.id }, next, selectedTileId);
+            setCurrentMapTileChoice(update.choice);
+            setCurrentMapTileDraft(update.draft);
+            if (update.nextPixelIndex !== undefined) setPixelIndex(update.nextPixelIndex);
+          }}
+          onTileIdDraftChange={(value) => {
+            if (!currentMapTileTileset) return;
+            const update = selectScopedMapTileId({ documentId: document.id, mapId: tilemap.id, tilesetId: currentMapTileTileset.id }, currentMapTileTileset, value);
+            setCurrentMapTileDraft(update.draft);
+            if (update.nextPixelIndex !== undefined) setPixelIndex(update.nextPixelIndex);
+          }}
+        />}
         {tool === 'tile-object' && tilemap && <>
-          <select aria-label="Tile object tileset" value={tileObjectTileset?.id ?? ''} onChange={(event) => { const tilesetId = event.target.value; setTileObjectTilesetChoice({ mapId: tilemap.id, tilesetId }); setTileObjectTileDraft(undefined); }} title="Exact attached atlas or finite-orthogonal image-collection tileset for the new tile object"><option value="" disabled>Attached tileset</option>{authorableTileObjectTilesets.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}</select>
+          <select aria-label="Tile object tileset" value={tileObjectTileset?.id ?? ''} onChange={(event) => { const tilesetId = event.target.value; setTileObjectTilesetChoice({ documentId: document.id, mapId: tilemap.id, tilesetId }); setTileObjectTileDraft(undefined); }} title="Exact attached atlas or finite-orthogonal image-collection tileset for the new tile object"><option value="" disabled>Attached tileset</option>{authorableTileObjectTilesets.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}</select>
           <label className="tile-object-tile-control"><span>Tile ID</span>{tileObjectTileset && isImageCollectionTileset(tileObjectTileset)
-            ? <select aria-label="Tile object local tile ID" value={tileObjectTileDraftValue} onChange={(event) => { const value = event.target.value; setTileObjectTileDraft({ mapId: tilemap.id, tilesetId: tileObjectTileset.id, value }); setPixelIndex(Number(value) + 1); }}>{tileObjectCollectionIds.map((id) => <option key={id} value={id}>{id}</option>)}</select>
-            : <input aria-label="Tile object local tile ID" type="number" min={0} max={Math.max(0, (tileObjectTileset?.columns ?? 1) * (tileObjectTileset?.rows ?? 1) - 1)} step={1} value={tileObjectTileDraftValue} onChange={(event) => { const value = event.target.value; if (!tileObjectTileset) return; setTileObjectTileDraft({ mapId: tilemap.id, tilesetId: tileObjectTileset.id, value }); const parsed = Number(value); if (value.trim() && Number.isSafeInteger(parsed) && parsed >= 0) setPixelIndex(parsed + 1); }} />}</label>
+            ? <select aria-label="Tile object local tile ID" value={tileObjectTileDraftValue} onChange={(event) => { const update = selectScopedMapTileId({ documentId: document.id, mapId: tilemap.id, tilesetId: tileObjectTileset.id }, tileObjectTileset, event.target.value); setTileObjectTileDraft(update.draft); if (update.nextPixelIndex !== undefined) setPixelIndex(update.nextPixelIndex); }}>{tileObjectCollectionIds.map((id) => <option key={id} value={id}>{id}</option>)}</select>
+            : <input aria-label="Tile object local tile ID" type="number" min={0} max={Math.max(0, (tileObjectTileset?.columns ?? 1) * (tileObjectTileset?.rows ?? 1) - 1)} step={1} value={tileObjectTileDraftValue} onChange={(event) => { if (!tileObjectTileset) return; const update = selectScopedMapTileId({ documentId: document.id, mapId: tilemap.id, tilesetId: tileObjectTileset.id }, tileObjectTileset, event.target.value); setTileObjectTileDraft(update.draft); if (update.nextPixelIndex !== undefined) setPixelIndex(update.nextPixelIndex); }} />}</label>
           <span title="Exact destination object layer">{activeObjectLayerEntry ? activeObjectLayerEntry.layer.name : 'Select object layer'}</span>
         </>}
         {tilemap && tool !== 'terrain' && terrainTileset?.type === 'tileset' && <>
@@ -1795,7 +1922,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
         </>}
         {tilemap && tool !== 'terrain' && selectedVariantGroup && <div className="variant-seed-control" title={`${selectedVariantCount} weighted tiles in “${selectedVariantGroup}”`}><span>{selectedVariantGroup} · {selectedVariantCount}</span><label><span>Seed</span><input aria-label="Random tile variant seed" type="number" defaultValue={variantSeed} key={`${tilemap.id}:${variantSeed}`} onBlur={(event) => changeVariantSeed(Math.max(-2_147_483_648, Math.min(2_147_483_647, Math.trunc(Number(event.target.value) || 0))), 'Change tile variant seed')} /></label><button type="button" onClick={() => changeVariantSeed(nextTileVariantSeed(variantSeed), 'Start new tile-variant stroke seed')} title="Persist a new deterministic seed for subsequent variant strokes; existing painted tiles do not change"><Dices size={11} /> New stroke</button></div>}
         {tool === 'stamp' && (sprite || tilemap) && <>
-          {sprite ? <select aria-label="Active reusable stamp" value={activeStamp?.id ?? 'builtin-plus'} onChange={(event) => setActiveStampId(event.target.value === 'builtin-plus' ? undefined : event.target.value)} title="Reusable stamp library"><option value="builtin-plus">Built-in plus</option>{document.stamps.map((stamp) => <option key={stamp.id} value={stamp.id}>{stamp.name}</option>)}</select> : <select aria-label="Active reusable tile stamp" value={activeTileStamp?.id ?? 'builtin-tile'} onChange={(event) => setActiveTileStampId(event.target.value === 'builtin-tile' ? undefined : event.target.value)} title="Reusable tile stamp library"><option value="builtin-tile">Current tile</option>{document.tileStamps.map((stamp) => <option key={stamp.id} value={stamp.id}>{stamp.name}</option>)}</select>}
+          {sprite ? <select aria-label="Active reusable stamp" value={activeStamp?.id ?? 'builtin-plus'} onChange={(event) => setActiveStampId(event.target.value === 'builtin-plus' ? undefined : event.target.value)} title="Reusable stamp library"><option value="builtin-plus">Built-in plus</option>{document.stamps.map((stamp) => <option key={stamp.id} value={stamp.id}>{stamp.name}</option>)}</select> : <select aria-label="Active reusable tile stamp" value={activeTileStamp?.id ?? 'builtin-tile'} onChange={(event) => setActiveTileStampId(event.target.value)} title="Reusable tile stamp library"><option value="builtin-tile">Current tile</option>{document.tileStamps.map((stamp) => <option key={stamp.id} value={stamp.id}>{stamp.name}</option>)}</select>}
           <button disabled={!selection.length} onClick={() => setStampCaptureOpen(true)} title="Capture the current selection as a reusable stamp"><Copy size={13} /> Capture</button>
           <button onClick={() => { setStampCaptureOpen(false); setStampLibraryOpen(true); }} title="Copy or import a bounded reusable stamp library as AIDraw JSON"><ClipboardPaste size={13} /> Library JSON</button>
           <button disabled={sprite ? !activeStamp : !activeTileStamp} onClick={() => void transformActiveStamp('flip-horizontal')} title="Flip saved stamp horizontally"><FlipHorizontal2 size={13} /></button>
@@ -1821,11 +1948,11 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
         {clipboardAvailable && <button onClick={() => void pasteLocalSelection()} title={tilemap ? 'Paste the project-local tile selection at the cursor (Ctrl+V)' : 'Paste the private indexed selection or standard PNG at the cursor (Ctrl+V)'}><ClipboardPaste size={13} /> Paste</button>}
         <span>{cursor ? `${cursor.x}, ${cursor.y}` : '—, —'}</span>
       </div>
-      {tileTransformPickerOpen && tilemap && tool !== 'terrain' && terrainTileset?.type === 'tileset' && <TileTransformPicker
+      {tileTransformPickerOpen && tilemap && tool !== 'terrain' && terrainTileset?.type === 'tileset' && validAuthoringTileId !== undefined && <TileTransformPicker
         document={document}
         sprite={terrainSourceSprite}
         tileset={terrainTileset}
-        tileId={tool === 'tile-object' ? tileObjectPlacementTileId : selectedTileId}
+        tileId={validAuthoringTileId}
         value={activeTileTransforms}
         onChange={setTileTransforms}
         onClose={() => setTileTransformPickerOpen(false)}

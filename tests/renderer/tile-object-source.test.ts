@@ -47,7 +47,9 @@ describe('tile-object production source wiring', () => {
     expect(canvas).toContain('tilesetId: tileObjectTilesetId');
     expect(canvas).toContain('tileId: tileObjectPlacementTileId');
     expect(canvas).toContain("tileObjectTileDraftValue.trim() ? Number(tileObjectTileDraftValue) : Number.NaN");
-    expect(canvas).toContain('value.trim() && Number.isSafeInteger(parsed) && parsed >= 0');
+    expect(canvas).toContain('tileObjectTilesetChoice?.documentId === document.id');
+    expect(canvas.match(/selectScopedMapTileId\(\{ documentId: document\.id, mapId: tilemap\.id, tilesetId: tileObjectTileset\.id \}, tileObjectTileset, event\.target\.value\)/gu)).toHaveLength(2);
+    expect(canvas).toContain('if (update.nextPixelIndex !== undefined) setPixelIndex(update.nextPixelIndex)');
     expect(canvas).toContain('transforms: activeTileTransforms');
     expect(canvas).toContain('clientPointToTilemapObjectAnchor');
     expect(canvas).toContain('plan.expectedDocumentRevision === undefined');
