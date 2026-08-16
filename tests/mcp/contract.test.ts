@@ -456,6 +456,7 @@ describe('authenticated stateful MCP contract', () => {
     expect(guide).toContain('pixel.wang-terrain.stroke');
     expect(guide).toContain('pixel.image-collection.create');
     expect(guide).toContain('pixel.image-collection.append');
+    expect(guide).toContain('pixel.image-collection.source.replace');
     expect(guide).toContain('intent-derived deterministic stream');
     const safetyHelp = await callTool(started.url, client.headers, 13, 'aidraw_help', { topic: 'safety' });
     expect(safetyHelp.steps).toEqual(expect.arrayContaining([
@@ -473,6 +474,7 @@ describe('authenticated stateful MCP contract', () => {
     ]));
     expect(JSON.stringify(operationsHelp.examples)).toContain('pixel.wang-terrain.stroke');
     expect(JSON.stringify(operationsHelp.examples)).toContain('pixel.image-collection.create');
+    expect(JSON.stringify(operationsHelp.examples)).toContain('pixel.image-collection.source.replace');
   });
 
   it('initializes the same raw Streamable HTTP profile under each configured client name', async () => {
@@ -1072,7 +1074,7 @@ describe('authenticated stateful MCP contract', () => {
     expect(readPixel(committedCel, 7, 7)).toBe(6);
   });
 
-  it('creates and appends exact image-collection sources through one guarded semantic lifecycle transaction', async () => {
+  it('creates, appends, and replaces exact image-collection sources through one guarded semantic lifecycle transaction', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aidraw-mcp-image-collection-')); temporaryPaths.push(root);
     const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0'); documents.initialize();
     const host = new McpHost(documents, '1.0.0', join(root, 'port.json')); hosts.push(host); const started = await host.start('image-collection-token');
@@ -1082,12 +1084,13 @@ describe('authenticated stateful MCP contract', () => {
     const first = document.pixelAssets[document.activeAssetId]; if (first.type !== 'sprite') throw new Error('Expected first sprite');
     const second = createPixelSprite('Second semantic source', 12, 7);
     const third = createPixelSprite('Third semantic source', 5, 18);
+    const fourth = createPixelSprite('Replacement semantic source', 4, 6);
     expect(await callTool(started.url, client.headers, 3, 'canvas_apply', {
       documentId: document.id, clientOperationId: 'collection-source-assets', label: 'Add collection source sprites', playback: { mode: 'instant', speed: 1 },
-      operations: [{ kind: 'pixel.asset.add', asset: second }, { kind: 'pixel.asset.add', asset: third }],
+      operations: [{ kind: 'pixel.asset.add', asset: second }, { kind: 'pixel.asset.add', asset: third }, { kind: 'pixel.asset.add', asset: fourth }],
     })).toMatchObject({ status: 'committed' });
     const afterSources = documents.getDocument(document.id); if (!afterSources || afterSources.kind !== 'pixel') throw new Error('Expected pixel project');
-    const sourceBytes = JSON.stringify([afterSources.pixelAssets[first.id], afterSources.pixelAssets[second.id], afterSources.pixelAssets[third.id]]);
+    const sourceBytes = JSON.stringify([afterSources.pixelAssets[first.id], afterSources.pixelAssets[second.id], afterSources.pixelAssets[third.id], afterSources.pixelAssets[fourth.id]]);
     expect(await callTool(started.url, client.headers, 4, 'canvas_apply', {
       documentId: document.id, clientOperationId: 'semantic-collection-create', label: 'Create semantic image collection', playback: { mode: 'instant', speed: 1 },
       operations: [{ kind: 'pixel.image-collection.create', tilesetId: 'semantic-collection', name: 'Semantic objects', sourceSpriteIds: [third.id, first.id], expectedDocumentRevision: afterSources.revision }],
@@ -1097,7 +1100,7 @@ describe('authenticated stateful MCP contract', () => {
     expect(collection).toMatchObject({ firstGid: 1, tileWidth: Math.max(first.width, third.width), tileHeight: Math.max(first.height, third.height), columns: 0, rows: 0, createdBy: expect.stringMatching(/^agent[_-]/) });
     expect(collection.spriteAssetId).toBeUndefined();
     expect([collection.tiles[0].imageAssetId, collection.tiles[1].imageAssetId]).toEqual([third.id, first.id]);
-    expect(JSON.stringify([afterCreate.pixelAssets[first.id], afterCreate.pixelAssets[second.id], afterCreate.pixelAssets[third.id]])).toBe(sourceBytes);
+    expect(JSON.stringify([afterCreate.pixelAssets[first.id], afterCreate.pixelAssets[second.id], afterCreate.pixelAssets[third.id], afterCreate.pixelAssets[fourth.id]])).toBe(sourceBytes);
 
     const mixedBefore = structuredClone(afterCreate);
     const mixed = await callToolMessage(started.url, client.headers, 5, 'canvas_apply', {
@@ -1116,16 +1119,30 @@ describe('authenticated stateful MCP contract', () => {
     const appended = afterAppend.pixelAssets[collection.id]; if (appended.type !== 'tileset') throw new Error('Expected image collection');
     expect(appended.tiles[2].imageAssetId).toBe(second.id);
     expect(appended.firstGid).toBe(collection.firstGid);
-    expect(JSON.stringify([afterAppend.pixelAssets[first.id], afterAppend.pixelAssets[second.id], afterAppend.pixelAssets[third.id]])).toBe(sourceBytes);
+    expect(JSON.stringify([afterAppend.pixelAssets[first.id], afterAppend.pixelAssets[second.id], afterAppend.pixelAssets[third.id], afterAppend.pixelAssets[fourth.id]])).toBe(sourceBytes);
 
-    const stale = await callToolMessage(started.url, client.headers, 7, 'canvas_apply', {
+    expect(await callTool(started.url, client.headers, 7, 'canvas_apply', {
+      documentId: document.id, clientOperationId: 'semantic-collection-source-replace', label: 'Replace semantic collection source', playback: { mode: 'instant', speed: 1 },
+      operations: [{ kind: 'pixel.image-collection.source.replace', tilesetId: collection.id, tileId: 0, sourceSpriteId: fourth.id, expectedTilesetRevision: appended.revision, expectedDocumentRevision: afterAppend.revision }],
+    })).toMatchObject({ status: 'committed' });
+    const afterReplacement = documents.getDocument(document.id); if (!afterReplacement || afterReplacement.kind !== 'pixel') throw new Error('Expected pixel project');
+    const replaced = afterReplacement.pixelAssets[collection.id]; if (replaced.type !== 'tileset') throw new Error('Expected image collection');
+    expect(replaced).toMatchObject({ firstGid: collection.firstGid, tiles: { 0: { id: 0, imageAssetId: fourth.id }, 1: { id: 1, imageAssetId: first.id }, 2: { id: 2, imageAssetId: second.id } } });
+    expect(JSON.stringify([afterReplacement.pixelAssets[first.id], afterReplacement.pixelAssets[second.id], afterReplacement.pixelAssets[third.id], afterReplacement.pixelAssets[fourth.id]])).toBe(sourceBytes);
+
+    const stale = await callToolMessage(started.url, client.headers, 8, 'canvas_apply', {
       documentId: document.id, clientOperationId: 'semantic-collection-stale', label: 'Reject stale collection append', playback: { mode: 'instant', speed: 1 },
       operations: [{ kind: 'pixel.image-collection.append', tilesetId: collection.id, sourceSpriteId: second.id, expectedTilesetRevision: appended.revision, expectedDocumentRevision: afterCreate.revision }],
     });
     expect(stale.result?.isError).toBe(true);
     expect(JSON.stringify(stale)).toContain('document revision changed');
-    expect(documents.getDocument(document.id)).toEqual(afterAppend);
-    expect(await callTool(started.url, client.headers, 8, 'history_manage', { action: 'undo', documentId: document.id })).toMatchObject({ status: 'committed' });
+    expect(documents.getDocument(document.id)).toEqual(afterReplacement);
+    expect(await callTool(started.url, client.headers, 9, 'history_manage', { action: 'undo', documentId: document.id })).toMatchObject({ status: 'committed' });
+    const replacementUndone = documents.getDocument(document.id); if (!replacementUndone || replacementUndone.kind !== 'pixel') throw new Error('Expected pixel project');
+    const replacementUndoneCollection = replacementUndone.pixelAssets[collection.id]; if (replacementUndoneCollection.type !== 'tileset') throw new Error('Expected image collection');
+    expect(replacementUndoneCollection.tiles[0].imageAssetId).toBe(third.id);
+    expect(replacementUndoneCollection.tiles[2].imageAssetId).toBe(second.id);
+    expect(await callTool(started.url, client.headers, 10, 'history_manage', { action: 'undo', documentId: document.id })).toMatchObject({ status: 'committed' });
     const undone = documents.getDocument(document.id); if (!undone || undone.kind !== 'pixel') throw new Error('Expected pixel project');
     const undoneCollection = undone.pixelAssets[collection.id]; if (undoneCollection.type !== 'tileset') throw new Error('Expected image collection');
     expect(Object.keys(undoneCollection.tiles)).toEqual(['0', '1']);

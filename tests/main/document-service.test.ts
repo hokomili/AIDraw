@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { HUMAN_ACTOR, IDENTITY_TRANSFORM, applyTransaction, createId, createIllustrationDocument, createPixelDocument, createPixelSprite, createPixelTileset, nowIso, type Actor, type CanvasTransaction, type ShapeObject } from '@aidraw/core';
 import type { TransactionTraceEntry } from '@common/contracts';
-import { appendImageCollectionSource, createImageCollectionTileset, imageCollectionSourceDependencyGuards, replaceImageCollectionTileMetadata } from '@common/image-collection-authoring';
+import { appendImageCollectionSource, createImageCollectionTileset, imageCollectionSourceDependencyGuards, replaceImageCollectionSource, replaceImageCollectionTileMetadata } from '@common/image-collection-authoring';
 import { DocumentService, type NativeDocumentPreviewRenderer } from '@main/document-service';
 import { RecoveryJournal } from '@main/journal';
 import { writeNativeDocument } from '@main/persistence';
@@ -652,6 +652,49 @@ describe('document service collaboration semantics', () => {
     const undone = service.getDocument(document.id); if (!undone || undone.kind !== 'pixel') throw new Error('Expected pixel document');
     expect(undone.pixelAssets[collection.id]).toMatchObject({ type: 'tileset', revision: collection.revision + 1, tiles: { 0: { imageAssetId: first.id } } });
     expect(undone.pixelAssets[collection.id]).not.toHaveProperty('tiles.1');
+  });
+
+  it('atomically refuses queued exact-ID source replacement after its new source changes, then admits a fresh retry', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-service-collection-replacement-guard-'));
+    temporaryPaths.push(root);
+    const service = new DocumentService(new RecoveryJournal(root), '1.0.0');
+    services.push(service);
+    const document = createPixelDocument('project', 'Queued collection replacement guard');
+    const original = document.pixelAssets[document.activeAssetId]; if (original.type !== 'sprite') throw new Error('Expected sprite');
+    const replacement = createPixelSprite('Queued replacement source', 12, 7);
+    document.assetIds.push(replacement.id); document.pixelAssets[replacement.id] = replacement;
+    const collection = createImageCollectionTileset(document, 'Queued collection', [original.id], { id: 'queued-replacement-collection' });
+    collection.tiles[0].properties = { preserved: true };
+    document.assetIds.push(collection.id); document.pixelAssets[collection.id] = collection; document.activeAssetId = collection.id;
+    service.addDocument(document);
+
+    const stalePlan = replaceImageCollectionSource(document, collection.id, 0, replacement.id);
+    const resizedReplacement = structuredClone(replacement); resizedReplacement.width += 3;
+    const sourceWrite = service.apply({
+      id: createId('tx'), clientOperationId: createId('human-op'), documentId: document.id, actor: HUMAN_ACTOR,
+      label: 'Resize replacement source first', createdAt: nowIso(), operations: [{ kind: 'pixel.asset.replace', asset: resizedReplacement, expectedRevision: replacement.revision }],
+    });
+    const staleReplacement = service.apply({
+      id: createId('tx'), clientOperationId: createId('human-op'), documentId: document.id, actor: HUMAN_ACTOR,
+      label: 'Replace with stale source', createdAt: nowIso(), operations: [{ kind: 'pixel.asset.replace', asset: stalePlan.tileset, expectedRevision: collection.revision, expectedSpriteDependencies: stalePlan.expectedSpriteDependencies }],
+    });
+    const [sourceResponse, staleResponse] = await Promise.all([sourceWrite, staleReplacement]);
+    expect(sourceResponse).toMatchObject({ status: 'committed', revision: document.revision + 1 });
+    expect(staleResponse).toMatchObject({ status: 'conflict', conflict: { entityId: replacement.id, expectedRevision: replacement.revision, actualRevision: replacement.revision + 1, retryable: true } });
+    const afterConflict = service.getDocument(document.id); if (!afterConflict || afterConflict.kind !== 'pixel') throw new Error('Expected pixel document');
+    expect(afterConflict.activity.map(({ label }) => label)).toEqual(['Resize replacement source first']);
+    expect(afterConflict.pixelAssets[collection.id]).toEqual(collection);
+
+    const retryPlan = replaceImageCollectionSource(afterConflict, collection.id, 0, replacement.id);
+    expect(await service.apply({
+      id: createId('tx'), clientOperationId: createId('human-op'), documentId: document.id, actor: HUMAN_ACTOR,
+      label: 'Replace with current source', createdAt: nowIso(), operations: [{ kind: 'pixel.asset.replace', asset: retryPlan.tileset, expectedRevision: collection.revision, expectedSpriteDependencies: retryPlan.expectedSpriteDependencies }],
+    })).toMatchObject({ status: 'committed', revision: document.revision + 2 });
+    const afterReplacement = service.getDocument(document.id); if (!afterReplacement || afterReplacement.kind !== 'pixel') throw new Error('Expected pixel document');
+    expect(afterReplacement.pixelAssets[collection.id]).toMatchObject({ type: 'tileset', tileWidth: replacement.width + 3, tiles: { 0: { id: 0, imageAssetId: replacement.id, properties: { preserved: true } } } });
+    expect(await service.undo(document.id)).toMatchObject({ status: 'committed', revision: document.revision + 3 });
+    const undone = service.getDocument(document.id); if (!undone || undone.kind !== 'pixel') throw new Error('Expected pixel document');
+    expect(undone.pixelAssets[collection.id]).toMatchObject({ type: 'tileset', tiles: { 0: { imageAssetId: original.id, properties: { preserved: true } } } });
   });
 
   it('orders checkpoint restore behind a pending commit and preserves that committed branch', async () => {

@@ -2,16 +2,22 @@ import {
   HUMAN_ACTOR,
   TILED_GID_MASK,
   createId,
+  decodeTiledGid,
+  decodeTilemapChunk,
   isImageCollectionTileset,
   nextTilesetFirstGid,
   nowIso,
+  resolveTilesetForGid,
   tilesetLocalIdSpan,
   type PixelDocument,
   type PixelSprite,
   type PixelSpriteDependencyGuard,
+  type PixelTilemap,
   type PixelTileset,
   type TileDefinition,
 } from '@aidraw/core';
+
+import { MAX_TILED_TOTAL_CELLS } from './tiled-resource-policy';
 
 export const MAX_AUTHORED_IMAGE_COLLECTION_SOURCES = 1_023;
 export const MAX_AUTHORED_IMAGE_COLLECTION_PIXELS = 64 * 1024 * 1024;
@@ -25,6 +31,23 @@ export interface ImageCollectionCreationOptions {
 export interface ImageCollectionAppendPlan {
   tileset: PixelTileset;
   tileId: number;
+  expectedSpriteDependencies: PixelSpriteDependencyGuard[];
+}
+
+export interface ImageCollectionSourceReplacementImpact {
+  baseGid: number;
+  attachedMapCount: number;
+  directMapCellCount: number;
+  animationReferenceCount: number;
+  scannedCellCount: number;
+}
+
+export interface ImageCollectionSourceReplacementPlan {
+  tileset: PixelTileset;
+  tileId: number;
+  previousSourceId: string;
+  sourceId: string;
+  impact: ImageCollectionSourceReplacementImpact;
   expectedSpriteDependencies: PixelSpriteDependencyGuard[];
 }
 
@@ -166,6 +189,100 @@ function assertAppendRangeAvailable(document: PixelDocument, tileset: PixelTiles
   }
 }
 
+function exactMapTilesetForLocalId(
+  document: PixelDocument,
+  map: PixelTilemap,
+  tileset: PixelTileset,
+  tileId: number,
+): void {
+  const baseGid = tileset.firstGid + tileId;
+  const covering = new Set<string>();
+  for (const attachedId of map.tilesetIds) {
+    const attached = document.pixelAssets[attachedId];
+    if (attached?.type !== 'tileset') continue;
+    const span = tilesetLocalIdSpan(attached);
+    const lastGid = attached.firstGid + span - 1;
+    if (span > 0 && (!Number.isSafeInteger(lastGid) || attached.firstGid < 1 || lastGid > TILED_GID_MASK)) {
+      throw new RangeError(`Map “${map.name}” has an unsafe attached GID range for tileset “${attached.name}”.`);
+    }
+    if (span > 0 && baseGid >= attached.firstGid && baseGid <= lastGid) covering.add(attached.id);
+  }
+  if (covering.size !== 1 || !covering.has(tileset.id)) {
+    throw new Error(`Map “${map.name}” does not resolve image-collection tile ${tileId} through one exact attached GID range.`);
+  }
+  const resolved = resolveTilesetForGid(document, map, baseGid);
+  if (!resolved || resolved.tileset.id !== tileset.id || resolved.localId !== tileId) {
+    throw new Error(`Map “${map.name}” does not resolve base GID ${baseGid} exactly to image-collection tile ${tileId}; attached tileset precedence shadows the target.`);
+  }
+}
+
+/**
+ * Counts the exact direct finite-map and animation references affected by a
+ * stable local-ID source replacement. Stored chunks are scanned lazily and
+ * bounded across every attached map; no nominal map plane is synthesized.
+ */
+export function imageCollectionSourceReplacementImpact(
+  document: PixelDocument,
+  tilesetId: string,
+  tileId: number,
+): ImageCollectionSourceReplacementImpact {
+  requirePixelDocument(document);
+  const tileset = document.pixelAssets[tilesetId];
+  if (!tileset || tileset.type !== 'tileset' || !isImageCollectionTileset(tileset)) throw new Error(`Image collection ${tilesetId} does not exist.`);
+  if (!Number.isSafeInteger(tileId) || tileId < 0 || tileId >= 1_048_576 || !tileset.tiles[tileId]?.imageAssetId) {
+    throw new Error(`Image-collection tile ${tileId} is unavailable.`);
+  }
+  const baseGid = tileset.firstGid + tileId;
+  if (!Number.isSafeInteger(baseGid) || baseGid < 1 || baseGid > TILED_GID_MASK) throw new RangeError(`Image-collection tile ${tileId} has an unsafe Tiled GID.`);
+
+  let attachedMapCount = 0;
+  let directMapCellCount = 0;
+  let scannedCellCount = 0;
+  for (const assetId of document.assetIds) {
+    const map = document.pixelAssets[assetId];
+    if (map?.type !== 'tilemap' || !map.tilesetIds.includes(tileset.id)) continue;
+    if (map.orientation !== 'orthogonal' || map.infinite) throw new Error(`Map “${map.name}” must remain finite orthogonal before replacing an image-collection source.`);
+    exactMapTilesetForLocalId(document, map, tileset, tileId);
+    attachedMapCount += 1;
+    const visited = new Set<string>();
+    const visit = (layerId: string): void => {
+      if (visited.has(layerId)) return;
+      visited.add(layerId);
+      const layer = map.layers[layerId];
+      if (!layer) throw new Error(`Map “${map.name}” is missing layer ${layerId}.`);
+      if (layer.type === 'group') {
+        for (const childId of layer.childIds ?? []) visit(childId);
+        return;
+      }
+      if (layer.type !== 'tile') return;
+      for (const chunk of Object.values(layer.chunks ?? {})) {
+        const chunkCells = chunk.width * chunk.height;
+        if (!Number.isSafeInteger(chunkCells) || chunkCells > MAX_TILED_TOTAL_CELLS - scannedCellCount) {
+          throw new RangeError(`Image-collection replacement impact exceeds the ${MAX_TILED_TOTAL_CELLS.toLocaleString('en-US')}-cell scan limit.`);
+        }
+        scannedCellCount += chunkCells;
+        const values = decodeTilemapChunk(chunk);
+        if (values.length !== chunkCells) throw new Error(`Map “${map.name}” layer “${layer.name}” has an invalid tile chunk payload.`);
+        for (let index = 0; index < values.length; index += 1) {
+          const x = chunk.x + index % chunk.width;
+          const y = chunk.y + Math.floor(index / chunk.width);
+          if (x < 0 || y < 0 || x >= map.width || y >= map.height) continue;
+          if (decodeTiledGid(values[index]).gid === baseGid) directMapCellCount += 1;
+        }
+      }
+    };
+    for (const layerId of map.layerIds) visit(layerId);
+  }
+
+  let animationReferenceCount = 0;
+  for (const tile of Object.values(tileset.tiles)) for (const frame of tile.animation) {
+    if (frame.tileId !== tileId) continue;
+    animationReferenceCount += 1;
+    if (!Number.isSafeInteger(animationReferenceCount)) throw new RangeError('Image-collection animation reference count is unsafe.');
+  }
+  return { baseGid, attachedMapCount, directMapCellCount, animationReferenceCount, scannedCellCount };
+}
+
 /** Appends one exact source above the collection's authored sparse span. */
 export function appendImageCollectionSource(
   document: PixelDocument,
@@ -191,6 +308,43 @@ export function appendImageCollectionSource(
   tileset.tileWidth = Math.max(tileset.tileWidth, source.width);
   tileset.tileHeight = Math.max(tileset.tileHeight, source.height);
   return { tileset, tileId, expectedSpriteDependencies: imageCollectionSourceDependencyGuards(document, tileset) };
+}
+
+/** Replaces one exact sparse tile source without changing its canonical ID or metadata. */
+export function replaceImageCollectionSource(
+  document: PixelDocument,
+  tilesetId: string,
+  tileId: number,
+  sourceId: string,
+): ImageCollectionSourceReplacementPlan {
+  requirePixelDocument(document);
+  const current = document.pixelAssets[tilesetId];
+  if (!current || current.type !== 'tileset' || !isImageCollectionTileset(current)) throw new Error(`Image collection ${tilesetId} does not exist.`);
+  if (!Number.isSafeInteger(tileId) || tileId < 0 || tileId >= 1_048_576) throw new Error(`Image-collection tile ${tileId} is unavailable.`);
+  const target = current.tiles[tileId];
+  const previousSourceId = target?.imageAssetId;
+  if (!previousSourceId) throw new Error(`Image-collection tile ${tileId} is unavailable.`);
+  const source = requireEligibleSource(document, sourceId);
+  if (source.id === previousSourceId) throw new Error(`Sprite “${source.name}” is already the source for tile ${tileId}.`);
+  const existingIds = imageCollectionTileIds(current);
+  if (existingIds.some((id) => id !== tileId && current.tiles[id].imageAssetId === source.id)) {
+    throw new Error(`Sprite “${source.name}” already belongs to this image collection.`);
+  }
+
+  const postSourceIds = existingIds.map((id) => id === tileId ? source.id : current.tiles[id].imageAssetId!);
+  imageCollectionSourcePixels(document, postSourceIds);
+  const postSources = postSourceIds.map((id) => requireEligibleSource(document, id));
+  const impact = imageCollectionSourceReplacementImpact(document, current.id, tileId);
+  const tileset = structuredClone(current);
+  tileset.tiles[tileId].imageAssetId = source.id;
+  tileset.tileWidth = Math.max(...postSources.map((entry) => entry.width));
+  tileset.tileHeight = Math.max(...postSources.map((entry) => entry.height));
+
+  const expectedSpriteDependencies = imageCollectionSourceDependencyGuards(document, current);
+  if (!expectedSpriteDependencies.some((guard) => guard.spriteId === source.id)) {
+    expectedSpriteDependencies.push({ spriteId: source.id, expectedRevision: source.revision, width: source.width, height: source.height });
+  }
+  return { tileset, tileId, previousSourceId, sourceId: source.id, impact, expectedSpriteDependencies };
 }
 
 export function imageCollectionSourceDependencyGuards(

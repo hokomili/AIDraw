@@ -28,6 +28,8 @@ export function ImageCollectionSourceDialog({
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
   const view = lifecycle.observe(currentDocument, currentTilesetId);
+  const replacing = opening.mode === 'replace';
+  const impact = opening.impact;
   const normalizedName = name.trim();
   const nameError = opening.mode === 'create' && (!normalizedName || normalizedName.length > 200)
     ? 'Enter a collection name from 1 to 200 characters.'
@@ -38,7 +40,7 @@ export function ImageCollectionSourceDialog({
       setError(view.contextError);
       return;
     }
-    if (nameError || view.selectedInAuthoredOrder.length === 0 || busy) return;
+    if (nameError || view.selectedInAuthoredOrder.length === 0 || (replacing && !view.impactConfirmed) || busy) return;
     setBusy(true);
     setError(undefined);
     try {
@@ -59,13 +61,24 @@ export function ImageCollectionSourceDialog({
     setError(toggleError);
     setSelectionVersion((value) => value + 1);
   };
+  const confirmImpact = (confirmed: boolean) => {
+    const confirmationError = lifecycle.confirmReplacement(confirmed);
+    setError(confirmationError);
+    setSelectionVersion((value) => value + 1);
+  };
   const availableCount = opening.choices.filter((choice) => !choice.unavailableReason).length;
 
   return <EditorDialog
-    title={opening.mode === 'create' ? 'Create image collection' : `Append to ${opening.target?.name ?? 'image collection'}`}
+    title={opening.mode === 'create'
+      ? 'Create image collection'
+      : replacing
+        ? `Replace tile ${opening.target?.tileId ?? ''} source`
+        : `Append to ${opening.target?.name ?? 'image collection'}`}
     description={opening.mode === 'create'
       ? 'Reference exact one-frame sprite assets in their opening project order. No atlas or sprite copy is created.'
-      : 'Add one exact one-frame sprite above the collection’s opening sparse local-ID span.'}
+      : replacing
+        ? 'Choose one unused exact sprite. The stable local tile ID and every authored tile record stay unchanged while its artwork changes everywhere.'
+        : 'Add one exact one-frame sprite above the collection’s opening sparse local-ID span.'}
     className="image-collection-source-dialog"
     onClose={onClose}
   >
@@ -73,7 +86,7 @@ export function ImageCollectionSourceDialog({
       <div className="entry-dialog-body image-collection-source-body">
         {opening.mode === 'create' && <label className="dialog-field"><span>Collection name</span><input autoFocus maxLength={200} value={name} onChange={(event) => setName(event.target.value)} aria-invalid={Boolean(nameError)} /></label>}
         <fieldset className="image-collection-source-list">
-          <legend>{opening.mode === 'create' ? 'Sprite sources in opening project order' : 'Sprite source to append'}</legend>
+          <legend>{opening.mode === 'create' ? 'Sprite sources in opening project order' : replacing ? 'Replacement sprite source' : 'Sprite source to append'}</legend>
           {opening.choices.map((choice) => <label key={choice.id} className={choice.unavailableReason ? 'is-unavailable' : ''}>
             <input
               type={opening.mode === 'create' ? 'checkbox' : 'radio'}
@@ -86,6 +99,12 @@ export function ImageCollectionSourceDialog({
           </label>)}
           {opening.choices.length === 0 && <p>No sprite assets exist in this pixel document.</p>}
         </fieldset>
+        {replacing && impact && <section className="image-collection-replacement-impact" aria-label="Document-wide replacement impact">
+          <strong>Stable tile {opening.target?.tileId} · base GID {impact.baseGid}</strong>
+          <p>The new artwork will resolve for {impact.directMapCellCount.toLocaleString('en-US')} direct map cell{impact.directMapCellCount === 1 ? '' : 's'} across {impact.attachedMapCount.toLocaleString('en-US')} attached map{impact.attachedMapCount === 1 ? '' : 's'}, plus {impact.animationReferenceCount.toLocaleString('en-US')} ordered animation reference{impact.animationReferenceCount === 1 ? '' : 's'}.</p>
+          <p>Probability, properties, animation, collisions, raw GIDs, transforms, offsets, and source sprites remain unchanged.</p>
+          <label><input type="checkbox" checked={view.impactConfirmed} disabled={busy || Boolean(view.contextError) || view.selectedInAuthoredOrder.length === 0} onChange={(event) => confirmImpact(event.currentTarget.checked)} /> I understand this replaces tile {opening.target?.tileId} artwork everywhere it is referenced.</label>
+        </section>}
         <p className="fine-print">Only one-frame canonical sprites are eligible. Existing source pixels, layers, frames, IDs, and history remain owned by their source assets.</p>
         {nameError && <p className="entry-dialog-error" role="alert">{nameError}</p>}
         {view.contextError && <p className="entry-dialog-error" role="alert">{view.contextError}</p>}
@@ -94,8 +113,8 @@ export function ImageCollectionSourceDialog({
       </div>
       <footer className="modal-footer">
         <button type="button" className="secondary-modal-button" onClick={onClose}>Cancel</button>
-        <button type="submit" className="primary-modal-button" disabled={busy || Boolean(view.contextError) || Boolean(nameError) || view.selectedInAuthoredOrder.length === 0}>
-          {busy ? 'Applying…' : opening.mode === 'create' ? `Create with ${view.selectedInAuthoredOrder.length} source${view.selectedInAuthoredOrder.length === 1 ? '' : 's'}` : 'Append source'}
+        <button type="submit" className="primary-modal-button" disabled={busy || Boolean(view.contextError) || Boolean(nameError) || view.selectedInAuthoredOrder.length === 0 || (replacing && !view.impactConfirmed)}>
+          {busy ? 'Applying…' : opening.mode === 'create' ? `Create with ${view.selectedInAuthoredOrder.length} source${view.selectedInAuthoredOrder.length === 1 ? '' : 's'}` : replacing ? 'Replace source everywhere' : 'Append source'}
         </button>
       </footer>
     </form>

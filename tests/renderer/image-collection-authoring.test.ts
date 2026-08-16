@@ -82,6 +82,7 @@ describe('image-collection authoring surface', () => {
     const stableRerender = structuredClone(document);
     stableRerender.revision += 1;
     expect(lifecycle.observe(stableRerender)).toEqual({
+      impactConfirmed: false,
       selectedIds: [newSource.id],
       selectedInAuthoredOrder: [newSource.id],
     });
@@ -105,7 +106,7 @@ describe('image-collection authoring surface', () => {
     const appendOpening = createImageCollectionSourceOpening(document, 'append', { tileset });
     const appendLifecycle = new ImageCollectionSourceDialogLifecycle(appendOpening);
     expect(appendLifecycle.toggle(newSource.id)).toBeUndefined();
-    expect(appendLifecycle.observe(structuredClone(document), tileset.id).selectedInAuthoredOrder).toEqual([newSource.id]);
+    expect(appendLifecycle.observe(structuredClone(document), tileset.id)).toMatchObject({ impactConfirmed: false, selectedInAuthoredOrder: [newSource.id] });
     expect(appendLifecycle.observe(document, 'another-tileset').contextError).toMatch(/selected image collection changed.*reopen/iu);
 
     const targetDrift = structuredClone(document);
@@ -123,6 +124,50 @@ describe('image-collection authoring surface', () => {
     expect(refusedMarkup).toContain('role="alert"');
     expect(refusedMarkup).toContain('project asset order changed while this chooser was open');
     expect(refusedMarkup).toContain('disabled=""');
+  });
+
+  it('freezes exact replacement intent, requires impact confirmation, and refuses context or source drift', () => {
+    const { document, tileset } = fixture();
+    const replacement = createPixelSprite('Unused replacement', 11, 9);
+    const alternative = createPixelSprite('Alternative replacement', 6, 4);
+    document.assetIds.splice(2, 0, replacement.id, alternative.id);
+    document.pixelAssets[replacement.id] = replacement; document.pixelAssets[alternative.id] = alternative;
+    const opening = createImageCollectionSourceOpening(document, 'replace', { tileset, tileId: 3 });
+    expect(Object.isFrozen(opening.target)).toBe(true);
+    expect(Object.isFrozen(opening.impact)).toBe(true);
+    expect(opening).toMatchObject({
+      mode: 'replace', documentId: document.id, documentRevision: document.revision,
+      target: { id: tileset.id, revision: tileset.revision, tileId: 3, sourceId: tileset.tiles[3].imageAssetId },
+      impact: { baseGid: tileset.firstGid + 3, attachedMapCount: 0, directMapCellCount: 0, animationReferenceCount: 0, scannedCellCount: 0 },
+    });
+    expect(opening.choices.find(({ id }) => id === tileset.tiles[3].imageAssetId)?.unavailableReason).toBe('current source for tile 3');
+    expect(opening.choices.find(({ id }) => id === tileset.tiles[0].imageAssetId)?.unavailableReason).toBe('already in this collection');
+    const lifecycle = new ImageCollectionSourceDialogLifecycle(opening);
+    expect(lifecycle.toggle(replacement.id)).toBeUndefined();
+    expect(lifecycle.observe(structuredClone(document), tileset.id)).toMatchObject({ impactConfirmed: false, selectedInAuthoredOrder: [replacement.id] });
+    expect(lifecycle.confirmReplacement(true)).toBeUndefined();
+    expect(lifecycle.observe(structuredClone(document), tileset.id)).toMatchObject({ impactConfirmed: true, selectedInAuthoredOrder: [replacement.id] });
+    expect(lifecycle.toggle(alternative.id)).toBeUndefined();
+    expect(lifecycle.observe(structuredClone(document), tileset.id)).toMatchObject({ impactConfirmed: false, selectedInAuthoredOrder: [alternative.id] });
+
+    const documentDrift = structuredClone(document); documentDrift.revision += 1;
+    expect(lifecycle.observe(documentDrift, tileset.id).contextError).toMatch(/document changed after this replacement impact was counted.*reopen/iu);
+    expect(lifecycle.observe(document, 'another-collection').contextError).toMatch(/selected image collection changed.*reopen/iu);
+    const sourceDrift = structuredClone(document);
+    const target = sourceDrift.pixelAssets[tileset.id]; if (target.type !== 'tileset') throw new Error('Expected tileset');
+    target.tiles[3].imageAssetId = replacement.id;
+    expect(lifecycle.observe(sourceDrift, tileset.id).contextError).toMatch(/tile source changed.*reopen/iu);
+
+    const markup = renderToStaticMarkup(createElement(ImageCollectionSourceDialog, {
+      opening, currentDocument: document, currentTilesetId: tileset.id,
+      onSubmit: async () => true, onClose: () => undefined,
+    }));
+    expect(markup).toContain('Replace tile 3 source');
+    expect(markup).toContain('Document-wide replacement impact');
+    expect(markup).toContain('Stable tile 3 · base GID 4');
+    expect(markup).toContain('I understand this replaces tile 3 artwork everywhere it is referenced.');
+    expect(markup).toContain('Replace source everywhere');
+    expect(markup).toContain('current source for tile 3');
   });
 
   it('renders the selected sparse tile at its own dimensions and never offers gap IDs', () => {
@@ -161,6 +206,11 @@ describe('image-collection authoring surface', () => {
     expect(app).toContain('expectedRevision: openingTarget.revision');
     expect(app).toContain('expectedSpriteDependencies: plan.expectedSpriteDependencies');
     expect(app).toContain('], active.id, active.revision)');
+    expect(app).toContain('createImageCollectionSourceOpening(document, "replace", { tileset, tileId: effectiveSelectedTileId })');
+    expect(app).toContain('const plan = replaceImageCollectionSource(active, openingTarget.id, openingTarget.tileId, selectedSourceId)');
+    expect(app).toContain('expectedSpriteDependencies: plan.expectedSpriteDependencies');
+    expect(app).toContain('], active.id, opening.documentRevision)');
+    expect(app).toContain('The replacement source or document-wide impact changed.');
     expect(app).toContain('return <TilesetPanel key={`${document.id}:${asset.id}`}');
     expect(app).toContain('<AssetsPanel key={document.id} document={document} />');
     expect(app).toContain('availableTileIds={collectionTileIds}');
@@ -168,6 +218,6 @@ describe('image-collection authoring surface', () => {
     expect(app).toContain('width={selectedSource?.rect.width ?? tileset.tileWidth}');
     expect(app).toContain('{!imageCollection && <>');
     expect(app).toContain('Apply drawing offset');
-    expect(app).toContain('Existing per-tile sources and sparse IDs remain fixed.');
+    expect(app).toContain('deliberate exact-ID source replacement');
   });
 });

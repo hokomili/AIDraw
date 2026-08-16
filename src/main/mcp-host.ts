@@ -72,7 +72,7 @@ import { TILE_VARIANT_SEED_PROPERTY, chooseTileVariant } from '../common/tile-va
 import { validateGenerationRequest } from '../common/generation-capabilities';
 import type { GenerationRequest } from '../common/generation';
 import { embedPixelLink, packPixelLinks } from '../common/pixel-links';
-import { appendImageCollectionSource, createImageCollectionTileset } from '../common/image-collection-authoring';
+import { appendImageCollectionSource, createImageCollectionTileset, replaceImageCollectionSource } from '../common/image-collection-authoring';
 import { DocumentService } from './document-service';
 import { BatchManager } from './batch-manager';
 import { PlaybackScheduler } from './playback-scheduler';
@@ -260,6 +260,14 @@ const PixelImageCollectionCreateSchema = z.object({
 const PixelImageCollectionAppendSchema = z.object({
   kind: z.literal('pixel.image-collection.append'),
   tilesetId: z.string().min(1),
+  sourceSpriteId: z.string().min(1),
+  expectedTilesetRevision: z.number().int().nonnegative(),
+  expectedDocumentRevision: z.number().int().nonnegative(),
+}).strict();
+const PixelImageCollectionSourceReplaceSchema = z.object({
+  kind: z.literal('pixel.image-collection.source.replace'),
+  tilesetId: z.string().min(1),
+  tileId: z.number().int().min(0).max(1_048_575),
   sourceSpriteId: z.string().min(1),
   expectedTilesetRevision: z.number().int().nonnegative(),
   expectedDocumentRevision: z.number().int().nonnegative(),
@@ -789,6 +797,16 @@ async function expandAgentCanvasOperation(document: AIDrawDocument, value: Recor
     const plan = appendImageCollectionSource(document, current.id, operation.sourceSpriteId);
     return [{ kind: 'pixel.asset.replace', asset: plan.tileset, expectedRevision: operation.expectedTilesetRevision, expectedSpriteDependencies: plan.expectedSpriteDependencies }];
   }
+  if (value.kind === 'pixel.image-collection.source.replace') {
+    const operation = PixelImageCollectionSourceReplaceSchema.parse(value);
+    if (document.kind !== 'pixel') throw new Error('Image-collection source replacement requires a pixel document.');
+    if (operation.expectedDocumentRevision !== document.revision) throw new Error(`Pixel document revision changed from ${operation.expectedDocumentRevision} to ${document.revision}; observe and retry.`);
+    const current = document.pixelAssets[operation.tilesetId];
+    if (!current || current.type !== 'tileset') throw new Error(`Image collection ${operation.tilesetId} does not exist.`);
+    if (current.revision !== operation.expectedTilesetRevision) throw new Error(`Image collection ${current.id} revision changed from ${operation.expectedTilesetRevision} to ${current.revision}; observe and retry.`);
+    const plan = replaceImageCollectionSource(document, current.id, operation.tileId, operation.sourceSpriteId);
+    return [{ kind: 'pixel.asset.replace', asset: plan.tileset, expectedRevision: operation.expectedTilesetRevision, expectedSpriteDependencies: plan.expectedSpriteDependencies }];
+  }
   if (value.kind === 'pixel.stamp.place') {
     const operation = PixelStampPlaceSchema.parse(value); const target = pixelSemanticTarget(document, operation.spriteId, operation.celId);
     const stamp = target.document.stamps.find((entry) => entry.id === operation.stampId); if (!stamp) throw new Error(`Pixel stamp ${operation.stampId} does not exist.`);
@@ -1001,12 +1019,12 @@ function jsonText(value: unknown) {
 }
 
 function imageCollectionLifecycleDocumentRevision(operations: Array<Record<string, unknown>>): number | undefined {
-  const lifecycle = operations.filter((operation) => operation.kind === 'pixel.image-collection.create' || operation.kind === 'pixel.image-collection.append');
+  const lifecycle = operations.filter((operation) => operation.kind === 'pixel.image-collection.create' || operation.kind === 'pixel.image-collection.append' || operation.kind === 'pixel.image-collection.source.replace');
   if (!lifecycle.length) return undefined;
-  if (operations.length !== 1 || lifecycle.length !== 1) throw new Error('Image-collection create/append must be the only request in its transaction so one observed document revision owns the complete lifecycle change.');
-  return lifecycle[0].kind === 'pixel.image-collection.create'
-    ? PixelImageCollectionCreateSchema.parse(lifecycle[0]).expectedDocumentRevision
-    : PixelImageCollectionAppendSchema.parse(lifecycle[0]).expectedDocumentRevision;
+  if (operations.length !== 1 || lifecycle.length !== 1) throw new Error('Image-collection create/append/source replacement must be the only request in its transaction so one observed document revision owns the complete lifecycle change.');
+  if (lifecycle[0].kind === 'pixel.image-collection.create') return PixelImageCollectionCreateSchema.parse(lifecycle[0]).expectedDocumentRevision;
+  if (lifecycle[0].kind === 'pixel.image-collection.append') return PixelImageCollectionAppendSchema.parse(lifecycle[0]).expectedDocumentRevision;
+  return PixelImageCollectionSourceReplaceSchema.parse(lifecycle[0]).expectedDocumentRevision;
 }
 
 function normalizeColor(value: string | undefined, fallback: string): string {
