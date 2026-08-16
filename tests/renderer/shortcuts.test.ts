@@ -183,8 +183,8 @@ describe('keyboard shortcut reference', () => {
     expect(readme).toContain('exactly 40 eligible bindings: all 39 tools displayed across the illustration (19) and pixel (20) rails plus the renderer-owned inspector toggle');
     expect(readme).toContain('Later still-free new mnemonics are reserved before fallback selection');
     expect(readme).toContain('remaining command/native-menu remapping');
-    expect(tracker).toContain('clean and live-synchronized through base `588688fbdfdb339313409f4c649f83157056f750`');
-    expect(tracker).toContain('The current bounded MAP-05/MAP-06/MAP-07/MAP-13 source/headless candidate makes exact sparse finite-orthogonal image-collection Wang metadata and paint/erase');
+    expect(tracker).toContain('clean and live-synchronized through base `abb6e2723239798e5c5e9f7c8753b41facfc555b`');
+    expect(tracker).toContain('The current bounded UX-01/MAP-05 source/headless candidate changes only the tileset Wang signature presentation');
     expect(tracker).toContain('A deliberate previewed version-2 portable kit carries every and only reached atlas or finite-orthogonal image-collection dependency');
     expect(tracker).toContain('all **39 displayed tool activations**—19 illustration and 20 pixel—plus the renderer-owned inspector toggle');
     expect(tracker).toContain('later still-free new mnemonics remain reserved from earlier fallbacks');

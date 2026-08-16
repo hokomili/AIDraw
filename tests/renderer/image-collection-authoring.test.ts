@@ -34,7 +34,9 @@ describe('image-collection authoring surface', () => {
     expect(source).toContain('expectedSpriteDependencies: plan.expectedSpriteDependencies');
     expect(source).toContain('active.id, plan.expectedDocumentRevision');
     expect(source).toContain('tileId: effectiveSelectedTileId');
-    expect(source).toContain('Tile {effectiveSelectedTileId} Wang slots');
+    expect(source).toContain('<WangSignatureEditor');
+    expect(source).toContain('tileId={effectiveSelectedTileId}');
+    expect(source).toContain('wangId={activeTileWangId}');
     expect(source).not.toContain('{!imageCollection && <>\n      <div className="section-heading">\n        <span>Wang terrain</span>');
   });
 

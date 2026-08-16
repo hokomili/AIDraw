@@ -522,6 +522,41 @@ html[data-native-titlebar="hidden-inset"] .brand { width: max(calc(118px + var(-
 .tile-object-tile-control { height: var(--ui-hit-secondary); display: flex; align-items: center; gap: 5px; padding: 0 6px; border: 1px solid var(--border); border-radius: 6px; background: #fff; color: var(--muted); font-size: var(--ui-type-caption); }.tile-object-tile-control input { width: 58px; min-width: 0; height: calc(var(--ui-hit-secondary) - 4px); border: 0; background: transparent; color: var(--muted); font-size: var(--ui-type-label); }
 .current-map-tile-control { min-height: var(--ui-hit-secondary); display: flex; flex: 0 0 auto; align-items: center; gap: 4px; }.current-map-tile-id-control { height: var(--ui-hit-secondary); display: flex; flex: 0 0 auto; align-items: center; gap: 5px; padding: 0 6px; border: 1px solid var(--border); border-radius: 6px; background: #fff; color: var(--muted); font-size: var(--ui-type-caption); }.current-map-tile-id-control input { width: 58px; min-width: 0; height: calc(var(--ui-hit-secondary) - 4px); border: 0; background: transparent; color: var(--muted); font-size: var(--ui-type-label); }.current-map-tile-control > small { max-width: 170px; overflow: hidden; color: var(--muted); font-size: var(--ui-type-caption); text-overflow: ellipsis; white-space: nowrap; }
 
+/* Wang signatures keep spatial edge/corner meaning separate from canonical slot order. */
+.wang-signature-editor { display: grid; gap: 8px; margin-top: 7px; padding-top: 7px; border-top: 1px solid var(--border-soft); }
+.wang-signature-heading { padding: 0; }
+.wang-signature-figure { min-width: 0; margin: 0; display: grid; gap: 6px; }
+.wang-signature-diagram { min-width: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: repeat(3, minmax(58px, auto)); gap: 5px; padding: 6px; border: 1px solid var(--border); border-radius: 9px; background: #f4f0ed; }
+.wang-signature-node { min-width: 0; min-height: 58px; padding: 5px 3px; display: grid; place-items: center; align-content: center; gap: 2px; border: 1px solid var(--border-soft); border-radius: 7px; background: #fff; color: var(--ink); text-align: center; }
+.wang-signature-node.is-top { grid-area: 1 / 2; }.wang-signature-node.is-top-right { grid-area: 1 / 3; }.wang-signature-node.is-right { grid-area: 2 / 3; }.wang-signature-node.is-bottom-right { grid-area: 3 / 3; }.wang-signature-node.is-bottom { grid-area: 3 / 2; }.wang-signature-node.is-bottom-left { grid-area: 3 / 1; }.wang-signature-node.is-left { grid-area: 2 / 1; }.wang-signature-node.is-top-left { grid-area: 1 / 1; }
+.wang-signature-marker { width: 24px; height: 5px; display: block; border: 1px solid rgba(44, 35, 52, .3); border-radius: 999px; background: var(--wang-slot-color); }
+.wang-signature-node.is-corner .wang-signature-marker { width: 12px; height: 12px; border-radius: 3px; transform: rotate(45deg); }
+.wang-signature-node.is-none .wang-signature-marker { border-style: dashed; background: transparent; }
+.wang-signature-node strong { font-size: var(--ui-type-label); line-height: 1; }
+.wang-signature-node small { color: var(--muted); font-size: var(--ui-type-caption); line-height: 1.15; }
+.wang-signature-legend { grid-area: 2 / 2; min-width: 0; padding: 5px; display: grid; place-content: center; gap: 4px; border: 1px dashed #c9c0cf; border-radius: 7px; color: var(--muted); background: #faf8f6; font-size: var(--ui-type-caption); text-align: center; }
+.wang-signature-legend strong { color: var(--ink); font-size: var(--ui-type-label); }
+.wang-signature-legend span { display: flex; align-items: center; justify-content: center; gap: 4px; }
+.wang-signature-legend i { width: 13px; height: 4px; display: inline-block; border: 1px solid currentColor; border-radius: 999px; }
+.wang-signature-legend i.is-corner { width: 8px; height: 8px; border-radius: 2px; transform: rotate(45deg); }
+.wang-signature-figure figcaption { color: var(--muted); font-size: var(--ui-type-caption); line-height: 1.4; }
+.wang-signature-fields { min-width: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.wang-signature-slot { min-width: 0; padding: 7px; display: grid; align-content: start; gap: 5px; border: 1px solid var(--border-soft); border-radius: 8px; background: #fff; }
+.wang-signature-slot-heading { min-width: 0; display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 3px 6px; }
+.wang-signature-slot-heading strong { min-width: 0; color: var(--ink); font-size: var(--ui-type-label); line-height: 1.3; overflow-wrap: anywhere; }
+.wang-signature-slot-heading em { padding: 2px 5px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted); font-size: var(--ui-type-caption); font-style: normal; line-height: 1.2; }
+.wang-signature-slot.is-corner .wang-signature-slot-heading em { border-radius: 3px; }
+.wang-signature-slot select { width: 100%; min-width: 0; height: var(--ui-hit-secondary); padding: 0 7px; border: 1px solid var(--border); border-radius: 7px; background: #fff; color: var(--ink); font-size: var(--ui-type-label); }
+.wang-signature-current { min-width: 0; display: flex; align-items: flex-start; gap: 5px; color: var(--muted); font-size: var(--ui-type-caption); line-height: 1.35; }
+.wang-signature-current > i { width: 16px; height: 5px; flex: 0 0 auto; margin-top: 4px; border: 1px solid rgba(44, 35, 52, .3); border-radius: 999px; background: var(--wang-slot-color); }
+.wang-signature-slot.is-corner .wang-signature-current > i { width: 9px; height: 9px; margin: 2px 3px 0 2px; border-radius: 2px; transform: rotate(45deg); }
+.wang-signature-current > i.is-none { border-style: dashed; background: transparent; }
+.wang-signature-current > span { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+
+@media (max-width: 1120px) {
+  .wang-signature-fields { grid-template-columns: minmax(0, 1fr); }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; scroll-behavior: auto !important; }
 }
