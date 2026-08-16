@@ -5,6 +5,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createPixelDocument, createPixelSprite, createPixelTileset } from '@aidraw/core';
 
 import { TileAnimationEditor } from '../../src/renderer/components/TileAnimationEditor';
+import { ImageCollectionSourceDialog } from '../../src/renderer/components/ImageCollectionSourceDialog';
+import {
+  ImageCollectionSourceDialogLifecycle,
+  createImageCollectionSourceOpening,
+} from '../../src/renderer/image-collection-source-opening';
 
 function fixture() {
   const document = createPixelDocument('project', 'Collection inspector');
@@ -23,6 +28,103 @@ function fixture() {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('image-collection authoring surface', () => {
+  it('presents exact authored-order source choices with bounded named controls and honest exclusions', () => {
+    const document = createPixelDocument('project', 'Chooser');
+    const wide = createPixelSprite('Wide source', 19, 5);
+    const animated = createPixelSprite('Animated source', 8, 8);
+    animated.frameIds.push('second-frame');
+    const tall = createPixelSprite('Tall source', 7, 13);
+    document.assetIds = [wide.id, animated.id, tall.id];
+    document.pixelAssets = { [wide.id]: wide, [animated.id]: animated, [tall.id]: tall };
+    const opening = createImageCollectionSourceOpening(document, 'create');
+    const markup = renderToStaticMarkup(createElement(ImageCollectionSourceDialog, {
+      opening,
+      currentDocument: document,
+      onSubmit: async () => true,
+      onClose: () => undefined,
+    }));
+    expect(markup.indexOf('Wide source')).toBeLessThan(markup.indexOf('Animated source'));
+    expect(markup.indexOf('Animated source')).toBeLessThan(markup.indexOf('Tall source'));
+    expect(markup).toContain('type="checkbox"');
+    expect(markup).toContain('Animated source</strong><small>8 × 8px · 2 frames · Sprite “Animated source” has 2 frames. Image-collection sources must be exact one-frame sprites.');
+    expect(markup).toContain('disabled=""');
+    expect(markup).toContain('Create with 0 sources');
+    expect(markup).toContain('No atlas or sprite copy is created.');
+
+    const { document: appendDocument, tileset } = fixture();
+    const newSource = createPixelSprite('New source', 11, 9);
+    appendDocument.assetIds.splice(2, 0, newSource.id);
+    appendDocument.pixelAssets[newSource.id] = newSource;
+    const appendOpening = createImageCollectionSourceOpening(appendDocument, 'append', { tileset });
+    const append = renderToStaticMarkup(createElement(ImageCollectionSourceDialog, {
+      opening: appendOpening,
+      currentDocument: appendDocument,
+      currentTilesetId: tileset.id,
+      onSubmit: async () => true, onClose: () => undefined,
+    }));
+    expect(append).toContain('Append to Sparse collection');
+    expect(append).toContain('type="radio"');
+    expect(append).toContain('above the collection’s opening sparse local-ID span');
+  });
+
+  it('keeps opening order and selection stable across parent updates and refuses every relevant drift', () => {
+    const { document, tileset } = fixture();
+    const newSource = createPixelSprite('New source', 11, 9);
+    document.assetIds.splice(2, 0, newSource.id);
+    document.pixelAssets[newSource.id] = newSource;
+    const opening = createImageCollectionSourceOpening(document, 'create');
+    expect(Object.isFrozen(opening)).toBe(true);
+    expect(Object.isFrozen(opening.assetIds)).toBe(true);
+    expect(Object.isFrozen(opening.choices)).toBe(true);
+    const lifecycle = new ImageCollectionSourceDialogLifecycle(opening);
+    expect(lifecycle.toggle(newSource.id)).toBeUndefined();
+
+    const stableRerender = structuredClone(document);
+    stableRerender.revision += 1;
+    expect(lifecycle.observe(stableRerender)).toEqual({
+      selectedIds: [newSource.id],
+      selectedInAuthoredOrder: [newSource.id],
+    });
+
+    const sourceDrift = structuredClone(document);
+    const changedSource = sourceDrift.pixelAssets[newSource.id];
+    if (changedSource?.type !== 'sprite') throw new Error('Expected sprite fixture.');
+    changedSource.revision += 1;
+    changedSource.width += 1;
+    expect(lifecycle.observe(sourceDrift).contextError).toMatch(/Sprite .* changed.*reopen/iu);
+    expect(lifecycle.observe(sourceDrift).selectedInAuthoredOrder).toEqual([newSource.id]);
+
+    const reordered = structuredClone(document);
+    [reordered.assetIds[0], reordered.assetIds[1]] = [reordered.assetIds[1], reordered.assetIds[0]];
+    expect(lifecycle.observe(reordered).contextError).toMatch(/asset order changed.*reopen/iu);
+
+    const switchedDocument = structuredClone(document);
+    switchedDocument.id = 'another-document';
+    expect(lifecycle.observe(switchedDocument).contextError).toMatch(/active document changed.*reopen/iu);
+
+    const appendOpening = createImageCollectionSourceOpening(document, 'append', { tileset });
+    const appendLifecycle = new ImageCollectionSourceDialogLifecycle(appendOpening);
+    expect(appendLifecycle.toggle(newSource.id)).toBeUndefined();
+    expect(appendLifecycle.observe(structuredClone(document), tileset.id).selectedInAuthoredOrder).toEqual([newSource.id]);
+    expect(appendLifecycle.observe(document, 'another-tileset').contextError).toMatch(/selected image collection changed.*reopen/iu);
+
+    const targetDrift = structuredClone(document);
+    const changedTarget = targetDrift.pixelAssets[tileset.id];
+    if (changedTarget?.type !== 'tileset') throw new Error('Expected tileset fixture.');
+    changedTarget.revision += 1;
+    expect(appendLifecycle.observe(targetDrift, tileset.id).contextError).toMatch(/image collection changed.*reopen/iu);
+
+    const refusedMarkup = renderToStaticMarkup(createElement(ImageCollectionSourceDialog, {
+      opening,
+      currentDocument: reordered,
+      onSubmit: async () => true,
+      onClose: () => undefined,
+    }));
+    expect(refusedMarkup).toContain('role="alert"');
+    expect(refusedMarkup).toContain('project asset order changed while this chooser was open');
+    expect(refusedMarkup).toContain('disabled=""');
+  });
+
   it('renders the selected sparse tile at its own dimensions and never offers gap IDs', () => {
     vi.stubGlobal('window', { matchMedia: () => ({ matches: true }) });
     const { document, tileset } = fixture();
@@ -49,11 +151,23 @@ describe('image-collection authoring surface', () => {
     expect(app).toContain('imageCollectionSourceDependencyGuards(document, tileset)');
     expect(app).toContain('...(expectedSpriteDependencies ? { expectedSpriteDependencies } : {})');
     expect(app).toContain('imageCollection ? document.id : undefined');
+    expect(app).toContain('createImageCollectionTileset(active, name ?? "Image collection", authoredSourceIds)');
+    expect(app).toContain('imageCollectionSourceOpeningGuardError(opening, document)');
+    expect(app).toContain('imageCollectionSourceOpeningGuardError(opening, active)');
+    expect(app).toContain('const authoredSourceIds = opening.assetIds.filter');
+    expect(app).toContain('sourceId !== authoredSourceIds[index]');
+    expect(app).toContain('Append image-collection source');
+    expect(app).toContain('const plan = appendImageCollectionSource(active, targetId, selectedSourceId)');
+    expect(app).toContain('expectedRevision: openingTarget.revision');
+    expect(app).toContain('expectedSpriteDependencies: plan.expectedSpriteDependencies');
+    expect(app).toContain('], active.id, active.revision)');
+    expect(app).toContain('return <TilesetPanel key={`${document.id}:${asset.id}`}');
+    expect(app).toContain('<AssetsPanel key={document.id} document={document} />');
     expect(app).toContain('availableTileIds={collectionTileIds}');
     expect(app).toContain('sprite={selectedSource?.sprite');
     expect(app).toContain('width={selectedSource?.rect.width ?? tileset.tileWidth}');
     expect(app).toContain('{!imageCollection && <>');
     expect(app).toContain('Apply drawing offset');
-    expect(app).toContain('Per-tile sources and sparse IDs remain fixed.');
+    expect(app).toContain('Existing per-tile sources and sparse IDs remain fixed.');
   });
 });

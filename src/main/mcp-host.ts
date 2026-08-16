@@ -72,6 +72,7 @@ import { TILE_VARIANT_SEED_PROPERTY, chooseTileVariant } from '../common/tile-va
 import { validateGenerationRequest } from '../common/generation-capabilities';
 import type { GenerationRequest } from '../common/generation';
 import { embedPixelLink, packPixelLinks } from '../common/pixel-links';
+import { appendImageCollectionSource, createImageCollectionTileset } from '../common/image-collection-authoring';
 import { DocumentService } from './document-service';
 import { BatchManager } from './batch-manager';
 import { PlaybackScheduler } from './playback-scheduler';
@@ -249,6 +250,20 @@ const PixelAnimationTagDeleteSchema = z.object({ kind: z.literal('pixel.animatio
 const PixelPaletteOverrideSchema = z.object({ kind: z.literal('pixel.palette-override.set'), spriteId: z.string().min(1), frameId: z.string().min(1), colors: z.array(z.string().regex(/^#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?$/)).min(1).max(256).nullable(), expectedRevision: z.number().int().nonnegative() }).strict();
 const PixelProjectLinkEmbedSchema = z.object({ kind: z.literal('pixel.project-link.embed'), linkId: z.string().min(1), expectedRevision: z.number().int().nonnegative() }).strict();
 const PixelProjectLinksPackSchema = z.object({ kind: z.literal('pixel.project-links.pack'), expectedRevision: z.number().int().nonnegative() }).strict();
+const PixelImageCollectionCreateSchema = z.object({
+  kind: z.literal('pixel.image-collection.create'),
+  tilesetId: z.string().min(1),
+  name: z.string().trim().min(1).max(200),
+  sourceSpriteIds: z.array(z.string().min(1)).min(1).max(1_023),
+  expectedDocumentRevision: z.number().int().nonnegative(),
+}).strict();
+const PixelImageCollectionAppendSchema = z.object({
+  kind: z.literal('pixel.image-collection.append'),
+  tilesetId: z.string().min(1),
+  sourceSpriteId: z.string().min(1),
+  expectedTilesetRevision: z.number().int().nonnegative(),
+  expectedDocumentRevision: z.number().int().nonnegative(),
+}).strict();
 const PixelStampPlaceSchema = z.object({ kind: z.literal('pixel.stamp.place'), stampId: z.string().min(1), spriteId: z.string().min(1), celId: z.string().min(1), x: z.number().int().min(-8_192).max(16_384), y: z.number().int().min(-8_192).max(16_384), transform: z.enum(['flip-horizontal', 'flip-vertical', 'rotate-clockwise', 'rotate-counterclockwise']).optional(), expectedRevision: z.number().int().nonnegative() }).strict();
 const PixelTileStampPlaceSchema = z.object({ kind: z.literal('pixel.tile-stamp.place'), stampId: z.string().min(1), mapId: z.string().min(1), layerId: z.string().min(1), x: z.number().int().min(-16_777_216).max(16_777_216), y: z.number().int().min(-16_777_216).max(16_777_216), transform: z.enum(['flip-horizontal', 'flip-vertical', 'rotate-clockwise', 'rotate-counterclockwise']).optional(), expectedRevision: z.number().int().nonnegative() }).strict();
 const PixelTileVariantsPaintSchema = z.object({ kind: z.literal('pixel.tile-variants.paint'), mapId: z.string().min(1), layerId: z.string().min(1), tilesetId: z.string().min(1), tileId: z.number().int().nonnegative(), points: z.array(z.object({ x: z.number().int().min(-16_777_216).max(16_777_216), y: z.number().int().min(-16_777_216).max(16_777_216) }).strict()).min(1).max(65_536), seed: z.number().int().min(-2_147_483_648).max(2_147_483_647).optional(), transforms: z.object({ hFlip: z.boolean().default(false), vFlip: z.boolean().default(false), diagonal: z.boolean().default(false) }).strict().optional(), expectedRevision: z.number().int().nonnegative() }).strict();
@@ -757,6 +772,23 @@ async function expandAgentCanvasOperation(document: AIDrawDocument, value: Recor
     if (!document.linkedAssets.some((entry) => entry.mode === 'linked')) throw new Error('The pixel project has no external links to pack.');
     return [{ kind: 'pixel.links.replace', linkedAssets: packPixelLinks(document), expectedRevision: operation.expectedRevision }];
   }
+  if (value.kind === 'pixel.image-collection.create') {
+    const operation = PixelImageCollectionCreateSchema.parse(value);
+    if (document.kind !== 'pixel') throw new Error('Image-collection creation requires a pixel document.');
+    if (operation.expectedDocumentRevision !== document.revision) throw new Error(`Pixel document revision changed from ${operation.expectedDocumentRevision} to ${document.revision}; observe and retry.`);
+    const tileset = createImageCollectionTileset(document, operation.name, operation.sourceSpriteIds, { id: operation.tilesetId, createdBy: actor.id });
+    return [{ kind: 'pixel.asset.add', asset: tileset }];
+  }
+  if (value.kind === 'pixel.image-collection.append') {
+    const operation = PixelImageCollectionAppendSchema.parse(value);
+    if (document.kind !== 'pixel') throw new Error('Image-collection append requires a pixel document.');
+    if (operation.expectedDocumentRevision !== document.revision) throw new Error(`Pixel document revision changed from ${operation.expectedDocumentRevision} to ${document.revision}; observe and retry.`);
+    const current = document.pixelAssets[operation.tilesetId];
+    if (!current || current.type !== 'tileset') throw new Error(`Image collection ${operation.tilesetId} does not exist.`);
+    if (current.revision !== operation.expectedTilesetRevision) throw new Error(`Image collection ${current.id} revision changed from ${operation.expectedTilesetRevision} to ${current.revision}; observe and retry.`);
+    const plan = appendImageCollectionSource(document, current.id, operation.sourceSpriteId);
+    return [{ kind: 'pixel.asset.replace', asset: plan.tileset, expectedRevision: operation.expectedTilesetRevision, expectedSpriteDependencies: plan.expectedSpriteDependencies }];
+  }
   if (value.kind === 'pixel.stamp.place') {
     const operation = PixelStampPlaceSchema.parse(value); const target = pixelSemanticTarget(document, operation.spriteId, operation.celId);
     const stamp = target.document.stamps.find((entry) => entry.id === operation.stampId); if (!stamp) throw new Error(`Pixel stamp ${operation.stampId} does not exist.`);
@@ -966,6 +998,15 @@ async function expandAgentCanvasOperation(document: AIDrawDocument, value: Recor
 
 function jsonText(value: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(value, null, 2) }], structuredContent: value as Record<string, unknown> };
+}
+
+function imageCollectionLifecycleDocumentRevision(operations: Array<Record<string, unknown>>): number | undefined {
+  const lifecycle = operations.filter((operation) => operation.kind === 'pixel.image-collection.create' || operation.kind === 'pixel.image-collection.append');
+  if (!lifecycle.length) return undefined;
+  if (operations.length !== 1 || lifecycle.length !== 1) throw new Error('Image-collection create/append must be the only request in its transaction so one observed document revision owns the complete lifecycle change.');
+  return lifecycle[0].kind === 'pixel.image-collection.create'
+    ? PixelImageCollectionCreateSchema.parse(lifecycle[0]).expectedDocumentRevision
+    : PixelImageCollectionAppendSchema.parse(lifecycle[0]).expectedDocumentRevision;
 }
 
 function normalizeColor(value: string | undefined, fallback: string): string {
@@ -1540,10 +1581,11 @@ export class McpHost {
     }, async ({ documentId, clientOperationId, label, operations, playback, batch }) => {
       const document = this.documents.getDocument(documentId);
       if (!document) return jsonText({ status: 'conflict', message: 'Document is not open.', next: { tool: 'document_manage', arguments: { action: 'list' }, guidance: 'Refresh the open-document list before choosing a mutation target.' } });
+      const expectedDocumentRevision = imageCollectionLifecycleDocumentRevision(operations);
       const parsedOperations: CanvasOperation[] = [];
       for (const operation of operations) parsedOperations.push(...await expandAgentCanvasOperation(document, operation, this.quantizeImage, session.actor));
       if (parsedOperations.length === 0 || parsedOperations.length > 256) return jsonText({ status: 'conflict', message: 'Semantic expansion must produce 1–256 canonical operations.' });
-      const transaction: CanvasTransaction = { id: createId('tx'), clientOperationId, documentId, actor: structuredClone(session.actor), label, createdAt: nowIso(), operations: parsedOperations, playback: playback ?? { mode: 'animated', speed: 1 } };
+      const transaction: CanvasTransaction = { id: createId('tx'), clientOperationId, documentId, ...(expectedDocumentRevision === undefined ? {} : { expectedDocumentRevision }), actor: structuredClone(session.actor), label, createdAt: nowIso(), operations: parsedOperations, playback: playback ?? { mode: 'animated', speed: 1 } };
       if (batch) {
         const preparation = await this.batches.prepare(batch, documentId, clientOperationId, session.actor);
         if (!preparation.accepted) {

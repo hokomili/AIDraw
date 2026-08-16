@@ -8,7 +8,7 @@ import { RecoveryJournal } from '@main/journal';
 import { McpHost, parseFolderTrustSettings, parsePreferredPortSettings, type GenerationApprovalPreviewRenderer } from '@main/mcp-host';
 import { TransactionTraceStore } from '@main/trace-store';
 import { createCanvas, loadImage } from '@napi-rs/canvas';
-import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createId, createPixelDocument, createPixelTileset, decodeTiledGid, encodeTiledGid, nowIso, readPixel, readTileAt } from '@aidraw/core';
+import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createId, createPixelDocument, createPixelSprite, createPixelTileset, decodeTiledGid, encodeTiledGid, nowIso, readPixel, readTileAt } from '@aidraw/core';
 import { LATEST_PROTOCOL_VERSION } from '@modelcontextprotocol/server';
 
 const temporaryPaths: string[] = [];
@@ -454,6 +454,8 @@ describe('authenticated stateful MCP contract', () => {
     expect(guide).toContain('Tool-level Invalid arguments');
     expect(guide).toContain('Configuration-profile availability remains separate from installed-client acceptance');
     expect(guide).toContain('pixel.wang-terrain.stroke');
+    expect(guide).toContain('pixel.image-collection.create');
+    expect(guide).toContain('pixel.image-collection.append');
     expect(guide).toContain('intent-derived deterministic stream');
     const safetyHelp = await callTool(started.url, client.headers, 13, 'aidraw_help', { topic: 'safety' });
     expect(safetyHelp.steps).toEqual(expect.arrayContaining([
@@ -470,6 +472,7 @@ describe('authenticated stateful MCP contract', () => {
       expect.stringContaining('creates no revision for an unmatched or already-matching stroke'),
     ]));
     expect(JSON.stringify(operationsHelp.examples)).toContain('pixel.wang-terrain.stroke');
+    expect(JSON.stringify(operationsHelp.examples)).toContain('pixel.image-collection.create');
   });
 
   it('initializes the same raw Streamable HTTP profile under each configured client name', async () => {
@@ -1067,6 +1070,65 @@ describe('authenticated stateful MCP contract', () => {
     expect(readPixel(committedCel, 2, 0)).toBe(9);
     expect(readPixel(committedCel, 3, 0)).toBe(9);
     expect(readPixel(committedCel, 7, 7)).toBe(6);
+  });
+
+  it('creates and appends exact image-collection sources through one guarded semantic lifecycle transaction', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-mcp-image-collection-')); temporaryPaths.push(root);
+    const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0'); documents.initialize();
+    const host = new McpHost(documents, '1.0.0', join(root, 'port.json')); hosts.push(host); const started = await host.start('image-collection-token');
+    const client = await initializeClient(started.url, 'image-collection-token', 'image-collection-client');
+    const created = await callTool(started.url, client.headers, 2, 'document_manage', { action: 'new', kind: 'project', name: 'Semantic collection project' });
+    const document = created.activeDocument as ReturnType<DocumentService['snapshot']>['activeDocument']; if (!document || document.kind !== 'pixel') throw new Error('Expected pixel project');
+    const first = document.pixelAssets[document.activeAssetId]; if (first.type !== 'sprite') throw new Error('Expected first sprite');
+    const second = createPixelSprite('Second semantic source', 12, 7);
+    const third = createPixelSprite('Third semantic source', 5, 18);
+    expect(await callTool(started.url, client.headers, 3, 'canvas_apply', {
+      documentId: document.id, clientOperationId: 'collection-source-assets', label: 'Add collection source sprites', playback: { mode: 'instant', speed: 1 },
+      operations: [{ kind: 'pixel.asset.add', asset: second }, { kind: 'pixel.asset.add', asset: third }],
+    })).toMatchObject({ status: 'committed' });
+    const afterSources = documents.getDocument(document.id); if (!afterSources || afterSources.kind !== 'pixel') throw new Error('Expected pixel project');
+    const sourceBytes = JSON.stringify([afterSources.pixelAssets[first.id], afterSources.pixelAssets[second.id], afterSources.pixelAssets[third.id]]);
+    expect(await callTool(started.url, client.headers, 4, 'canvas_apply', {
+      documentId: document.id, clientOperationId: 'semantic-collection-create', label: 'Create semantic image collection', playback: { mode: 'instant', speed: 1 },
+      operations: [{ kind: 'pixel.image-collection.create', tilesetId: 'semantic-collection', name: 'Semantic objects', sourceSpriteIds: [third.id, first.id], expectedDocumentRevision: afterSources.revision }],
+    })).toMatchObject({ status: 'committed' });
+    const afterCreate = documents.getDocument(document.id); if (!afterCreate || afterCreate.kind !== 'pixel') throw new Error('Expected pixel project');
+    const collection = afterCreate.pixelAssets['semantic-collection']; if (collection.type !== 'tileset') throw new Error('Expected image collection');
+    expect(collection).toMatchObject({ firstGid: 1, tileWidth: Math.max(first.width, third.width), tileHeight: Math.max(first.height, third.height), columns: 0, rows: 0, createdBy: expect.stringMatching(/^agent[_-]/) });
+    expect(collection.spriteAssetId).toBeUndefined();
+    expect([collection.tiles[0].imageAssetId, collection.tiles[1].imageAssetId]).toEqual([third.id, first.id]);
+    expect(JSON.stringify([afterCreate.pixelAssets[first.id], afterCreate.pixelAssets[second.id], afterCreate.pixelAssets[third.id]])).toBe(sourceBytes);
+
+    const mixedBefore = structuredClone(afterCreate);
+    const mixed = await callToolMessage(started.url, client.headers, 5, 'canvas_apply', {
+      documentId: document.id, clientOperationId: 'semantic-collection-mixed', label: 'Reject mixed lifecycle', playback: { mode: 'instant', speed: 1 },
+      operations: [{ kind: 'pixel.image-collection.append', tilesetId: collection.id, sourceSpriteId: second.id, expectedTilesetRevision: collection.revision, expectedDocumentRevision: afterCreate.revision }, { kind: 'document.rename', name: 'Must not rename' }],
+    });
+    expect(mixed.result?.isError).toBe(true);
+    expect(JSON.stringify(mixed)).toContain('must be the only request');
+    expect(documents.getDocument(document.id)).toEqual(mixedBefore);
+
+    expect(await callTool(started.url, client.headers, 6, 'canvas_apply', {
+      documentId: document.id, clientOperationId: 'semantic-collection-append', label: 'Append semantic collection source', playback: { mode: 'instant', speed: 1 },
+      operations: [{ kind: 'pixel.image-collection.append', tilesetId: collection.id, sourceSpriteId: second.id, expectedTilesetRevision: collection.revision, expectedDocumentRevision: afterCreate.revision }],
+    })).toMatchObject({ status: 'committed' });
+    const afterAppend = documents.getDocument(document.id); if (!afterAppend || afterAppend.kind !== 'pixel') throw new Error('Expected pixel project');
+    const appended = afterAppend.pixelAssets[collection.id]; if (appended.type !== 'tileset') throw new Error('Expected image collection');
+    expect(appended.tiles[2].imageAssetId).toBe(second.id);
+    expect(appended.firstGid).toBe(collection.firstGid);
+    expect(JSON.stringify([afterAppend.pixelAssets[first.id], afterAppend.pixelAssets[second.id], afterAppend.pixelAssets[third.id]])).toBe(sourceBytes);
+
+    const stale = await callToolMessage(started.url, client.headers, 7, 'canvas_apply', {
+      documentId: document.id, clientOperationId: 'semantic-collection-stale', label: 'Reject stale collection append', playback: { mode: 'instant', speed: 1 },
+      operations: [{ kind: 'pixel.image-collection.append', tilesetId: collection.id, sourceSpriteId: second.id, expectedTilesetRevision: appended.revision, expectedDocumentRevision: afterCreate.revision }],
+    });
+    expect(stale.result?.isError).toBe(true);
+    expect(JSON.stringify(stale)).toContain('document revision changed');
+    expect(documents.getDocument(document.id)).toEqual(afterAppend);
+    expect(await callTool(started.url, client.headers, 8, 'history_manage', { action: 'undo', documentId: document.id })).toMatchObject({ status: 'committed' });
+    const undone = documents.getDocument(document.id); if (!undone || undone.kind !== 'pixel') throw new Error('Expected pixel project');
+    const undoneCollection = undone.pixelAssets[collection.id]; if (undoneCollection.type !== 'tileset') throw new Error('Expected image collection');
+    expect(Object.keys(undoneCollection.tiles)).toEqual(['0', '1']);
   });
 
   it('flood-fills a bounded connected island inside a sprite larger than one million cells', async () => {

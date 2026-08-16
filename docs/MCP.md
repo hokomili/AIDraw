@@ -94,6 +94,7 @@ In addition to the canonical reducer kinds, MCP accepts these validated semantic
 - `pixel.selection.transform` with compact selection runs for move, horizontal/vertical flip, clockwise/counterclockwise 90° rotation, or independent 1×–64× integer scaling while preserving exact indexed pixels;
 - `pixel.image.quantize` for an embedded image asset using the document's area/OKLab/dither/alpha defaults;
 - `pixel.project-link.embed` for one hash-checked external link and `pixel.project-links.pack` for every healthy external link, both guarded by the pixel-document revision;
+- `pixel.image-collection.create` for 1–1,023 exact one-frame sprite IDs in explicit authored order, and `pixel.image-collection.append` for one exact source at the next local ID above the collection span. Each request must stand alone and carry the observed document revision; append also carries the exact tileset revision. Both lower into the existing canonical asset add/replace path, never copy sprite pixels, synthesize an atlas, or ask the caller to calculate a GID;
 - `illustration.objects.align` with artboard/selection/key-object targets;
 - `illustration.objects.distribute` on x or y;
 - `illustration.material.apply` with the `polished-gold` editable material recipe;

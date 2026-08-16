@@ -8,9 +8,10 @@ import UPNG from 'upng-js';
 import { importDocument } from '../../src/main/import-document';
 import { exportDocument } from '../../src/main/export-document';
 import { readNativeDocument, writeNativeDocument } from '../../src/main/persistence';
-import { renderTilemap, renderTilemapRegion } from '../../src/main/render-document';
+import { renderSprite, renderTilemap, renderTilemapRegion } from '../../src/main/render-document';
 import { runImportUtilityRequest } from '../../src/main/utility-import';
 import { editTileObject } from '../../src/common/tile-object-authoring';
+import { appendImageCollectionSource, createImageCollectionTileset } from '../../src/common/image-collection-authoring';
 
 const fixture = new URL('../fixtures/tiled/isometric-external.tmj', import.meta.url).pathname.replace(/^\/(?=[A-Za-z]:)/, '');
 const xmlFixtureSource = new URL('../fixtures/tiled/orthogonal-external.tmx', import.meta.url).pathname.replace(/^\/(?=[A-Za-z]:)/, '');
@@ -498,6 +499,50 @@ describe('representative Tiled JSON interchange', () => {
     const standaloneTileZero = standaloneTsx.data.toString().match(/<tile id="0"[^>]*>([\s\S]*?)<\/tile>/)?.[1]; expect(standaloneTileZero).toBeDefined();
     const standaloneOrder = ['<properties>', '<image ', '<objectgroup>', '<animation>'].map((child) => standaloneTileZero!.indexOf(child));
     expect(standaloneOrder.every((index) => index >= 0)).toBe(true); expect(standaloneOrder).toEqual([...standaloneOrder].sort((left, right) => left - right));
+  });
+
+  it('persists and JSON/XML exports a human-created collection plus appended exact source without atlas synthesis', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'aidraw-authored-image-collection-')); temporaryDirectories.push(directory);
+    const document = createPixelDocument('project', 'Authored collection project');
+    const first = createPixelSprite('Red wide', 2, 1); writePixels(Object.values(first.cels)[0], [{ x: 0, y: 0, index: 4 }, { x: 1, y: 0, index: 8 }]);
+    const second = createPixelSprite('Gold tall', 1, 2); writePixels(Object.values(second.cels)[0], [{ x: 0, y: 0, index: 12 }, { x: 0, y: 1, index: 4 }]);
+    document.assetIds = [first.id, second.id]; document.pixelAssets = { [first.id]: first, [second.id]: second }; document.activeAssetId = first.id;
+    const collection = createImageCollectionTileset(document, 'Authored sparse', [first.id], { id: 'authored-collection' });
+    document.assetIds.push(collection.id); document.pixelAssets[collection.id] = collection;
+    const appended = appendImageCollectionSource(document, collection.id, second.id);
+    document.pixelAssets[collection.id] = appended.tileset; document.activeAssetId = collection.id;
+
+    const nativePath = await writeNativeDocument(join(directory, 'authored-native'), document, '1.0.0');
+    const reopened = await readNativeDocument(nativePath); if (reopened.document.kind !== 'pixel') throw new Error('Expected pixel document');
+    const reopenedDocument = reopened.document;
+    const persisted = reopenedDocument.pixelAssets[collection.id]; if (persisted.type !== 'tileset') throw new Error('Expected collection');
+    expect(Object.values(persisted.tiles).map(({ id, imageAssetId }) => ({ id, imageAssetId }))).toEqual([{ id: 0, imageAssetId: first.id }, { id: 1, imageAssetId: second.id }]);
+    expect(persisted).toMatchObject({ firstGid: 1, tileWidth: 2, tileHeight: 2, columns: 0, rows: 0 });
+
+    for (const format of ['tiled-json', 'tiled-xml'] as const) {
+      const artifact = await exportDocument(reopenedDocument, format);
+      expect(artifact.report).toEqual({ warnings: [], rasterized: [] });
+      expect(artifact.companions?.map((entry) => entry.name)).toEqual(['Authored sparse tile 0.png', 'Authored sparse tile 1.png']);
+      const decoded = artifact.companions!.map((entry) => UPNG.decode(entry.data.buffer.slice(entry.data.byteOffset, entry.data.byteOffset + entry.data.byteLength) as ArrayBuffer));
+      expect(decoded.map(({ width, height }) => [width, height])).toEqual([[2, 1], [1, 2]]);
+      const decodedPixels = decoded.map((entry) => Buffer.from(UPNG.toRGBA8(entry)[0]));
+      const expectedPixels = [first.id, second.id].map((id) => {
+        const source = reopenedDocument.pixelAssets[id]; if (source.type !== 'sprite') throw new Error('Expected source sprite');
+        return Buffer.from(renderSprite(reopenedDocument, source).getContext('2d').getImageData(0, 0, source.width, source.height).data);
+      });
+      expect(decodedPixels).toEqual(expectedPixels);
+      if (format === 'tiled-json') {
+        const output = JSON.parse(artifact.data.toString());
+        expect(output).toMatchObject({ name: 'Authored sparse', tilecount: 2, columns: 0, tilewidth: 2, tileheight: 2 });
+        expect(output.image).toBeUndefined();
+        expect(output.tiles.map((tile: { id: number; image: string }) => ({ id: tile.id, image: tile.image }))).toEqual([{ id: 0, image: 'Authored sparse tile 0.png' }, { id: 1, image: 'Authored sparse tile 1.png' }]);
+      } else {
+        const output = artifact.data.toString();
+        expect(output).toContain('<tileset version="1.10" tiledversion="1.11.2" name="Authored sparse" tilewidth="2" tileheight="2" margin="0" spacing="0" tilecount="2" columns="0">');
+        expect(output).not.toMatch(/<tileset[^>]*>\s*<image/u);
+        expect(output).toContain('<tile id="0" probability="1">'); expect(output).toContain('<tile id="1" probability="1">');
+      }
+    }
   });
 
   it('rejects explicitly malformed JSON/XML image declarations while retaining metadata-only atlases', async () => {

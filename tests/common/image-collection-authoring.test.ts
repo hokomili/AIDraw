@@ -1,8 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { createPixelDocument, createPixelSprite, createPixelTileset } from '@aidraw/core';
+import { TILED_GID_MASK, createPixelDocument, createPixelSprite, createPixelTileset } from '@aidraw/core';
 
 import {
+  appendImageCollectionSource,
+  createImageCollectionTileset,
   imageCollectionAuthoringGuardError,
+  imageCollectionSourceEligibility,
+  imageCollectionSourceObservationGuardError,
   imageCollectionSourceDependencyGuards,
   imageCollectionTileIds,
   replaceImageCollectionTileMetadata,
@@ -30,6 +34,65 @@ function collectionFixture() {
 }
 
 describe('image-collection authoring boundary', () => {
+  it('creates exact source-ordered tiles and appends above the sparse authored span without rebasing', () => {
+    const document = createPixelDocument('project', 'Collection lifecycle');
+    const first = createPixelSprite('First', 7, 11);
+    const second = createPixelSprite('Second', 19, 5);
+    const appended = createPixelSprite('Appended', 23, 13);
+    document.assetIds = [second.id, first.id, appended.id];
+    document.pixelAssets = { [first.id]: first, [second.id]: second, [appended.id]: appended };
+    document.activeAssetId = second.id;
+    const collection = createImageCollectionTileset(document, '  Environment  ', [second.id, first.id], { id: 'collection', createdAt: '2026-08-16T00:00:00.000Z', createdBy: 'tester' });
+    expect(collection).toMatchObject({ id: 'collection', name: 'Environment', firstGid: 1, tileWidth: 19, tileHeight: 11, columns: 0, rows: 0, createdBy: 'tester' });
+    expect(collection.spriteAssetId).toBeUndefined();
+    expect(collection.tiles).toEqual({
+      0: { id: 0, sourceX: 0, sourceY: 0, imageAssetId: second.id, probability: 1, animation: [], collisions: [], properties: {} },
+      1: { id: 1, sourceX: 0, sourceY: 0, imageAssetId: first.id, probability: 1, animation: [], collisions: [], properties: {} },
+    });
+    document.assetIds.push(collection.id);
+    document.pixelAssets[collection.id] = collection;
+    delete collection.tiles[1];
+    collection.tiles[3] = { id: 3, sourceX: 0, sourceY: 0, imageAssetId: first.id, probability: 0.4, animation: [], collisions: [], properties: { preserved: true } };
+    const plan = appendImageCollectionSource(document, collection.id, appended.id);
+    expect(plan.tileId).toBe(4);
+    expect(plan.tileset.firstGid).toBe(1);
+    expect(plan.tileset.tiles[3]).toEqual(collection.tiles[3]);
+    expect(plan.tileset.tiles[4]).toMatchObject({ id: 4, imageAssetId: appended.id, probability: 1 });
+    expect(plan.tileset).toMatchObject({ tileWidth: 23, tileHeight: 13 });
+    expect(plan.expectedSpriteDependencies.map(({ spriteId }) => spriteId)).toEqual([second.id, first.id, appended.id]);
+    const later = createImageCollectionTileset(document, 'Later collection', [appended.id], { id: 'later-collection' });
+    expect(later.firstGid).toBe(5);
+  });
+
+  it('refuses animated, duplicate, oversized, overlapping, and exhausted lifecycle inputs', () => {
+    const document = createPixelDocument('project', 'Collection refusals');
+    const source = createPixelSprite('Source', 8, 8);
+    const animated = createPixelSprite('Animated', 8, 8);
+    animated.frameIds.push('frame-2'); animated.frames['frame-2'] = { ...animated.frames[animated.frameIds[0]], id: 'frame-2' };
+    document.assetIds = [source.id, animated.id]; document.pixelAssets = { [source.id]: source, [animated.id]: animated }; document.activeAssetId = source.id;
+    expect(imageCollectionSourceEligibility(document, source.id)).toBeUndefined();
+    expect(imageCollectionSourceEligibility(document, animated.id)).toMatch(/one-frame sprites/);
+    expect(() => createImageCollectionTileset(document, 'Collection', [source.id, source.id])).toThrow(/unique/);
+    expect(() => createImageCollectionTileset(document, 'Collection', [animated.id])).toThrow(/one-frame/);
+    expect(() => createImageCollectionTileset(document, 'Collection', Array.from({ length: 1_024 }, (_, index) => `source-${index}`))).toThrow(/at most 1,023/);
+    const maximum = createPixelSprite('Maximum', 8_192, 8_192);
+    const overflow = createPixelSprite('Overflow', 1, 1);
+    document.assetIds.push(maximum.id, overflow.id);
+    Object.assign(document.pixelAssets, { [maximum.id]: maximum, [overflow.id]: overflow });
+    expect(() => createImageCollectionTileset(document, 'Too many pixels', [maximum.id, overflow.id])).toThrow(/64-megapixel/);
+    const collection = createImageCollectionTileset(document, 'Collection', [source.id], { id: 'collection' });
+    collection.firstGid = 4;
+    const other = createPixelTileset('Atlas', source.id, 8, 8, 1, 1); other.firstGid = 5;
+    const appendSource = createPixelSprite('Append', 8, 8);
+    document.assetIds.push(collection.id, other.id, appendSource.id);
+    Object.assign(document.pixelAssets, { [collection.id]: collection, [other.id]: other, [appendSource.id]: appendSource });
+    expect(() => appendImageCollectionSource(document, collection.id, source.id)).toThrow(/already belongs/);
+    expect(() => appendImageCollectionSource(document, collection.id, appendSource.id)).toThrow(/overlapping tileset/);
+    other.firstGid = 20;
+    collection.firstGid = TILED_GID_MASK;
+    expect(() => appendImageCollectionSource(document, collection.id, appendSource.id)).toThrow(/28-bit/);
+  });
+
   it('selects only exact sparse IDs and replaces metadata without changing source topology', () => {
     const { document, tileset, source0, source3 } = collectionFixture();
     expect(imageCollectionTileIds(tileset)).toEqual([0, 3]);
@@ -72,5 +135,17 @@ describe('image-collection authoring boundary', () => {
     if (changedTileset.type !== 'tileset') throw new Error('Expected tileset');
     delete changedTileset.tiles[3];
     expect(imageCollectionAuthoringGuardError(document, changedTopology, tileset.id)).toMatch(/tile IDs changed/);
+  });
+
+  it('refuses a chooser source that changed after it was displayed', () => {
+    const document = createPixelDocument('project', 'Collection source observation');
+    const source = document.pixelAssets[document.activeAssetId]; if (source.type !== 'sprite') throw new Error('Expected sprite');
+    expect(imageCollectionSourceObservationGuardError(document, structuredClone(document), [source.id])).toBeUndefined();
+    const revised = structuredClone(document);
+    const revisedSource = revised.pixelAssets[source.id]; if (revisedSource.type !== 'sprite') throw new Error('Expected sprite');
+    revisedSource.revision += 1;
+    expect(imageCollectionSourceObservationGuardError(document, revised, [source.id])).toMatch(/changed/);
+    const missing = structuredClone(document); delete missing.pixelAssets[source.id];
+    expect(imageCollectionSourceObservationGuardError(document, missing, [source.id])).toMatch(/missing or changed kind/);
   });
 });

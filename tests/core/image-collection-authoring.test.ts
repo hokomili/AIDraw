@@ -12,9 +12,55 @@ import {
   type CanvasTransaction,
 } from '@aidraw/core';
 
-import { imageCollectionSourceDependencyGuards, replaceImageCollectionTileMetadata } from '../../src/common/image-collection-authoring';
+import {
+  appendImageCollectionSource,
+  createImageCollectionTileset,
+  imageCollectionSourceDependencyGuards,
+  replaceImageCollectionTileMetadata,
+} from '../../src/common/image-collection-authoring';
 
 describe('image-collection metadata transaction', () => {
+  it('creates and appends through existing guarded transactions with exact inverse restoration', () => {
+    const document = createPixelDocument('project', 'Collection lifecycle history');
+    const first = document.pixelAssets[document.activeAssetId]; if (first.type !== 'sprite') throw new Error('Expected sprite');
+    first.name = 'First source';
+    const second = createPixelSprite('Second source', 12, 9);
+    document.assetIds.push(second.id); document.pixelAssets[second.id] = second;
+    const sourceBytes = JSON.stringify([first, second]);
+    const collection = createImageCollectionTileset(document, 'Objects', [first.id], { id: 'collection-history' });
+    const create: CanvasTransaction = {
+      id: createId('tx'), clientOperationId: createId('human-op'), documentId: document.id, expectedDocumentRevision: document.revision,
+      actor: HUMAN_ACTOR, label: 'Create image collection', createdAt: nowIso(),
+      operations: [{ kind: 'pixel.asset.add', asset: collection }, { kind: 'pixel.active-asset.set', assetId: collection.id }],
+    };
+    const created = applyTransaction(document, create); if (created.document.kind !== 'pixel') throw new Error('Expected pixel document');
+    expect(created.document.activeAssetId).toBe(collection.id);
+    expect(created.document.pixelAssets[collection.id]).toEqual(collection);
+    expect(JSON.stringify([created.document.pixelAssets[first.id], created.document.pixelAssets[second.id]])).toBe(sourceBytes);
+    const restoredCreate = applyTransaction(created.document, created.inverse, { recordActivity: false }).document; if (restoredCreate.kind !== 'pixel') throw new Error('Expected pixel document');
+    expect(restoredCreate.pixelAssets[collection.id]).toBeUndefined();
+    expect(restoredCreate.activeAssetId).toBe(document.activeAssetId);
+
+    const appendPlan = appendImageCollectionSource(created.document, collection.id, second.id);
+    const append: CanvasTransaction = {
+      id: createId('tx'), clientOperationId: createId('human-op'), documentId: created.document.id, expectedDocumentRevision: created.document.revision,
+      actor: HUMAN_ACTOR, label: 'Append image-collection source', createdAt: nowIso(),
+      operations: [{ kind: 'pixel.asset.replace', asset: appendPlan.tileset, expectedRevision: collection.revision, expectedSpriteDependencies: appendPlan.expectedSpriteDependencies }],
+    };
+    const appended = applyTransaction(created.document, append); if (appended.document.kind !== 'pixel') throw new Error('Expected pixel document');
+    const changed = appended.document.pixelAssets[collection.id]; if (changed.type !== 'tileset') throw new Error('Expected tileset');
+    expect(changed.tiles[1].imageAssetId).toBe(second.id);
+    expect(JSON.stringify([appended.document.pixelAssets[first.id], appended.document.pixelAssets[second.id]])).toBe(sourceBytes);
+    const restoredAppend = applyTransaction(appended.document, appended.inverse, { recordActivity: false }).document; if (restoredAppend.kind !== 'pixel') throw new Error('Expected pixel document');
+    const restoredTileset = restoredAppend.pixelAssets[collection.id]; if (restoredTileset.type !== 'tileset') throw new Error('Expected tileset');
+    expect({ ...restoredTileset, revision: collection.revision, updatedAt: collection.updatedAt }).toEqual(collection);
+
+    const concurrentlyChanged = structuredClone(created.document);
+    concurrentlyChanged.name = 'Concurrent canonical edit'; concurrentlyChanged.revision += 1;
+    expect(() => applyTransaction(concurrentlyChanged, append)).toThrow(TransactionConflictError);
+    expect(concurrentlyChanged.pixelAssets[collection.id]).toEqual(collection);
+  });
+
   it('commits and inverses one complete tileset replacement without changing sparse sources or artwork', () => {
     const document = createPixelDocument('project', 'Collection history');
     const source0 = createPixelSprite('Zero', 8, 12);

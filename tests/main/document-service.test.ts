@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { HUMAN_ACTOR, IDENTITY_TRANSFORM, applyTransaction, createId, createIllustrationDocument, createPixelDocument, createPixelSprite, createPixelTileset, nowIso, type Actor, type CanvasTransaction, type ShapeObject } from '@aidraw/core';
 import type { TransactionTraceEntry } from '@common/contracts';
-import { imageCollectionSourceDependencyGuards, replaceImageCollectionTileMetadata } from '@common/image-collection-authoring';
+import { appendImageCollectionSource, createImageCollectionTileset, imageCollectionSourceDependencyGuards, replaceImageCollectionTileMetadata } from '@common/image-collection-authoring';
 import { DocumentService, type NativeDocumentPreviewRenderer } from '@main/document-service';
 import { RecoveryJournal } from '@main/journal';
 import { writeNativeDocument } from '@main/persistence';
@@ -609,6 +609,49 @@ describe('document service collaboration semantics', () => {
     expect(current.activity.map(({ label }) => label)).toEqual(['Resize collection source first']);
     expect(current.pixelAssets[source3.id]).toMatchObject({ type: 'sprite', width: source3.width + 1, revision: source3.revision + 1 });
     expect(current.pixelAssets[tileset.id]).toMatchObject({ type: 'tileset', revision: tileset.revision, tiles: { 3: { probability: 0.5 } } });
+  });
+
+  it('refuses a queued lifecycle append planned before a source change, then admits a fresh retry and exact undo', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-service-collection-append-guard-'));
+    temporaryPaths.push(root);
+    const service = new DocumentService(new RecoveryJournal(root), '1.0.0');
+    services.push(service);
+    const document = createPixelDocument('project', 'Queued collection append guard');
+    const first = document.pixelAssets[document.activeAssetId]; if (first.type !== 'sprite') throw new Error('Expected sprite');
+    const appendedSource = createPixelSprite('Queued append source', 12, 7);
+    document.assetIds.push(appendedSource.id); document.pixelAssets[appendedSource.id] = appendedSource;
+    const collection = createImageCollectionTileset(document, 'Queued collection', [first.id], { id: 'queued-collection' });
+    document.assetIds.push(collection.id); document.pixelAssets[collection.id] = collection; document.activeAssetId = collection.id;
+    service.addDocument(document);
+
+    const stalePlan = appendImageCollectionSource(document, collection.id, appendedSource.id);
+    const resizedSource = structuredClone(appendedSource); resizedSource.width += 3;
+    const sourceWrite = service.apply({
+      id: createId('tx'), clientOperationId: createId('human-op'), documentId: document.id, actor: HUMAN_ACTOR,
+      label: 'Resize append source first', createdAt: nowIso(), operations: [{ kind: 'pixel.asset.replace', asset: resizedSource, expectedRevision: appendedSource.revision }],
+    });
+    const staleAppend = service.apply({
+      id: createId('tx'), clientOperationId: createId('human-op'), documentId: document.id, expectedDocumentRevision: document.revision, actor: HUMAN_ACTOR,
+      label: 'Append stale collection source', createdAt: nowIso(), operations: [{ kind: 'pixel.asset.replace', asset: stalePlan.tileset, expectedRevision: collection.revision, expectedSpriteDependencies: stalePlan.expectedSpriteDependencies }],
+    });
+    const [sourceResponse, staleResponse] = await Promise.all([sourceWrite, staleAppend]);
+    expect(sourceResponse).toMatchObject({ status: 'committed', revision: document.revision + 1 });
+    expect(staleResponse).toMatchObject({ status: 'conflict', conflict: { entityId: document.id, expectedRevision: document.revision, actualRevision: document.revision + 1, retryable: true } });
+    const afterConflict = service.getDocument(document.id); if (!afterConflict || afterConflict.kind !== 'pixel') throw new Error('Expected pixel document');
+    expect(afterConflict.activity.map(({ label }) => label)).toEqual(['Resize append source first']);
+    expect(afterConflict.pixelAssets[collection.id]).toEqual(collection);
+
+    const retryPlan = appendImageCollectionSource(afterConflict, collection.id, appendedSource.id);
+    expect(await service.apply({
+      id: createId('tx'), clientOperationId: createId('human-op'), documentId: document.id, expectedDocumentRevision: afterConflict.revision, actor: HUMAN_ACTOR,
+      label: 'Append current collection source', createdAt: nowIso(), operations: [{ kind: 'pixel.asset.replace', asset: retryPlan.tileset, expectedRevision: collection.revision, expectedSpriteDependencies: retryPlan.expectedSpriteDependencies }],
+    })).toMatchObject({ status: 'committed', revision: document.revision + 2 });
+    const afterAppend = service.getDocument(document.id); if (!afterAppend || afterAppend.kind !== 'pixel') throw new Error('Expected pixel document');
+    expect(afterAppend.pixelAssets[collection.id]).toMatchObject({ type: 'tileset', tileWidth: Math.max(first.width, appendedSource.width + 3), tiles: { 1: { imageAssetId: appendedSource.id } } });
+    expect(await service.undo(document.id)).toMatchObject({ status: 'committed', revision: document.revision + 3 });
+    const undone = service.getDocument(document.id); if (!undone || undone.kind !== 'pixel') throw new Error('Expected pixel document');
+    expect(undone.pixelAssets[collection.id]).toMatchObject({ type: 'tileset', revision: collection.revision + 1, tiles: { 0: { imageAssetId: first.id } } });
+    expect(undone.pixelAssets[collection.id]).not.toHaveProperty('tiles.1');
   });
 
   it('orders checkpoint restore behind a pending commit and preserves that committed branch', async () => {

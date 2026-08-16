@@ -152,6 +152,8 @@ import { flattenLayerTree, layerTreeDescendants, moveLayerTreeEntry } from "../c
 import { assignWangTile, deleteWangColor, deleteWangSet, upsertWangColor, upsertWangSet } from "../common/wang-authoring";
 import { TILE_VARIANT_GROUP_PROPERTY, tileVariantCandidates, tileVariantGroup } from "../common/tile-variants";
 import {
+  appendImageCollectionSource,
+  createImageCollectionTileset,
   imageCollectionAuthoringGuardError,
   imageCollectionSourceDependencyGuards,
   imageCollectionTileIds,
@@ -183,6 +185,12 @@ import { TileAnimationEditor } from "./components/TileAnimationEditor";
 import { TilesetSliceEditor } from "./components/TilesetSliceEditor";
 import { TileVariantPreview } from "./components/TileVariantPreview";
 import { TileMapObjectInspector } from "./components/TileMapObjectInspector";
+import { ImageCollectionSourceDialog } from "./components/ImageCollectionSourceDialog";
+import {
+  createImageCollectionSourceOpening,
+  imageCollectionSourceOpeningGuardError,
+  type ImageCollectionSourceOpening,
+} from "./image-collection-source-opening";
 import { ShortcutReferenceDialog } from "./components/ShortcutReferenceDialog";
 import { InspectorLayoutControls } from "./components/InspectorLayoutControls";
 import { documentTabFocusIndex } from "./document-tabs";
@@ -3761,7 +3769,7 @@ function PixelLayers({ document }: { document: PixelDocument }) {
     if (selected === object.id) setSelected(selectedLayer.id);
   };
   if (asset.type === "tileset")
-    return <TilesetPanel document={document} tileset={asset} />;
+    return <TilesetPanel key={`${document.id}:${asset.id}`} document={document} tileset={asset} />;
   return (
     <>
       <div className="asset-heading">
@@ -3991,6 +3999,7 @@ function TilesetPanel({
   const [propertyValue, setPropertyValue] = useState("");
   const [selectedWangSetId, setSelectedWangSetId] = useState<string>();
   const [drawingOffsetDraft, setDrawingOffsetDraft] = useState<{ tilesetId: string; revision: number; x: string; y: string }>();
+  const [appendSourceOpening, setAppendSourceOpening] = useState<ImageCollectionSourceOpening>();
   const imageCollection = !tileset.spriteAssetId;
   const collectionTileIds = imageCollection ? imageCollectionTileIds(tileset) : undefined;
   const effectiveSelectedTileId = imageCollection && collectionTileIds && !collectionTileIds.includes(selectedTileId)
@@ -4078,6 +4087,49 @@ function TilesetPanel({
     setDrawingOffsetDraft(undefined);
     replace({ ...tileset, tileOffset: { x, y } }, "Change tileset drawing offset");
   };
+  const appendSource = async (opening: ImageCollectionSourceOpening, { sourceIds }: { sourceIds: string[] }) => {
+    const active = useEditorStore.getState().snapshot?.activeDocument;
+    if (active?.kind !== "pixel") {
+      notify("The active document changed. Re-open the image collection before appending a source.", "warning");
+      return false;
+    }
+    const openingError = imageCollectionSourceOpeningGuardError(opening, document, tileset.id)
+      ?? imageCollectionSourceOpeningGuardError(opening, active, tileset.id);
+    if (openingError) {
+      notify(openingError, "warning");
+      return false;
+    }
+    const openingTarget = opening.target;
+    if (!openingTarget) {
+      notify("The opening image collection is unavailable. Close this chooser and reopen it before trying again.", "warning");
+      return false;
+    }
+    const targetId = openingTarget.id;
+    const guardError = imageCollectionAuthoringGuardError(document, active, targetId);
+    if (guardError) {
+      notify(guardError, "warning");
+      return false;
+    }
+    try {
+      const selectedSourceId = sourceIds[0];
+      if (!selectedSourceId) throw new Error("Choose one exact sprite source to append.");
+      const plan = appendImageCollectionSource(active, targetId, selectedSourceId);
+      const applied = await apply("Append image-collection source", [{
+        kind: "pixel.asset.replace",
+        asset: plan.tileset,
+        expectedRevision: openingTarget.revision,
+        expectedSpriteDependencies: plan.expectedSpriteDependencies,
+      }], active.id, active.revision);
+      if (applied) {
+        setSelectedTileId(plan.tileId);
+        setSelectedCollisionIds([]);
+      }
+      return applied;
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "The image-collection source could not be appended.", "warning");
+      return false;
+    }
+  };
   const addTerrain = () => {
     const terrainId = tileset.wangSets.length + 1;
     const wangSet: WangSet = {
@@ -4160,7 +4212,7 @@ function TilesetPanel({
           </small>
         </span>
       </div>
-      {imageCollection && <p className="tileset-slice-summary">Choose an exact sparse local ID to preview its own source and edit metadata. Source images, IDs, membership, atlas slicing, Wang terrain, and tile-object artwork remain fixed or unavailable.</p>}
+      {imageCollection && <><p className="tileset-slice-summary">Choose an exact sparse local ID to preview its own source and edit metadata. Append references one eligible project sprite at the next ID above the authored sparse span; existing source images and IDs never move.</p><div className="tileset-actions"><button type="button" onClick={() => setAppendSourceOpening(createImageCollectionSourceOpening(document, "append", { tileset }))}>Append sprite source</button></div></>}
       {!imageCollection && <TilesetSliceEditor key={`${tileset.id}:${tileset.revision}`} palette={document.palette} tileset={tileset} sourceSprite={sourceSprite?.type === "sprite" ? sourceSprite : undefined} selectedTileId={selectedTileId} onCommit={(next, nextSelectedTileId, impact) => {
         const droppedEntries = impact.droppedAnimationFrames + impact.droppedCollisionShapes + impact.droppedCustomProperties + impact.droppedWangColors + impact.droppedWangTiles;
         if (impact.droppedMetadataTiles > 0 || droppedEntries > 0) notify(`Re-sliced after explicit review; ${impact.droppedMetadataTiles} metadata-addressed tile${impact.droppedMetadataTiles === 1 ? "" : "s"} and ${droppedEntries} metadata entr${droppedEntries === 1 ? "y" : "ies"} no longer fit.`, "warning");
@@ -4290,7 +4342,14 @@ function TilesetPanel({
         animation, drawing offset, properties, and collision data export through Tiled.
       </p>
       </>}
-      {imageCollection && <p className="fine-print">Probability, ordered animation, typed properties, collision metadata, and drawing offset use the existing complete tileset transaction and supported Tiled export. Per-tile sources and sparse IDs remain fixed.</p>}
+      {imageCollection && <p className="fine-print">Probability, ordered animation, typed properties, collision metadata, drawing offset, and append use the existing complete tileset transaction and supported Tiled export. Existing per-tile sources and sparse IDs remain fixed.</p>}
+      {imageCollection && appendSourceOpening && <ImageCollectionSourceDialog
+        opening={appendSourceOpening}
+        currentDocument={document}
+        currentTilesetId={tileset.id}
+        onSubmit={appendSource}
+        onClose={() => setAppendSourceOpening(undefined)}
+      />}
     </div>
   );
 }
@@ -5612,6 +5671,7 @@ function GenerationPanel({ document }: { document: AIDrawDocument }) {
 function AssetsPanel({ document }: { document: AIDrawDocument }) {
   const apply = useEditorStore((state) => state.apply);
   const notify = useEditorStore((state) => state.notify);
+  const [createCollectionOpening, setCreateCollectionOpening] = useState<ImageCollectionSourceOpening>();
   if (document.kind === "illustration") {
     const assets = Object.values(document.assets);
     return (
@@ -5684,6 +5744,30 @@ function AssetsPanel({ document }: { document: AIDrawDocument }) {
     operations.push({ kind: "pixel.asset.add", asset: tileset });
     void apply("Add tileset", operations);
   };
+  const createCollection = async (opening: ImageCollectionSourceOpening, { name, sourceIds }: { name?: string; sourceIds: string[] }) => {
+    const active = useEditorStore.getState().snapshot?.activeDocument;
+    if (document.kind !== "pixel" || active?.kind !== "pixel") {
+      notify("The active document changed. Re-open image-collection creation before applying.", "warning");
+      return false;
+    }
+    try {
+      const openingError = imageCollectionSourceOpeningGuardError(opening, document)
+        ?? imageCollectionSourceOpeningGuardError(opening, active);
+      if (openingError) throw new Error(openingError);
+      const selected = new Set(sourceIds);
+      const authoredSourceIds = opening.assetIds.filter((assetId) => selected.has(assetId));
+      if (authoredSourceIds.length !== selected.size) throw new Error("One or more selected sprite sources are no longer in this document.");
+      if (sourceIds.some((sourceId, index) => sourceId !== authoredSourceIds[index])) throw new Error("The project source order changed. Re-open image-collection creation before applying.");
+      const collection = createImageCollectionTileset(active, name ?? "Image collection", authoredSourceIds);
+      return await apply("Create image collection", [
+        { kind: "pixel.asset.add", asset: collection },
+        { kind: "pixel.active-asset.set", assetId: collection.id },
+      ], active.id, active.revision);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "The image collection could not be created.", "warning");
+      return false;
+    }
+  };
   const addMap = () => {
     const map = createPixelTilemap(
       `Map ${assets.filter((asset) => asset.type === "tilemap").length + 1}`,
@@ -5721,6 +5805,9 @@ function AssetsPanel({ document }: { document: AIDrawDocument }) {
         <span className="asset-add-actions">
           <button onClick={addSprite}>Sprite</button>
           <button onClick={addTileset}>Tileset</button>
+          <button onClick={() => setCreateCollectionOpening(createImageCollectionSourceOpening(document, "create", {
+            defaultName: `Image collection ${assets.filter((asset) => asset.type === "tileset" && !asset.spriteAssetId).length + 1}`,
+          }))}>Image collection</button>
           <button onClick={addMap}>Map</button>
         </span>
       </div>
@@ -5751,7 +5838,9 @@ function AssetsPanel({ document }: { document: AIDrawDocument }) {
                   ? `${asset.width} × ${asset.height} · ${asset.frameIds.length} frames`
                   : asset.type === "tilemap"
                     ? `${asset.orientation} · ${asset.width} × ${asset.height}`
-                    : `${asset.columns} × ${asset.rows} tiles`}
+                    : asset.spriteAssetId
+                      ? `${asset.columns} × ${asset.rows} tiles`
+                      : `Image collection · ${Object.keys(asset.tiles).length} sparse tiles`}
               </small>
             </span>
           </button>
@@ -5807,6 +5896,12 @@ function AssetsPanel({ document }: { document: AIDrawDocument }) {
           Pack Project
         </button>
       </div>
+      {createCollectionOpening && <ImageCollectionSourceDialog
+        opening={createCollectionOpening}
+        currentDocument={document}
+        onSubmit={createCollection}
+        onClose={() => setCreateCollectionOpening(undefined)}
+      />}
     </div>
   );
 }
@@ -6088,7 +6183,7 @@ function RightSidebar({
             {document.kind === "pixel" && <PalettePanel document={document} />}
           </>
         )}
-        {visiblePanel === "assets" && <AssetsPanel document={document} />}
+        {visiblePanel === "assets" && <AssetsPanel key={document.id} document={document} />}
         {visiblePanel === "animation" && document.kind === "illustration" && <IllustrationAnimationPanel document={document} />}
         {visiblePanel === "activity" && <ActivityPanel />}
         {visiblePanel === "generation" && <GenerationPanel document={document} />}

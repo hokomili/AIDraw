@@ -183,9 +183,9 @@ describe('keyboard shortcut reference', () => {
     expect(readme).toContain('exactly 40 eligible bindings: all 39 tools displayed across the illustration (19) and pixel (20) rails plus the renderer-owned inspector toggle');
     expect(readme).toContain('Later still-free new mnemonics are reserved before fallback selection');
     expect(readme).toContain('remaining command/native-menu remapping');
-    expect(tracker).toContain('clean and live-synchronized through base `e6c1e159c03e56a9194dbd61a510f489623e01af`');
-    expect(tracker).toContain('The current bounded PIX-11 source/headless candidate is one reviewable animation-tag workflow over that base');
-    expect(tracker).toContain('overlapping/nested membership and exact single-tag preview/export explicit');
+    expect(tracker).toContain('clean and live-synchronized through base `04b9f224a759ca200792a3311f58794c6c8f3ec3`');
+    expect(tracker).toContain('The current bounded MAP-07/MAP-13 source/headless candidate is one reviewable image-collection lifecycle over that base');
+    expect(tracker).toContain('creates from exact existing one-frame sprites and appends one unused exact source above the authored sparse span');
     expect(tracker).toContain('all **39 displayed tool activations**—19 illustration and 20 pixel—plus the renderer-owned inspector toggle');
     expect(tracker).toContain('later still-free new mnemonics remain reserved from earlier fallbacks');
     expect(tracker).toContain('remapping beyond the later bounded UX-08 tool/inspector slice');
