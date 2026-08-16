@@ -240,6 +240,35 @@ export function deletePixelAnimationTag(sprite: PixelSprite, tagId: Id): PixelSp
   return next;
 }
 
+export interface PixelAnimationTagSpan {
+  tag: AnimationTag;
+  /** Stable zero-based position in the sprite's authored tag order. */
+  order: number;
+  fromIndex: number;
+  toIndex: number;
+  frameCount: number;
+}
+
+function pixelAnimationTagSpan(sprite: PixelSprite, tag: AnimationTag, order: number, frameIndexes?: ReadonlyMap<Id, number>): PixelAnimationTagSpan {
+  const fromIndex = frameIndexes?.get(tag.fromFrameId) ?? sprite.frameIds.indexOf(tag.fromFrameId);
+  const toIndex = frameIndexes?.get(tag.toFrameId) ?? sprite.frameIds.indexOf(tag.toFrameId);
+  if (fromIndex < 0 || toIndex < fromIndex) throw new Error(`Animation tag ${tag.id} has an invalid frame range.`);
+  return { tag, order, fromIndex, toIndex, frameCount: toIndex - fromIndex + 1 };
+}
+
+/** Resolve every independent tag range without merging, nesting, or assigning priority. */
+export function pixelAnimationTagSpans(sprite: PixelSprite): PixelAnimationTagSpan[] {
+  const frameIndexes = new Map(sprite.frameIds.map((frameId, index) => [frameId, index]));
+  return sprite.tags.map((tag, order) => pixelAnimationTagSpan(sprite, tag, order, frameIndexes));
+}
+
+/** Return all independent tags containing one exact frame in stable authored order. */
+export function pixelAnimationTagsForFrame(sprite: PixelSprite, frameId: Id): PixelAnimationTagSpan[] {
+  const frameIndex = sprite.frameIds.indexOf(frameId);
+  if (frameIndex < 0) throw new Error(`Frame ${frameId} does not exist.`);
+  return pixelAnimationTagSpans(sprite).filter((span) => frameIndex >= span.fromIndex && frameIndex <= span.toIndex);
+}
+
 export function setPixelFramePaletteOverride(sprite: PixelSprite, frameId: Id, palette?: PaletteEntry[]): PixelSprite {
   if (!sprite.frames[frameId]) throw new Error(`Frame ${frameId} does not exist.`);
   if (palette && (palette.length < 1 || palette.length > 256)) throw new Error('A frame palette override must contain 1–256 entries.');
@@ -251,16 +280,15 @@ export function setPixelFramePaletteOverride(sprite: PixelSprite, frameId: Id, p
 
 export function pixelAnimationFrames(sprite: PixelSprite, tagId?: Id): Id[] {
   const tag = tagId ? sprite.tags.find((entry) => entry.id === tagId) : undefined;
-  if (!tag) return [...sprite.frameIds];
-  const from = sprite.frameIds.indexOf(tag.fromFrameId);
-  const to = sprite.frameIds.indexOf(tag.toFrameId);
-  return from >= 0 && to >= from ? sprite.frameIds.slice(from, to + 1) : [];
+  if (!tagId) return [...sprite.frameIds];
+  if (!tag) throw new Error(`Animation tag ${tagId} does not exist.`);
+  const span = pixelAnimationTagSpan(sprite, tag, sprite.tags.indexOf(tag));
+  return sprite.frameIds.slice(span.fromIndex, span.toIndex + 1);
 }
 
 export function pixelAnimationSequence(sprite: PixelSprite, tagId?: Id): Id[] {
   const frames = pixelAnimationFrames(sprite, tagId); if (!tagId) return frames;
-  const tag = sprite.tags.find((entry) => entry.id === tagId); if (!tag) throw new Error(`Animation tag ${tagId} does not exist.`);
-  if (!frames.length) throw new Error(`Animation tag ${tagId} has an invalid frame range.`);
+  const tag = sprite.tags.find((entry) => entry.id === tagId)!;
   if (tag.direction === 'reverse') return [...frames].reverse();
   if (tag.direction === 'ping-pong' && frames.length > 2) return [...frames, ...frames.slice(1, -1).reverse()];
   return frames;

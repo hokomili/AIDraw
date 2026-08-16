@@ -100,6 +100,7 @@ import {
   illustrationAtTime,
   nextTilesetFirstGid,
   nowIso,
+  pixelAnimationTagSpans,
   resolveTilesetForGid,
   resizePixelSpriteCanvas,
   replaceStyledText,
@@ -186,6 +187,7 @@ import { ShortcutReferenceDialog } from "./components/ShortcutReferenceDialog";
 import { InspectorLayoutControls } from "./components/InspectorLayoutControls";
 import { documentTabFocusIndex } from "./document-tabs";
 import { menuFocusIndex } from "./popover-navigation";
+import { resolveScopedAnimationTagId, type ScopedAnimationTagSelection } from "./animation-tag-timeline";
 import { shortcutHelpRequested, toolRailFocusIndex } from "./shortcuts";
 import {
   shortcutActionForEvent,
@@ -829,7 +831,7 @@ function BatchExportDialog({ documentCount, onClose }: { documentCount: number; 
   const [result, setResult] = useState<BatchDocumentResult>();
   const run = async () => { setRunning(true); try { const next = await window.aidraw.batchExportDocuments(format, { scale, animationTagName: ["gif", "apng", "sprite-sheet"].includes(format) && animationTagName.trim() ? animationTagName.trim() : undefined }); if (!next.cancelled) setResult(next); } finally { setRunning(false); } };
   if (result) return <BatchResultDialog title="Batch export complete" result={result} onClose={onClose} />;
-  return <EditorDialog title="Batch export" description={`Export all ${documentCount} open documents into one folder with collision-safe filenames.`} className="batch-export-dialog" onClose={onClose}><div className="entry-dialog-body"><label className="dialog-field"><span>Format</span><select autoFocus value={format} onChange={(event) => setFormat(event.target.value as typeof format)}><option value="png">PNG · all documents</option><option value="jpeg">JPEG · all documents</option><option value="webp">WebP · all documents</option><option value="gif">GIF · sprites and keyframed illustrations</option><option value="apng">APNG · sprites and keyframed illustrations</option><option value="sprite-sheet">Sprite sheet + JSON · pixel sprites only</option></select></label><label className="dialog-field"><span>Pixel presentation scale</span><select value={scale} onChange={(event) => setScale(Number(event.target.value))}><option value={1}>1× native</option><option value={2}>2×</option><option value={4}>4×</option><option value={8}>8× presentation</option><option value={12}>12× presentation</option><option value={16}>16×</option></select></label>{["gif", "apng", "sprite-sheet"].includes(format) && <label className="dialog-field"><span>Shared pixel-animation tag (optional)</span><input maxLength={120} value={animationTagName} onChange={(event) => setAnimationTagName(event.target.value)} placeholder="e.g. Walk" /><small>Each pixel sprite resolves this exact tag independently. Leave blank to also export complete illustration timelines.</small></label>}<p className="batch-export-note">Illustrations remain at native size. Unsupported documents are reported as skipped rather than silently converted.</p></div><footer className="modal-footer"><button type="button" className="secondary-modal-button" onClick={onClose}>Cancel</button><button type="button" className="primary-modal-button" disabled={running || documentCount === 0} onClick={() => void run()}><Download size={15} />{running ? "Exporting…" : "Choose folder and export"}</button></footer></EditorDialog>;
+  return <EditorDialog title="Batch export" description={`Export all ${documentCount} open documents into one folder with collision-safe filenames.`} className="batch-export-dialog" onClose={onClose}><div className="entry-dialog-body"><label className="dialog-field"><span>Format</span><select autoFocus value={format} onChange={(event) => setFormat(event.target.value as typeof format)}><option value="png">PNG · all documents</option><option value="jpeg">JPEG · all documents</option><option value="webp">WebP · all documents</option><option value="gif">GIF · sprites and keyframed illustrations</option><option value="apng">APNG · sprites and keyframed illustrations</option><option value="sprite-sheet">Sprite sheet + JSON · pixel sprites only</option></select></label><label className="dialog-field"><span>Pixel presentation scale</span><select value={scale} onChange={(event) => setScale(Number(event.target.value))}><option value={1}>1× native</option><option value={2}>2×</option><option value={4}>4×</option><option value={8}>8× presentation</option><option value={12}>12× presentation</option><option value={16}>16×</option></select></label>{["gif", "apng", "sprite-sheet"].includes(format) && <label className="dialog-field"><span>Shared pixel-animation tag (optional)</span><input maxLength={120} value={animationTagName} onChange={(event) => setAnimationTagName(event.target.value)} placeholder="exact ID or unique name" /><small>Each pixel sprite resolves one exact ID or unambiguous case-insensitive name independently; duplicate names are refused. Leave blank to also export complete illustration timelines.</small></label>}<p className="batch-export-note">Illustrations remain at native size. Unsupported documents are reported as skipped rather than silently converted.</p></div><footer className="modal-footer"><button type="button" className="secondary-modal-button" onClick={onClose}>Cancel</button><button type="button" className="primary-modal-button" disabled={running || documentCount === 0} onClick={() => void run()}><Download size={15} />{running ? "Exporting…" : "Choose folder and export"}</button></footer></EditorDialog>;
 }
 
 function DocumentActivityBadge({ document }: { document: DocumentTab }) {
@@ -1278,7 +1280,7 @@ function TopBar({
   const inspectorShortcut = shortcutChordForAction(shortcutPreferences, "toggle-inspector");
   const [exporting, setExporting] = useState(false);
   const [exportScale, setExportScale] = useState(1);
-  const [exportTagId, setExportTagId] = useState("");
+  const [exportTagSelection, setExportTagSelection] = useState<ScopedAnimationTagSelection>();
   const [exportPaletteCycleId, setExportPaletteCycleId] = useState("");
   const [spriteSheetSelection, setSpriteSheetSelection] = useState<SpriteSheetSelection>();
   const exportWrapRef = useRef<HTMLDivElement>(null);
@@ -1287,6 +1289,8 @@ function TopBar({
   const exportMenuId = useId();
   const document = snapshot?.activeDocument;
   const exportSprite = document?.kind === "pixel" && document.pixelAssets[document.activeAssetId]?.type === "sprite" ? document.pixelAssets[document.activeAssetId] as PixelSprite : undefined;
+  const exportTagSpans = useMemo(() => exportSprite ? pixelAnimationTagSpans(exportSprite) : [], [exportSprite]);
+  const exportTagId = resolveScopedAnimationTagId(exportTagSelection, document?.id, exportSprite?.id, exportTagSpans.map((span) => span.tag.id));
   const selectedExportCycle = document?.kind === "pixel" ? document.paletteCycles.find((cycle) => cycle.id === exportPaletteCycleId) : undefined;
   const exportFrameId = exportSprite && canvasAnimation?.activeAssetId === exportSprite.id && canvasAnimation.activeFrameId && exportSprite.frames[canvasAnimation.activeFrameId]
     ? canvasAnimation.activeFrameId
@@ -1431,8 +1435,8 @@ function TopBar({
                   </select>
                 </label>
               )}
-              {exportSprite && exportSprite.tags.length > 0 && <label className="export-scale-control"><span><strong>Animation range</strong><small>GIF, APNG, sheet</small></span><select aria-label="Animation export range" disabled={Boolean(selectedExportCycle)} value={exportSprite.tags.some((tag) => tag.id === exportTagId) ? exportTagId : ""} onChange={(event) => { setExportTagId(event.target.value); setExportPaletteCycleId(""); }}><option value="">Full timeline</option>{exportSprite.tags.map((tag) => <option key={tag.id} value={tag.id}>{tag.name} · {tag.direction}</option>)}</select></label>}
-              {exportSprite && document?.kind === "pixel" && document.paletteCycles.length > 0 && <label className="export-scale-control"><span><strong>Palette-cycle output</strong><small>{selectedExportCycle && selectedExportCycle.stepMs % 10 !== 0 ? "APNG/sheet exact · GIF needs 10 ms steps" : "GIF/APNG/sheet · active frame"}</small></span><select aria-label="Palette-cycle export" value={selectedExportCycle?.id ?? ""} onChange={(event) => { setExportPaletteCycleId(event.target.value); if (event.target.value) setExportTagId(""); }}><option value="">Timeline or tag animation</option>{document.paletteCycles.map((cycle) => <option key={cycle.id} value={cycle.id}>{cycle.name} · {cycle.toIndex - cycle.fromIndex + 1} steps · {cycle.stepMs} ms</option>)}</select></label>}
+              {exportSprite && exportTagSpans.length > 0 && <label className="export-scale-control"><span><strong>Animation range</strong><small>One exact tag · GIF, APNG, sheet</small></span><select aria-label="Animation export range" disabled={Boolean(selectedExportCycle)} value={exportTagId ?? ""} onChange={(event) => { setExportTagSelection(event.target.value && document ? { documentId: document.id, spriteId: exportSprite.id, tagId: event.target.value } : undefined); setExportPaletteCycleId(""); }}><option value="">Full timeline</option>{exportTagSpans.map((span) => <option key={span.tag.id} value={span.tag.id}>{span.tag.name} · tag {span.order + 1} · F{span.fromIndex + 1}–F{span.toIndex + 1} · {span.tag.direction}</option>)}</select></label>}
+              {exportSprite && document?.kind === "pixel" && document.paletteCycles.length > 0 && <label className="export-scale-control"><span><strong>Palette-cycle output</strong><small>{selectedExportCycle && selectedExportCycle.stepMs % 10 !== 0 ? "APNG/sheet exact · GIF needs 10 ms steps" : "GIF/APNG/sheet · active frame"}</small></span><select aria-label="Palette-cycle export" value={selectedExportCycle?.id ?? ""} onChange={(event) => { setExportPaletteCycleId(event.target.value); if (event.target.value) setExportTagSelection(undefined); }}><option value="">Timeline or tag animation</option>{document.paletteCycles.map((cycle) => <option key={cycle.id} value={cycle.id}>{cycle.name} · {cycle.toIndex - cycle.fromIndex + 1} steps · {cycle.stepMs} ms</option>)}</select></label>}
               {exportChoices.map((format) => {
                 const scalable =
                   document?.kind === "pixel" &&

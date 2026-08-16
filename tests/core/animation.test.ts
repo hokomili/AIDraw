@@ -4,6 +4,9 @@ import {
   deletePixelAnimationTag,
   duplicatePixelFrame,
   pixelAnimationFrames,
+  pixelAnimationSequence,
+  pixelAnimationTagSpans,
+  pixelAnimationTagsForFrame,
   pixelCelForFrame,
   pixelRawCelForFrame,
   readPixel,
@@ -37,6 +40,42 @@ function deterministicIds(...ids: string[]) {
 }
 
 describe('pixel animation kernel', () => {
+  it('keeps disjoint, overlapping, nested, and identical tag ranges independent in stable order', () => {
+    const sprite = spriteFixture();
+    const sourceFrame = sprite.frames[sprite.frameIds[0]];
+    sprite.frameIds = ['frame-1', 'frame-2', 'frame-3', 'frame-4', 'frame-5'];
+    sprite.frames = Object.fromEntries(sprite.frameIds.map((id, index) => [id, { ...structuredClone(sourceFrame), id, name: `Frame ${index + 1}`, durationMs: 80 + index * 10 }]));
+    sprite.tags = [
+      { id: 'disjoint', name: 'Shared', fromFrameId: 'frame-4', toFrameId: 'frame-5', direction: 'forward', color: '#ff6b7a' },
+      { id: 'overlap', name: 'Shared', fromFrameId: 'frame-1', toFrameId: 'frame-3', direction: 'reverse', color: '#31a6a0' },
+      { id: 'nested', name: 'Nested', fromFrameId: 'frame-2', toFrameId: 'frame-3', direction: 'ping-pong', color: '#8268dd' },
+      { id: 'identical', name: 'Identical', fromFrameId: 'frame-2', toFrameId: 'frame-3', direction: 'forward', color: '#d27c36' },
+    ];
+    const before = JSON.stringify(sprite);
+
+    expect(pixelAnimationTagSpans(sprite).map((span) => ({
+      id: span.tag.id, order: span.order, fromIndex: span.fromIndex, toIndex: span.toIndex, frameCount: span.frameCount,
+    }))).toEqual([
+      { id: 'disjoint', order: 0, fromIndex: 3, toIndex: 4, frameCount: 2 },
+      { id: 'overlap', order: 1, fromIndex: 0, toIndex: 2, frameCount: 3 },
+      { id: 'nested', order: 2, fromIndex: 1, toIndex: 2, frameCount: 2 },
+      { id: 'identical', order: 3, fromIndex: 1, toIndex: 2, frameCount: 2 },
+    ]);
+    expect(pixelAnimationTagsForFrame(sprite, 'frame-2').map((span) => span.tag.id)).toEqual(['overlap', 'nested', 'identical']);
+    expect(pixelAnimationTagsForFrame(sprite, 'frame-4').map((span) => span.tag.id)).toEqual(['disjoint']);
+    expect(pixelAnimationSequence(sprite, 'overlap')).toEqual(['frame-3', 'frame-2', 'frame-1']);
+    expect(pixelAnimationSequence(sprite, 'nested')).toEqual(['frame-2', 'frame-3']);
+    expect(pixelAnimationSequence(sprite, 'identical')).toEqual(['frame-2', 'frame-3']);
+    const inserted = structuredClone(sprite);
+    inserted.frameIds.splice(2, 0, 'frame-inserted');
+    inserted.frames['frame-inserted'] = { ...structuredClone(sourceFrame), id: 'frame-inserted', name: 'Inserted frame' };
+    expect(pixelAnimationFrames(inserted, 'overlap')).toEqual(['frame-1', 'frame-2', 'frame-inserted', 'frame-3']);
+    expect(pixelAnimationTagsForFrame(inserted, 'frame-inserted').map((span) => span.tag.id)).toEqual(['overlap', 'nested', 'identical']);
+    expect(() => pixelAnimationFrames(sprite, 'missing')).toThrow('Animation tag missing does not exist.');
+    expect(() => pixelAnimationTagsForFrame(sprite, 'missing')).toThrow('Frame missing does not exist.');
+    expect(JSON.stringify(sprite)).toBe(before);
+  });
+
   it('duplicates resolved pixels and links or unlinks cels without losing indexed content', () => {
     const sprite = spriteFixture();
     const layerId = sprite.layerIds[0];

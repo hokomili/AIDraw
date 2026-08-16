@@ -189,6 +189,10 @@ describe('authenticated stateful MCP contract', () => {
     const sprite = document.pixelAssets[document.activeAssetId];
     if (sprite.type !== 'sprite') throw new Error('Expected sprite');
     sprite.frames[sprite.frameIds[0]].name = 'Agent source frame';
+    sprite.tags = [
+      { id: 'agent-tag-one', name: 'Shared', fromFrameId: sprite.frameIds[0], toFrameId: sprite.frameIds[0], direction: 'forward', color: '#31a6a0' },
+      { id: 'agent-tag-two', name: 'Shared', fromFrameId: sprite.frameIds[0], toFrameId: sprite.frameIds[0], direction: 'reverse', color: '#8268dd' },
+    ];
     document.paletteCycles = [{ id: 'agent-cycle', name: 'Agent cycle', fromIndex: 1, toIndex: 3, direction: 'forward', stepMs: 83 }];
     documents.addDocument(document);
     const host = new McpHost(documents, '1.0.0', join(root, 'port.json')); hosts.push(host);
@@ -221,6 +225,13 @@ describe('authenticated stateful MCP contract', () => {
     expect(await callTool(started.url, client.headers, 6, 'document_export', {
       documentId: document.id, path: outputPath, format: 'sprite-sheet', paletteCycleId: 'agent-cycle', paletteCycleFrameId: 'missing-frame',
     })).toMatchObject({ error: 'palette_cycle_frame_not_found', paletteCycleFrameId: 'missing-frame' });
+    expect(await callTool(started.url, client.headers, 6_001, 'document_export', {
+      documentId: document.id, path: outputPath, format: 'sprite-sheet', animationTagId: 'Shared',
+    })).toMatchObject({ error: 'animation_tag_not_found', animationTagId: 'Shared', message: expect.stringMatching(/exact/i) });
+    expect(await callTool(started.url, client.headers, 6_002, 'document_export', {
+      documentId: document.id, path: outputPath, format: 'png', animationTagId: 'agent-tag-one',
+    })).toMatchObject({ error: 'unsupported_animation_tag_format' });
+    expect(documents.snapshot().jobs).toHaveLength(initialJobCount);
     const inexactGifPath = join(canonicalRoot, 'agent-cycle.gif');
     const inexactGif = await callTool(started.url, client.headers, 7, 'document_export', {
       documentId: document.id, path: inexactGifPath, format: 'gif', paletteCycleId: 'agent-cycle', paletteCycleFrameId: sprite.frameIds[0],

@@ -1652,7 +1652,7 @@ export class McpHost {
         path: z.string().min(1).describe('Exact destination filename including extension; AIDraw reports every existing target to the human.'),
         format: z.enum(['png', 'jpeg', 'webp', 'svg', 'pdf', 'psd', 'gif', 'apng', 'sprite-sheet', 'tiled-json', 'tiled-xml']).optional().describe('Required for document export; omit when projectLinkId extracts its verified cached source.'),
         scale: z.number().int().min(1).max(64).default(1).describe('Integer nearest-neighbor presentation scale where supported.'),
-        animationTagId: z.string().min(1).optional().describe('Optional named animation tag limiting animated export.'),
+        animationTagId: z.string().min(1).optional().describe('Optional exact animation tag ID limiting GIF, APNG, or sprite-sheet export to that independent range.'),
         paletteCycleId: z.string().min(1).optional().describe('Exact named palette-cycle ID for one complete derived GIF/APNG/sprite-sheet period; requires paletteCycleFrameId, and GIF requires stepMs divisible by 10.'),
         paletteCycleFrameId: z.string().min(1).optional().describe('Exact active-sprite source-frame ID for paletteCycleId.'),
         projectLinkId: z.string().min(1).optional().describe('Extract exactly one cached project link; cannot combine with format, animationTagId, palette-cycle fields, or non-default scale.'),
@@ -1677,6 +1677,14 @@ export class McpHost {
         return approvalJob('export', 'Extract pixel-project source', 'Review the cached source, destination, and overwrite impact before AIDraw writes it.', documentId, { action: 'project-link-extract', path, projectLinkId });
       }
       if (!format) return jsonText({ error: 'format_required', message: 'Document export requires a format.' });
+      if (animationTagId) {
+        if (!['gif', 'apng', 'sprite-sheet'].includes(format)) return jsonText({ error: 'unsupported_animation_tag_format', message: 'Animation-tag export is available only for GIF, APNG, and sprite sheets.' });
+        const document = this.documents.getDocument(documentId);
+        if (!document || document.kind !== 'pixel') return jsonText({ error: 'pixel_document_required', message: 'Animation-tag export requires an open pixel document.' });
+        const sprite = document.pixelAssets[document.activeAssetId];
+        if (sprite?.type !== 'sprite') return jsonText({ error: 'active_sprite_required', message: 'Animation-tag export requires an active pixel sprite.' });
+        if (!sprite.tags.some((tag) => tag.id === animationTagId)) return jsonText({ error: 'animation_tag_not_found', animationTagId, message: `Exact animation tag ID “${animationTagId}” does not exist in the active sprite.` });
+      }
       if (paletteCycleRequested) {
         if (!['gif', 'apng', 'sprite-sheet'].includes(format)) return jsonText({ error: 'unsupported_palette_cycle_format', message: 'Palette-cycle export is available only for GIF, APNG, and sprite sheets.' });
         const document = this.documents.getDocument(documentId);

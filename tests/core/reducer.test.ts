@@ -44,6 +44,39 @@ function shapeTransaction(documentId: string, layerId: string, expectedRevision?
 }
 
 describe('transaction reducer', () => {
+  it('commits independent overlapping tags as one guarded asset replacement with an exact inverse', () => {
+    const document = createPixelDocument('sprite', 'Overlapping tag history');
+    const sprite = document.pixelAssets[document.activeAssetId];
+    if (sprite.type !== 'sprite') throw new Error('Expected sprite');
+    const next = structuredClone(sprite);
+    const frameId = next.frameIds[0];
+    next.tags = [
+      { id: 'tag-one', name: 'Loop', fromFrameId: frameId, toFrameId: frameId, direction: 'forward', color: '#31a6a0' },
+      { id: 'tag-two', name: 'Loop', fromFrameId: frameId, toFrameId: frameId, direction: 'reverse', color: '#8268dd' },
+    ];
+    const originalDocument = structuredClone(document);
+    const applied = applyTransaction(document, {
+      id: createId('tx'), clientOperationId: createId('op'), documentId: document.id, actor: HUMAN_ACTOR,
+      label: 'Author overlapping animation tags', createdAt: nowIso(),
+      operations: [{ kind: 'pixel.asset.replace', asset: next, expectedRevision: sprite.revision }],
+    });
+    if (applied.document.kind !== 'pixel') throw new Error('Expected pixel document');
+    const appliedSprite = applied.document.pixelAssets[sprite.id]; if (appliedSprite.type !== 'sprite') throw new Error('Expected sprite');
+    expect(appliedSprite.tags).toEqual(next.tags);
+    expect(appliedSprite.revision).toBe(sprite.revision + 1);
+    expect(applied.document.activity.at(-1)).toMatchObject({ label: 'Author overlapping animation tags', actor: HUMAN_ACTOR });
+    expect(document).toEqual(originalDocument);
+
+    const restored = applyTransaction(applied.document, applied.inverse).document;
+    if (restored.kind !== 'pixel') throw new Error('Expected pixel document');
+    const restoredSprite = restored.pixelAssets[sprite.id]; if (restoredSprite.type !== 'sprite') throw new Error('Expected sprite');
+    expect(restoredSprite.tags).toEqual([]);
+    expect(restoredSprite.frameIds).toEqual(sprite.frameIds);
+    expect(restoredSprite.frames).toEqual(sprite.frames);
+    expect(restoredSprite.cels).toEqual(sprite.cels);
+    expect(restored.palette).toEqual(document.palette);
+  });
+
   it('refuses image-collection maps outside finite orthogonal mode before canonical mutation', () => {
     const document = createPixelDocument('project', 'Collection mode guard');
     const tileImage = createPixelSprite('Sparse tile', 2, 2);
@@ -213,13 +246,19 @@ describe('transaction reducer', () => {
     const withSecond = applyTransaction(document, { id: createId('tx'), clientOperationId: createId('op'), documentId: document.id, actor: HUMAN_ACTOR, label: 'Add second frame', createdAt: nowIso(), operations: [{ kind: 'pixel.frame.add', spriteId: initial.id, ...duplicate, expectedRevision: initial.revision }] }).document;
     if (withSecond.kind !== 'pixel') throw new Error('Expected pixel document'); const secondSprite = withSecond.pixelAssets[initial.id]; if (secondSprite.type !== 'sprite') throw new Error('Expected sprite');
     const linkedAsset = setPixelFrameCelsLinked(secondSprite, duplicate.frame.id, true);
+    linkedAsset.tags = [
+      { id: 'range', name: 'Range', fromFrameId: firstFrameId, toFrameId: duplicate.frame.id, direction: 'forward', color: '#31a6a0' },
+      { id: 'single', name: 'Single', fromFrameId: firstFrameId, toFrameId: firstFrameId, direction: 'reverse', color: '#8268dd' },
+    ];
     const linkedDocument = applyTransaction(withSecond, { id: createId('tx'), clientOperationId: createId('op'), documentId: document.id, actor: HUMAN_ACTOR, label: 'Link frame', createdAt: nowIso(), operations: [{ kind: 'pixel.asset.replace', asset: linkedAsset, expectedRevision: secondSprite.revision }] }).document;
     if (linkedDocument.kind !== 'pixel') throw new Error('Expected pixel document'); const linkedSprite = linkedDocument.pixelAssets[initial.id]; if (linkedSprite.type !== 'sprite') throw new Error('Expected sprite');
     const removed = applyTransaction(linkedDocument, { id: createId('tx'), clientOperationId: createId('op'), documentId: document.id, actor: HUMAN_ACTOR, label: 'Delete source frame', createdAt: nowIso(), operations: [{ kind: 'pixel.frame.delete', spriteId: linkedSprite.id, frameId: firstFrameId, expectedRevision: linkedSprite.revision }] });
     if (removed.document.kind !== 'pixel') throw new Error('Expected pixel document'); const remaining = removed.document.pixelAssets[initial.id]; if (remaining.type !== 'sprite') throw new Error('Expected sprite');
     const remainingCel = Object.values(remaining.cels)[0]; expect(remainingCel.linkedToCelId).toBeUndefined(); expect(readPixel(remainingCel, 4, 5)).toBe(6);
+    expect(remaining.tags).toEqual([{ id: 'range', name: 'Range', fromFrameId: duplicate.frame.id, toFrameId: duplicate.frame.id, direction: 'forward', color: '#31a6a0' }]);
     const restored = applyTransaction(removed.document, removed.inverse).document; if (restored.kind !== 'pixel') throw new Error('Expected pixel document'); const restoredSprite = restored.pixelAssets[initial.id]; if (restoredSprite.type !== 'sprite') throw new Error('Expected sprite');
     expect(restoredSprite.frameIds).toEqual(linkedSprite.frameIds); expect(Object.values(restoredSprite.cels).find((cel) => cel.frameId === duplicate.frame.id)?.linkedToCelId).toBe(firstCel.id);
+    expect(restoredSprite.tags).toEqual(linkedSprite.tags);
   });
 
   it('applies an atomic object addition and provides an exact inverse', () => {

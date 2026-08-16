@@ -247,10 +247,21 @@ describe('interchange exporters', () => {
     const document = createPixelDocument('sprite'); const sprite = document.pixelAssets[document.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('Expected sprite'); const timestamp = nowIso();
     writePixels(Object.values(sprite.cels)[0], [{ x: 0, y: 0, index: 2 }]);
     for (let index = 2; index <= 3; index += 1) { const frameId = `frame-${index}`; const celId = `cel-${index}`; sprite.frameIds.push(frameId); sprite.frames[frameId] = { id: frameId, revision: 0, name: `Frame ${index}`, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, durationMs: 100 + index }; sprite.cels[celId] = { id: celId, revision: 0, name: `Cel ${index}`, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id, layerId: sprite.layerIds[0], frameId, chunks: {} }; writePixels(sprite.cels[celId], [{ x: index - 1, y: 0, index: index + 2 }]); }
-    sprite.tags = [{ id: 'bounce', name: 'Bounce', fromFrameId: sprite.frameIds[0], toFrameId: sprite.frameIds[2], direction: 'ping-pong', color: '#ff6b7a' }];
+    sprite.tags = [
+      { id: 'bounce', name: 'Bounce', fromFrameId: sprite.frameIds[0], toFrameId: sprite.frameIds[2], direction: 'ping-pong', color: '#ff6b7a' },
+      { id: 'overlap', name: 'Shared', fromFrameId: sprite.frameIds[1], toFrameId: sprite.frameIds[2], direction: 'reverse', color: '#31a6a0' },
+      { id: 'nested', name: 'Shared', fromFrameId: sprite.frameIds[1], toFrameId: sprite.frameIds[1], direction: 'forward', color: '#8268dd' },
+      { id: 'identical', name: 'Echo', fromFrameId: sprite.frameIds[1], toFrameId: sprite.frameIds[1], direction: 'reverse', color: '#d27c36' },
+    ];
+    const before = JSON.stringify(document);
     const gif = await exportDocument(document, 'gif', { animationTagId: 'bounce' }); expect(decompressFrames(parseGIF(Uint8Array.from(gif.data).buffer), true)).toHaveLength(4); expect(gif.report.warnings).toContain('Exported animation tag “Bounce” using ping-pong playback.');
     const apng = UPNG.decode(Uint8Array.from((await exportDocument(document, 'apng', { animationTagId: 'bounce' })).data).buffer); const apngFrames = UPNG.toRGBA8(apng).map((frame) => Buffer.from(frame)); expect(apng.frames.map((frame) => frame.delay)).toEqual([sprite.frames[sprite.frameIds[0]].durationMs, 102, 103, 102]); expect(apngFrames).toHaveLength(4); expect(apngFrames[0].equals(apngFrames[1])).toBe(false); expect(apngFrames[1].equals(apngFrames[2])).toBe(false); expect(apngFrames[3].equals(apngFrames[1])).toBe(true);
     const sheet = await exportDocument(document, 'sprite-sheet', { animationTagId: 'bounce' }); const metadata = JSON.parse(sheet.companion!.data.toString()); expect(metadata.meta.frameOrder).toEqual([sprite.frameIds[0], sprite.frameIds[1], sprite.frameIds[2], sprite.frameIds[1]]); expect(Object.keys(metadata.frames)).toHaveLength(4);
+    const overlappingSheet = await exportDocument(document, 'sprite-sheet', { animationTagId: 'overlap' }); const overlappingMetadata = JSON.parse(overlappingSheet.companion!.data.toString());
+    expect(overlappingMetadata.meta).toMatchObject({ selectedTagId: 'overlap', frameOrder: [sprite.frameIds[2], sprite.frameIds[1]], tags: sprite.tags });
+    expect(Object.keys(overlappingMetadata.frames)).toHaveLength(2);
+    expect(overlappingSheet.report.warnings).toContain('Exported animation tag “Shared” using reverse playback.');
+    expect(JSON.stringify(document)).toBe(before);
     await expect(exportDocument(document, 'gif', { animationTagId: 'missing' })).rejects.toThrow(/does not exist/);
   });
 

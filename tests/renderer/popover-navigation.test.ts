@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
+import { resolveScopedAnimationTagId } from '../../src/renderer/animation-tag-timeline';
 import { menuFocusIndex } from '../../src/renderer/popover-navigation';
 
 describe('renderer popover keyboard navigation', () => {
@@ -19,6 +20,15 @@ describe('renderer popover keyboard navigation', () => {
     const homeIndex = menuFocusIndex('Home', activeMapIndex, totalDocumentAndBatchItems);
     expect(homeIndex).toBe(0);
     expect(menuFocusIndex('ArrowDown', homeIndex!, totalDocumentAndBatchItems)).toBe(1);
+  });
+
+  it('omits a stored tag choice after the exact sprite or current tag set changes', () => {
+    const selection = { documentId: 'document-a', spriteId: 'sprite-a', tagId: 'tag-shared' };
+    expect(resolveScopedAnimationTagId(selection, 'document-a', 'sprite-a', ['tag-shared', 'tag-other'])).toBe('tag-shared');
+    expect(resolveScopedAnimationTagId(selection, 'document-a', 'sprite-a', ['tag-other'])).toBeUndefined();
+    expect(resolveScopedAnimationTagId(selection, 'document-a', 'sprite-b', ['tag-shared'])).toBeUndefined();
+    expect(resolveScopedAnimationTagId(selection, 'document-b', 'sprite-a', ['tag-shared'])).toBeUndefined();
+    expect(resolveScopedAnimationTagId(undefined, 'document-a', 'sprite-a', ['tag-shared'])).toBeUndefined();
   });
 
   it('binds owned focus, Escape restoration, and outside dismissal to both popovers', async () => {
@@ -52,5 +62,16 @@ describe('renderer popover keyboard navigation', () => {
     expect(app).toContain('paletteCycleId: ["gif", "apng", "sprite-sheet"].includes(format) ? selectedExportCycle?.id : undefined');
     expect(app).toContain('paletteCycleFrameId: ["gif", "apng", "sprite-sheet"].includes(format) && selectedExportCycle ? exportFrameId : undefined');
     expect(app).toContain('canvasAnimation?.activeAssetId === exportSprite.id');
+  });
+
+  it('disambiguates independent animation tags by exact authored range and stable order', async () => {
+    const app = await readFile(new URL('../../src/renderer/App.tsx', import.meta.url), 'utf8');
+    expect(app).toContain('<strong>Animation range</strong><small>One exact tag · GIF, APNG, sheet</small>');
+    expect(app).toContain('{span.tag.name} · tag {span.order + 1} · F{span.fromIndex + 1}–F{span.toIndex + 1} · {span.tag.direction}');
+    expect(app).toContain('value={span.tag.id}');
+    expect(app).toContain('resolveScopedAnimationTagId(exportTagSelection, document?.id, exportSprite?.id, exportTagSpans.map((span) => span.tag.id))');
+    expect(app).toContain('value={exportTagId ?? ""}');
+    expect(app).toContain('animationTagId: ["gif", "apng", "sprite-sheet"].includes(format) && !selectedExportCycle && exportTagId ? exportTagId : undefined');
+    expect(app).toContain('duplicate names are refused');
   });
 });

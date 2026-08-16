@@ -441,6 +441,29 @@ describe('persisted pixel schemas', () => {
     expect(createPixelDocument().bitmapFonts[0].glyphs.a).toBeTruthy();
   });
 
+  it('admits stable overlapping animation tags with duplicate names while requiring unique IDs', () => {
+    const { document, sprite } = pixelDocument();
+    const [firstFrameId, secondFrameId] = sprite.frameIds;
+    sprite.tags = [
+      { id: 'outer-tag', name: 'Loop', fromFrameId: firstFrameId, toFrameId: secondFrameId, direction: 'forward', color: '#31a6a0' },
+      { id: 'nested-tag', name: 'Loop', fromFrameId: secondFrameId, toFrameId: secondFrameId, direction: 'reverse', color: '#8268dd' },
+      { id: 'identical-tag', name: 'Echo', fromFrameId: secondFrameId, toFrameId: secondFrameId, direction: 'ping-pong', color: '#d27c36' },
+    ];
+    const sibling = createPixelSprite('Sibling');
+    sibling.tags = [{ id: 'outer-tag', name: 'Same ID, another sprite', fromFrameId: sibling.frameIds[0], toFrameId: sibling.frameIds[0], direction: 'reverse', color: '#ff6b7a' }];
+    document.pixelAssets[sibling.id] = sibling;
+    document.assetIds.push(sibling.id);
+    const migrated = migrateDocument(document); if (migrated.kind !== 'pixel') throw new Error('Expected pixel document');
+    const migratedSprite = migrated.pixelAssets[sprite.id]; if (migratedSprite.type !== 'sprite') throw new Error('Expected sprite');
+    expect(migratedSprite.tags).toEqual(sprite.tags);
+    const migratedSibling = migrated.pixelAssets[sibling.id]; if (migratedSibling.type !== 'sprite') throw new Error('Expected sibling sprite');
+    expect(migratedSibling.tags[0].id).toBe('outer-tag');
+
+    const duplicateId = structuredClone(document); const duplicateSprite = duplicateId.pixelAssets[sprite.id]; if (duplicateSprite.type !== 'sprite') throw new Error('Expected sprite');
+    duplicateSprite.tags[2].id = duplicateSprite.tags[1].id;
+    expect(() => migrateDocument(duplicateId)).toThrow('Invalid persisted pixel asset metadata.');
+  });
+
   it('rejects malformed canonical pixel palettes, libraries, assets, links, and conversion state', () => {
     const cases: Array<[string, (fixture: ReturnType<typeof pixelDocument>) => void]> = [
       ['Invalid persisted pixel palette metadata.', ({ document }) => { document.palette[0].color = '#000000ff'; }],

@@ -539,3 +539,13 @@ html[data-native-titlebar="hidden-inset"] .brand { width: max(calc(118px + var(-
 .comfy-mapping-editor > summary { cursor: pointer; font-size: 9px; font-weight: 700; }
 .comfy-mapping-editor > small { display: block; margin: 7px 0 9px; color: var(--muted); font-size: 8px; line-height: 1.35; }
 .comfy-mapping-row + .comfy-mapping-row { margin-top: 6px; }
+
+/* Independent sprite-tag membership remains visible inside the bounded timeline axes. */
+.timeline-tags button { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
+.timeline-tags-help { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+.timeline-tag-name { font-weight: 650; }
+.timeline-tag-range { opacity: .78; }
+.timeline-tags button.contains-active-frame::after { content: ''; width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: var(--tag-color); box-shadow: 0 0 0 1px #fff; }
+.frame-tag-membership { position: absolute; top: 31px; right: 5px; display: flex; align-items: center; gap: 2px; max-width: calc(100% - 10px); }
+.frame-tag-marker { width: 5px; height: 5px; flex: 0 0 auto; border-radius: 50%; background: var(--tag-color); box-shadow: 0 0 0 1px #fff; }
+.frame-tag-more { font-size: 6px; line-height: 1; color: var(--muted); }

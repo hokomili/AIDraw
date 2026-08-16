@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { join } from 'node:path';
-import { createIllustrationDocument, type AIDrawDocument } from '@aidraw/core';
+import { createIllustrationDocument, createPixelDocument, type AIDrawDocument } from '@aidraw/core';
 import type { DocumentTab, InterchangeReportInput } from '../../src/common/contracts';
 import {
   BatchDocumentWorkflows,
@@ -146,6 +146,31 @@ describe('batch document workflows', () => {
       [{ code: 'raster-fallback', subjectType: 'document', subjectId: first.id, subjectName: first.name, detail: 'Fixture reason.' }],
       [{ code: 'raster-fallback', subjectType: 'document', subjectId: second.id, subjectName: second.name, detail: 'Fixture reason.' }],
     ]);
+  });
+
+  it('refuses duplicate tag names without choosing an overlap and lets an exact ID win', async () => {
+    const root = join('C:', 'isolated', 'tag-exports');
+    const document = createPixelDocument('sprite', 'Overlapping tags');
+    const sprite = document.pixelAssets[document.activeAssetId];
+    if (sprite.type !== 'sprite') throw new Error('Expected sprite');
+    const frameId = sprite.frameIds[0];
+    sprite.tags = [
+      { id: 'outer-tag', name: 'Loop', fromFrameId: frameId, toFrameId: frameId, direction: 'forward', color: '#31a6a0' },
+      { id: 'nested-tag', name: 'loop', fromFrameId: frameId, toFrameId: frameId, direction: 'reverse', color: '#8268dd' },
+    ];
+    const ambiguous = createHarness({ documents: [document], tabs: [tab(document)], directories: [root] });
+    const ambiguousResult = await ambiguous.workflows.batchExportDocuments('apng', { animationTagName: 'Loop' });
+    expect(ambiguousResult.items).toEqual([expect.objectContaining({
+      documentId: document.id,
+      status: 'skipped',
+      warnings: ['Animation tag name “Loop” is ambiguous; use an exact tag ID.'],
+    })]);
+    expect(ambiguous.dependencies.exportDocument).not.toHaveBeenCalled();
+    expect(ambiguous.writeTarget).not.toHaveBeenCalled();
+
+    const exact = createHarness({ documents: [document], tabs: [tab(document)], directories: [root] });
+    await expect(exact.workflows.batchExportDocuments('apng', { animationTagName: 'nested-tag' })).resolves.toEqual({ items: [expect.objectContaining({ status: 'exported' })] });
+    expect(exact.dependencies.exportDocument).toHaveBeenCalledWith(document, 'apng', { scale: 1, animationTagId: 'nested-tag' });
   });
 
   it('keeps all dirty documents open when Close All is cancelled', async () => {

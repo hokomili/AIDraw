@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { HUMAN_ACTOR, type AIDrawDocument } from '@aidraw/core';
+import { HUMAN_ACTOR, type AIDrawDocument, type AnimationTag, type PixelSprite } from '@aidraw/core';
 import type {
   BatchDocumentResult,
   DocumentTab,
@@ -51,6 +51,15 @@ export function safeBatchFileStem(name: string): string {
     .replace(/[. ]+$/g, '')
     .trim();
   return value || 'Untitled';
+}
+
+export function resolveBatchAnimationTag(sprite: PixelSprite, selector: string): { tag?: AnimationTag; refusal?: string } {
+  const exactId = sprite.tags.find((entry) => entry.id === selector);
+  if (exactId) return { tag: exactId };
+  const named = sprite.tags.filter((entry) => entry.name.toLocaleLowerCase() === selector.toLocaleLowerCase());
+  if (named.length > 1) return { refusal: `Animation tag name “${selector}” is ambiguous; use an exact tag ID.` };
+  if (!named[0]) return { refusal: `Animation tag “${selector}” does not exist in this sprite.` };
+  return { tag: named[0] };
 }
 
 export class BatchDocumentWorkflows {
@@ -125,9 +134,8 @@ export class BatchDocumentWorkflows {
         const sprite = document.kind === 'pixel' && document.pixelAssets[document.activeAssetId]?.type === 'sprite'
           ? document.pixelAssets[document.activeAssetId]
           : undefined;
-        const tag = animationTagName && sprite?.type === 'sprite'
-          ? sprite.tags.find((entry) => entry.id === animationTagName || entry.name.toLocaleLowerCase() === animationTagName.toLocaleLowerCase())
-          : undefined;
+        const tagResolution = animationTagName && sprite?.type === 'sprite' ? resolveBatchAnimationTag(sprite, animationTagName) : undefined;
+        const tag = tagResolution?.tag;
         if (animationTagName && ['gif', 'apng', 'sprite-sheet'].includes(format) && !tag) {
           items.push({
             documentId: tab.id,
@@ -135,7 +143,7 @@ export class BatchDocumentWorkflows {
             status: 'skipped',
             warnings: [document.kind === 'illustration'
               ? 'Named animation tags apply only to pixel sprites; clear the shared tag to export this illustration timeline.'
-              : `Animation tag “${animationTagName}” does not exist in this sprite.`],
+              : tagResolution?.refusal ?? `Animation tag “${animationTagName}” does not exist in this sprite.`],
           });
           continue;
         }

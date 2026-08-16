@@ -127,7 +127,7 @@ const helpTopics: Record<AIDrawHelpTopic, AIDrawHelpResult> = {
     summary: 'Explicit-path imports, exports, native saves, and generation approvals.',
     steps: [
       'asset_import always requires path; paletteMode or projectLinkId also requires documentId, and spriteSheet, paletteMode, and projectLinkId are mutually exclusive.',
-      'document_export requires documentId, an exact filename with extension, and format unless extracting projectLinkId. One paletteCycleId plus one paletteCycleFrameId requests a complete derived GIF/APNG/sprite-sheet period and cannot combine with animationTagId; GIF additionally requires stepMs divisible by 10 and is refused before approval otherwise.',
+      'document_export requires documentId, an exact filename with extension, and format unless extracting projectLinkId. animationTagId is one exact active-sprite tag ID for an independent GIF/APNG/sprite-sheet range and is refused before approval when missing or incompatible. One paletteCycleId plus one paletteCycleFrameId requests a complete derived period and cannot combine with animationTagId; GIF additionally requires stepMs divisible by 10 and is refused before approval otherwise.',
       'New paths may use explicit trusted-folder authority; overwrites always require human review. AIDraw never enumerates or deletes files for an agent.',
       'generation_start requires documentId, provider, mode, and prompt. It always requires human approval and never inherits folder trust.',
       'Retain jobId and follow the returned next step with job_manage. Raw requests and output paths are intentionally absent from public job summaries.',
@@ -136,6 +136,7 @@ const helpTopics: Record<AIDrawHelpTopic, AIDrawHelpResult> = {
     relatedTools: ['document_manage', 'asset_import', 'document_export', 'generation_start', 'job_manage'],
     examples: [
       { tool: 'document_export', arguments: { documentId: '<documentId>', path: '<absolute-new-path>.png', format: 'png', scale: 1 }, purpose: 'Request an actor-bound export approval.' },
+      { tool: 'document_export', arguments: { documentId: '<documentId>', path: '<absolute-new-path>.apng', format: 'apng', animationTagId: '<exactTagId>', scale: 1 }, purpose: 'Request one exact independent animation-tag schedule without name guessing or overlap composition.' },
       { tool: 'document_export', arguments: { documentId: '<documentId>', path: '<absolute-new-path>.png', format: 'sprite-sheet', scale: 4, paletteCycleId: '<cycleId>', paletteCycleFrameId: '<frameId>' }, purpose: 'Request one complete derived named-cycle sheet after human approval.' },
       { tool: 'asset_import', arguments: { documentId: '<documentId>', path: '<absolute-input-path>.png', pixelMode: true }, purpose: 'Request a reviewed indexed-pixel import.' },
     ],

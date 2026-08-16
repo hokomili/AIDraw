@@ -143,7 +143,7 @@ describe('primary pixel workspace 200%-text contract', () => {
     expect(pixelCanvas).toContain("aria-label={playing ? 'Pause animation' : 'Play animation'}");
     expect(pixelCanvas).toContain('aria-pressed={pingPong}');
     expect(pixelCanvas).toContain('aria-expanded={exposureGridOpen}');
-    expect(pixelCanvas).toContain('aria-label={`Frame ${index + 1}, ${sprite.frames[id]?.durationMs ?? 100} milliseconds`}');
+    expect(pixelCanvas).toContain('aria-label={`Frame ${index + 1}, ${sprite.frames[id]?.durationMs ?? 100} milliseconds. ${membershipSummary}`}');
   });
 
   it('fits enlarged inspector tabs and timeline metadata without changing the canvas boundary', async () => {

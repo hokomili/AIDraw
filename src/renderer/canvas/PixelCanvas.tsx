@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from 'react';
 import {
   decodeTiledGid,
   decodeTilemapChunk,
@@ -27,6 +27,7 @@ import {
   orderedDitherIndex,
   planWangTerrainStroke,
   pixelAnimationFrames,
+  pixelAnimationTagSpans,
   pixelCelForFrame,
   pixelRawCelForFrame,
   pixelPerfectStrokePoints,
@@ -76,6 +77,15 @@ import {
 } from '../components/BitmapFontLibraryDialog';
 import { OnionSkinSettingsPanel } from '../components/OnionSkinSettingsPanel';
 import { SpriteSymmetrySettingsPanel } from '../components/SpriteSymmetrySettingsPanel';
+import { AnimationFrameTagMembership, AnimationTagStrip } from '../components/AnimationTagTimeline';
+import {
+  animationAdvisoryDirection,
+  animationTagMembershipsForFrames,
+  animationTagMembershipSummary,
+  animationTagScopeMatches,
+  resolveScopedAnimationTagId,
+  type ScopedAnimationTagSelection,
+} from '../animation-tag-timeline';
 import { PlaybackLanes } from '../components/PlaybackLanes';
 import { StampLibraryDialog } from '../components/StampLibraryDialog';
 import { TileTransformPicker } from '../components/TileTransformPicker';
@@ -114,6 +124,7 @@ import { editableSpriteLayer, spriteRegionBitmap, visibleSpriteLayers, type Spri
 interface PixelPoint { x: number; y: number }
 interface PixelView { scale: number; offsetX: number; offsetY: number; logicalWidth: number; logicalHeight: number }
 interface TagDraft { id?: string; name: string; fromFrameId: string; toFrameId: string; direction: 'forward' | 'reverse' | 'ping-pong'; color: string }
+interface ScopedTagDraft { documentId: string; spriteId: string; draft: TagDraft }
 interface MapObjectGesture { layerId: string; objectId: string; mode: 'move' | 'resize' | 'point'; pointIndex?: number; start: PixelPoint; current: PixelPoint; original: MapObject; lockPromise: Promise<{ acquired: boolean; lockId?: string }> }
 type SelectionCombination = 'replace' | 'add' | 'subtract' | 'intersect';
 type PixelSelectionCommand = 'copy' | 'cut' | 'paste' | 'delete' | 'clear' | 'select-all';
@@ -321,8 +332,8 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const [bitmapTextPoint, setBitmapTextPoint] = useState<PixelPoint>();
   const [durationFrameId, setDurationFrameId] = useState<string>();
   const [exposureGridOpen, setExposureGridOpen] = useState(false);
-  const [tagDraft, setTagDraft] = useState<TagDraft>();
-  const [selectedTagId, setSelectedTagId] = useState<string>();
+  const [tagDraftState, setTagDraftState] = useState<ScopedTagDraft>();
+  const [selectedTagSelection, setSelectedTagSelection] = useState<ScopedAnimationTagSelection>();
   const setCanvasViewport = useEditorStore((state) => state.setCanvasViewport);
   const setCanvasAnimation = useEditorStore((state) => state.setCanvasAnimation);
   const onionSettings = useEditorStore((state) => state.onionSkinPreferences);
@@ -365,6 +376,12 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const playbackMap = useEditorStore((state) => state.playbacks);
   const playbacks = Object.values(playbackMap).filter((entry) => entry.documentId === document.id);
   const activeFrameId = sprite?.frameIds.includes(frameId ?? '') ? frameId : sprite?.frameIds[0];
+  const animationTagSpans = useMemo(() => sprite ? pixelAnimationTagSpans(sprite) : [], [sprite]);
+  const selectedTagId = resolveScopedAnimationTagId(selectedTagSelection, document.id, sprite?.id, animationTagSpans.map((span) => span.tag.id));
+  const tagDraftTargetExists = !tagDraftState?.draft.id || Boolean(sprite?.tags.some((tag) => tag.id === tagDraftState.draft.id));
+  const tagDraft = animationTagScopeMatches(tagDraftState, document.id, sprite?.id) && tagDraftTargetExists ? tagDraftState?.draft : undefined;
+  const activeFrameIndex = sprite?.frameIds.indexOf(activeFrameId ?? '') ?? -1;
+  const animationTagMemberships = useMemo(() => animationTagMembershipsForFrames(animationTagSpans, sprite?.frameIds.length ?? 0), [animationTagSpans, sprite?.frameIds.length]);
   const selectedBitmapFontId = resolveBitmapFontId(document.bitmapFonts, bitmapFontId);
   const selectedGlyphCapture = useMemo<{ capture?: BitmapGlyphCapture; error?: string }>(() => {
     if (!glyphMapperOpen || !sprite || !activeFrameId || !selection.length) return {};
@@ -476,7 +493,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     const currentIndex = playbackFrames.indexOf(activeFrameId ?? playbackFrames[0]);
     const current = sprite.frames[playbackFrames[Math.max(0, currentIndex)]];
     const timeout = window.setTimeout(() => {
-      const direction = tag?.direction ?? (pingPong ? 'ping-pong' : 'forward'); let nextDirection = direction === 'reverse' ? -1 : playDirection; let nextIndex = currentIndex < 0 ? (direction === 'reverse' ? playbackFrames.length - 1 : 0) : currentIndex + nextDirection;
+      const direction = animationAdvisoryDirection(tag?.direction, pingPong); let nextDirection = direction === 'reverse' ? -1 : playDirection; let nextIndex = currentIndex < 0 ? (direction === 'reverse' ? playbackFrames.length - 1 : 0) : currentIndex + nextDirection;
       if (direction === 'ping-pong' && (nextIndex < 0 || nextIndex >= playbackFrames.length)) { nextDirection = nextDirection === 1 ? -1 : 1; setPlayDirection(nextDirection); nextIndex = currentIndex + nextDirection; }
       if (direction === 'forward') nextIndex = (Math.max(0, currentIndex) + 1) % playbackFrames.length;
       if (direction === 'reverse') nextIndex = (currentIndex <= 0 ? playbackFrames.length : currentIndex) - 1;
@@ -484,6 +501,14 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     }, current?.durationMs ?? 100);
     return () => window.clearTimeout(timeout);
   }, [activeFrameId, pingPong, playDirection, playing, selectedTagId, sprite]);
+
+  useEffect(() => {
+    if (animationTagScopeMatches(selectedTagSelection, document.id, sprite?.id) && !selectedTagId) setSelectedTagSelection(undefined);
+  }, [document.id, selectedTagId, selectedTagSelection, sprite?.id]);
+
+  useEffect(() => {
+    if (tagDraftState && (!animationTagScopeMatches(tagDraftState, document.id, sprite?.id) || !tagDraftTargetExists)) setTagDraftState(undefined);
+  }, [document.id, sprite?.id, tagDraftState, tagDraftTargetExists]);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -527,12 +552,9 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   }, [setCanvasViewport, size.height, size.width, view.offsetX, view.offsetY, view.scale]);
 
   useEffect(() => {
-    const activeTag = sprite?.tags.find((tag) => tag.id === selectedTagId) ?? sprite?.tags.find((tag) => {
-      const frameIndex = sprite.frameIds.indexOf(activeFrameId ?? '');
-      return frameIndex >= sprite.frameIds.indexOf(tag.fromFrameId) && frameIndex <= sprite.frameIds.indexOf(tag.toFrameId);
-    });
-    setCanvasAnimation(sprite ? { activeAssetId: sprite.id, activeFrameId, activeTagId: activeTag?.id, playing, onionSkin, direction: activeTag?.direction ?? (pingPong ? 'ping-pong' : playDirection < 0 ? 'reverse' : 'forward') } : undefined);
-  }, [activeFrameId, onionSkin, pingPong, playDirection, playing, selectedTagId, setCanvasAnimation, sprite]);
+    const activeTag = sprite?.tags.find((tag) => tag.id === selectedTagId);
+    setCanvasAnimation(sprite ? { activeAssetId: sprite.id, activeFrameId, activeTagId: activeTag?.id, playing, onionSkin, direction: animationAdvisoryDirection(activeTag?.direction, pingPong) } : undefined);
+  }, [activeFrameId, onionSkin, pingPong, playing, selectedTagId, setCanvasAnimation, sprite]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -1643,22 +1665,36 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const openTagDialog = (tagId?: string) => {
     if (!sprite) return;
     const tag = tagId ? sprite.tags.find((entry) => entry.id === tagId) : undefined;
-    setTagDraft(tag ? structuredClone(tag) : { name: `Animation ${sprite.tags.length + 1}`, fromFrameId: activeFrameId ?? sprite.frameIds[0], toFrameId: sprite.frameIds.at(-1)!, direction: pingPong ? 'ping-pong' : 'forward', color: '#31a6a0' });
+    if (tagId && !tag) { notify('That animation tag is no longer available. Reopen the current sprite tag and try again.', 'warning'); return; }
+    setTagDraftState({ documentId: document.id, spriteId: sprite.id, draft: tag ? structuredClone(tag) : { name: `Animation ${sprite.tags.length + 1}`, fromFrameId: activeFrameId ?? sprite.frameIds[0], toFrameId: sprite.frameIds.at(-1)!, direction: pingPong ? 'ping-pong' : 'forward', color: '#31a6a0' } });
+  };
+
+  const selectAnimationTag = (tagId?: string) => {
+    if (!tagId) { setSelectedTagSelection(undefined); return; }
+    const tag = sprite?.tags.find((entry) => entry.id === tagId);
+    if (!sprite || !tag) return;
+    setSelectedTagSelection({ documentId: document.id, spriteId: sprite.id, tagId });
+    setPlayDirection(tag.direction === 'reverse' ? -1 : 1);
+    setFrameId(tag.direction === 'reverse' ? tag.toFrameId : tag.fromFrameId);
   };
 
   const addTag = async () => {
     if (!sprite || !tagDraft?.name.trim()) return;
+    if (!animationTagScopeMatches(tagDraftState, document.id, sprite.id)) return;
+    if (tagDraft.id && !sprite.tags.some((tag) => tag.id === tagDraft.id)) { notify('That animation tag changed or was deleted. Reopen it before editing.', 'warning'); setTagDraftState(undefined); return; }
     const fromIndex = sprite.frameIds.indexOf(tagDraft.fromFrameId);
     const toIndex = sprite.frameIds.indexOf(tagDraft.toFrameId);
     if (fromIndex < 0 || toIndex < fromIndex) return;
     const tag = { ...tagDraft, id: tagDraft.id ?? createId('tag'), name: tagDraft.name.trim() };
     const next = upsertPixelAnimationTag(sprite, tag);
-    if (await apply(tagDraft.id ? 'Edit animation tag' : 'Add animation tag', [{ kind: 'pixel.asset.replace', asset: next, expectedRevision: sprite.revision }])) setTagDraft(undefined);
+    if (await apply(tagDraft.id ? 'Edit animation tag' : 'Add animation tag', [{ kind: 'pixel.asset.replace', asset: next, expectedRevision: sprite.revision }])) setTagDraftState(undefined);
   };
 
   const deleteTag = async (tagId: string) => {
-    if (!sprite) return; const next = deletePixelAnimationTag(sprite, tagId);
-    if (await apply('Delete animation tag', [{ kind: 'pixel.asset.replace', asset: next, expectedRevision: sprite.revision }])) { if (selectedTagId === tagId) setSelectedTagId(undefined); setTagDraft(undefined); }
+    if (!sprite) return;
+    if (!sprite.tags.some((tag) => tag.id === tagId)) { notify('That animation tag changed or was deleted. Reopen the current sprite before deleting.', 'warning'); setTagDraftState(undefined); return; }
+    const next = deletePixelAnimationTag(sprite, tagId);
+    if (await apply('Delete animation tag', [{ kind: 'pixel.asset.replace', asset: next, expectedRevision: sprite.revision }])) { if (selectedTagId === tagId) setSelectedTagSelection(undefined); setTagDraftState(undefined); }
   };
 
   useEffect(() => {
@@ -1688,6 +1724,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const durationFrameNumber = durationFrameId && sprite ? sprite.frameIds.indexOf(durationFrameId) + 1 : undefined;
   const tagFromIndex = tagDraft && sprite ? sprite.frameIds.indexOf(tagDraft.fromFrameId) : -1;
   const tagToIndex = tagDraft && sprite ? sprite.frameIds.indexOf(tagDraft.toFrameId) : -1;
+  const tagDraftOrder = tagDraft?.id && sprite ? sprite.tags.findIndex((tag) => tag.id === tagDraft.id) : -1;
   const tagError = !tagDraft?.name.trim() ? 'Enter a tag name.' : tagFromIndex < 0 || tagToIndex < tagFromIndex ? 'The end frame must be at or after the start frame.' : undefined;
   const activeFrameLinked = Boolean(sprite && activeFrameId && Object.values(sprite.cels).some((cel) => cel.frameId === activeFrameId && cel.linkedToCelId));
 
@@ -1800,9 +1837,13 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
             {activePaletteOverride?.[pixelIndex] && <input aria-label="Active frame palette color" type="color" value={activePaletteOverride[pixelIndex].color.slice(0, 7)} onChange={(event) => void changeOverrideColor(event.target.value)} />}
             <button aria-label="Delete active frame" onClick={() => void deleteFrame()} disabled={sprite.frameIds.length <= 1} title="Delete active frame"><Trash2 size={12} /></button>
           </div>
-          {sprite.tags.length > 0 && <div className="timeline-tags">{sprite.tags.map((tag) => <button key={tag.id} aria-pressed={selectedTagId === tag.id} className={selectedTagId === tag.id ? 'is-active' : ''} style={{ '--tag-color': tag.color } as CSSProperties} onClick={() => { const active = selectedTagId === tag.id ? undefined : tag.id; setSelectedTagId(active); setPlayDirection(tag.direction === 'reverse' ? -1 : 1); if (active) setFrameId(tag.direction === 'reverse' ? tag.toFrameId : tag.fromFrameId); }} onDoubleClick={() => openTagDialog(tag.id)} title="Click to preview this range; double-click to edit">{tag.name}</button>)}</div>}
+          {animationTagSpans.length > 0 && <AnimationTagStrip spans={animationTagSpans} activeFrameIndex={activeFrameIndex} selectedTagId={selectedTagId} onSelect={selectAnimationTag} onEdit={openTagDialog} />}
           <div className="frame-strip">
-            {sprite.frameIds.map((id, index) => <button key={id} aria-label={`Frame ${index + 1}, ${sprite.frames[id]?.durationMs ?? 100} milliseconds`} aria-current={id === activeFrameId ? 'true' : undefined} className={id === activeFrameId ? 'is-active' : ''} onClick={() => setFrameId(id)} onDoubleClick={() => setDurationFrameId(id)} title="Double-click to edit duration"><span className="frame-thumb"><Grid3X3 size={13} /></span><small>{index + 1}</small><em>{sprite.frames[id]?.durationMs ?? 100}ms</em></button>)}
+            {sprite.frameIds.map((id, index) => {
+              const membership = animationTagMemberships[index];
+              const membershipSummary = animationTagMembershipSummary(membership);
+              return <button key={id} aria-label={`Frame ${index + 1}, ${sprite.frames[id]?.durationMs ?? 100} milliseconds. ${membershipSummary}`} aria-current={id === activeFrameId ? 'true' : undefined} className={id === activeFrameId ? 'is-active' : ''} onClick={() => setFrameId(id)} onDoubleClick={() => setDurationFrameId(id)} title={`${membershipSummary} Double-click to edit duration.`}><span className="frame-thumb"><Grid3X3 size={13} /></span><AnimationFrameTagMembership membership={membership} /><small>{index + 1}</small><em>{sprite.frames[id]?.durationMs ?? 100}ms</em></button>;
+            })}
             <button aria-label="Add frame" className="add-frame" title="Add frame (Alt: linked cel)" onClick={(event) => void addFrame(event.altKey)}>+</button>
           </div>
         </section>
@@ -1911,18 +1952,18 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
         onSubmit={changeFrameDuration}
         onClose={() => setDurationFrameId(undefined)}
       />}
-      {tagDraft && sprite && <EditorDialog title={tagDraft.id ? 'Edit animation tag' : 'Add animation tag'} description="Name an exact frame range and choose how tagged playback traverses it." onClose={() => setTagDraft(undefined)} className="animation-tag-dialog">
+      {tagDraft && sprite && <EditorDialog title={tagDraft.id && tagDraftOrder >= 0 ? `Edit animation tag ${tagDraftOrder + 1} of ${sprite.tags.length}` : 'Add animation tag'} description={tagDraft.id ? 'Edit this exact independent tag; overlapping ranges and duplicate names remain separate.' : 'Name one independent exact frame range and choose how tagged playback traverses it.'} onClose={() => setTagDraftState(undefined)} className="animation-tag-dialog">
         <form onSubmit={(event) => { event.preventDefault(); if (!tagError) void addTag(); }}>
           <div className="entry-dialog-body tag-dialog-grid">
-            <label className="dialog-field tag-name-field"><span>Name</span><input autoFocus maxLength={120} value={tagDraft.name} onChange={(event) => setTagDraft({ ...tagDraft, name: event.target.value })} aria-invalid={!tagDraft.name.trim()} /></label>
-            <label className="dialog-field"><span>Start frame</span><select value={tagDraft.fromFrameId} onChange={(event) => setTagDraft({ ...tagDraft, fromFrameId: event.target.value })}>{sprite.frameIds.map((id, index) => <option key={id} value={id}>Frame {index + 1}</option>)}</select></label>
-            <label className="dialog-field"><span>End frame</span><select value={tagDraft.toFrameId} onChange={(event) => setTagDraft({ ...tagDraft, toFrameId: event.target.value })}>{sprite.frameIds.map((id, index) => <option key={id} value={id}>Frame {index + 1}</option>)}</select></label>
-            <label className="dialog-field"><span>Direction</span><select value={tagDraft.direction} onChange={(event) => setTagDraft({ ...tagDraft, direction: event.target.value as TagDraft['direction'] })}><option value="forward">Forward</option><option value="reverse">Reverse</option><option value="ping-pong">Ping-pong</option></select></label>
-            <label className="dialog-field"><span>Label color</span><input type="color" value={tagDraft.color} onChange={(event) => setTagDraft({ ...tagDraft, color: event.target.value })} /></label>
+            <label className="dialog-field tag-name-field"><span>Name</span><input autoFocus maxLength={120} value={tagDraft.name} onChange={(event) => setTagDraftState({ documentId: document.id, spriteId: sprite.id, draft: { ...tagDraft, name: event.target.value } })} aria-invalid={!tagDraft.name.trim()} /></label>
+            <label className="dialog-field"><span>Start frame</span><select value={tagDraft.fromFrameId} onChange={(event) => setTagDraftState({ documentId: document.id, spriteId: sprite.id, draft: { ...tagDraft, fromFrameId: event.target.value } })}>{sprite.frameIds.map((id, index) => <option key={id} value={id}>Frame {index + 1}</option>)}</select></label>
+            <label className="dialog-field"><span>End frame</span><select value={tagDraft.toFrameId} onChange={(event) => setTagDraftState({ documentId: document.id, spriteId: sprite.id, draft: { ...tagDraft, toFrameId: event.target.value } })}>{sprite.frameIds.map((id, index) => <option key={id} value={id}>Frame {index + 1}</option>)}</select></label>
+            <label className="dialog-field"><span>Direction</span><select value={tagDraft.direction} onChange={(event) => setTagDraftState({ documentId: document.id, spriteId: sprite.id, draft: { ...tagDraft, direction: event.target.value as TagDraft['direction'] } })}><option value="forward">Forward</option><option value="reverse">Reverse</option><option value="ping-pong">Ping-pong</option></select></label>
+            <label className="dialog-field"><span>Label color</span><input type="color" value={tagDraft.color} onChange={(event) => setTagDraftState({ documentId: document.id, spriteId: sprite.id, draft: { ...tagDraft, color: event.target.value } })} /></label>
             <div className="entry-dialog-preview tag-range-preview"><strong>Tagged range</strong><span>{tagError ?? `${tagToIndex - tagFromIndex + 1} frames · ${tagDraft.direction}`}</span></div>
             {tagError && <p className="entry-dialog-error" role="alert">{tagError}</p>}
           </div>
-          <footer className="modal-footer">{tagDraft.id && <button type="button" className="danger-modal-button" onClick={() => void deleteTag(tagDraft.id!)}>Delete tag</button>}<button type="button" className="secondary-modal-button" onClick={() => setTagDraft(undefined)}>Cancel</button><button type="submit" className="primary-modal-button" disabled={Boolean(tagError)}>{tagDraft.id ? 'Save tag' : 'Add tag'}</button></footer>
+          <footer className="modal-footer">{tagDraft.id && <button type="button" className="danger-modal-button" onClick={() => void deleteTag(tagDraft.id!)}>Delete tag</button>}<button type="button" className="secondary-modal-button" onClick={() => setTagDraftState(undefined)}>Cancel</button><button type="submit" className="primary-modal-button" disabled={Boolean(tagError)}>{tagDraft.id ? 'Save tag' : 'Add tag'}</button></footer>
         </form>
       </EditorDialog>}
     </div>
