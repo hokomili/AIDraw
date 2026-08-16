@@ -1,6 +1,6 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, type ReactNode } from 'react';
 import { tilesetHasLocalId, type PixelDocument, type PixelSprite, type PixelTileset } from '@aidraw/core';
-import { X } from 'lucide-react';
+import { Check, X } from 'lucide-react';
 import {
   TILE_TRANSFORM_CHOICES,
   tileTransformChoiceAllowed,
@@ -14,6 +14,40 @@ import { drawSpriteRegionThumbnail } from '../canvas/pixel-bitmap';
 
 const TILE_TRANSFORM_PREVIEW_SIDE = 32;
 
+export function TileTransformChoiceControl({ choice, active, disabled, preview, onSelect }: {
+  choice: TileTransformChoice;
+  active: boolean;
+  disabled: boolean;
+  preview?: ReactNode;
+  onSelect: (value: TileTransformFlags) => void;
+}) {
+  const visibleState = active
+    ? disabled ? 'Selected · unavailable' : 'Selected'
+    : disabled ? 'Unavailable' : 'Available';
+  const accessibleState = disabled
+    ? 'Unavailable under this tileset’s capabilities.'
+    : 'Available under this tileset’s capabilities.';
+  return <button
+    type="button"
+    className={[active ? 'is-active' : '', disabled ? 'is-disabled' : ''].filter(Boolean).join(' ')}
+    disabled={disabled}
+    aria-pressed={active}
+    aria-label={`Use ${choice.label.toLocaleLowerCase()} tile transform. ${accessibleState}${active ? ' Currently selected.' : ''}`}
+    title={`${choice.label} · ${accessibleState}`}
+    onClick={() => onSelect({ ...choice.flags })}
+  >
+    {preview}
+    <span className="tile-transform-choice-copy">
+      <strong>{choice.label}</strong>
+      <small>{choice.shortLabel === '—' ? 'No transform flags' : `${choice.shortLabel} flags`}</small>
+    </span>
+    <span className={`tile-transform-choice-state${active ? ' is-selected' : ''}${disabled ? ' is-disabled' : ''}`} aria-hidden="true">
+      {active && <Check />}
+      <span>{visibleState}</span>
+    </span>
+  </button>;
+}
+
 function TransformSwatch({ palette, sprite, tileset, tileId, choice, active, disabled, onSelect }: {
   palette: PixelDocument['palette'];
   sprite?: PixelSprite;
@@ -22,7 +56,7 @@ function TransformSwatch({ palette, sprite, tileset, tileId, choice, active, dis
   choice: TileTransformChoice;
   active: boolean;
   disabled: boolean;
-  onSelect: () => void;
+  onSelect: (value: TileTransformFlags) => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
@@ -61,19 +95,13 @@ function TransformSwatch({ palette, sprite, tileset, tileId, choice, active, dis
     source.width = 1;
     source.height = 1;
   }, [choice.flags, palette, sprite, tileId, tileset]);
-  return <button
-    type="button"
-    className={active ? 'is-active' : ''}
+  return <TileTransformChoiceControl
+    choice={choice}
+    active={active}
     disabled={disabled}
-    aria-pressed={active}
-    aria-label={`Use ${choice.label.toLocaleLowerCase()} tile transform`}
-    title={disabled ? `${choice.label} is disabled by this tileset.` : `${choice.label} · Tiled diagonal-first flags`}
-    onClick={onSelect}
-  >
-    <span><canvas ref={canvasRef} /></span>
-    <strong>{choice.shortLabel}</strong>
-    <small>{choice.label}</small>
-  </button>;
+    onSelect={onSelect}
+    preview={<span className="tile-transform-preview"><canvas ref={canvasRef} /></span>}
+  />;
 }
 
 export function TileTransformPicker({ document, sprite, tileset, tileId, value, onChange, onClose }: {
@@ -86,15 +114,21 @@ export function TileTransformPicker({ document, sprite, tileset, tileId, value, 
   onClose: () => void;
 }) {
   const activeId = tileTransformChoiceId(value);
+  const activeChoice = TILE_TRANSFORM_CHOICES.find((choice) => choice.id === activeId) ?? TILE_TRANSFORM_CHOICES[0]!;
+  const activeAllowed = tileTransformChoiceAllowed(activeChoice, tileset.transformations);
   let sourceSize = `${tileset.tileWidth} × ${tileset.tileHeight}px`;
   try { if (sprite && tilesetHasLocalId(tileset, tileId)) { const rect = tilesetTileSourceRect(tileset, tileId, sprite); sourceSize = `${rect.width} × ${rect.height}px`; } } catch { /* Keep the nominal fallback label. */ }
   return <section id="tile-transform-picker" className="tile-transform-picker" aria-label="Tile transform preview">
     <header>
-      <span><strong>Tile transform</strong><small>Tile {tileId} · {sourceSize}</small></span>
-      <span><strong>Tiled flags</strong><small>Diagonal first, then H/V</small></span>
-      <button type="button" className="tile-transform-close" aria-label="Close tile transform preview" onClick={onClose}><X size={13} /></button>
+      <span><strong>Tile transform</strong><small>Choose one exact session-local transform for tile ID {tileId}.</small></span>
+      <button type="button" className="tile-transform-close" aria-label="Close tile transform preview" onClick={onClose}><X /><span>Close</span></button>
     </header>
-    <div className="tile-transform-grid">
+    <div className="tile-transform-review" aria-label="Current tile transform review">
+      <div><small>Selected tile source</small><strong>{sprite ? sprite.name : 'Source unavailable'}</strong><span>Tile ID {tileId} · {sprite ? sourceSize : `nominal ${sourceSize}`}</span></div>
+      <div><small>Current transform</small><strong>{activeChoice.shortLabel} · {activeChoice.label}</strong><span>{activeAllowed ? 'Available under this tileset’s capabilities' : 'Unavailable under this tileset’s capabilities'}</span></div>
+    </div>
+    <p className="tile-transform-order-note"><strong>Tiled transform order</strong><span>Diagonal is applied first, then horizontal and vertical. A diagonal rectangular preview therefore swaps the visible footprint axes.</span></p>
+    <div className="tile-transform-grid" aria-label="Eight tile transform choices">
       {TILE_TRANSFORM_CHOICES.map((choice) => <TransformSwatch
         key={choice.id}
         palette={document.palette}
@@ -104,9 +138,9 @@ export function TileTransformPicker({ document, sprite, tileset, tileId, value, 
         choice={choice}
         active={choice.id === activeId}
         disabled={!tileTransformChoiceAllowed(choice, tileset.transformations)}
-        onSelect={() => onChange({ ...choice.flags })}
+        onSelect={onChange}
       />)}
     </div>
-    <footer><span>Preview aspect-fits the complete transformed footprint inside {TILE_TRANSFORM_PREVIEW_SIDE} × {TILE_TRANSFORM_PREVIEW_SIDE}px and never materializes the complete source sprite.</span></footer>
+    <footer><strong>Preview only</strong><span>Each nearest-neighbor sample aspect-fits the complete transformed footprint inside {TILE_TRANSFORM_PREVIEW_SIDE} × {TILE_TRANSFORM_PREVIEW_SIDE}px. Existing GIDs, source pixels, and canonical documents remain unchanged.</span></footer>
   </section>;
 }
