@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { HUMAN_ACTOR, IDENTITY_TRANSFORM, applyTransaction, createId, createIllustrationDocument, createPixelDocument, createPixelSprite, createPixelTilemap, createPixelTileset, encodeTiledGid, nowIso, readTileAt, type Actor, type CanvasTransaction, type ShapeObject } from '@aidraw/core';
 import type { TransactionTraceEntry } from '@common/contracts';
 import { appendImageCollectionSource, createImageCollectionTileset, imageCollectionSourceDependencyGuards, removeUnusedImageCollectionSource, replaceImageCollectionSource, replaceImageCollectionTileMetadata } from '@common/image-collection-authoring';
+import { planTileObjectCreation } from '@common/tile-object-authoring';
 import { DocumentService, type NativeDocumentPreviewRenderer } from '@main/document-service';
 import { RecoveryJournal } from '@main/journal';
 import { writeNativeDocument } from '@main/persistence';
@@ -609,6 +610,111 @@ describe('document service collaboration semantics', () => {
     expect(current.activity.map(({ label }) => label)).toEqual(['Resize collection source first']);
     expect(current.pixelAssets[source3.id]).toMatchObject({ type: 'sprite', width: source3.width + 1, revision: source3.revision + 1 });
     expect(current.pixelAssets[tileset.id]).toMatchObject({ type: 'tileset', revision: tileset.revision, tiles: { 3: { probability: 0.5 } } });
+  });
+
+  it('atomically refuses queued collection tile-object placement after an earlier source-sprite change', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-service-collection-object-source-guard-'));
+    temporaryPaths.push(root);
+    const service = new DocumentService(new RecoveryJournal(root), '1.0.0');
+    services.push(service);
+    const document = createPixelDocument('project', 'Queued collection object source guard');
+    const source0 = createPixelSprite('Tile zero', 8, 12);
+    const source3 = createPixelSprite('Tile three', 17, 6);
+    const tileset = createPixelTileset('Collection', source0.id, 17, 12, 1, 1);
+    tileset.spriteAssetId = undefined; tileset.firstGid = 20; tileset.columns = 0; tileset.rows = 0; tileset.margin = 0; tileset.spacing = 0; tileset.wangSets = [];
+    tileset.tiles = {
+      0: { id: 0, sourceX: 0, sourceY: 0, imageAssetId: source0.id, probability: 1, animation: [], collisions: [], properties: {} },
+      3: { id: 3, sourceX: 0, sourceY: 0, imageAssetId: source3.id, probability: 1, animation: [], collisions: [], properties: {} },
+    };
+    const map = createPixelTilemap('Collection object map'); map.tilesetIds = [tileset.id];
+    const layer = map.layers[map.layerIds[0]]; layer.type = 'object'; delete layer.chunks; layer.objects = [];
+    document.assetIds = [source0.id, source3.id, tileset.id, map.id];
+    document.pixelAssets = { [source0.id]: source0, [source3.id]: source3, [tileset.id]: tileset, [map.id]: map };
+    document.activeAssetId = map.id;
+    service.addDocument(document);
+
+    const plan = planTileObjectCreation(document, {
+      mapId: map.id, layerId: layer.id, tilesetId: tileset.id, tileId: 3,
+      objectId: 'queued-collection-object', point: { x: 4, y: 9 },
+      transforms: { hFlip: false, vFlip: false, diagonal: false },
+    });
+    const resizedSource = structuredClone(source3); resizedSource.width += 1;
+    const sourceWrite = service.apply({
+      id: createId('tx'), clientOperationId: createId('human-op'), documentId: document.id, actor: HUMAN_ACTOR,
+      label: 'Resize collection object source first', createdAt: nowIso(), operations: [{ kind: 'pixel.asset.replace', asset: resizedSource, expectedRevision: source3.revision }],
+    });
+    const stalePlacement = service.apply({
+      id: createId('tx'), clientOperationId: createId('human-op'), documentId: document.id, actor: HUMAN_ACTOR,
+      label: 'Place stale collection object', createdAt: nowIso(), operations: [{ kind: 'pixel.asset.replace', asset: plan.asset, expectedRevision: plan.expectedRevision, expectedSpriteDependencies: plan.expectedSpriteDependencies }],
+    });
+    const [sourceResponse, placementResponse] = await Promise.all([sourceWrite, stalePlacement]);
+
+    expect(sourceResponse).toMatchObject({ status: 'committed', revision: document.revision + 1 });
+    expect(placementResponse).toMatchObject({ status: 'conflict', message: 'A referenced source sprite changed before the asset replacement', conflict: { entityId: source3.id, expectedRevision: source3.revision, actualRevision: source3.revision + 1, retryable: true } });
+    const current = service.getDocument(document.id); if (current?.kind !== 'pixel') throw new Error('Expected pixel document');
+    expect(current.revision).toBe(document.revision + 1);
+    expect(current.activity.map(({ label }) => label)).toEqual(['Resize collection object source first']);
+    const currentMap = current.pixelAssets[map.id]; if (currentMap.type !== 'tilemap') throw new Error('Expected tilemap');
+    const currentLayer = currentMap.layers[layer.id]; if (currentLayer.type !== 'object') throw new Error('Expected object layer');
+    expect(currentLayer.objects).toEqual([]);
+    expect(currentMap.revision).toBe(map.revision);
+  });
+
+  it('atomically refuses queued collection tile-object placement after an earlier tileset-only removal', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-service-collection-object-document-guard-'));
+    temporaryPaths.push(root);
+    const service = new DocumentService(new RecoveryJournal(root), '1.0.0');
+    services.push(service);
+    const document = createPixelDocument('project', 'Queued collection object document guard');
+    const source0 = createPixelSprite('Tile zero', 8, 12);
+    const source3 = createPixelSprite('Tile three', 17, 6);
+    const tileset = createPixelTileset('Collection', source0.id, 17, 12, 1, 1);
+    tileset.spriteAssetId = undefined; tileset.firstGid = 20; tileset.columns = 0; tileset.rows = 0; tileset.margin = 0; tileset.spacing = 0; tileset.wangSets = [];
+    tileset.tiles = {
+      0: { id: 0, sourceX: 0, sourceY: 0, imageAssetId: source0.id, probability: 1, animation: [], collisions: [], properties: {} },
+      3: { id: 3, sourceX: 0, sourceY: 0, imageAssetId: source3.id, probability: 1, animation: [], collisions: [], properties: {} },
+    };
+    const map = createPixelTilemap('Collection object map'); map.tilesetIds = [tileset.id];
+    const layer = map.layers[map.layerIds[0]]; layer.type = 'object'; delete layer.chunks; layer.objects = [];
+    document.assetIds = [source0.id, source3.id, tileset.id, map.id];
+    document.pixelAssets = { [source0.id]: source0, [source3.id]: source3, [tileset.id]: tileset, [map.id]: map };
+    document.activeAssetId = map.id;
+    service.addDocument(document);
+
+    const placement = planTileObjectCreation(document, {
+      mapId: map.id, layerId: layer.id, tilesetId: tileset.id, tileId: 3,
+      objectId: 'queued-stale-collection-object', point: { x: 4, y: 9 },
+      transforms: { hFlip: false, vFlip: false, diagonal: false },
+    });
+    if (placement.expectedDocumentRevision === undefined) throw new Error('Expected collection document guard');
+    const removal = removeUnusedImageCollectionSource(document, tileset.id, 3);
+    const removeFirst = service.apply({
+      id: createId('tx'), clientOperationId: createId('human-op'), documentId: document.id, expectedDocumentRevision: document.revision, actor: HUMAN_ACTOR,
+      label: 'Remove selected collection source first', createdAt: nowIso(), operations: [{ kind: 'pixel.asset.replace', asset: removal.tileset, expectedRevision: tileset.revision, expectedSpriteDependencies: removal.expectedSpriteDependencies }],
+    });
+    const stalePlacement = service.apply({
+      id: createId('tx'), clientOperationId: createId('human-op'), documentId: document.id, expectedDocumentRevision: placement.expectedDocumentRevision, actor: HUMAN_ACTOR,
+      label: 'Place stale collection object', createdAt: nowIso(), operations: [{ kind: 'pixel.asset.replace', asset: placement.asset, expectedRevision: placement.expectedRevision, expectedSpriteDependencies: placement.expectedSpriteDependencies }],
+    });
+    const [removalResponse, placementResponse] = await Promise.all([removeFirst, stalePlacement]);
+
+    expect(removalResponse).toMatchObject({ status: 'committed', revision: document.revision + 1 });
+    expect(placementResponse).toMatchObject({ status: 'conflict', conflict: { entityId: document.id, expectedRevision: document.revision, actualRevision: document.revision + 1, retryable: true } });
+    const current = service.getDocument(document.id); if (current?.kind !== 'pixel') throw new Error('Expected pixel document');
+    const currentTileset = current.pixelAssets[tileset.id]; const currentMap = current.pixelAssets[map.id];
+    if (currentTileset.type !== 'tileset' || currentMap.type !== 'tilemap') throw new Error('Expected tileset and map');
+    const currentLayer = currentMap.layers[layer.id]; if (currentLayer.type !== 'object') throw new Error('Expected object layer');
+    expect(currentTileset.tiles).not.toHaveProperty('3');
+    expect(currentLayer.objects).toEqual([]);
+    expect(currentMap.revision).toBe(map.revision);
+    expect(current.activity.map(({ label }) => label)).toEqual(['Remove selected collection source first']);
+    expect(service.getChanges(document.id, document.revision)).toHaveLength(1);
+    expect(await service.undo(document.id)).toMatchObject({ status: 'committed', revision: document.revision + 2 });
+    const undone = service.getDocument(document.id); if (!undone || undone.kind !== 'pixel') throw new Error('Expected pixel document');
+    const undoneTileset = undone.pixelAssets[tileset.id]; const undoneMap = undone.pixelAssets[map.id];
+    if (undoneTileset.type !== 'tileset' || undoneMap.type !== 'tilemap') throw new Error('Expected tileset and map');
+    expect(undoneTileset.tiles[3].imageAssetId).toBe(source3.id);
+    expect(undoneMap.layers[layer.id].objects).toEqual([]);
   });
 
   it('refuses a queued lifecycle append planned before a source change, then admits a fresh retry and exact undo', async () => {

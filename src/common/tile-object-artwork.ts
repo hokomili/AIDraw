@@ -79,6 +79,7 @@ export function tileObjectArtworkPlacement(
   objectMatrix: MapObjectAffineMatrix,
   pixelScale: number,
   tileset?: Pick<PixelTileset, 'objectAlignment' | 'tileOffset' | 'tileWidth' | 'tileHeight'>,
+  sourceSize?: { width: number; height: number },
 ): TileObjectArtworkPlacement {
   finite([object.x, object.y, object.width, object.height, object.rotation], 'Tile-object geometry');
   finite([objectMatrix.a, objectMatrix.b, objectMatrix.c, objectMatrix.d, objectMatrix.e, objectMatrix.f], 'Tile-object projection');
@@ -102,8 +103,8 @@ export function tileObjectArtworkPlacement(
     d: sine * tiled.c + cosine * tiled.d,
   };
   const offset = tileset ? {
-    x: tileset.tileOffset.x * width / positive(tileset.tileWidth, 'Tile-object source width'),
-    y: tileset.tileOffset.y * height / positive(tileset.tileHeight, 'Tile-object source height'),
+    x: tileset.tileOffset.x * width / positive(sourceSize?.width ?? tileset.tileWidth, 'Tile-object source width'),
+    y: tileset.tileOffset.y * height / positive(sourceSize?.height ?? tileset.tileHeight, 'Tile-object source height'),
   } : { x: 0, y: 0 };
   const diagonalCompensation = decoded.diagonal ? (height - width) / 2 : 0;
   const localCenter = {

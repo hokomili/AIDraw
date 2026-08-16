@@ -172,8 +172,11 @@ function planTiledExportLayerData(
     }
     if (layer.type === 'object') {
       for (const object of layer.objects ?? []) if (object.type === 'tile') {
-        const reference = referenceForBaseGid(plan, decodeTiledGid(object.gid).gid);
-        if (reference && isImageCollectionTileset(reference.tileset)) throw new Error(`Tiled tile objects backed by image collection “${reference.tileset.name}” are outside this supported slice.`);
+        const gid = decodeTiledGid(object.gid).gid;
+        const range = [...plan.ranges].reverse().find((candidate) => candidate.firstGid <= gid);
+        if (range && isImageCollectionTileset(range.tileset) && gid <= range.lastGid && !referenceForBaseGid(plan, gid)) {
+          throw new Error(`Tiled tile object references missing sparse image-collection GID ${gid} in “${range.tileset.name}”.`);
+        }
       }
       return;
     }

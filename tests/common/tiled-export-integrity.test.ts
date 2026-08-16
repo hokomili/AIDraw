@@ -88,4 +88,15 @@ describe('Tiled export reference integrity', () => {
     writeTiles(layer.chunks!, [{ x: 0, y: 0, gid: 99 }]);
     expect(() => planTiledMapExport(document, map)).toThrow('layer “Ground” uses unresolved tile GID 99 at (0, 0)');
   });
+
+  it('admits exact collection tile objects while refusing a sparse-gap object before export', () => {
+    const { document, sprite, tileset, map } = tileProject();
+    tileset.spriteAssetId = undefined; tileset.columns = 0; tileset.rows = 0; tileset.wangSets = [];
+    tileset.tiles = { 3: { id: 3, sourceX: 0, sourceY: 0, imageAssetId: sprite.id, probability: 1, animation: [], collisions: [], properties: {} } };
+    const layer = map.layers[map.layerIds[0]]; layer.type = 'object'; delete layer.chunks; layer.objects = [{ id: 'exact', type: 'tile', gid: encodeTiledGid(20, { diagonal: true }), x: 2, y: 3, width: 2, height: 1, rotation: 0, name: '', className: '', properties: {} }];
+    expect(() => planTiledMapExport(document, map)).not.toThrow();
+    const exactObject = layer.objects[0]; if (exactObject.type !== 'tile') throw new Error('Expected tile object');
+    layer.objects[0] = { ...exactObject, gid: 18 };
+    expect(() => planTiledMapExport(document, map)).toThrow('missing sparse image-collection GID 18');
+  });
 });

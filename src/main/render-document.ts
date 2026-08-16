@@ -32,7 +32,7 @@ import { renderRasterStroke } from '../common/raster-brush';
 import { drawPixelSpriteRegion, pixelSpriteRegionPlan, type PixelSpriteRegion } from '../common/pixel-sprite-render';
 import { MAX_STATIC_RASTER_PIXELS, MAX_STATIC_RASTER_SIDE, assertStaticRasterDimensions } from '../common/static-raster';
 import { renderStyledText } from '../common/text-layout';
-import { tileAnimationFrameAt, tilesetTileSourceRect } from '../common/tile-animation';
+import { resolveRenderedTilesetTileSource, tileAnimationFrameAt, tilesetTileSourceRect } from '../common/tile-animation';
 import { isometricTileRenderCells } from '../common/tile-render-order';
 import { tilemapChunksIntersectingRegion } from '../common/tilemap-region';
 import { composedVisibleTilemapLayers } from '../common/tilemap-layer-composition';
@@ -398,11 +398,12 @@ function renderTilemapSurface(document: PixelDocument, map: PixelTilemap, region
         }
         const decoded = decodeTiledGid(object.gid);
         const resolved = resolveTilesetForGid(document, map, decoded.gid);
-        const sourceAsset = resolved?.tileset.spriteAssetId ? document.pixelAssets[resolved.tileset.spriteAssetId] : undefined;
-        const placement = tileObjectArtworkPlacement(object, map.orientation, matrix, 1, resolved?.tileset);
+        let renderedSource: ReturnType<typeof resolveRenderedTilesetTileSource> | undefined;
+        try { renderedSource = resolved ? resolveRenderedTilesetTileSource(document, resolved.tileset, resolved.localId, tileAnimationTimeMs) : undefined; } catch { renderedSource = undefined; }
+        const placement = tileObjectArtworkPlacement(object, map.orientation, matrix, 1, resolved?.tileset, renderedSource?.rect);
         if (!tileObjectArtworkIntersects(placement, layerRegion)) continue;
-        if (resolved && sourceAsset?.type === 'sprite') {
-          const sourceRect = tilesetTileSourceRect(resolved.tileset, animatedLocalId(resolved.tileset, resolved.localId), sourceAsset);
+        if (renderedSource) {
+          const { sprite: sourceAsset, rect: sourceRect } = renderedSource;
           const plan = pixelSpriteRegionPlan(sourceAsset, sourceRect); const frameId = sourceAsset.frameIds[0]; const cacheKey = `${sourceAsset.id}\0${frameId}\0${sourceRect.x},${sourceRect.y},${sourceRect.width},${sourceRect.height}`;
           const source = sources.acquire(cacheKey, plan.render.width * plan.render.height * 4, () => renderSpriteRegion(document, sourceAsset, sourceRect, frameId));
           try {

@@ -81,3 +81,22 @@ export function resolveTilesetTileSource(
   if (sprite?.type !== 'sprite') throw new Error(`Tile ${tileId} is missing its sprite source.`);
   return { sprite, rect: tilesetTileSourceRect(tileset, tileId, sprite) };
 }
+
+/**
+ * Resolves the exact source used by one tileset tile at an animation time.
+ * Image collections intentionally resolve the sampled frame's own sprite and
+ * dimensions; atlas tiles continue to share their predecessor source sprite.
+ */
+export function resolveRenderedTilesetTileSource(
+  document: PixelDocument,
+  tileset: PixelTileset,
+  tileId: number,
+  timeMs: number,
+): {
+  localId: number;
+  sprite: PixelSprite;
+  rect: { x: number; y: number; width: number; height: number };
+} {
+  const localId = tileAnimationFrameAt(tileset.tiles[tileId]?.animation ?? [], timeMs)?.tileId ?? tileId;
+  return { localId, ...resolveTilesetTileSource(document, tileset, localId) };
+}

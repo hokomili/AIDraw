@@ -7,6 +7,7 @@ import {
   createId,
   createPixelDocument,
   createPixelSprite,
+  createPixelTilemap,
   createPixelTileset,
   nowIso,
   type CanvasTransaction,
@@ -20,8 +21,37 @@ import {
   replaceImageCollectionSource,
   replaceImageCollectionTileMetadata,
 } from '../../src/common/image-collection-authoring';
+import { planTileObjectCreation } from '../../src/common/tile-object-authoring';
 
 describe('image-collection metadata transaction', () => {
+  it('commits and inverses one guarded exact collection tile object while source drift refuses atomically', () => {
+    const document = createPixelDocument('project', 'Collection tile object history');
+    const source0 = createPixelSprite('Zero', 7, 11); const source3 = createPixelSprite('Three', 13, 5);
+    const tileset = createPixelTileset('Collection', source0.id, 13, 11, 1, 1); tileset.spriteAssetId = undefined; tileset.firstGid = 17; tileset.columns = 0; tileset.rows = 0; tileset.wangSets = [];
+    tileset.tiles = {
+      0: { id: 0, sourceX: 0, sourceY: 0, imageAssetId: source0.id, probability: 1, animation: [], collisions: [], properties: {} },
+      3: { id: 3, sourceX: 0, sourceY: 0, imageAssetId: source3.id, probability: 1, animation: [], collisions: [], properties: {} },
+    };
+    const map = createPixelTilemap('Finite object map'); map.tilesetIds = [tileset.id]; const layer = map.layers[map.layerIds[0]]; layer.type = 'object'; delete layer.chunks; layer.objects = [];
+    document.assetIds = [source0.id, source3.id, tileset.id, map.id]; document.pixelAssets = { [source0.id]: source0, [source3.id]: source3, [tileset.id]: tileset, [map.id]: map }; document.activeAssetId = map.id;
+    const plan = planTileObjectCreation(document, { mapId: map.id, layerId: layer.id, tilesetId: tileset.id, tileId: 3, transforms: { hFlip: true, vFlip: false, diagonal: true }, point: { x: 9, y: 12 }, objectId: 'exact-collection-object' });
+    const transaction: CanvasTransaction = {
+      id: createId('tx'), clientOperationId: createId('human-op'), documentId: document.id, actor: HUMAN_ACTOR,
+      label: 'Place collection tile object', createdAt: nowIso(), operations: [{ kind: 'pixel.asset.replace', asset: plan.asset, expectedRevision: plan.expectedRevision, expectedSpriteDependencies: plan.expectedSpriteDependencies }],
+    };
+    const applied = applyTransaction(document, transaction); const appliedDocument = applied.document; if (appliedDocument.kind !== 'pixel') throw new Error('Expected pixel document');
+    const changedMap = appliedDocument.pixelAssets[map.id]; if (changedMap.type !== 'tilemap') throw new Error('Expected tilemap');
+    expect(changedMap.layers[layer.id].objects).toEqual([plan.object]);
+    expect(appliedDocument.activity[0]).toMatchObject({ label: 'Place collection tile object', operationCount: 1 });
+    expect(() => removeUnusedImageCollectionSource(appliedDocument, tileset.id, 3)).toThrow('tile object');
+    const restored = applyTransaction(appliedDocument, applied.inverse, { recordActivity: false }).document; if (restored.kind !== 'pixel') throw new Error('Expected pixel document');
+    const restoredMap = restored.pixelAssets[map.id]; if (restoredMap.type !== 'tilemap') throw new Error('Expected tilemap'); expect(restoredMap.layers[layer.id].objects).toEqual([]);
+
+    const drifted = structuredClone(document); const changedSource = drifted.pixelAssets[source3.id]; if (changedSource.type !== 'sprite') throw new Error('Expected sprite'); changedSource.revision += 1;
+    expect(() => applyTransaction(drifted, transaction)).toThrow(TransactionConflictError);
+    const unchangedMap = drifted.pixelAssets[map.id]; if (unchangedMap.type !== 'tilemap') throw new Error('Expected tilemap'); expect(unchangedMap.layers[layer.id].objects).toEqual([]); expect(drifted.activity).toEqual(document.activity);
+  });
+
   it('creates and appends through existing guarded transactions with exact inverse restoration', () => {
     const document = createPixelDocument('project', 'Collection lifecycle history');
     const first = document.pixelAssets[document.activeAssetId]; if (first.type !== 'sprite') throw new Error('Expected sprite');

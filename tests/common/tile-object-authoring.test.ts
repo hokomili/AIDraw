@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   createPixelDocument,
+  createPixelSprite,
   createPixelTilemap,
   createPixelTileset,
   decodeTiledGid,
@@ -43,8 +44,45 @@ describe('tile-object human authoring', () => {
     expect(decodeTiledGid(plan.object.gid)).toEqual({ gid: 19, hFlip: true, vFlip: false, diagonal: true });
     expect(plan.object).toMatchObject({ id: 'new-tile-object', type: 'tile', x: 37.5, y: -12.25, width: 24, height: 32, rotation: 0, name: '', className: '', properties: {} });
     expect(plan.expectedRevision).toBe(0);
+    expect(plan.expectedDocumentRevision).toBeUndefined();
+    expect(plan.expectedSpriteDependencies).toBeUndefined();
     expect(plan.asset.layers[source.layerId].objects).toEqual([plan.object]);
     expect((source.document.pixelAssets[source.mapId] as typeof plan.asset).layers[source.layerId].objects).toEqual([]);
+  });
+
+  it('creates one exact sparse image-collection tile object with per-source dimensions and dependency guards', () => {
+    const source = fixture();
+    const map = source.document.pixelAssets[source.mapId]; const atlas = source.document.pixelAssets[source.tilesetId];
+    if (map.type !== 'tilemap' || atlas.type !== 'tileset') throw new Error('Expected map and tileset');
+    const narrow = createPixelSprite('Narrow exact tile', 7, 13); const wide = createPixelSprite('Wide exact tile', 19, 5);
+    const collection = createPixelTileset('Sparse collection', narrow.id, 19, 13, 1, 1);
+    collection.spriteAssetId = undefined; collection.firstGid = 41; collection.columns = 2; collection.rows = 0; collection.wangSets = [];
+    collection.tiles = {
+      0: { id: 0, sourceX: 0, sourceY: 0, imageAssetId: narrow.id, probability: 1, animation: [], collisions: [], properties: {} },
+      3: { id: 3, sourceX: 0, sourceY: 0, imageAssetId: wide.id, probability: 1, animation: [{ tileId: 0, durationMs: 90 }], collisions: [], properties: {} },
+    };
+    source.document.pixelAssets[narrow.id] = narrow; source.document.pixelAssets[wide.id] = wide; source.document.pixelAssets[collection.id] = collection;
+    source.document.assetIds.push(narrow.id, wide.id, collection.id); map.tilesetIds = [collection.id];
+    const plan = planTileObjectCreation(source.document, {
+      mapId: map.id, layerId: source.layerId, tilesetId: collection.id, tileId: 3,
+      transforms: { hFlip: true, vFlip: false, diagonal: true }, point: { x: 12, y: 18 }, objectId: 'collection-object',
+    });
+    expect(decodeTiledGid(plan.object.gid)).toEqual({ gid: 44, hFlip: true, vFlip: false, diagonal: true });
+    expect(plan.object).toMatchObject({ width: 19, height: 5 });
+    expect(plan.expectedDocumentRevision).toBe(source.document.revision);
+    expect(plan.expectedSpriteDependencies).toEqual([
+      { spriteId: narrow.id, expectedRevision: narrow.revision, width: 7, height: 13 },
+      { spriteId: wide.id, expectedRevision: wide.revision, width: 19, height: 5 },
+    ]);
+    const request = { mapId: map.id, layerId: source.layerId, tilesetId: collection.id, transforms: { hFlip: false, vFlip: false, diagonal: false }, point: { x: 0, y: 0 } };
+    const shortShadow = createPixelTileset('Short later shadow', narrow.id, 7, 13, 1, 1); shortShadow.firstGid = 43; source.document.pixelAssets[shortShadow.id] = shortShadow; map.tilesetIds.push(shortShadow.id);
+    expect(() => planTileObjectCreation(source.document, { ...request, tileId: 3, objectId: 'shadowed' })).toThrow('does not resolve exactly');
+    map.tilesetIds = [collection.id];
+    expect(() => planTileObjectCreation(source.document, { ...request, tileId: 2, objectId: 'gap' })).toThrow('sparse gap');
+    map.orientation = 'isometric';
+    expect(() => planTileObjectCreation(source.document, { ...request, tileId: 0, objectId: 'isometric' })).toThrow('finite orthogonal');
+    map.orientation = 'orthogonal'; delete source.document.pixelAssets[wide.id];
+    expect(() => planTileObjectCreation(source.document, { ...request, tileId: 3, objectId: 'missing' })).toThrow('missing its sprite source');
   });
 
   it('fails closed for the wrong layer, locked ancestry, stale attachment, tile range, permission, or ambiguous GID resolution', () => {

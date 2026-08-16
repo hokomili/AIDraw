@@ -43,6 +43,11 @@ describe('shared Tiled tile-object artwork geometry', () => {
     expect(tileObjectArtworkContainsPoint(placement, { x: placement.bounds.x - 1, y: placement.bounds.y - 1 })).toBe(false);
   });
 
+  it('scales drawing offset against an exact per-tile source without changing explicit object size', () => {
+    const placement = tileObjectArtworkPlacement(object(), 'orthogonal', identity, 1, { objectAlignment: 'bottomleft', tileOffset: { x: 2, y: 3 }, tileWidth: 40, tileHeight: 30 }, { width: 10, height: 5 });
+    expect(placement).toMatchObject({ width: 20, height: 10, center: { x: 114, y: 81 } });
+  });
+
   it('uses explicit alignment, projection, scaling, culling, and exact transformed resize handles', () => {
     const placement = tileObjectArtworkPlacement(object(), 'isometric', { a: 0.5, b: 0.25, c: -0.5, d: 0.25, e: 32, f: 0 }, 2, { objectAlignment: 'topright', tileOffset: { x: -2, y: 4 }, tileWidth: 20, tileHeight: 10 });
     expect(placement).toMatchObject({ anchor: { x: 42, y: 45 }, center: { x: 18, y: 63 }, width: 40, height: 20, alignment: 'topright' });

@@ -73,6 +73,7 @@ import { validateGenerationRequest } from '../common/generation-capabilities';
 import type { GenerationRequest } from '../common/generation';
 import { embedPixelLink, packPixelLinks } from '../common/pixel-links';
 import { appendImageCollectionSource, createImageCollectionTileset, removeUnusedImageCollectionSource, replaceImageCollectionSource } from '../common/image-collection-authoring';
+import { planTileObjectCreation } from '../common/tile-object-authoring';
 import { DocumentService } from './document-service';
 import { BatchManager } from './batch-manager';
 import { PlaybackScheduler } from './playback-scheduler';
@@ -276,6 +277,20 @@ const PixelImageCollectionSourceRemoveSchema = z.object({
   kind: z.literal('pixel.image-collection.source.remove'),
   tilesetId: z.string().min(1),
   tileId: z.number().int().min(0).max(1_048_575),
+  expectedTilesetRevision: z.number().int().nonnegative(),
+  expectedDocumentRevision: z.number().int().nonnegative(),
+}).strict();
+const PixelTileObjectCreateSchema = z.object({
+  kind: z.literal('pixel.tile-object.create'),
+  mapId: z.string().min(1),
+  layerId: z.string().min(1),
+  tilesetId: z.string().min(1),
+  tileId: z.number().int().min(0).max(1_048_575),
+  objectId: z.string().min(1),
+  x: z.number().finite().min(-16_777_216).max(16_777_216),
+  y: z.number().finite().min(-16_777_216).max(16_777_216),
+  transforms: z.object({ hFlip: z.boolean().default(false), vFlip: z.boolean().default(false), diagonal: z.boolean().default(false) }).strict().optional(),
+  expectedMapRevision: z.number().int().nonnegative(),
   expectedTilesetRevision: z.number().int().nonnegative(),
   expectedDocumentRevision: z.number().int().nonnegative(),
 }).strict();
@@ -824,6 +839,32 @@ async function expandAgentCanvasOperation(document: AIDrawDocument, value: Recor
     const plan = removeUnusedImageCollectionSource(document, current.id, operation.tileId);
     return [{ kind: 'pixel.asset.replace', asset: plan.tileset, expectedRevision: operation.expectedTilesetRevision, expectedSpriteDependencies: plan.expectedSpriteDependencies }];
   }
+  if (value.kind === 'pixel.tile-object.create') {
+    const operation = PixelTileObjectCreateSchema.parse(value);
+    if (document.kind !== 'pixel') throw new Error('Tile-object creation requires a pixel document.');
+    if (operation.expectedDocumentRevision !== document.revision) throw new Error(`Pixel document revision changed from ${operation.expectedDocumentRevision} to ${document.revision}; observe and retry.`);
+    const map = document.pixelAssets[operation.mapId];
+    if (!map || map.type !== 'tilemap') throw new Error(`Tilemap ${operation.mapId} does not exist.`);
+    if (map.revision !== operation.expectedMapRevision) throw new Error(`Tilemap ${map.id} revision changed from ${operation.expectedMapRevision} to ${map.revision}; observe and retry.`);
+    const tileset = document.pixelAssets[operation.tilesetId];
+    if (!tileset || tileset.type !== 'tileset') throw new Error(`Tileset ${operation.tilesetId} does not exist.`);
+    if (tileset.revision !== operation.expectedTilesetRevision) throw new Error(`Tileset ${tileset.id} revision changed from ${operation.expectedTilesetRevision} to ${tileset.revision}; observe and retry.`);
+    const plan = planTileObjectCreation(document, {
+      mapId: map.id,
+      layerId: operation.layerId,
+      tilesetId: tileset.id,
+      tileId: operation.tileId,
+      transforms: operation.transforms ?? { hFlip: false, vFlip: false, diagonal: false },
+      point: { x: operation.x, y: operation.y },
+      objectId: operation.objectId,
+    });
+    return [{
+      kind: 'pixel.asset.replace',
+      asset: plan.asset,
+      expectedRevision: operation.expectedMapRevision,
+      ...(plan.expectedSpriteDependencies ? { expectedSpriteDependencies: plan.expectedSpriteDependencies } : {}),
+    }];
+  }
   if (value.kind === 'pixel.stamp.place') {
     const operation = PixelStampPlaceSchema.parse(value); const target = pixelSemanticTarget(document, operation.spriteId, operation.celId);
     const stamp = target.document.stamps.find((entry) => entry.id === operation.stampId); if (!stamp) throw new Error(`Pixel stamp ${operation.stampId} does not exist.`);
@@ -1035,14 +1076,15 @@ function jsonText(value: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(value, null, 2) }], structuredContent: value as Record<string, unknown> };
 }
 
-function imageCollectionLifecycleDocumentRevision(operations: Array<Record<string, unknown>>): number | undefined {
-  const lifecycle = operations.filter((operation) => operation.kind === 'pixel.image-collection.create' || operation.kind === 'pixel.image-collection.append' || operation.kind === 'pixel.image-collection.source.replace' || operation.kind === 'pixel.image-collection.source.remove');
-  if (!lifecycle.length) return undefined;
-  if (operations.length !== 1 || lifecycle.length !== 1) throw new Error('Image-collection create/append/source replacement/removal must be the only request in its transaction so one observed document revision owns the complete lifecycle change.');
-  if (lifecycle[0].kind === 'pixel.image-collection.create') return PixelImageCollectionCreateSchema.parse(lifecycle[0]).expectedDocumentRevision;
-  if (lifecycle[0].kind === 'pixel.image-collection.append') return PixelImageCollectionAppendSchema.parse(lifecycle[0]).expectedDocumentRevision;
-  if (lifecycle[0].kind === 'pixel.image-collection.source.replace') return PixelImageCollectionSourceReplaceSchema.parse(lifecycle[0]).expectedDocumentRevision;
-  return PixelImageCollectionSourceRemoveSchema.parse(lifecycle[0]).expectedDocumentRevision;
+function exactIntentDocumentRevision(operations: Array<Record<string, unknown>>): number | undefined {
+  const exactIntent = operations.filter((operation) => operation.kind === 'pixel.image-collection.create' || operation.kind === 'pixel.image-collection.append' || operation.kind === 'pixel.image-collection.source.replace' || operation.kind === 'pixel.image-collection.source.remove' || operation.kind === 'pixel.tile-object.create');
+  if (!exactIntent.length) return undefined;
+  if (operations.length !== 1 || exactIntent.length !== 1) throw new Error('Image-collection lifecycle and exact tile-object creation requests must be the only request in their transaction so one observed document revision owns the complete change.');
+  if (exactIntent[0].kind === 'pixel.image-collection.create') return PixelImageCollectionCreateSchema.parse(exactIntent[0]).expectedDocumentRevision;
+  if (exactIntent[0].kind === 'pixel.image-collection.append') return PixelImageCollectionAppendSchema.parse(exactIntent[0]).expectedDocumentRevision;
+  if (exactIntent[0].kind === 'pixel.image-collection.source.replace') return PixelImageCollectionSourceReplaceSchema.parse(exactIntent[0]).expectedDocumentRevision;
+  if (exactIntent[0].kind === 'pixel.image-collection.source.remove') return PixelImageCollectionSourceRemoveSchema.parse(exactIntent[0]).expectedDocumentRevision;
+  return PixelTileObjectCreateSchema.parse(exactIntent[0]).expectedDocumentRevision;
 }
 
 function normalizeColor(value: string | undefined, fallback: string): string {
@@ -1617,7 +1659,7 @@ export class McpHost {
     }, async ({ documentId, clientOperationId, label, operations, playback, batch }) => {
       const document = this.documents.getDocument(documentId);
       if (!document) return jsonText({ status: 'conflict', message: 'Document is not open.', next: { tool: 'document_manage', arguments: { action: 'list' }, guidance: 'Refresh the open-document list before choosing a mutation target.' } });
-      const expectedDocumentRevision = imageCollectionLifecycleDocumentRevision(operations);
+      const expectedDocumentRevision = exactIntentDocumentRevision(operations);
       const parsedOperations: CanvasOperation[] = [];
       for (const operation of operations) parsedOperations.push(...await expandAgentCanvasOperation(document, operation, this.quantizeImage, session.actor));
       if (parsedOperations.length === 0 || parsedOperations.length > 256) return jsonText({ status: 'conflict', message: 'Semantic expansion must produce 1–256 canonical operations.' });

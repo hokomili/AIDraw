@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createPixelDocument, createPixelSprite, createPixelTileset } from '@aidraw/core';
 
-import { moveTileAnimationFrame, resolveTilesetTileSource, tileAnimationFrameAt, tilesetTileSourceRect } from '../../src/common/tile-animation';
+import { moveTileAnimationFrame, resolveRenderedTilesetTileSource, resolveTilesetTileSource, tileAnimationFrameAt, tilesetTileSourceRect } from '../../src/common/tile-animation';
 
 describe('tile animation authoring', () => {
   it('samples exact frame boundaries and loops without unsafe duration summation', () => {
@@ -83,5 +83,9 @@ describe('tile animation authoring', () => {
     expect(resolveTilesetTileSource(document, tileset, 0)).toEqual({ sprite: narrow, rect: { x: 0, y: 0, width: 7, height: 13 } });
     expect(resolveTilesetTileSource(document, tileset, 3)).toEqual({ sprite: wide, rect: { x: 0, y: 0, width: 19, height: 5 } });
     expect(() => resolveTilesetTileSource(document, tileset, 2)).toThrow(/missing its sprite source/);
+
+    tileset.tiles[0].animation = [{ tileId: 0, durationMs: 40 }, { tileId: 3, durationMs: 60 }];
+    expect(resolveRenderedTilesetTileSource(document, tileset, 0, 0)).toEqual({ localId: 0, sprite: narrow, rect: { x: 0, y: 0, width: 7, height: 13 } });
+    expect(resolveRenderedTilesetTileSource(document, tileset, 0, 40)).toEqual({ localId: 3, sprite: wide, rect: { x: 0, y: 0, width: 19, height: 5 } });
   });
 });

@@ -510,6 +510,7 @@ export function imageCollectionSourceDependencyGuards(
     if (source?.type !== 'sprite') throw new Error(`Image-collection tile ${tileId} is missing its sprite source.`);
     guards.set(source.id, { spriteId: source.id, expectedRevision: source.revision, width: source.width, height: source.height });
   }
+  imageCollectionSourcePixels(document, [...guards.keys()]);
   return [...guards.values()];
 }
 

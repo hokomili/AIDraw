@@ -14,10 +14,10 @@ describe('tile-object production source wiring', () => {
       expect(source).toContain('tileObjectArtworkIntersects');
       expect(source).toContain('tileObjectFallbackColor');
       expect(source).toContain('resolveTilesetForGid');
-      expect(source).toContain('tilesetTileSourceRect');
-      expect(source).toContain('animatedLocalId');
+      expect(source).toContain('resolveRenderedTilesetTileSource');
+      expect(source).toContain('renderedSource?.rect');
     }
-    expect(canvas).toContain('spriteRegionBitmap(sourceAsset, frameId, document.palette, sourceRect)');
+    expect(canvas).toContain('spriteRegionBitmap(renderedSource.sprite, frameId, document.palette, renderedSource.rect)');
     expect(headless).toContain('renderSpriteRegion(document, sourceAsset, sourceRect, frameId)');
   });
 
@@ -50,7 +50,13 @@ describe('tile-object production source wiring', () => {
     expect(canvas).toContain('value.trim() && Number.isSafeInteger(parsed) && parsed >= 0');
     expect(canvas).toContain('transforms: activeTileTransforms');
     expect(canvas).toContain('clientPointToTilemapObjectAnchor');
-    expect(canvas).toContain("apply('Place tile object', [{ kind: 'pixel.asset.replace'");
+    expect(canvas).toContain('plan.expectedDocumentRevision === undefined');
+    expect(canvas).toContain("? await apply('Place tile object', operations)");
+    expect(canvas).toContain(": await applyGuarded('Place tile object', operations, plan.expectedDocumentRevision)");
+    expect(canvas).toContain('expectedSpriteDependencies: plan.expectedSpriteDependencies');
+    expect(canvas).toContain('authorableTileObjectTilesets');
+    expect(canvas).toContain('tileObjectCollectionIds.map((id) => <option');
+    expect(canvas).toContain('tilesetTileSourceAssetId(terrainTileset');
     expect(canvas).toContain("setSelectedEntity(plan.object.id); setRightPanel('layers'); setTool('select')");
     expect(canvas).not.toContain('Select one visible, unlocked object layer before placing a tile object. Choosing');
   });
@@ -66,6 +72,7 @@ describe('tile-object production source wiring', () => {
     expect(documentRecheck).toBeGreaterThan(lock);
     expect(secondTilesetCheck).toBeGreaterThan(documentRecheck);
     expect(submit).toBeGreaterThan(secondTilesetCheck);
+    expect(canvas).toContain('lockedDocument.revision !== plan.expectedDocumentRevision');
     expect(canvas).toContain('applyToActiveDocument(label, operations, document.id)');
     expect(store).toContain('(expectedDocumentId && document.id !== expectedDocumentId)');
   });

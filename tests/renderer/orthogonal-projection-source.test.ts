@@ -51,7 +51,9 @@ describe('orthogonal projection source parity', () => {
     }
     expect(headless).toContain('sourceAsset.width'); expect(headless).toContain('sourceAsset.height');
     expect(interactive).toContain('mapSourceAsset.width'); expect(interactive).toContain('mapSourceAsset.height');
-    expect(interactive).toContain('const authorableMapTilesets = attachedMapTilesets.filter((entry) => Boolean(entry.spriteAssetId))');
+    expect(interactive).toContain('const atlasMapTilesets = attachedMapTilesets.filter((entry) => Boolean(entry.spriteAssetId))');
+    expect(interactive).toContain("const authorableTileObjectTilesets = attachedMapTilesets.filter((entry) => Boolean(entry.spriteAssetId) || (isImageCollectionTileset(entry) && tilemap?.orientation === 'orthogonal' && !tilemap.infinite))");
+    expect(interactive).toContain("const terrainTileset = tool === 'tile-object' ? tileObjectTileset : atlasMapTilesets[0]");
     expect(interactive).toContain('tilesetTileSourceAssetId(resolved.tileset, visibleLocalId)');
     expect(headless).toContain('tilesetTileSourceAssetId(resolved.tileset, renderedLocalId)');
     expect(app).toContain('nextTilesetFirstGid(assets.filter((asset): asset is PixelTileset => asset.type === "tileset"))');

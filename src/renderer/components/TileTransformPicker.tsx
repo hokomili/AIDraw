@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import type { PixelDocument, PixelSprite, PixelTileset } from '@aidraw/core';
+import { tilesetHasLocalId, type PixelDocument, type PixelSprite, type PixelTileset } from '@aidraw/core';
 import { X } from 'lucide-react';
 import {
   TILE_TRANSFORM_CHOICES,
@@ -34,8 +34,10 @@ function TransformSwatch({ palette, sprite, tileset, tileId, choice, active, dis
     if (!context) return;
     context.clearRect(0, 0, canvas.width, canvas.height);
     const frameId = sprite?.frameIds[0];
-    if (!sprite || !frameId || tileId < 0 || tileId >= tileset.columns * tileset.rows) return;
-    const geometry = tileTransformPreviewGeometry(tileset.tileWidth, tileset.tileHeight, choice.flags, TILE_TRANSFORM_PREVIEW_SIDE);
+    if (!sprite || !frameId || !tilesetHasLocalId(tileset, tileId)) return;
+    let sourceRect: ReturnType<typeof tilesetTileSourceRect>;
+    try { sourceRect = tilesetTileSourceRect(tileset, tileId, sprite); } catch { return; }
+    const geometry = tileTransformPreviewGeometry(sourceRect.width, sourceRect.height, choice.flags, TILE_TRANSFORM_PREVIEW_SIDE);
     const source = window.document.createElement('canvas');
     source.width = geometry.sampleWidth;
     source.height = geometry.sampleHeight;
@@ -46,7 +48,7 @@ function TransformSwatch({ palette, sprite, tileset, tileId, choice, active, dis
       sprite,
       frameId,
       palette,
-      tilesetTileSourceRect(tileset, tileId),
+      sourceRect,
       source.width,
       source.height,
     );
@@ -84,9 +86,11 @@ export function TileTransformPicker({ document, sprite, tileset, tileId, value, 
   onClose: () => void;
 }) {
   const activeId = tileTransformChoiceId(value);
+  let sourceSize = `${tileset.tileWidth} × ${tileset.tileHeight}px`;
+  try { if (sprite && tilesetHasLocalId(tileset, tileId)) { const rect = tilesetTileSourceRect(tileset, tileId, sprite); sourceSize = `${rect.width} × ${rect.height}px`; } } catch { /* Keep the nominal fallback label. */ }
   return <section id="tile-transform-picker" className="tile-transform-picker" aria-label="Tile transform preview">
     <header>
-      <span><strong>Tile transform</strong><small>Tile {tileId} · {tileset.tileWidth} × {tileset.tileHeight}px</small></span>
+      <span><strong>Tile transform</strong><small>Tile {tileId} · {sourceSize}</small></span>
       <span><strong>Tiled flags</strong><small>Diagonal first, then H/V</small></span>
       <button type="button" className="tile-transform-close" aria-label="Close tile transform preview" onClick={onClose}><X size={13} /></button>
     </header>

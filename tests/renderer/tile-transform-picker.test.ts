@@ -52,6 +52,18 @@ describe('tile transform picker', () => {
     expect(markup).not.toContain('intentionally limited to square tiles');
   });
 
+  it('presents one exact sparse image-collection source at its own dimensions', () => {
+    const { document, sprite, tileset } = fixture(16, 8);
+    tileset.spriteAssetId = undefined; tileset.columns = 0; tileset.rows = 0; tileset.wangSets = [];
+    tileset.tiles = { 7: { id: 7, sourceX: 0, sourceY: 0, imageAssetId: sprite.id, probability: 1, animation: [], collisions: [], properties: {} } };
+    const markup = renderToStaticMarkup(createElement(TileTransformPicker, {
+      document, sprite, tileset, tileId: 7, value: { hFlip: false, vFlip: false, diagonal: true }, onChange: () => undefined, onClose: () => undefined,
+    }));
+    expect(markup).toContain(`Tile 7 · ${sprite.width} × ${sprite.height}px`);
+    expect(markup.match(/aria-label="Use [^"]* tile transform"/g)).toHaveLength(8);
+    expect(markup).toContain('aria-label="Use diagonal tile transform"');
+  });
+
   it('uses constrained flags for stamps/paint while tile-object admission refuses stale disallowed flags', async () => {
     const [canvasSource, pickerSource] = await Promise.all([
       readFile(new URL('../../src/renderer/canvas/PixelCanvas.tsx', import.meta.url), 'utf8'),
@@ -69,8 +81,9 @@ describe('tile transform picker', () => {
     expect(canvasSource).toContain('tileTransformFlagsAllowed(tileTransformCandidates.diagonal');
     expect(canvasSource).not.toMatch(/encodeTiledGid\([^\n]+, tileTransforms\)/);
     expect(pickerSource).toContain('TILE_TRANSFORM_PREVIEW_SIDE = 32');
-    expect(pickerSource).toContain('tilesetTileSourceRect(tileset, tileId)');
-    expect(pickerSource).toContain('tileTransformPreviewGeometry(tileset.tileWidth, tileset.tileHeight, choice.flags');
+    expect(pickerSource).toContain('tilesetHasLocalId(tileset, tileId)');
+    expect(pickerSource).toContain('tilesetTileSourceRect(tileset, tileId, sprite)');
+    expect(pickerSource).toContain('tileTransformPreviewGeometry(sourceRect.width, sourceRect.height, choice.flags');
     expect(pickerSource).toContain('source.width = geometry.sampleWidth');
     expect(pickerSource).toContain('geometry.transform.a');
     expect(pickerSource).toContain('geometry.drawWidth');

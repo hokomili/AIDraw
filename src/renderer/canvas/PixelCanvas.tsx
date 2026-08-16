@@ -110,7 +110,7 @@ import { isometricTileRenderCells } from '../../common/tile-render-order';
 import { coveringRasterViewportRegion, createGridRasterRegionFilter, tilemapChunksIntersectingRegion, tilemapGridLineRange } from '../../common/tilemap-region';
 import { onionSkinLayers } from '../../common/onion-skin';
 import { effectiveSpriteSymmetry, expandSpriteSymmetry, withSpriteSymmetryAxes, withSpriteSymmetryMode } from '../../common/sprite-symmetry';
-import { tileAnimationFrameAt, tilesetTileSourceRect } from '../../common/tile-animation';
+import { resolveRenderedTilesetTileSource, tileAnimationFrameAt, tilesetTileSourceRect } from '../../common/tile-animation';
 import { parseBitmapFontJson } from '../../common/bitmap-font-interchange';
 import { composedVisibleTilemapLayers, tilemapLayerScreenTranslation, type ComposedTilemapLayer } from '../../common/tilemap-layer-composition';
 import { cancelPixelGesture, releasePendingPixelLocks } from '../../common/pixel-gesture';
@@ -328,7 +328,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const [tileTransforms, setTileTransforms] = useState({ hFlip: false, vFlip: false, diagonal: false });
   const [tileTransformPickerOpen, setTileTransformPickerOpen] = useState(false);
   const [tileObjectTilesetChoice, setTileObjectTilesetChoice] = useState<{ mapId: string; tilesetId: string }>();
-  const [tileObjectTileDraft, setTileObjectTileDraft] = useState<{ mapId: string; value: string }>();
+  const [tileObjectTileDraft, setTileObjectTileDraft] = useState<{ mapId: string; tilesetId: string; value: string }>();
   const [bitmapTextPoint, setBitmapTextPoint] = useState<PixelPoint>();
   const [durationFrameId, setDurationFrameId] = useState<string>();
   const [exposureGridOpen, setExposureGridOpen] = useState(false);
@@ -396,13 +396,26 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
     const entry = document.pixelAssets[id];
     return entry?.type === 'tileset' ? [entry] : [];
   }) ?? [], [document.pixelAssets, tilemap]);
-  const authorableMapTilesets = attachedMapTilesets.filter((entry) => Boolean(entry.spriteAssetId));
-  const tileObjectTilesetId = tilemap && tileObjectTilesetChoice?.mapId === tilemap.id ? tileObjectTilesetChoice.tilesetId : authorableMapTilesets[0]?.id;
-  const tileObjectTileset = authorableMapTilesets.find((entry) => entry.id === tileObjectTilesetId);
-  const terrainTileset = tool === 'tile-object' ? tileObjectTileset : authorableMapTilesets[0];
+  const atlasMapTilesets = attachedMapTilesets.filter((entry) => Boolean(entry.spriteAssetId));
+  const authorableTileObjectTilesets = attachedMapTilesets.filter((entry) => Boolean(entry.spriteAssetId) || (isImageCollectionTileset(entry) && tilemap?.orientation === 'orthogonal' && !tilemap.infinite));
+  const tileObjectTilesetId = tilemap && tileObjectTilesetChoice?.mapId === tilemap.id ? tileObjectTilesetChoice.tilesetId : authorableTileObjectTilesets[0]?.id;
+  const tileObjectTileset = authorableTileObjectTilesets.find((entry) => entry.id === tileObjectTilesetId);
+  const selectedTileId = Math.max(1, pixelIndex) - 1;
+  const tileObjectCollectionIds = tileObjectTileset && isImageCollectionTileset(tileObjectTileset)
+    ? Object.values(tileObjectTileset.tiles).map((tile) => tile.id).sort((left, right) => left - right)
+    : [];
+  const tileObjectDefaultTileId = tileObjectCollectionIds.length && !tileObjectCollectionIds.includes(selectedTileId) ? tileObjectCollectionIds[0] : selectedTileId;
+  const tileObjectTileDraftValue = tilemap && tileObjectTileDraft?.mapId === tilemap.id && tileObjectTileDraft.tilesetId === tileObjectTilesetId
+    ? tileObjectTileDraft.value
+    : String(tileObjectDefaultTileId);
+  const tileObjectPlacementTileId = tileObjectTileDraftValue.trim() ? Number(tileObjectTileDraftValue) : Number.NaN;
+  const terrainTileset = tool === 'tile-object' ? tileObjectTileset : atlasMapTilesets[0];
   const terrainSet = terrainTileset?.type === 'tileset' ? terrainTileset.wangSets.find((set) => set.id === terrainSetId) ?? terrainTileset.wangSets[0] : undefined;
   const terrainColor = terrainSet?.colors.find((color) => color.id === terrainColorId) ?? terrainSet?.colors[0];
-  const terrainSource = terrainTileset?.type === 'tileset' && terrainTileset.spriteAssetId ? document.pixelAssets[terrainTileset.spriteAssetId] : undefined;
+  const terrainSourceId = terrainTileset?.type === 'tileset'
+    ? tilesetTileSourceAssetId(terrainTileset, tool === 'tile-object' ? tileObjectPlacementTileId : selectedTileId)
+    : undefined;
+  const terrainSource = terrainSourceId ? document.pixelAssets[terrainSourceId] : undefined;
   const terrainSourceSprite = terrainSource?.type === 'sprite' ? terrainSource : undefined;
   const constrainedTileTransforms = constrainTileTransformFlags(tileTransforms, terrainTileset?.type === 'tileset' ? terrainTileset.transformations : undefined);
   const activeTileTransforms = tool === 'tile-object' ? { ...tileTransforms } : constrainedTileTransforms;
@@ -413,9 +426,6 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   };
   const activeTileStamp = document.tileStamps.find((stamp) => stamp.id === activeTileStampId) ?? document.tileStamps[0];
   const placementTileStamp: TileStamp = activeTileStamp ?? { id: 'builtin-tile', name: 'Current tile', width: 1, height: 1, anchorX: 0, anchorY: 0, cells: [{ x: 0, y: 0, gid: encodeTiledGid((terrainTileset?.type === 'tileset' ? terrainTileset.firstGid : 1) + Math.max(1, pixelIndex) - 1, activeTileTransforms) }] };
-  const selectedTileId = Math.max(1, pixelIndex) - 1;
-  const tileObjectTileDraftValue = tilemap && tileObjectTileDraft?.mapId === tilemap.id ? tileObjectTileDraft.value : String(selectedTileId);
-  const tileObjectPlacementTileId = tileObjectTileDraftValue.trim() ? Number(tileObjectTileDraftValue) : Number.NaN;
   const selectedVariantGroup = terrainTileset?.type === 'tileset' ? tileVariantGroup(terrainTileset.tiles[selectedTileId]) : undefined;
   const selectedVariantCandidates = terrainTileset?.type === 'tileset' ? tileVariantCandidates(terrainTileset, selectedTileId) : [];
   const selectedVariantCount = selectedVariantCandidates.length;
@@ -732,14 +742,13 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
             }
             const decoded = decodeTiledGid(object.gid);
             const resolved = resolveTilesetForGid(document, tilemap, decoded.gid);
-            const sourceAsset = resolved?.tileset.spriteAssetId ? document.pixelAssets[resolved.tileset.spriteAssetId] : undefined;
-            const placement = tileObjectArtworkPlacement(object, tilemap.orientation, matrix, view.scale / tilemap.tileWidth, resolved?.tileset);
+            let renderedSource: ReturnType<typeof resolveRenderedTilesetTileSource> | undefined;
+            try { renderedSource = resolved ? resolveRenderedTilesetTileSource(document, resolved.tileset, resolved.localId, tileAnimationTimeMs) : undefined; } catch { renderedSource = undefined; }
+            const placement = tileObjectArtworkPlacement(object, tilemap.orientation, matrix, view.scale / tilemap.tileWidth, resolved?.tileset, renderedSource?.rect);
             if (!tileObjectArtworkIntersects(placement, viewport, selected ? 5 : 0)) continue;
-            const visibleLocalId = resolved ? animatedLocalId(resolved) : undefined;
-            const sourceRect = resolved && visibleLocalId !== undefined ? tilesetTileSourceRect(resolved.tileset, visibleLocalId, sourceAsset?.type === 'sprite' ? sourceAsset : undefined) : undefined;
-            const sourcePlan = sourceAsset?.type === 'sprite' && sourceRect ? pixelSpriteRegionPlan(sourceAsset, sourceRect) : undefined; const frameId = sourceAsset?.type === 'sprite' ? sourceAsset.frameIds[0] : undefined;
-            const mapSource = sourceAsset?.type === 'sprite' && sourceRect && sourcePlan && frameId
-              ? mapSources.acquire(`${sourceAsset.id}\0${frameId}\0${sourceRect.x},${sourceRect.y},${sourceRect.width},${sourceRect.height}`, sourcePlan.render.width * sourcePlan.render.height * 4, () => spriteRegionBitmap(sourceAsset, frameId, document.palette, sourceRect))
+            const sourcePlan = renderedSource ? pixelSpriteRegionPlan(renderedSource.sprite, renderedSource.rect) : undefined; const frameId = renderedSource?.sprite.frameIds[0];
+            const mapSource = renderedSource && sourcePlan && frameId
+              ? mapSources.acquire(`${renderedSource.sprite.id}\0${frameId}\0${renderedSource.rect.x},${renderedSource.rect.y},${renderedSource.rect.width},${renderedSource.rect.height}`, sourcePlan.render.width * sourcePlan.render.height * 4, () => spriteRegionBitmap(renderedSource.sprite, frameId, document.palette, renderedSource.rect))
               : undefined;
             try {
               context.save(); context.translate(placement.center.x, placement.center.y); context.transform(placement.transform.a, placement.transform.b, placement.transform.c, placement.transform.d, 0, 0);
@@ -1259,9 +1268,19 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
       if (!lockedDocument || lockedDocument.kind !== 'pixel' || lockedDocument.id !== liveDocument.id) { notify('The active document changed while tile-object placement waited for its lock. Nothing was submitted.', 'warning'); return; }
       const lockedMap = lockedDocument.pixelAssets[liveMap.id];
       if (!lockedMap || lockedMap.type !== 'tilemap' || lockedMap.revision !== plan.expectedRevision || !lockedMap.tilesetIds.includes(liveTileset.id)) { notify('The map changed while tile-object placement waited for its lock. Re-observe it and try again.', 'warning'); return; }
+      if (plan.expectedDocumentRevision !== undefined && lockedDocument.revision !== plan.expectedDocumentRevision) { notify('The image-collection project changed while tile-object placement waited for its lock. Re-observe it and try again.', 'warning'); return; }
       try { requireTileObjectPlacementTileset(lockedDocument, lockedMap, liveTileset.id, liveTileset.revision); }
       catch (error) { notify(`${error instanceof Error ? error.message : 'The selected tileset changed while placement waited for its lock.'} Re-observe it and try again.`, 'warning'); return; }
-      if (await apply('Place tile object', [{ kind: 'pixel.asset.replace', asset: plan.asset, expectedRevision: plan.expectedRevision }])) {
+      const operations: CanvasOperation[] = [{
+        kind: 'pixel.asset.replace',
+        asset: plan.asset,
+        expectedRevision: plan.expectedRevision,
+        ...(plan.expectedSpriteDependencies ? { expectedSpriteDependencies: plan.expectedSpriteDependencies } : {}),
+      }];
+      const committed = plan.expectedDocumentRevision === undefined
+        ? await apply('Place tile object', operations)
+        : await applyGuarded('Place tile object', operations, plan.expectedDocumentRevision);
+      if (committed) {
         setSelectedEntity(plan.object.id); setRightPanel('layers'); setTool('select');
       }
     } finally {
@@ -1319,7 +1338,9 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
             continue;
           }
           const resolved = resolveTilesetForGid(document, tilemap, decodeTiledGid(candidate.gid).gid);
-          const placement = tileObjectArtworkPlacement(candidate, tilemap.orientation, matrix, view.scale / tilemap.tileWidth, resolved?.tileset);
+          let renderedSource: ReturnType<typeof resolveRenderedTilesetTileSource> | undefined;
+          try { renderedSource = resolved ? resolveRenderedTilesetTileSource(document, resolved.tileset, resolved.localId, tileAnimationTimeMs) : undefined; } catch { renderedSource = undefined; }
+          const placement = tileObjectArtworkPlacement(candidate, tilemap.orientation, matrix, view.scale / tilemap.tileWidth, resolved?.tileset, renderedSource?.rect);
           if (tileObjectArtworkContainsPoint(placement, rasterPoint, 9)) { hit = { layer, object: candidate, point: mapPoint, rasterPoint, tilePlacement: placement }; break; }
         }
         if (hit) break;
@@ -1760,8 +1781,10 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
         {paletteCycling && document.paletteCycles.length > 0 && <select aria-label="Active palette cycle" value={activePaletteCycle?.id} onChange={(event) => { setActivePaletteCycleId(event.target.value); setPaletteOffset(0); }} title="Named palette cycle">{document.paletteCycles.map((cycle) => <option key={cycle.id} value={cycle.id}>{cycle.name}</option>)}</select>}
         {tool === 'terrain' && terrainTileset?.type === 'tileset' && <><select aria-label="Active Wang set" value={terrainSet?.id ?? ''} onChange={(event) => { setTerrainSetId(event.target.value); setTerrainColorId(undefined); }}><option value="" disabled>Wang set</option>{terrainTileset.wangSets.map((set) => <option key={set.id} value={set.id}>{set.name}</option>)}</select><select aria-label="Active Wang color" value={terrainColor?.id ?? ''} onChange={(event) => setTerrainColorId(Number(event.target.value))}><option value="" disabled>Terrain color</option>{terrainSet?.colors.map((color) => <option key={color.id} value={color.id}>{color.name}</option>)}</select><button className={terrainErase ? 'is-active' : ''} onClick={() => setTerrainErase((value) => !value)} title="Toggle terrain erase and neighbor repair"><Eraser size={13} /> {terrainErase ? 'Erase' : 'Paint'}</button></>}
         {tool === 'tile-object' && tilemap && <>
-          <select aria-label="Tile object tileset" value={tileObjectTileset?.id ?? ''} onChange={(event) => setTileObjectTilesetChoice({ mapId: tilemap.id, tilesetId: event.target.value })} title="Exact attached atlas tileset for the new tile object"><option value="" disabled>Attached atlas tileset</option>{authorableMapTilesets.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}</select>
-          <label className="tile-object-tile-control"><span>Tile ID</span><input aria-label="Tile object local tile ID" type="number" min={0} max={Math.max(0, (tileObjectTileset?.columns ?? 1) * (tileObjectTileset?.rows ?? 1) - 1)} step={1} value={tileObjectTileDraftValue} onChange={(event) => { const value = event.target.value; setTileObjectTileDraft({ mapId: tilemap.id, value }); const parsed = Number(value); if (value.trim() && Number.isSafeInteger(parsed) && parsed >= 0) setPixelIndex(parsed + 1); }} /></label>
+          <select aria-label="Tile object tileset" value={tileObjectTileset?.id ?? ''} onChange={(event) => { const tilesetId = event.target.value; setTileObjectTilesetChoice({ mapId: tilemap.id, tilesetId }); setTileObjectTileDraft(undefined); }} title="Exact attached atlas or finite-orthogonal image-collection tileset for the new tile object"><option value="" disabled>Attached tileset</option>{authorableTileObjectTilesets.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}</select>
+          <label className="tile-object-tile-control"><span>Tile ID</span>{tileObjectTileset && isImageCollectionTileset(tileObjectTileset)
+            ? <select aria-label="Tile object local tile ID" value={tileObjectTileDraftValue} onChange={(event) => { const value = event.target.value; setTileObjectTileDraft({ mapId: tilemap.id, tilesetId: tileObjectTileset.id, value }); setPixelIndex(Number(value) + 1); }}>{tileObjectCollectionIds.map((id) => <option key={id} value={id}>{id}</option>)}</select>
+            : <input aria-label="Tile object local tile ID" type="number" min={0} max={Math.max(0, (tileObjectTileset?.columns ?? 1) * (tileObjectTileset?.rows ?? 1) - 1)} step={1} value={tileObjectTileDraftValue} onChange={(event) => { const value = event.target.value; if (!tileObjectTileset) return; setTileObjectTileDraft({ mapId: tilemap.id, tilesetId: tileObjectTileset.id, value }); const parsed = Number(value); if (value.trim() && Number.isSafeInteger(parsed) && parsed >= 0) setPixelIndex(parsed + 1); }} />}</label>
           <span title="Exact destination object layer">{activeObjectLayerEntry ? activeObjectLayerEntry.layer.name : 'Select object layer'}</span>
         </>}
         {tilemap && tool !== 'terrain' && terrainTileset?.type === 'tileset' && <>
@@ -1802,7 +1825,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
         document={document}
         sprite={terrainSourceSprite}
         tileset={terrainTileset}
-        tileId={selectedTileId}
+        tileId={tool === 'tile-object' ? tileObjectPlacementTileId : selectedTileId}
         value={activeTileTransforms}
         onChange={setTileTransforms}
         onClose={() => setTileTransformPickerOpen(false)}

@@ -1,7 +1,10 @@
 import {
   encodeTiledGid,
+  isImageCollectionTileset,
   resolveTilesetForGid,
+  tilesetLocalIdSpan,
   type PixelDocument,
+  type PixelSpriteDependencyGuard,
   type PixelTilemap,
   type PixelTileset,
   type TileMapObject,
@@ -9,6 +12,8 @@ import {
   type TilemapLayer,
 } from '@aidraw/core';
 import { MAX_TILED_OBJECTS } from './tiled-resource-policy';
+import { imageCollectionSourceDependencyGuards } from './image-collection-authoring';
+import { resolveTilesetTileSource } from './tile-animation';
 import { tileTransformFlagsAllowed, type TileTransformFlags } from './tile-transform-options';
 
 export const MAX_TILE_OBJECT_COORDINATE = 16_777_216;
@@ -48,6 +53,8 @@ export interface TileObjectCreationPlan {
   asset: PixelTilemap;
   object: TileMapObject;
   expectedRevision: number;
+  expectedDocumentRevision?: number;
+  expectedSpriteDependencies?: PixelSpriteDependencyGuard[];
 }
 
 export interface TileObjectEditableFields {
@@ -150,29 +157,33 @@ export function planTileObjectCreation(document: PixelDocument, request: TileObj
   const tileset = document.pixelAssets[request.tilesetId];
   if (!tileset) throw new Error(`Tileset ${request.tilesetId} no longer exists.`);
   if (tileset.type !== 'tileset') throw new Error(`Asset ${request.tilesetId} is not a tileset.`);
-  const tileCount = tileset.columns * tileset.rows;
+  const imageCollection = isImageCollectionTileset(tileset);
+  const tileCount = tilesetLocalIdSpan(tileset);
   if (!Number.isSafeInteger(request.tileId) || request.tileId < 0 || request.tileId >= tileCount) throw new RangeError(`Tile ID must be a whole number from 0 to ${Math.max(0, tileCount - 1)} for tileset “${tileset.name}”.`);
+  if (imageCollection && !tileset.tiles[request.tileId]?.imageAssetId) throw new Error(`Tile ${request.tileId} is a sparse gap in image collection “${tileset.name}”. Choose one exact existing tile ID.`);
+  if (imageCollection && (asset.orientation !== 'orthogonal' || asset.infinite)) throw new Error(`Image-collection tile objects require a finite orthogonal map.`);
   if (!tileTransformFlagsAllowed(request.transforms, tileset.transformations)) throw new Error(`The selected H/V/diagonal transform is not permitted by tileset “${tileset.name}”.`);
 
   const baseGid = tileset.firstGid + request.tileId;
   const coveringTilesetCount = asset.tilesetIds.reduce((count, id) => {
     const attached = document.pixelAssets[id];
     if (attached?.type !== 'tileset') return count;
-    const attachedTileCount = attached.columns * attached.rows;
+    const attachedTileCount = tilesetLocalIdSpan(attached);
     const finalGid = attached.firstGid + attachedTileCount - 1;
     return baseGid >= attached.firstGid && baseGid <= finalGid ? count + 1 : count;
   }, 0);
   if (coveringTilesetCount !== 1) throw new Error(`GID ${baseGid} is covered by ${coveringTilesetCount} attached tileset ranges; tile-object creation requires exactly one.`);
   const resolved = resolveTilesetForGid(document, asset, baseGid);
   if (!resolved || resolved.tileset.id !== tileset.id || resolved.localId !== request.tileId) throw new Error(`Tile ${request.tileId} does not resolve exactly to attached tileset ${tileset.id}; no object was created.`);
+  const source = imageCollection ? resolveTilesetTileSource(document, tileset, request.tileId).sprite : undefined;
   const object: TileMapObject = {
     id: request.objectId,
     type: 'tile',
     gid: encodeTiledGid(baseGid, request.transforms),
     x: boundedFinite(request.point.x, 'Tile-object X'),
     y: boundedFinite(request.point.y, 'Tile-object Y'),
-    width: boundedFinite(tileset.tileWidth, 'Tile-object width', { positive: true }),
-    height: boundedFinite(tileset.tileHeight, 'Tile-object height', { positive: true }),
+    width: boundedFinite(source?.width ?? tileset.tileWidth, 'Tile-object width', { positive: true }),
+    height: boundedFinite(source?.height ?? tileset.tileHeight, 'Tile-object height', { positive: true }),
     rotation: 0,
     name: '',
     className: '',
@@ -182,7 +193,15 @@ export function planTileObjectCreation(document: PixelDocument, request: TileObj
   const nextLayer = next.layers[layer.id];
   if (nextLayer?.type !== 'object') throw new Error(`Object layer ${request.layerId} changed before placement.`);
   nextLayer.objects = [...(nextLayer.objects ?? []), object];
-  return { asset: next, object, expectedRevision: asset.revision };
+  return {
+    asset: next,
+    object,
+    expectedRevision: asset.revision,
+    ...(imageCollection ? {
+      expectedDocumentRevision: document.revision,
+      expectedSpriteDependencies: imageCollectionSourceDependencyGuards(document, tileset),
+    } : {}),
+  };
 }
 
 /** Preserves tile identity while validating the complete admitted editable field set. */

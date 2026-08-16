@@ -342,6 +342,37 @@ describe('native document rendering', () => {
     expect([...second.getContext('2d').getImageData(3, 4, 1, 1).data]).toEqual([49, 166, 160, 255]);
   });
 
+  it('renders transformed image-collection tile objects from each animated frame\'s exact sprite', () => {
+    const document = createPixelDocument('project', 'Animated collection tile object'); document.assetIds = []; document.pixelAssets = {};
+    document.palette[2].color = '#ef476fff'; document.palette[3].color = '#ffd166ff'; document.palette[4].color = '#118ab2ff';
+    const base = createPixelSprite('Three by two base', 3, 2); writePixels(Object.values(base.cels)[0], [
+      { x: 0, y: 0, index: 2 }, { x: 1, y: 0, index: 2 }, { x: 2, y: 0, index: 3 },
+      { x: 0, y: 1, index: 2 }, { x: 1, y: 1, index: 3 }, { x: 2, y: 1, index: 3 },
+    ]);
+    const tall = createPixelSprite('Two by four animated frame', 2, 4); writePixels(Object.values(tall.cels)[0], Array.from({ length: 8 }, (_, index) => ({ x: index % 2, y: Math.floor(index / 2), index: 4 })));
+    const tileset = createPixelTileset('Sparse object collection', base.id, 3, 4, 1, 1); tileset.spriteAssetId = undefined; tileset.firstGid = 11; tileset.columns = 0; tileset.rows = 0; tileset.objectAlignment = 'center'; tileset.wangSets = [];
+    tileset.tiles = {
+      3: { id: 3, sourceX: 0, sourceY: 0, imageAssetId: base.id, probability: 1, animation: [{ tileId: 3, durationMs: 50 }, { tileId: 7, durationMs: 50 }], collisions: [], properties: {} },
+      7: { id: 7, sourceX: 0, sourceY: 0, imageAssetId: tall.id, probability: 1, animation: [], collisions: [], properties: {} },
+    };
+    const map = createPixelTilemap('Collection object map'); map.width = 4; map.height = 4; map.tileWidth = 4; map.tileHeight = 4; map.tilesetIds = [tileset.id];
+    const layer = map.layers[map.layerIds[0]]; layer.type = 'object'; delete layer.chunks; layer.objects = [{ id: 'collection-object', type: 'tile', gid: encodeTiledGid(14, { hFlip: true, diagonal: true }), x: 8, y: 8, width: 6, height: 4, rotation: 0, name: 'Animated source', className: 'actor', properties: { exact: true } }];
+    document.pixelAssets = { [base.id]: base, [tall.id]: tall, [tileset.id]: tileset, [map.id]: map }; document.assetIds = [base.id, tall.id, tileset.id, map.id]; document.activeAssetId = map.id; const canonical = structuredClone(document);
+
+    const first = renderTilemap(document, map, undefined, 0); const second = renderTilemap(document, map, undefined, 60);
+    const visibleColors = (canvas: ReturnType<typeof renderTilemap>) => {
+      const data = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data; const colors = new Set<string>();
+      for (let offset = 0; offset < data.length; offset += 4) if (data[offset + 3]) colors.add([...data.slice(offset, offset + 4)].join(','));
+      return colors;
+    };
+    expect(visibleColors(first)).toEqual(new Set(['239,71,111,255', '255,209,102,255']));
+    expect(visibleColors(second)).toEqual(new Set(['17,138,178,255']));
+    expect({ width: first.width, height: first.height }).toEqual({ width: 16, height: 16 });
+    const requested = renderTilemapRegion(document, map, { x: 4, y: 4, width: 8, height: 8 }, undefined, 60);
+    expect(Buffer.from(requested.getContext('2d').getImageData(0, 0, 8, 8).data)).toEqual(Buffer.from(second.getContext('2d').getImageData(4, 4, 8, 8).data));
+    expect(document).toEqual(canonical);
+  });
+
   it('preserves all eight Tiled transforms inside a native rectangular orthogonal footprint', () => {
     const document = createPixelDocument('project', 'Native rectangular transforms'); document.assetIds = []; document.pixelAssets = {};
     const colors = ['#ef476fff', '#ffd166ff', '#06d6a0ff', '#118ab2ff', '#8338ecff', '#fb5607ff', '#3a86ffff', '#8ac926ff'];

@@ -183,9 +183,9 @@ describe('keyboard shortcut reference', () => {
     expect(readme).toContain('exactly 40 eligible bindings: all 39 tools displayed across the illustration (19) and pixel (20) rails plus the renderer-owned inspector toggle');
     expect(readme).toContain('Later still-free new mnemonics are reserved before fallback selection');
     expect(readme).toContain('remaining command/native-menu remapping');
-    expect(tracker).toContain('clean and live-synchronized through base `f1745fe278e472e86beaa858d9203b9c5da8d04f`');
-    expect(tracker).toContain('The current bounded MAP-07/MAP-13 source/headless candidate is one reviewable proven-unused exact-ID image-collection record removal over that base');
-    expect(tracker).toContain('retaining a sparse gap, first/raw GIDs, every other complete tile record, and every independently owned source sprite');
+    expect(tracker).toContain('clean and live-synchronized through base `09dae8af6cb7631bc4d767afb736fd809b67c85c`');
+    expect(tracker).toContain('The current bounded MAP-07/MAP-13 source/headless candidate extends exact finite-orthogonal image-collection sprites to the existing tile-object authoring/render/interchange path');
+    expect(tracker).toContain('Interactive and headless paths share animation-first source resolution');
     expect(tracker).toContain('all **39 displayed tool activations**—19 illustration and 20 pixel—plus the renderer-owned inspector toggle');
     expect(tracker).toContain('later still-free new mnemonics remain reserved from earlier fallbacks');
     expect(tracker).toContain('remapping beyond the later bounded UX-08 tool/inspector slice');

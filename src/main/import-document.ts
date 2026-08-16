@@ -59,6 +59,7 @@ import { MAX_IMPORT_UTILITY_DOCUMENTS, MAX_IMPORT_UTILITY_SERIALIZED_BYTES } fro
 import { jsonStringSerializedByteLength } from './utility-resource-policy';
 import { inspectSpriteSheetSource } from './sprite-sheet-preview';
 import { readBoundedRegularFile } from './bounded-file-read';
+import { resolveTilesetTileSource } from '../common/tile-animation';
 import {
   assertMetadataSpriteSheetAtlas,
   planMetadataSpriteSheet,
@@ -652,8 +653,11 @@ function tiledMapObject(source: any, document: ReturnType<typeof createPixelDocu
   const decoded = decodeTiledGid(gid);
   if (!decoded.gid || (gid & 0x1000_0000) !== 0) throw new Error('Tiled tile objects require a nonzero orthogonal/isometric GID with only H/V/diagonal flags.');
   const resolved = resolveTilesetForGid(document, map, decoded.gid);
-  const width = Number(source.width ?? 0) || resolved?.tileset.tileWidth;
-  const height = Number(source.height ?? 0) || resolved?.tileset.tileHeight;
+  const collectionSource = resolved && isImageCollectionTileset(resolved.tileset)
+    ? resolveTilesetTileSource(document, resolved.tileset, resolved.localId).sprite
+    : undefined;
+  const width = Number(source.width ?? 0) || collectionSource?.width || resolved?.tileset.tileWidth;
+  const height = Number(source.height ?? 0) || collectionSource?.height || resolved?.tileset.tileHeight;
   if (!width || !height) throw new Error(`Tiled tile object ${String(source.id ?? '') || '(unnamed)'} needs explicit positive dimensions when its GID is unresolved.`);
   return {
     id: String(source.id ?? createId('tile-object')),
@@ -978,7 +982,11 @@ async function importTiled(bytes: Buffer, name: string, filePath: string): Promi
     for (const layer of Object.values(map.layers)) {
       if (layer.type === 'object') for (const object of layer.objects ?? []) if (object.type === 'tile') {
         const decoded = decodeTiledGid(object.gid); const collection = collectionRange(decoded.gid);
-        if (collection) throw new Error(`Tiled tile objects backed by image collection “${collection.name}” are outside this supported slice.`);
+        if (collection) {
+          const resolved = resolveTilesetForGid(document, map, decoded.gid);
+          if (!resolved || resolved.tileset.id !== collection.id) throw new Error(`Tiled tile object references missing sparse image-collection GID ${decoded.gid}.`);
+          resolveTilesetTileSource(document, resolved.tileset, resolved.localId);
+        }
       }
       if (layer.type === 'tile') for (const chunk of Object.values(layer.chunks ?? {})) for (const raw of decodeTilemapChunk(chunk)) {
         const decoded = decodeTiledGid(raw); if (!decoded.gid) continue; const collection = collectionRange(decoded.gid);

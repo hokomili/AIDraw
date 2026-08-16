@@ -8,7 +8,7 @@ import { RecoveryJournal } from '@main/journal';
 import { McpHost, parseFolderTrustSettings, parsePreferredPortSettings, type GenerationApprovalPreviewRenderer } from '@main/mcp-host';
 import { TransactionTraceStore } from '@main/trace-store';
 import { createCanvas, loadImage } from '@napi-rs/canvas';
-import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createId, createPixelDocument, createPixelSprite, createPixelTileset, decodeTiledGid, encodeTiledGid, nowIso, readPixel, readTileAt } from '@aidraw/core';
+import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createId, createPixelDocument, createPixelSprite, createPixelTilemap, createPixelTileset, decodeTiledGid, encodeTiledGid, nowIso, readPixel, readTileAt } from '@aidraw/core';
 import { LATEST_PROTOCOL_VERSION } from '@modelcontextprotocol/server';
 
 const temporaryPaths: string[] = [];
@@ -458,6 +458,7 @@ describe('authenticated stateful MCP contract', () => {
     expect(guide).toContain('pixel.image-collection.append');
     expect(guide).toContain('pixel.image-collection.source.replace');
     expect(guide).toContain('pixel.image-collection.source.remove');
+    expect(guide).toContain('pixel.tile-object.create');
     expect(guide).toContain('intent-derived deterministic stream');
     const safetyHelp = await callTool(started.url, client.headers, 13, 'aidraw_help', { topic: 'safety' });
     expect(safetyHelp.steps).toEqual(expect.arrayContaining([
@@ -477,6 +478,7 @@ describe('authenticated stateful MCP contract', () => {
     expect(JSON.stringify(operationsHelp.examples)).toContain('pixel.image-collection.create');
     expect(JSON.stringify(operationsHelp.examples)).toContain('pixel.image-collection.source.replace');
     expect(JSON.stringify(operationsHelp.examples)).toContain('pixel.image-collection.source.remove');
+    expect(JSON.stringify(operationsHelp.examples)).toContain('pixel.tile-object.create');
   });
 
   it('initializes the same raw Streamable HTTP profile under each configured client name', async () => {
@@ -1163,6 +1165,31 @@ describe('authenticated stateful MCP contract', () => {
     const undone = documents.getDocument(document.id); if (!undone || undone.kind !== 'pixel') throw new Error('Expected pixel project');
     const undoneCollection = undone.pixelAssets[collection.id]; if (undoneCollection.type !== 'tileset') throw new Error('Expected image collection');
     expect(Object.keys(undoneCollection.tiles)).toEqual(['0', '1']);
+  });
+
+  it('creates one exact finite-orthogonal image-collection tile object through the shared semantic planner', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-mcp-collection-object-')); temporaryPaths.push(root);
+    const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0'); documents.initialize();
+    const host = new McpHost(documents, '1.0.0', join(root, 'port.json')); hosts.push(host); const started = await host.start('collection-object-token');
+    const client = await initializeClient(started.url, 'collection-object-token', 'collection-object-client');
+    const created = await callTool(started.url, client.headers, 2, 'document_manage', { action: 'new', kind: 'project', name: 'Semantic collection object' });
+    const document = created.activeDocument as ReturnType<DocumentService['snapshot']>['activeDocument']; if (!document || document.kind !== 'pixel') throw new Error('Expected pixel project');
+    const source = document.pixelAssets[document.activeAssetId]; if (source.type !== 'sprite') throw new Error('Expected source sprite');
+    const collection = createPixelTileset('Semantic sparse collection', source.id, source.width, source.height, 1, 1); collection.spriteAssetId = undefined; collection.firstGid = 31; collection.columns = 0; collection.rows = 0; collection.wangSets = [];
+    collection.tiles = { 3: { id: 3, sourceX: 0, sourceY: 0, imageAssetId: source.id, probability: 1, animation: [], collisions: [], properties: {} } };
+    const map = createPixelTilemap('Semantic finite map'); map.tilesetIds = [collection.id]; const layer = map.layers[map.layerIds[0]]; layer.type = 'object'; delete layer.chunks; layer.objects = [];
+    expect(await callTool(started.url, client.headers, 3, 'canvas_apply', { documentId: document.id, clientOperationId: 'collection-object-setup', label: 'Add exact collection map', playback: { mode: 'instant', speed: 1 }, operations: [{ kind: 'pixel.asset.add', asset: collection }, { kind: 'pixel.asset.add', asset: map }] })).toMatchObject({ status: 'committed' });
+    const setup = documents.getDocument(document.id); if (!setup || setup.kind !== 'pixel') throw new Error('Expected pixel project'); const setupMap = setup.pixelAssets[map.id]; const setupCollection = setup.pixelAssets[collection.id]; if (setupMap.type !== 'tilemap' || setupCollection.type !== 'tileset') throw new Error('Expected collection map');
+    expect(await callTool(started.url, client.headers, 4, 'canvas_apply', {
+      documentId: document.id, clientOperationId: 'semantic-collection-object-create', label: 'Place exact collection tile object', playback: { mode: 'instant', speed: 1 },
+      operations: [{ kind: 'pixel.tile-object.create', mapId: map.id, layerId: layer.id, tilesetId: collection.id, tileId: 3, objectId: 'semantic-tile-object', x: 12, y: 18, transforms: { hFlip: true, vFlip: false, diagonal: true }, expectedMapRevision: setupMap.revision, expectedTilesetRevision: setupCollection.revision, expectedDocumentRevision: setup.revision }],
+    })).toMatchObject({ status: 'committed' });
+    const placed = documents.getDocument(document.id); if (!placed || placed.kind !== 'pixel') throw new Error('Expected pixel project'); const placedMap = placed.pixelAssets[map.id]; if (placedMap.type !== 'tilemap') throw new Error('Expected map'); const placedLayer = placedMap.layers[layer.id]; if (placedLayer.type !== 'object') throw new Error('Expected object layer');
+    expect(placedLayer.objects).toEqual([{ id: 'semantic-tile-object', type: 'tile', gid: encodeTiledGid(34, { hFlip: true, diagonal: true }), x: 12, y: 18, width: source.width, height: source.height, rotation: 0, name: '', className: '', properties: {} }]);
+    const mixed = await callToolMessage(started.url, client.headers, 5, 'canvas_apply', { documentId: document.id, clientOperationId: 'collection-object-mixed', label: 'Reject mixed exact intent', playback: { mode: 'instant', speed: 1 }, operations: [{ kind: 'pixel.tile-object.create', mapId: map.id, layerId: layer.id, tilesetId: collection.id, tileId: 3, objectId: 'second', x: 0, y: 0, expectedMapRevision: placedMap.revision, expectedTilesetRevision: setupCollection.revision, expectedDocumentRevision: placed.revision }, { kind: 'document.rename', name: 'Must not rename' }] });
+    expect(mixed.result?.isError).toBe(true); expect(JSON.stringify(mixed)).toContain('must be the only request'); expect(documents.getDocument(document.id)).toEqual(placed);
+    expect(await callTool(started.url, client.headers, 6, 'history_manage', { action: 'undo', documentId: document.id })).toMatchObject({ status: 'committed' });
+    const undone = documents.getDocument(document.id); if (!undone || undone.kind !== 'pixel') throw new Error('Expected pixel project'); const undoneMap = undone.pixelAssets[map.id]; if (undoneMap.type !== 'tilemap') throw new Error('Expected map'); expect(undoneMap.layers[layer.id].objects).toEqual([]);
   });
 
   it('flood-fills a bounded connected island inside a sprite larger than one million cells', async () => {
