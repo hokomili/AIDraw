@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
-import { ArrowDown, ArrowUp, GripVertical, Pause, Play, Trash2 } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from 'react';
+import { ArrowDown, ArrowUp, GripVertical, Pause, Play, Plus, Trash2 } from 'lucide-react';
 import type { PixelDocument, PixelTileset, TileDefinition } from '@aidraw/core';
 
 import { moveTileAnimationFrame, resolveTilesetTileSource, type TileAnimationFrame } from '../../common/tile-animation';
@@ -61,7 +61,100 @@ function TileAnimationPreview({ document, tileset, tile }: Pick<TileAnimationEdi
         <strong>{tile.animation.length ? `Frame ${activeIndex + 1} of ${tile.animation.length}` : 'Static tile'}</strong>
         <small>{source ? `Tile ${frame.tileId} · ${source.rect.width} × ${source.rect.height}px${tile.animation.length ? ` · ${frame.durationMs} ms` : ''}` : 'Source sprite unavailable'}</small>
       </div>
-      {tile.animation.length > 1 && <button type="button" title={playing ? 'Pause animation preview' : 'Play animation preview'} aria-label={playing ? 'Pause animation preview' : 'Play animation preview'} onClick={() => setPlaying((value) => !value)}>{playing ? <Pause size={11} /> : <Play size={11} />}</button>}
+      {tile.animation.length > 1 && <button type="button" title={playing ? 'Pause animation preview' : 'Play animation preview'} aria-label={playing ? 'Pause animation preview' : 'Play animation preview'} onClick={() => setPlaying((value) => !value)}>{playing ? <Pause aria-hidden="true" /> : <Play aria-hidden="true" />}<span>{playing ? 'Pause preview' : 'Play preview'}</span></button>}
+    </div>
+  );
+}
+
+interface TileAnimationFrameManagerProps {
+  tileId: number;
+  animation: TileAnimationFrame[];
+  tileCount: number;
+  availableTileIds?: number[];
+  preview: ReactNode;
+  draggedFrameIndex?: number;
+  dropFrameIndex?: number;
+  onDraggedFrameIndexChange: (index: number | undefined) => void;
+  onDropFrameIndexChange: (index: number | undefined) => void;
+  onChange: TileAnimationEditorProps['onChange'];
+}
+
+export function TileAnimationFrameManager({
+  tileId,
+  animation,
+  tileCount,
+  availableTileIds,
+  preview,
+  draggedFrameIndex,
+  dropFrameIndex,
+  onDraggedFrameIndexChange,
+  onDropFrameIndexChange,
+  onChange,
+}: TileAnimationFrameManagerProps) {
+  const moveFrame = (fromIndex: number, toIndex: number) => {
+    if (fromIndex === toIndex) return;
+    onChange(moveTileAnimationFrame(animation, fromIndex, toIndex), 'Reorder animated tile frames');
+  };
+  const endDrag = () => {
+    onDraggedFrameIndexChange(undefined);
+    onDropFrameIndexChange(undefined);
+  };
+  const dropFrame = (event: DragEvent<HTMLElement>, toIndex: number) => {
+    event.preventDefault();
+    const transferValue = event.dataTransfer.getData('text/plain');
+    const transferIndex = transferValue.trim() ? Number(transferValue) : Number.NaN;
+    const fromIndex = draggedFrameIndex ?? (Number.isInteger(transferIndex) ? transferIndex : undefined);
+    if (fromIndex !== undefined && fromIndex >= 0 && fromIndex < animation.length) moveFrame(fromIndex, toIndex);
+    endDrag();
+  };
+
+  return (
+    <div className="tile-animation-editor">
+      <div className="section-heading tile-animation-heading">
+        <span>Animation</span>
+        <button type="button" className="tile-animation-add" aria-label={`Add animation frame for tile ${tileId}`} onClick={() => onChange([...animation, { tileId, durationMs: 100 }], 'Add animated tile frame')}><Plus aria-hidden="true" /><span>Add frame</span></button>
+      </div>
+      {preview}
+      <div className="tile-animation-frame-list" role="list" aria-label={`Animation frames for tile ${tileId}`}>
+        {animation.map((frame, frameIndex) => (
+          <article
+            className={`tile-animation-frame-card${dropFrameIndex === frameIndex ? ' is-drop-target' : ''}`}
+            key={`${frame.tileId}-${frame.durationMs}-${frameIndex}`}
+            role="listitem"
+            aria-label={`Animation frame ${frameIndex + 1}, tile ${frame.tileId}, ${frame.durationMs} milliseconds`}
+            onDragOver={(event) => {
+              event.preventDefault();
+              event.dataTransfer.dropEffect = 'move';
+              onDropFrameIndexChange(frameIndex);
+            }}
+            onDragLeave={() => onDropFrameIndexChange(dropFrameIndex === frameIndex ? undefined : dropFrameIndex)}
+            onDrop={(event) => dropFrame(event, frameIndex)}
+          >
+            <header className="tile-animation-frame-header">
+              <span className="tile-animation-frame-identity"><strong>Frame {frameIndex + 1}</strong><small>Tile ID {frame.tileId} · {frame.durationMs} ms</small></span>
+              <button type="button" className="tile-animation-drag-handle" draggable aria-label={`Drag animation frame ${frameIndex + 1}`} title={`Drag animation frame ${frameIndex + 1} to reorder`} onDragStart={(event) => { event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', String(frameIndex)); onDraggedFrameIndexChange(frameIndex); }} onDragEnd={endDrag}><GripVertical aria-hidden="true" /><span>Drag frame</span></button>
+            </header>
+            <div className="tile-animation-frame-fields">
+              <label className="tile-animation-field">
+                <span>Tile ID</span>
+                {availableTileIds
+                  ? <select aria-label={`Animation frame ${frameIndex + 1} tile ID`} title="Existing collection tile ID" value={frame.tileId} onChange={(event) => onChange(animation.map((entry, index) => index === frameIndex ? { ...entry, tileId: Number(event.currentTarget.value) } : entry), 'Edit animated tile frame')}>{availableTileIds.map((availableTileId) => <option key={availableTileId} value={availableTileId}>{availableTileId}</option>)}</select>
+                  : <input aria-label={`Animation frame ${frameIndex + 1} tile ID`} title="Tile ID" type="number" min="0" max={tileCount - 1} value={frame.tileId} onChange={(event) => onChange(animation.map((entry, index) => index === frameIndex ? { ...entry, tileId: integerInRange(event.currentTarget.value, 0, tileCount - 1, entry.tileId) } : entry), 'Edit animated tile frame')} />}
+              </label>
+              <label className="tile-animation-field">
+                <span>Duration (ms)</span>
+                <input aria-label={`Animation frame ${frameIndex + 1} duration in milliseconds`} title="Duration (ms)" type="number" min="1" max="60000" value={frame.durationMs} onChange={(event) => onChange(animation.map((entry, index) => index === frameIndex ? { ...entry, durationMs: integerInRange(event.currentTarget.value, 1, 60_000, entry.durationMs) } : entry), 'Edit animated tile timing')} />
+              </label>
+            </div>
+            <div className="tile-animation-frame-actions" role="group" aria-label={`Animation frame ${frameIndex + 1} actions`}>
+              <button type="button" aria-label={`Move animation frame ${frameIndex + 1} up`} disabled={frameIndex === 0} onClick={() => moveFrame(frameIndex, frameIndex - 1)}><ArrowUp aria-hidden="true" /><span>Move up</span></button>
+              <button type="button" aria-label={`Move animation frame ${frameIndex + 1} down`} disabled={frameIndex === animation.length - 1} onClick={() => moveFrame(frameIndex, frameIndex + 1)}><ArrowDown aria-hidden="true" /><span>Move down</span></button>
+              <button type="button" className="tile-animation-delete" aria-label={`Delete animation frame ${frameIndex + 1}, tile ${frame.tileId}`} onClick={() => onChange(animation.filter((_, index) => index !== frameIndex), 'Delete animated tile frame')}><Trash2 aria-hidden="true" /><span>Delete frame</span></button>
+            </div>
+          </article>
+        ))}
+        {animation.length === 0 && <p className="tile-animation-empty" role="status">No animation frames. This tile remains static until a frame is added.</p>}
+      </div>
     </div>
   );
 }
@@ -69,35 +162,18 @@ function TileAnimationPreview({ document, tileset, tile }: Pick<TileAnimationEdi
 export function TileAnimationEditor({ document, tileset, tile, tileCount, availableTileIds, onChange }: TileAnimationEditorProps) {
   const [draggedFrameIndex, setDraggedFrameIndex] = useState<number>();
   const [dropFrameIndex, setDropFrameIndex] = useState<number>();
-  const moveFrame = (fromIndex: number, toIndex: number) => {
-    if (fromIndex === toIndex) return;
-    onChange(moveTileAnimationFrame(tile.animation, fromIndex, toIndex), 'Reorder animated tile frames');
-  };
-  const endDrag = () => { setDraggedFrameIndex(undefined); setDropFrameIndex(undefined); };
-  const dropFrame = (event: DragEvent<HTMLDivElement>, toIndex: number) => {
-    event.preventDefault();
-    const transferValue = event.dataTransfer.getData('text/plain');
-    const transferIndex = transferValue.trim() ? Number(transferValue) : Number.NaN;
-    const fromIndex = draggedFrameIndex ?? (Number.isInteger(transferIndex) ? transferIndex : undefined);
-    if (fromIndex !== undefined && fromIndex >= 0 && fromIndex < tile.animation.length) moveFrame(fromIndex, toIndex);
-    endDrag();
-  };
   return (
-    <>
-      <div className="section-heading"><span>Animation</span><button type="button" onClick={() => onChange([...tile.animation, { tileId: tile.id, durationMs: 100 }], 'Add animated tile frame')}>+ Frame</button></div>
-      <TileAnimationPreview key={tile.id} document={document} tileset={tileset} tile={tile} />
-      {tile.animation.map((frame, frameIndex) => (
-        <div className={`tile-animation-row${dropFrameIndex === frameIndex ? ' is-drop-target' : ''}`} key={`${frame.tileId}-${frame.durationMs}-${frameIndex}`} onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; setDropFrameIndex(frameIndex); }} onDragLeave={() => setDropFrameIndex((index) => index === frameIndex ? undefined : index)} onDrop={(event) => dropFrame(event, frameIndex)}>
-          <button type="button" className="tile-animation-drag-handle" draggable aria-label={`Drag animation frame ${frameIndex + 1}`} title="Drag to reorder animation frame" onDragStart={(event) => { event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', String(frameIndex)); setDraggedFrameIndex(frameIndex); }} onDragEnd={endDrag}><GripVertical size={11} /></button>
-          {availableTileIds ? <select aria-label={`Animation tile ${frameIndex + 1}`} title="Existing collection tile ID" value={frame.tileId} onChange={(event) => onChange(tile.animation.map((entry, index) => index === frameIndex ? { ...entry, tileId: Number(event.target.value) } : entry), 'Edit animated tile frame')}>{availableTileIds.map((tileId) => <option key={tileId} value={tileId}>{tileId}</option>)}</select> : <input aria-label={`Animation tile ${frameIndex + 1}`} title="Tile ID" type="number" min="0" max={tileCount - 1} value={frame.tileId} onChange={(event) => onChange(tile.animation.map((entry, index) => index === frameIndex ? { ...entry, tileId: integerInRange(event.target.value, 0, tileCount - 1, entry.tileId) } : entry), 'Edit animated tile frame')} />}
-          <input aria-label={`Animation duration ${frameIndex + 1}`} title="Duration (ms)" type="number" min="1" max="60000" value={frame.durationMs} onChange={(event) => onChange(tile.animation.map((entry, index) => index === frameIndex ? { ...entry, durationMs: integerInRange(event.target.value, 1, 60_000, entry.durationMs) } : entry), 'Edit animated tile timing')} />
-          <div className="tile-animation-move-actions">
-            <button type="button" title="Move animation frame up" aria-label={`Move animation frame ${frameIndex + 1} up`} disabled={frameIndex === 0} onClick={() => moveFrame(frameIndex, frameIndex - 1)}><ArrowUp size={10} /></button>
-            <button type="button" title="Move animation frame down" aria-label={`Move animation frame ${frameIndex + 1} down`} disabled={frameIndex === tile.animation.length - 1} onClick={() => moveFrame(frameIndex, frameIndex + 1)}><ArrowDown size={10} /></button>
-          </div>
-          <button type="button" title="Delete animation frame" aria-label={`Delete animation frame ${frameIndex + 1}`} onClick={() => onChange(tile.animation.filter((_, index) => index !== frameIndex), 'Delete animated tile frame')}><Trash2 size={11} /></button>
-        </div>
-      ))}
-    </>
+    <TileAnimationFrameManager
+      tileId={tile.id}
+      animation={tile.animation}
+      tileCount={tileCount}
+      availableTileIds={availableTileIds}
+      preview={<TileAnimationPreview key={tile.id} document={document} tileset={tileset} tile={tile} />}
+      draggedFrameIndex={draggedFrameIndex}
+      dropFrameIndex={dropFrameIndex}
+      onDraggedFrameIndexChange={setDraggedFrameIndex}
+      onDropFrameIndexChange={setDropFrameIndex}
+      onChange={onChange}
+    />
   );
 }

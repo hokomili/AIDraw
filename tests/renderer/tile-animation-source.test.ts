@@ -5,10 +5,14 @@ describe('tile animation editor wiring', () => {
   it('provides drag and keyboard ordering through the shared immutable kernel', async () => {
     const source = await readFile(new URL('../../src/renderer/components/TileAnimationEditor.tsx', import.meta.url), 'utf8');
     expect(source).toContain('moveTileAnimationFrame');
+    expect(source).toContain('TileAnimationFrameManager');
     expect(source).toContain('draggable');
     expect(source).toContain('onDrop=');
-    expect(source).toContain('Move animation frame up');
-    expect(source).toContain('Move animation frame down');
+    expect(source).toContain('aria-label={`Move animation frame ${frameIndex + 1} up`}');
+    expect(source).toContain('aria-label={`Move animation frame ${frameIndex + 1} down`}');
+    expect(source).toContain('<span>Move up</span>');
+    expect(source).toContain('<span>Move down</span>');
+    expect(source).toContain('<span>Delete frame</span>');
     expect(source).toContain("'Reorder animated tile frames'");
   });
 
@@ -20,14 +24,17 @@ describe('tile animation editor wiring', () => {
     expect(source).toContain('frame.durationMs');
     expect(source).toContain('Pause animation preview');
     expect(source).toContain('Play animation preview');
+    expect(source).toContain("'Pause preview' : 'Play preview'");
     expect(source).toContain('prefers-reduced-motion: reduce');
   });
 
   it('uses an exact sparse-ID chooser for image-collection animation frames', async () => {
     const source = await readFile(new URL('../../src/renderer/components/TileAnimationEditor.tsx', import.meta.url), 'utf8');
-    expect(source).toContain('availableTileIds ? <select');
+    expect(source).toContain('? <select aria-label={`Animation frame ${frameIndex + 1} tile ID`}');
     expect(source).toContain('Existing collection tile ID');
-    expect(source).toContain('availableTileIds.map((tileId)');
+    expect(source).toContain('availableTileIds.map((availableTileId)');
+    expect(source).toContain('<span>Tile ID</span>');
+    expect(source).toContain('<span>Duration (ms)</span>');
   });
 
   it('samples placed animations through one clock and one shared source-rectangle contract', async () => {

@@ -613,6 +613,36 @@ html[data-native-titlebar="hidden-inset"] .brand { width: max(calc(118px + var(-
 .tile-collision-delete { grid-column: span 2; min-height: var(--ui-hit-secondary); padding: 0 9px; display: inline-flex; align-items: center; justify-content: center; gap: 5px; border-radius: 7px; background: var(--coral-soft); color: var(--coral); font-size: var(--ui-type-caption); cursor: pointer; }
 .collision-shape-editor small, .collision-selection-note { font-size: var(--ui-type-caption); line-height: 1.4; }
 
+/* Selected-tile animation controls retain exact frame meaning at the shared inspector density floor. */
+.tile-animation-editor { min-width: 0; }
+.tile-animation-heading { padding: 2px 0 7px; }
+.tile-animation-heading .tile-animation-add { min-height: var(--ui-hit-secondary); padding: 0 9px; display: inline-flex; align-items: center; justify-content: center; gap: 5px; border-radius: 7px; background: var(--teal-soft); color: #267f79; font-size: var(--ui-type-caption); font-weight: 700; cursor: pointer; }
+.tile-animation-heading .tile-animation-add svg, .tile-animation-preview > button svg, .tile-animation-drag-handle svg, .tile-animation-frame-actions svg { width: var(--ui-icon-secondary); height: var(--ui-icon-secondary); flex: 0 0 auto; }
+.tile-animation-preview { min-height: 58px; padding: 7px; grid-template-columns: 44px minmax(0, 1fr) auto; align-items: center; gap: 8px; }
+.tile-animation-preview-copy strong, .tile-animation-preview-copy small { display: block; min-width: 0; overflow: visible; text-overflow: clip; white-space: normal; overflow-wrap: anywhere; }
+.tile-animation-preview-copy strong { color: var(--ink); font-size: var(--ui-type-label); line-height: 1.3; }
+.tile-animation-preview-copy small { margin-top: 2px; color: var(--muted); font-size: var(--ui-type-caption); line-height: 1.35; }
+.tile-animation-preview > button { width: auto; min-width: var(--ui-hit-secondary); height: var(--ui-hit-secondary); padding: 0 8px; display: inline-flex; align-items: center; justify-content: center; gap: 5px; border-radius: 7px; font-size: var(--ui-type-caption); white-space: nowrap; }
+.tile-animation-frame-list { min-width: 0; display: grid; gap: 7px; }
+.tile-animation-empty { margin: 0; padding: 9px; border: 1px dashed var(--border); border-radius: 8px; color: var(--muted); font-size: var(--ui-type-caption); line-height: 1.4; }
+.tile-animation-frame-card { min-width: 0; padding: 7px; display: grid; gap: 7px; border: 1px solid var(--border-soft); border-radius: 8px; background: #fff; }
+.tile-animation-frame-card.is-drop-target { border-color: var(--teal); background: var(--teal-soft); }
+.tile-animation-frame-card:focus-within { border-color: #267f79; box-shadow: 0 0 0 2px rgba(38, 127, 121, .16); }
+.tile-animation-frame-header { min-width: 0; display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.tile-animation-frame-identity { min-width: 0; }
+.tile-animation-frame-identity strong, .tile-animation-frame-identity small { display: block; min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+.tile-animation-frame-identity strong { color: var(--ink); font-size: var(--ui-type-label); line-height: 1.3; }
+.tile-animation-frame-identity small { margin-top: 2px; color: var(--muted); font-size: var(--ui-type-caption); line-height: 1.3; font-variant-numeric: tabular-nums; }
+.tile-animation-drag-handle { min-height: var(--ui-hit-secondary); padding: 0 8px; flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; gap: 5px; border-radius: 7px; background: #f1edef; color: var(--muted); font-size: var(--ui-type-caption); cursor: grab; }
+.tile-animation-drag-handle:active { cursor: grabbing; }
+.tile-animation-frame-fields { min-width: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.tile-animation-field { min-width: 0; display: grid; gap: 4px; color: var(--muted); font-size: var(--ui-type-caption); font-weight: 700; }
+.tile-animation-field input, .tile-animation-field select { width: 100%; min-width: 0; height: var(--ui-hit-secondary); padding: 0 7px; border: 1px solid var(--border); border-radius: 7px; background: #fff; color: var(--ink); font-size: var(--ui-type-label); font-variant-numeric: tabular-nums; }
+.tile-animation-frame-actions { min-width: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; }
+.tile-animation-frame-actions button { min-height: var(--ui-hit-secondary); padding: 0 7px; display: inline-flex; align-items: center; justify-content: center; gap: 5px; border-radius: 7px; background: #f1edef; color: var(--muted); font-size: var(--ui-type-caption); cursor: pointer; }
+.tile-animation-frame-actions button:disabled { opacity: .4; cursor: default; }
+.tile-animation-frame-actions .tile-animation-delete { background: var(--coral-soft); color: var(--coral); }
+
 @media (max-width: 1120px) {
   .wang-signature-fields { grid-template-columns: minmax(0, 1fr); }
   .wang-set-row { grid-template-columns: var(--ui-hit-secondary) minmax(0, 1fr); }
@@ -628,6 +658,11 @@ html[data-native-titlebar="hidden-inset"] .brand { width: max(calc(118px + var(-
   .tile-collision-selection-actions button { width: 100%; }
   .tile-collision-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .tile-collision-field.is-type, .tile-collision-delete { grid-column: 1 / -1; }
+  .tile-animation-preview { grid-template-columns: 44px minmax(0, 1fr); }
+  .tile-animation-preview > button { grid-column: 1 / -1; width: 100%; }
+  .tile-animation-frame-fields { grid-template-columns: minmax(0, 1fr); }
+  .tile-animation-frame-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .tile-animation-frame-actions .tile-animation-delete { grid-column: 1 / -1; }
 }
 
 @media (prefers-reduced-motion: reduce) {
