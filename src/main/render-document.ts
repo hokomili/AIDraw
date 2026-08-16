@@ -363,14 +363,35 @@ export function renderTilemapDimensions(map: PixelTilemap): { width: number; hei
   return { width: Math.max(1, Math.ceil(projected.width)), height: Math.max(1, Math.ceil(projected.height)) };
 }
 
+function assertTilemapRasterRegion(
+  map: PixelTilemap,
+  dimensions: { width: number; height: number },
+  region: PixelSpriteRegion,
+): void {
+  const signedSparseRegion = map.orientation === 'orthogonal' && map.infinite;
+  if (![region.x, region.y, region.width, region.height].every(Number.isSafeInteger)
+    || (!signedSparseRegion && (region.x < 0 || region.y < 0))
+    || region.width < 1
+    || region.height < 1) {
+    throw new RangeError(signedSparseRegion
+      ? 'Sparse orthogonal tilemap raster regions require safe-integer coordinates and positive safe-integer dimensions.'
+      : 'Tilemap raster regions must use nonnegative safe-integer coordinates and positive safe-integer dimensions.');
+  }
+  if (!Number.isSafeInteger(region.x + region.width) || !Number.isSafeInteger(region.y + region.height)) {
+    throw new RangeError('Tilemap raster region extent is unsafe.');
+  }
+  if (!signedSparseRegion && (region.x + region.width > dimensions.width || region.y + region.height > dimensions.height)) {
+    throw new RangeError('Tilemap raster region falls outside the nominal projected bounds.');
+  }
+}
+
 function renderTilemapSurface(document: PixelDocument, map: PixelTilemap, region: PixelSpriteRegion, onlyLayerId?: string, tileAnimationTimeMs = 0): Canvas {
   assertImageCollectionTilemapMode(document, map);
   const isometric = map.orientation === 'isometric';
   const dimensions = renderTilemapDimensions(map);
   const orthogonalArtworkEnvelope = isometric ? undefined : orthogonalMapTileArtworkEnvelope(document, map);
   const isometricArtworkEnvelope = isometric ? isometricMapTileArtworkEnvelope(document, map) : undefined;
-  if (![region.x, region.y, region.width, region.height].every(Number.isSafeInteger) || region.x < 0 || region.y < 0 || region.width < 1 || region.height < 1) throw new RangeError('Tilemap raster regions must use nonnegative safe-integer coordinates and positive safe-integer dimensions.');
-  if (!Number.isSafeInteger(region.x + region.width) || !Number.isSafeInteger(region.y + region.height) || region.x + region.width > dimensions.width || region.y + region.height > dimensions.height) throw new RangeError('Tilemap raster region falls outside the nominal projected bounds.');
+  assertTilemapRasterRegion(map, dimensions, region);
   assertStaticRasterDimensions(region.width, region.height, 'Tilemap raster region');
   const canvas = createCanvas(region.width, region.height); const context = canvas.getContext('2d'); context.imageSmoothingEnabled = false; context.translate(-region.x, -region.y);
   const sources = new BoundedResourceCache<RenderedSpriteRegion>(MAX_MAP_TILE_SOURCE_CACHE_ENTRIES, MAX_MAP_TILE_SOURCE_CACHE_BYTES, (source) => releaseCanvas(source.canvas));
@@ -470,13 +491,13 @@ function renderTilemapSurface(document: PixelDocument, map: PixelTilemap, region
 
 export function renderTilemapRegion(document: PixelDocument, map: PixelTilemap, region: PixelSpriteRegion, onlyLayerId?: string, tileAnimationTimeMs = 0): Canvas {
   const dimensions = renderTilemapDimensions(map);
-  if (![region.x, region.y, region.width, region.height].every(Number.isSafeInteger) || region.x < 0 || region.y < 0 || region.width < 1 || region.height < 1) throw new RangeError('Tilemap raster regions must use nonnegative safe-integer coordinates and positive safe-integer dimensions.');
-  if (!Number.isSafeInteger(region.x + region.width) || !Number.isSafeInteger(region.y + region.height) || region.x + region.width > dimensions.width || region.y + region.height > dimensions.height) throw new RangeError('Tilemap raster region falls outside the nominal projected bounds.');
+  assertTilemapRasterRegion(map, dimensions, region);
   assertStaticRasterDimensions(region.width, region.height, 'Tilemap raster region');
-  let left = Math.min(TILEMAP_REGION_OVERSCAN_PIXELS, region.x);
-  let right = Math.min(TILEMAP_REGION_OVERSCAN_PIXELS, dimensions.width - region.x - region.width);
-  let top = Math.min(TILEMAP_REGION_OVERSCAN_PIXELS, region.y);
-  let bottom = Math.min(TILEMAP_REGION_OVERSCAN_PIXELS, dimensions.height - region.y - region.height);
+  const signedSparseRegion = map.orientation === 'orthogonal' && map.infinite;
+  let left = signedSparseRegion ? TILEMAP_REGION_OVERSCAN_PIXELS : Math.min(TILEMAP_REGION_OVERSCAN_PIXELS, region.x);
+  let right = signedSparseRegion ? TILEMAP_REGION_OVERSCAN_PIXELS : Math.min(TILEMAP_REGION_OVERSCAN_PIXELS, dimensions.width - region.x - region.width);
+  let top = signedSparseRegion ? TILEMAP_REGION_OVERSCAN_PIXELS : Math.min(TILEMAP_REGION_OVERSCAN_PIXELS, region.y);
+  let bottom = signedSparseRegion ? TILEMAP_REGION_OVERSCAN_PIXELS : Math.min(TILEMAP_REGION_OVERSCAN_PIXELS, dimensions.height - region.y - region.height);
   while (region.width + left + right > MAX_STATIC_RASTER_SIDE) { if (right > left) right -= 1; else left -= 1; }
   while (region.height + top + bottom > MAX_STATIC_RASTER_SIDE) { if (bottom > top) bottom -= 1; else top -= 1; }
   while ((region.width + left + right) * (region.height + top + bottom) > MAX_STATIC_RASTER_PIXELS) {

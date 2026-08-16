@@ -68,16 +68,16 @@ describe('image-collection authoring boundary', () => {
     expect(later.firstGid).toBe(5);
   });
 
-  it('replaces one exact sparse source, preserves its complete tile record, and counts bounded document-wide impact', () => {
+  it('replaces one exact sparse source, preserves its complete tile record, and counts signed sparse-infinite impact', () => {
     const { document, tileset, source0, source3 } = collectionFixture();
     const replacement = createPixelSprite('Replacement', 4, 3);
     const map = createPixelTilemap('Collection map');
-    map.width = 4; map.height = 1; map.tilesetIds = [tileset.id];
+    map.width = 1; map.height = 1; map.infinite = true; map.tilesetIds = [tileset.id];
     const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile' || !layer.chunks) throw new Error('Expected tile layer');
     writeTiles(layer.chunks, [
-      { x: 0, y: 0, gid: tileset.firstGid + 3 },
-      { x: 1, y: 0, gid: encodeTiledGid(tileset.firstGid + 3, { hFlip: true, diagonal: true }) },
-      { x: 2, y: 0, gid: tileset.firstGid },
+      { x: -33, y: 4, gid: tileset.firstGid + 3 },
+      { x: 34, y: -35, gid: encodeTiledGid(tileset.firstGid + 3, { hFlip: true, diagonal: true }) },
+      { x: 0, y: 0, gid: tileset.firstGid },
     ]);
     tileset.tiles[0].animation = [{ tileId: 3, durationMs: 90 }];
     tileset.tiles[3].animation.push({ tileId: 3, durationMs: 110 });
@@ -89,7 +89,7 @@ describe('image-collection authoring boundary', () => {
       attachedMapCount: 1,
       directMapCellCount: 2,
       animationReferenceCount: 2,
-      scannedCellCount: 1_024,
+      scannedCellCount: 3_072,
     });
     const beforeTile = structuredClone(tileset.tiles[3]);
     const sourceBytes = JSON.stringify([source0, source3, replacement]);
@@ -149,9 +149,9 @@ describe('image-collection authoring boundary', () => {
     expect(() => removeUnusedImageCollectionSource(animationReference, tileset.id, 3)).toThrow(/tile 0 animation still references tile 3/);
 
     const mapReference = structuredClone(document);
-    const map = createPixelTilemap('Reference map'); map.tilesetIds = [tileset.id]; map.width = 1; map.height = 1;
+    const map = createPixelTilemap('Reference map'); map.tilesetIds = [tileset.id]; map.width = 1; map.height = 1; map.infinite = true;
     const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile' || !layer.chunks) throw new Error('Expected tile layer');
-    writeTiles(layer.chunks, [{ x: 0, y: 0, gid: encodeTiledGid(tileset.firstGid + 3, { hFlip: true, vFlip: true, diagonal: true }) }]);
+    writeTiles(layer.chunks, [{ x: -33, y: 35, gid: encodeTiledGid(tileset.firstGid + 3, { hFlip: true, vFlip: true, diagonal: true }) }]);
     mapReference.assetIds.push(map.id); mapReference.pixelAssets[map.id] = map;
     expect(() => removeUnusedImageCollectionSource(mapReference, tileset.id, 3)).toThrow(/tile layer .* still references.*tile 3/);
 
@@ -243,7 +243,7 @@ describe('image-collection authoring boundary', () => {
     document.assetIds.push(sparseShadow.id); document.pixelAssets[sparseShadow.id] = sparseShadow; map.tilesetIds = [tileset.id, sparseShadow.id];
     expect(() => replaceImageCollectionSource(document, tileset.id, 3, replacement.id)).toThrow(/one exact attached GID range/);
     map.tilesetIds = [tileset.id]; map.orientation = 'isometric';
-    expect(() => replaceImageCollectionSource(document, tileset.id, 3, replacement.id)).toThrow(/finite orthogonal/);
+    expect(() => replaceImageCollectionSource(document, tileset.id, 3, replacement.id)).toThrow(/must remain orthogonal/);
   });
 
   it('selects only exact sparse IDs and replaces metadata without changing source topology', () => {

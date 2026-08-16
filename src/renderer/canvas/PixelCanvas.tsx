@@ -419,16 +419,16 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   const activePaletteCycle = document.paletteCycles.find((cycle) => cycle.id === activePaletteCycleId) ?? document.paletteCycles[0];
   const attachedMapTilesets = useMemo(() => tilemap ? attachedMapTileAuthoringTilesets(document, tilemap) : [], [document, tilemap]);
   const atlasMapTilesets = attachedMapTilesets.filter((entry) => Boolean(entry.spriteAssetId));
-  const finiteOrthogonalCollectionTilesets = attachedMapTilesets.filter((entry) => isImageCollectionTileset(entry) && tilemap?.orientation === 'orthogonal' && !tilemap.infinite);
-  const authorableMapTileTilesets = [...atlasMapTilesets, ...finiteOrthogonalCollectionTilesets];
-  const authorableTileObjectTilesets = attachedMapTilesets.filter((entry) => Boolean(entry.spriteAssetId) || finiteOrthogonalCollectionTilesets.some((collection) => collection.id === entry.id));
+  const orthogonalCollectionTilesets = attachedMapTilesets.filter((entry) => isImageCollectionTileset(entry) && tilemap?.orientation === 'orthogonal');
+  const authorableMapTileTilesets = [...atlasMapTilesets, ...orthogonalCollectionTilesets];
+  const authorableTileObjectTilesets = attachedMapTilesets.filter((entry) => Boolean(entry.spriteAssetId) || orthogonalCollectionTilesets.some((collection) => collection.id === entry.id));
   const wangTerrainTilesets = [
     ...atlasMapTilesets,
-    ...finiteOrthogonalCollectionTilesets.filter((entry) => entry.wangSets.length > 0),
+    ...orthogonalCollectionTilesets.filter((entry) => entry.wangSets.length > 0),
   ];
   const currentMapTileTilesetId = tilemap && currentMapTileChoice?.documentId === document.id && currentMapTileChoice.mapId === tilemap.id
     ? currentMapTileChoice.tilesetId
-    : atlasMapTilesets[0]?.id ?? finiteOrthogonalCollectionTilesets[0]?.id;
+    : atlasMapTilesets[0]?.id ?? orthogonalCollectionTilesets[0]?.id;
   const currentMapTileTileset = authorableMapTileTilesets.find((entry) => entry.id === currentMapTileTilesetId);
   const tileObjectTilesetId = tilemap && tileObjectTilesetChoice?.documentId === document.id && tileObjectTilesetChoice.mapId === tilemap.id ? tileObjectTilesetChoice.tilesetId : authorableTileObjectTilesets[0]?.id;
   const tileObjectTileset = authorableTileObjectTilesets.find((entry) => entry.id === tileObjectTilesetId);
@@ -1884,7 +1884,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
   });
 
   if (!asset) return <div className="empty-canvas">No pixel asset selected.</div>;
-  if (asset.type === 'tileset' && isImageCollectionTileset(asset)) return <div className="empty-canvas"><Grid3X3 size={36} /><strong>Image collection tileset</strong><span>{Object.keys(asset.tiles).length} sparse PNG tile(s) · {asset.columns} display column(s). Per-tile artwork is read-only here; use this tileset from a finite orthogonal map.</span></div>;
+  if (asset.type === 'tileset' && isImageCollectionTileset(asset)) return <div className="empty-canvas"><Grid3X3 size={36} /><strong>Image collection tileset</strong><span>{Object.keys(asset.tiles).length} sparse PNG tile(s) · {asset.columns} display column(s). Per-tile artwork is read-only here; use this tileset from an orthogonal map.</span></div>;
   if (asset.type === 'tileset' && !sprite) return <div className="empty-canvas"><Grid3X3 size={36} /><strong>Missing tileset pixels</strong><span>The linked source sprite is unavailable.</span></div>;
   if (tilemapModeError) return <div className="empty-canvas"><Grid3X3 size={36} /><strong>Unsupported image-collection map mode</strong><span>{tilemapModeError}</span></div>;
   const durationFrame = durationFrameId && sprite ? sprite.frames[durationFrameId] : undefined;
@@ -1948,7 +1948,7 @@ export function PixelCanvas({ document }: { document: PixelDocument }) {
           }}
         />}
         {tool === 'tile-object' && tilemap && <>
-          <select aria-label="Tile object tileset" value={tileObjectTileset?.id ?? ''} onChange={(event) => { const tilesetId = event.target.value; setTileObjectTilesetChoice({ documentId: document.id, mapId: tilemap.id, tilesetId }); setTileObjectTileDraft(undefined); }} title="Exact attached atlas or finite-orthogonal image-collection tileset for the new tile object"><option value="" disabled>Attached tileset</option>{authorableTileObjectTilesets.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}</select>
+          <select aria-label="Tile object tileset" value={tileObjectTileset?.id ?? ''} onChange={(event) => { const tilesetId = event.target.value; setTileObjectTilesetChoice({ documentId: document.id, mapId: tilemap.id, tilesetId }); setTileObjectTileDraft(undefined); }} title="Exact attached atlas or orthogonal image-collection tileset for the new tile object"><option value="" disabled>Attached tileset</option>{authorableTileObjectTilesets.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}</select>
           <label className="tile-object-tile-control"><span>Tile ID</span>{tileObjectTileset && isImageCollectionTileset(tileObjectTileset)
             ? <select aria-label="Tile object local tile ID" value={tileObjectTileDraftValue} onChange={(event) => { const update = selectScopedMapTileId({ documentId: document.id, mapId: tilemap.id, tilesetId: tileObjectTileset.id }, tileObjectTileset, event.target.value); setTileObjectTileDraft(update.draft); if (update.nextPixelIndex !== undefined) setPixelIndex(update.nextPixelIndex); }}>{tileObjectCollectionIds.map((id) => <option key={id} value={id}>{id}</option>)}</select>
             : <input aria-label="Tile object local tile ID" type="number" min={0} max={Math.max(0, (tileObjectTileset?.columns ?? 1) * (tileObjectTileset?.rows ?? 1) - 1)} step={1} value={tileObjectTileDraftValue} onChange={(event) => { if (!tileObjectTileset) return; const update = selectScopedMapTileId({ documentId: document.id, mapId: tilemap.id, tilesetId: tileObjectTileset.id }, tileObjectTileset, event.target.value); setTileObjectTileDraft(update.draft); if (update.nextPixelIndex !== undefined) setPixelIndex(update.nextPixelIndex); }} />}</label>

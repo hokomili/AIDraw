@@ -118,7 +118,7 @@ describe('exact map-tile human authoring', () => {
     expect(plan.expectedSpriteDependencies).toBeUndefined();
   });
 
-  it('refuses sparse gaps, unsupported modes, missing sources, transforms, ambiguity, and precedence shadows', () => {
+  it('admits sparse-infinite maps while refusing gaps, isometric mode, missing sources, transforms, ambiguity, and precedence shadows', () => {
     const source = fixture();
     const request = {
       mapId: source.map.id,
@@ -128,10 +128,9 @@ describe('exact map-tile human authoring', () => {
     };
     expect(() => planMapTileAuthoringSelection(source.document, { ...request, tileId: 2 })).toThrow('sparse gap');
     source.map.orientation = 'isometric';
-    expect(() => planMapTileAuthoringSelection(source.document, request)).toThrow('finite orthogonal');
+    expect(() => planMapTileAuthoringSelection(source.document, request)).toThrow('orthogonal map');
     source.map.orientation = 'orthogonal'; source.map.infinite = true;
-    expect(() => planMapTileAuthoringSelection(source.document, request)).toThrow('finite orthogonal');
-    source.map.infinite = false;
+    expect(planMapTileAuthoringSelection(source.document, request)).toMatchObject({ rawGid: 20, tileId: 3, imageCollection: true });
 
     source.collection.transformations = { hFlip: false, vFlip: false, rotate: false };
     expect(() => planMapTileAuthoringSelection(source.document, { ...request, transforms: { hFlip: true, vFlip: false, diagonal: false } })).toThrow('not permitted');
@@ -182,18 +181,19 @@ describe('exact map-tile human authoring', () => {
     expect(mapTileAuthoringPlansMatch(observed, planMapTileAuthoringSelection(tilesetDrift, request))).toBe(false);
   });
 
-  it('captures and places the exact transformed collection GID through a persistent saved stamp', () => {
+  it('captures and places the exact transformed collection GID through a persistent saved stamp on signed sparse coordinates', () => {
     const source = fixture();
+    source.map.infinite = true;
     const plan = planMapTileAuthoringSelection(source.document, {
       mapId: source.map.id,
       tilesetId: source.collection.id,
       tileId: 3,
       transforms: { hFlip: true, vFlip: true, diagonal: true },
     });
-    const stamp = captureTileStamp('saved-collection', 'Saved collection tile', [{ x: 4, y: 7 }], () => plan.rawGid);
+    const stamp = captureTileStamp('saved-collection', 'Saved collection tile', [{ x: -34, y: 35 }], () => plan.rawGid);
     expect(stamp.cells).toEqual([{ x: 0, y: 0, gid: plan.rawGid }]);
-    const placed = placeTileStamp(stamp, 2, 3, { width: source.map.width, height: source.map.height });
-    expect(placed).toEqual({ changes: [{ x: 2, y: 3, gid: plan.rawGid }], dropped: 0 });
+    const placed = placeTileStamp(stamp, -35, 36);
+    expect(placed).toEqual({ changes: [{ x: -35, y: 36, gid: plan.rawGid }], dropped: 0 });
     expect(decodeTiledGid(placed.changes[0].gid)).toEqual({ gid: 20, hFlip: true, vFlip: true, diagonal: true });
   });
 });

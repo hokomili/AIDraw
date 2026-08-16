@@ -355,7 +355,7 @@ describe('native document rendering', () => {
       3: { id: 3, sourceX: 0, sourceY: 0, imageAssetId: base.id, probability: 1, animation: [{ tileId: 3, durationMs: 50 }, { tileId: 7, durationMs: 50 }], collisions: [], properties: {} },
       7: { id: 7, sourceX: 0, sourceY: 0, imageAssetId: tall.id, probability: 1, animation: [], collisions: [], properties: {} },
     };
-    const map = createPixelTilemap('Collection object map'); map.width = 4; map.height = 4; map.tileWidth = 4; map.tileHeight = 4; map.tilesetIds = [tileset.id];
+    const map = createPixelTilemap('Collection object map'); map.infinite = true; map.width = 4; map.height = 4; map.tileWidth = 4; map.tileHeight = 4; map.tilesetIds = [tileset.id];
     const layer = map.layers[map.layerIds[0]]; layer.type = 'object'; delete layer.chunks; layer.objects = [{ id: 'collection-object', type: 'tile', gid: encodeTiledGid(14, { hFlip: true, diagonal: true }), x: 8, y: 8, width: 6, height: 4, rotation: 0, name: 'Animated source', className: 'actor', properties: { exact: true } }];
     document.pixelAssets = { [base.id]: base, [tall.id]: tall, [tileset.id]: tileset, [map.id]: map }; document.assetIds = [base.id, tall.id, tileset.id, map.id]; document.activeAssetId = map.id; const canonical = structuredClone(document);
 
@@ -370,6 +370,53 @@ describe('native document rendering', () => {
     expect({ width: first.width, height: first.height }).toEqual({ width: 16, height: 16 });
     const requested = renderTilemapRegion(document, map, { x: 4, y: 4, width: 8, height: 8 }, undefined, 60);
     expect(Buffer.from(requested.getContext('2d').getImageData(0, 0, 8, 8).data)).toEqual(Buffer.from(second.getContext('2d').getImageData(4, 4, 8, 8).data));
+    expect(document).toEqual(canonical);
+  });
+
+  it('renders equal transformed animated image-collection pixels from negative and positive sparse chunks with native overhang', () => {
+    const document = createPixelDocument('project', 'Signed sparse collection raster'); document.assetIds = []; document.pixelAssets = {};
+    document.palette[2].color = '#ef476fff'; document.palette[3].color = '#06d6a0ff'; document.palette[4].color = '#118ab2ff';
+    const base = createPixelSprite('Two by two base', 2, 2); writePixels(Object.values(base.cels)[0], [
+      { x: 0, y: 0, index: 2 }, { x: 1, y: 0, index: 2 }, { x: 0, y: 1, index: 2 }, { x: 1, y: 1, index: 2 },
+    ]);
+    const overhang = createPixelSprite('Two by six animated overhang', 2, 6); writePixels(Object.values(overhang.cels)[0], [
+      { x: 0, y: 0, index: 2 }, { x: 1, y: 2, index: 3 }, { x: 0, y: 5, index: 4 },
+    ]);
+    const tileset = createPixelTileset('Signed sparse collection', base.id, 2, 6, 1, 1);
+    tileset.spriteAssetId = undefined; tileset.firstGid = 41; tileset.columns = 2; tileset.rows = 0; tileset.tileOffset = { x: 1, y: -1 }; tileset.wangSets = [];
+    tileset.tiles = {
+      0: { id: 0, sourceX: 0, sourceY: 0, imageAssetId: base.id, probability: 1, animation: [{ tileId: 0, durationMs: 50 }, { tileId: 3, durationMs: 50 }], collisions: [], properties: {} },
+      3: { id: 3, sourceX: 0, sourceY: 0, imageAssetId: overhang.id, probability: 1, animation: [], collisions: [], properties: {} },
+    };
+    const map = createPixelTilemap('Signed sparse map'); map.infinite = true; map.width = 2; map.height = 2; map.tileWidth = 4; map.tileHeight = 4; map.tilesetIds = [tileset.id];
+    const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile' || !layer.chunks) throw new Error('Expected tile layer'); layer.offsetX = 2; layer.offsetY = -3;
+    const rawGid = encodeTiledGid(tileset.firstGid, { hFlip: true, diagonal: true });
+    const cells = [{ x: -33, y: -34 }, { x: 34, y: 35 }];
+    writeTiles(layer.chunks, cells.map((cell) => ({ ...cell, gid: rawGid })));
+    document.pixelAssets = { [base.id]: base, [overhang.id]: overhang, [tileset.id]: tileset, [map.id]: map };
+    document.assetIds = [base.id, overhang.id, tileset.id, map.id]; document.activeAssetId = map.id;
+    const canonical = structuredClone(document);
+
+    const regionFor = ({ x, y }: { x: number; y: number }) => ({ x: x * map.tileWidth + layer.offsetX - 8, y: y * map.tileHeight + layer.offsetY - 8, width: 20, height: 20 });
+    const rendered = cells.map((cell) => {
+      const region = regionFor(cell);
+      const canvas = renderTilemapRegion(document, map, region, undefined, 60);
+      return { region, pixels: canvas.getContext('2d').getImageData(0, 0, region.width, region.height).data };
+    });
+    expect(Buffer.from(rendered[0].pixels)).toEqual(Buffer.from(rendered[1].pixels));
+    const visible = new Set<string>(); let overhangsCell = false;
+    const firstCellRect = { x: cells[0].x * map.tileWidth + layer.offsetX, y: cells[0].y * map.tileHeight + layer.offsetY, width: map.tileWidth, height: map.tileHeight };
+    for (let y = 0; y < rendered[0].region.height; y += 1) for (let x = 0; x < rendered[0].region.width; x += 1) {
+      const offset = (y * rendered[0].region.width + x) * 4;
+      if (!rendered[0].pixels[offset + 3]) continue;
+      visible.add([...rendered[0].pixels.slice(offset, offset + 4)].join(','));
+      const globalX = rendered[0].region.x + x; const globalY = rendered[0].region.y + y;
+      if (globalX < firstCellRect.x || globalY < firstCellRect.y || globalX >= firstCellRect.x + firstCellRect.width || globalY >= firstCellRect.y + firstCellRect.height) overhangsCell = true;
+    }
+    expect(visible).toEqual(new Set(['239,71,111,255', '6,214,160,255', '17,138,178,255']));
+    expect(overhangsCell).toBe(true);
+    const baseFrame = renderTilemapRegion(document, map, rendered[0].region, undefined, 0).getContext('2d').getImageData(0, 0, 20, 20).data;
+    expect(Buffer.from(baseFrame)).not.toEqual(Buffer.from(rendered[0].pixels));
     expect(document).toEqual(canonical);
   });
 

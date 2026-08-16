@@ -2,7 +2,7 @@ import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { createPixelDocument, createPixelSprite, createPixelTilemap, createPixelTileset, encodeTiledGid, readPixel, readTileAt, writePixels, writeTiles, type CollisionShape, type PixelSprite } from '@aidraw/core';
+import { HUMAN_ACTOR, createPixelDocument, createPixelSprite, createPixelTilemap, createPixelTileset, encodeTiledGid, nowIso, readPixel, readTileAt, writePixels, writeTiles, type CollisionShape, type PixelSprite } from '@aidraw/core';
 import UPNG from 'upng-js';
 
 import { importDocument } from '../../src/main/import-document';
@@ -456,11 +456,9 @@ describe('representative Tiled JSON interchange', () => {
     expect([...originalRaster].filter((_, index) => Math.floor(index / 4) % 4 < 2 && index % 4 === 3).every((alpha) => alpha === 255)).toBe(true);
     const rightRegion = renderTilemapRegion(document, map, { x: 3, y: 0, width: 1, height: 2 });
     expect(Buffer.from(rightRegion.getContext('2d').getImageData(0, 0, 1, 2).data)).toEqual(Buffer.from(originalRaster.filter((_, index) => Math.floor(index / 4) % 4 === 3)));
-    for (const unsupported of [{ orientation: 'isometric' as const }, { infinite: true }]) {
-      const rejectedDocument = structuredClone(document); const rejectedMap = rejectedDocument.pixelAssets[rejectedDocument.activeAssetId];
-      if (rejectedMap.type !== 'tilemap') throw new Error('Expected rejected image-collection tilemap'); Object.assign(rejectedMap, unsupported);
-      expect(() => renderTilemap(rejectedDocument, rejectedMap)).toThrow(/must remain finite orthogonal/);
-    }
+    const rejectedDocument = structuredClone(document); const rejectedMap = rejectedDocument.pixelAssets[rejectedDocument.activeAssetId];
+    if (rejectedMap.type !== 'tilemap') throw new Error('Expected rejected image-collection tilemap'); rejectedMap.orientation = 'isometric';
+    expect(() => renderTilemap(rejectedDocument, rejectedMap)).toThrow(/must remain orthogonal/);
 
     const nativePath = await writeNativeDocument(join(directory, 'collection-native'), document, '1.0.0');
     const native = await readNativeDocument(nativePath); if (native.document.kind !== 'pixel') throw new Error('Expected persisted image-collection document');
@@ -506,6 +504,79 @@ describe('representative Tiled JSON interchange', () => {
     const standaloneTileZero = standaloneTsx.data.toString().match(/<tile id="0"[^>]*>([\s\S]*?)<\/tile>/)?.[1]; expect(standaloneTileZero).toBeDefined();
     const standaloneOrder = ['<properties>', '<image ', '<objectgroup>', '<animation>'].map((child) => standaloneTileZero!.indexOf(child));
     expect(standaloneOrder.every((index) => index >= 0)).toBe(true); expect(standaloneOrder).toEqual([...standaloneOrder].sort((left, right) => left - right));
+  });
+
+  it('persists and JSON/XML round-trips signed sparse-infinite image-collection chunks, objects, metadata, and PNG ownership', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'aidraw-tiled-infinite-image-collection-')); temporaryDirectories.push(directory);
+    const document = createPixelDocument('project', 'Infinite image collection round trip'); document.assetIds = []; document.pixelAssets = {};
+    document.palette[2].color = '#6c3b78ff'; document.palette[3].color = '#31a6a0ff'; document.palette[4].color = '#e5b84bff';
+    const base = createPixelSprite('Base source', 2, 2); writePixels(Object.values(base.cels)[0], [
+      { x: 0, y: 0, index: 2 }, { x: 1, y: 0, index: 2 }, { x: 0, y: 1, index: 2 }, { x: 1, y: 1, index: 2 },
+    ]);
+    const animated = createPixelSprite('Animated native source', 1, 3); writePixels(Object.values(animated.cels)[0], [
+      { x: 0, y: 0, index: 2 }, { x: 0, y: 1, index: 3 }, { x: 0, y: 2, index: 4 },
+    ]);
+    const tileset = createPixelTileset('Infinite sparse collection', base.id, 2, 3, 1, 1);
+    delete tileset.spriteAssetId; tileset.firstGid = 11; tileset.columns = 2; tileset.rows = 0; tileset.tileOffset = { x: -1, y: 2 };
+    tileset.tiles = {
+      0: { id: 0, sourceX: 0, sourceY: 0, imageAssetId: base.id, probability: 0.25, animation: [{ tileId: 0, durationMs: 50 }, { tileId: 3, durationMs: 70 }], collisions: [], properties: { base: true } },
+      3: { id: 3, sourceX: 0, sourceY: 0, imageAssetId: animated.id, probability: 0.75, animation: [], collisions: [], properties: { native: 'one-by-three' } },
+    };
+    tileset.wangSets = [{ id: 'infinite-wang', name: 'Infinite Wang', type: 'mixed', colors: [{ id: 1, name: 'Ground', color: '#55aa44', tileId: 3, probability: 1 }], tiles: [{ tileId: 0, wangId: [0, 0, 0, 0, 0, 0, 0, 0] }, { tileId: 3, wangId: [1, 1, 1, 1, 1, 1, 1, 1] }] }];
+    const map = createPixelTilemap('Infinite sparse collection map'); map.infinite = true; map.width = 2; map.height = 2; map.tileWidth = 2; map.tileHeight = 2; map.tilesetIds = [tileset.id];
+    const tileLayer = map.layers[map.layerIds[0]]; if (tileLayer.type !== 'tile' || !tileLayer.chunks) throw new Error('Expected tile layer'); tileLayer.offsetX = 1; tileLayer.offsetY = -1;
+    const negativeRaw = encodeTiledGid(tileset.firstGid, { hFlip: true, diagonal: true });
+    const positiveRaw = encodeTiledGid(tileset.firstGid + 3, { vFlip: true });
+    writeTiles(tileLayer.chunks, [{ x: -33, y: -34, gid: negativeRaw }, { x: 34, y: 35, gid: positiveRaw }]);
+    const timestamp = nowIso(); const objectLayer = {
+      id: 'infinite-objects', revision: 0, name: 'Signed objects', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
+      type: 'object' as const, visible: true, locked: false, opacity: 1, offsetX: 0, offsetY: 0, parallaxX: 1, parallaxY: 1,
+      objects: [{ id: 'negative-object', type: 'tile' as const, gid: positiveRaw, x: -17, y: -13, width: 2, height: 6, rotation: 15, name: 'Signed tile', className: 'actor', properties: { exact: true } }],
+    };
+    map.layers[objectLayer.id] = objectLayer; map.layerIds.push(objectLayer.id);
+    document.pixelAssets = { [base.id]: base, [animated.id]: animated, [tileset.id]: tileset, [map.id]: map };
+    document.assetIds = [base.id, animated.id, tileset.id, map.id]; document.activeAssetId = map.id;
+
+    const negativeRegion = { x: -70, y: -72, width: 12, height: 12 };
+    const negativeRaster = Buffer.from(renderTilemapRegion(document, map, negativeRegion, undefined, 60).getContext('2d').getImageData(0, 0, 12, 12).data);
+    expect(negativeRaster.some((value, index) => index % 4 === 3 && value > 0)).toBe(true);
+    const nativePath = await writeNativeDocument(join(directory, 'infinite-native'), document, '1.0.0');
+    const native = await readNativeDocument(nativePath); if (native.document.kind !== 'pixel') throw new Error('Expected native pixel document');
+    const nativeMap = native.document.pixelAssets[map.id]; if (nativeMap.type !== 'tilemap') throw new Error('Expected native tilemap');
+    expect(nativeMap).toMatchObject({ orientation: 'orthogonal', infinite: true, width: 2, height: 2 });
+    const nativeLayer = nativeMap.layers[tileLayer.id]; if (nativeLayer.type !== 'tile' || !nativeLayer.chunks) throw new Error('Expected native tile layer');
+    expect(readTileAt(nativeLayer.chunks, -33, -34)).toBe(negativeRaw); expect(readTileAt(nativeLayer.chunks, 34, 35)).toBe(positiveRaw);
+    expect(Buffer.from(renderTilemapRegion(native.document, nativeMap, negativeRegion, undefined, 60).getContext('2d').getImageData(0, 0, 12, 12).data)).toEqual(negativeRaster);
+
+    for (const format of ['tiled-json', 'tiled-xml'] as const) {
+      const artifact = await exportDocument(native.document, format);
+      expect(artifact.report).toEqual({ warnings: [], rasterized: [] });
+      expect(artifact.companions?.map(({ name }) => name)).toEqual(['Infinite sparse collection tile 0.png', 'Infinite sparse collection tile 3.png']);
+      const text = artifact.data.toString();
+      if (format === 'tiled-json') {
+        const output = JSON.parse(text); expect(output).toMatchObject({ orientation: 'orthogonal', infinite: true });
+        const outputLayer = output.layers.find((entry: any) => entry.type === 'tilelayer');
+        expect(outputLayer.chunks.map((chunk: any) => [chunk.x, chunk.y])).toEqual(expect.arrayContaining([[-64, -64], [32, 32]]));
+        const outputObjects = output.layers.find((entry: any) => entry.type === 'objectgroup');
+        expect(outputObjects.objects[0]).toMatchObject({ gid: positiveRaw, x: -17, y: -13, width: 2, height: 6, rotation: 15 });
+      } else {
+        expect(text).toContain('orientation="orthogonal"'); expect(text).toContain('infinite="1"');
+        expect(text).toContain('<chunk x="-64" y="-64" width="32" height="32">');
+        expect(text).toContain('<chunk x="32" y="32" width="32" height="32">');
+      }
+      const outputDirectory = join(directory, format); await mkdir(outputDirectory);
+      const outputPath = join(outputDirectory, format === 'tiled-json' ? 'infinite.tmj' : 'infinite.tmx');
+      await Promise.all([writeFile(outputPath, artifact.data), ...artifact.companions!.map((entry) => writeFile(join(outputDirectory, entry.name), entry.data))]);
+      const reopened = await importDocument(outputPath, true); expect(reopened.warnings).toEqual([]);
+      const reopenedDocument = reopened.documents[0]; if (reopenedDocument.kind !== 'pixel') throw new Error('Expected reopened pixel document');
+      const reopenedMap = reopenedDocument.pixelAssets[reopenedDocument.activeAssetId]; if (reopenedMap.type !== 'tilemap') throw new Error('Expected reopened tilemap');
+      const reopenedLayer = reopenedMap.layers[reopenedMap.layerIds.find((id) => reopenedMap.layers[id]?.type === 'tile')!]; if (reopenedLayer.type !== 'tile' || !reopenedLayer.chunks) throw new Error('Expected reopened tile layer');
+      expect(reopenedMap).toMatchObject({ orientation: 'orthogonal', infinite: true });
+      expect(readTileAt(reopenedLayer.chunks, -33, -34)).toBe(negativeRaw); expect(readTileAt(reopenedLayer.chunks, 34, 35)).toBe(positiveRaw);
+      const reopenedTileset = reopenedDocument.pixelAssets[reopenedMap.tilesetIds[0]]; if (reopenedTileset.type !== 'tileset') throw new Error('Expected reopened collection');
+      expect({ ids: Object.keys(reopenedTileset.tiles), offset: reopenedTileset.tileOffset, wangSets: reopenedTileset.wangSets }).toMatchObject({ ids: ['0', '3'], offset: { x: -1, y: 2 }, wangSets: [{ colors: [{ tileId: 3 }], tiles: [{ tileId: 0 }, { tileId: 3 }] }] });
+      expect(Buffer.from(renderTilemapRegion(reopenedDocument, reopenedMap, negativeRegion, undefined, 60).getContext('2d').getImageData(0, 0, 12, 12).data)).toEqual(negativeRaster);
+    }
   });
 
   it('persists and JSON/XML exports a human-created collection plus appended exact source without atlas synthesis', async () => {
@@ -673,7 +744,7 @@ describe('representative Tiled JSON interchange', () => {
     await writeFile(join(directory, 'gap.tmj'), JSON.stringify(map({ layers: [{ id: 1, name: 'Gap', type: 'tilelayer', width: 1, height: 1, data: [7] }] })));
     await expect(importDocument(join(directory, 'gap.tmj'), true)).rejects.toThrow('missing sparse image-collection GID 7');
     await writeFile(join(directory, 'isometric.tmj'), JSON.stringify(map({ orientation: 'isometric' })));
-    await expect(importDocument(join(directory, 'isometric.tmj'), true)).rejects.toThrow('only finite orthogonal');
+    await expect(importDocument(join(directory, 'isometric.tmj'), true)).rejects.toThrow('only orthogonal');
     const transformedObjectGid = encodeTiledGid(9, { hFlip: true, diagonal: true });
     await writeFile(join(directory, 'object.tmj'), JSON.stringify(map({ layers: [{ id: 1, name: 'Objects', type: 'objectgroup', objects: [
       { id: 'default-size', gid: transformedObjectGid, x: 3, y: 5, name: 'Exact sparse tile', class: 'actor', properties: [{ name: 'solid', type: 'bool', value: true }] },

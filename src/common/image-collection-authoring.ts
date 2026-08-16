@@ -238,7 +238,7 @@ function exactMapTilesetForLocalId(
 }
 
 /**
- * Counts the exact direct finite-map and animation references affected by a
+ * Counts the exact direct orthogonal-map and animation references affected by a
  * stable local-ID source replacement. Stored chunks are scanned lazily and
  * bounded across every attached map; no nominal map plane is synthesized.
  */
@@ -262,7 +262,7 @@ export function imageCollectionSourceReplacementImpact(
   for (const assetId of document.assetIds) {
     const map = document.pixelAssets[assetId];
     if (map?.type !== 'tilemap' || !map.tilesetIds.includes(tileset.id)) continue;
-    if (map.orientation !== 'orthogonal' || map.infinite) throw new Error(`Map “${map.name}” must remain finite orthogonal before replacing an image-collection source.`);
+    if (map.orientation !== 'orthogonal') throw new Error(`Map “${map.name}” must remain orthogonal before replacing an image-collection source.`);
     exactMapTilesetForLocalId(document, map, tileset, tileId);
     attachedMapCount += 1;
     const visited = new Set<string>();
@@ -287,7 +287,7 @@ export function imageCollectionSourceReplacementImpact(
         for (let index = 0; index < values.length; index += 1) {
           const x = chunk.x + index % chunk.width;
           const y = chunk.y + Math.floor(index / chunk.width);
-          if (x < 0 || y < 0 || x >= map.width || y >= map.height) continue;
+          if (!map.infinite && (x < 0 || y < 0 || x >= map.width || y >= map.height)) continue;
           if (decodeTiledGid(values[index]).gid === baseGid) directMapCellCount += 1;
         }
       }
@@ -409,7 +409,7 @@ export function imageCollectionSourceRemovalProof(
   for (const assetId of document.assetIds) {
     const map = document.pixelAssets[assetId];
     if (map?.type !== 'tilemap' || !map.tilesetIds.includes(tileset.id)) continue;
-    if (map.orientation !== 'orthogonal' || map.infinite) throw new Error(`Map “${map.name}” must remain finite orthogonal before removing an image-collection source.`);
+    if (map.orientation !== 'orthogonal') throw new Error(`Map “${map.name}” must remain orthogonal before removing an image-collection source.`);
     exactMapTilesetForLocalId(document, map, tileset, tileId);
     attachedMapCount += 1;
     const visited = new Set<string>();

@@ -631,7 +631,7 @@ describe('document service collaboration semantics', () => {
         0: { id: 0, sourceX: 0, sourceY: 0, imageAssetId: source0.id, probability: 1, animation: [], collisions: [], properties: {} },
         3: { id: 3, sourceX: 0, sourceY: 0, imageAssetId: source3.id, probability: 1, animation: [], collisions: [], properties: {} },
       };
-      const map = createPixelTilemap('Collection paint map'); map.tilesetIds = [tileset.id];
+      const map = createPixelTilemap('Collection paint map'); map.infinite = true; map.tilesetIds = [tileset.id];
       const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile' || !layer.chunks) throw new Error('Expected tile layer');
       document.assetIds = [source0.id, source3.id, tileset.id, map.id];
       document.pixelAssets = { [source0.id]: source0, [source3.id]: source3, [tileset.id]: tileset, [map.id]: map };
@@ -659,7 +659,7 @@ describe('document service collaboration semantics', () => {
         id: createId('tx'), clientOperationId: createId('human-op'), documentId: document.id,
         expectedDocumentRevision: stalePlan.expectedDocumentRevision, actor: HUMAN_ACTOR,
         label: 'Paint stale collection tile', createdAt: nowIso(),
-        operations: [{ kind: 'pixel.tilemap.set', mapId: map.id, layerId: layer.id, changes: [{ x: 2, y: 4, gid: stalePlan.rawGid }], expectedRevision: layer.revision }],
+        operations: [{ kind: 'pixel.tilemap.set', mapId: map.id, layerId: layer.id, changes: [{ x: -35, y: 36, gid: stalePlan.rawGid }], expectedRevision: layer.revision }],
       });
       const [driftResponse, staleResponse] = await Promise.all([drift, stalePaint]);
       expect(driftResponse).toMatchObject({ status: 'committed', revision: document.revision + 1 });
@@ -670,7 +670,7 @@ describe('document service collaboration semantics', () => {
       const afterConflict = service.getDocument(document.id); if (!afterConflict || afterConflict.kind !== 'pixel') throw new Error('Expected pixel document');
       const afterConflictMap = afterConflict.pixelAssets[map.id]; if (afterConflictMap.type !== 'tilemap') throw new Error('Expected tilemap');
       const afterConflictLayer = afterConflictMap.layers[layer.id]; if (afterConflictLayer.type !== 'tile' || !afterConflictLayer.chunks) throw new Error('Expected tile layer');
-      expect(readTileAt(afterConflictLayer.chunks, 2, 4)).toBe(0);
+      expect(readTileAt(afterConflictLayer.chunks, -35, 36)).toBe(0);
       expect(afterConflict.activity.map(({ label }) => label)).toEqual([driftLabel]);
       expect(service.getChanges(document.id, document.revision)).toHaveLength(1);
 
@@ -685,17 +685,17 @@ describe('document service collaboration semantics', () => {
         id: createId('tx'), clientOperationId: createId('human-op'), documentId: document.id,
         expectedDocumentRevision: freshPlan.expectedDocumentRevision, actor: HUMAN_ACTOR,
         label: 'Paint current collection tile', createdAt: nowIso(),
-        operations: [{ kind: 'pixel.tilemap.set', mapId: map.id, layerId: layer.id, changes: [{ x: 2, y: 4, gid: freshPlan.rawGid }], expectedRevision: afterConflictLayer.revision }],
+        operations: [{ kind: 'pixel.tilemap.set', mapId: map.id, layerId: layer.id, changes: [{ x: -35, y: 36, gid: freshPlan.rawGid }], expectedRevision: afterConflictLayer.revision }],
       })).toMatchObject({ status: 'committed', revision: document.revision + 2 });
       const painted = service.getDocument(document.id); if (!painted || painted.kind !== 'pixel') throw new Error('Expected pixel document');
       const paintedMap = painted.pixelAssets[map.id]; if (paintedMap.type !== 'tilemap') throw new Error('Expected tilemap');
       const paintedLayer = paintedMap.layers[layer.id]; if (paintedLayer.type !== 'tile' || !paintedLayer.chunks) throw new Error('Expected tile layer');
-      expect(readTileAt(paintedLayer.chunks, 2, 4)).toBe(freshPlan.rawGid);
+      expect(readTileAt(paintedLayer.chunks, -35, 36)).toBe(freshPlan.rawGid);
       expect(await service.undo(document.id)).toMatchObject({ status: 'committed', revision: document.revision + 3 });
       const undone = service.getDocument(document.id); if (!undone || undone.kind !== 'pixel') throw new Error('Expected pixel document');
       const undoneMap = undone.pixelAssets[map.id]; if (undoneMap.type !== 'tilemap') throw new Error('Expected tilemap');
       const undoneLayer = undoneMap.layers[layer.id]; if (undoneLayer.type !== 'tile' || !undoneLayer.chunks) throw new Error('Expected tile layer');
-      expect(readTileAt(undoneLayer.chunks, 2, 4)).toBe(0);
+      expect(readTileAt(undoneLayer.chunks, -35, 36)).toBe(0);
     }
   });
 
@@ -711,7 +711,7 @@ describe('document service collaboration semantics', () => {
       3: { id: 3, sourceX: 0, sourceY: 0, imageAssetId: source3.id, probability: 1, animation: [], collisions: [], properties: {} },
     };
     tileset.wangSets = [{ id: 'collection-wang', name: 'Collection Wang', type: 'mixed', colors: [{ id: 1, name: 'Land', color: '#55aa44', tileId: 3, probability: 1 }], tiles: [{ tileId: 0, wangId: [0, 0, 0, 0, 0, 0, 0, 0] }, { tileId: 3, wangId: [1, 1, 1, 1, 1, 1, 1, 1] }] }];
-    const map = createPixelTilemap('Collection Wang map'); map.tilesetIds = [tileset.id];
+    const map = createPixelTilemap('Collection Wang map'); map.infinite = true; map.tilesetIds = [tileset.id];
     const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile' || !layer.chunks) throw new Error('Expected tile layer');
     document.assetIds = [source0.id, source3.id, tileset.id, map.id]; document.pixelAssets = { [source0.id]: source0, [source3.id]: source3, [tileset.id]: tileset, [map.id]: map }; document.activeAssetId = map.id;
     service.addDocument(document);
@@ -720,21 +720,21 @@ describe('document service collaboration semantics', () => {
     if (stale.expectedDocumentRevision === undefined) throw new Error('Expected collection Wang document guard');
     const renamed = structuredClone(tileset); renamed.wangSets[0].name = 'Changed before stroke';
     const metadataChange = service.apply({ id: createId('tx'), clientOperationId: createId('human-op'), documentId: document.id, actor: HUMAN_ACTOR, label: 'Change Wang metadata first', createdAt: nowIso(), operations: [{ kind: 'pixel.asset.replace', asset: renamed, expectedRevision: tileset.revision }] });
-    const staleStroke = service.apply({ id: createId('tx'), clientOperationId: createId('human-op'), documentId: document.id, expectedDocumentRevision: stale.expectedDocumentRevision, actor: HUMAN_ACTOR, label: 'Paint stale collection Wang', createdAt: nowIso(), operations: [{ kind: 'pixel.tilemap.set', mapId: map.id, layerId: layer.id, changes: [{ x: 1, y: 1, gid: tileset.firstGid + 3 }], expectedRevision: layer.revision }] });
+    const staleStroke = service.apply({ id: createId('tx'), clientOperationId: createId('human-op'), documentId: document.id, expectedDocumentRevision: stale.expectedDocumentRevision, actor: HUMAN_ACTOR, label: 'Paint stale collection Wang', createdAt: nowIso(), operations: [{ kind: 'pixel.tilemap.set', mapId: map.id, layerId: layer.id, changes: [{ x: -33, y: 34, gid: tileset.firstGid + 3 }], expectedRevision: layer.revision }] });
     expect(await metadataChange).toMatchObject({ status: 'committed' });
     expect(await staleStroke).toMatchObject({ status: 'conflict', conflict: { entityId: document.id, expectedRevision: document.revision, actualRevision: document.revision + 1 } });
     const after = service.getDocument(document.id); if (!after || after.kind !== 'pixel') throw new Error('Expected pixel document');
     const afterMap = after.pixelAssets[map.id]; if (afterMap.type !== 'tilemap') throw new Error('Expected map'); const afterLayer = afterMap.layers[layer.id]; if (afterLayer.type !== 'tile' || !afterLayer.chunks) throw new Error('Expected tile layer');
-    expect(readTileAt(afterLayer.chunks, 1, 1)).toBe(0);
+    expect(readTileAt(afterLayer.chunks, -33, 34)).toBe(0);
     expect(after.activity.map((entry) => entry.label)).toEqual(['Change Wang metadata first']);
     expect(service.getChanges(document.id, document.revision)).toHaveLength(1);
 
     const currentTileset = after.pixelAssets[tileset.id]; if (currentTileset.type !== 'tileset') throw new Error('Expected tileset');
     const fresh = planWangTerrainSelection(after, { mapId: map.id, tilesetId: currentTileset.id, wangSetId: 'collection-wang', colorId: 1 });
-    expect(await service.apply({ id: createId('tx'), clientOperationId: createId('human-op'), documentId: document.id, expectedDocumentRevision: fresh.expectedDocumentRevision, actor: HUMAN_ACTOR, label: 'Paint current collection Wang', createdAt: nowIso(), operations: [{ kind: 'pixel.tilemap.set', mapId: map.id, layerId: layer.id, changes: [{ x: 1, y: 1, gid: currentTileset.firstGid + 3 }], expectedRevision: afterLayer.revision }] })).toMatchObject({ status: 'committed' });
+    expect(await service.apply({ id: createId('tx'), clientOperationId: createId('human-op'), documentId: document.id, expectedDocumentRevision: fresh.expectedDocumentRevision, actor: HUMAN_ACTOR, label: 'Paint current collection Wang', createdAt: nowIso(), operations: [{ kind: 'pixel.tilemap.set', mapId: map.id, layerId: layer.id, changes: [{ x: -33, y: 34, gid: currentTileset.firstGid + 3 }], expectedRevision: afterLayer.revision }] })).toMatchObject({ status: 'committed' });
     expect(await service.undo(document.id)).toMatchObject({ status: 'committed' });
     const undone = service.getDocument(document.id); if (!undone || undone.kind !== 'pixel') throw new Error('Expected pixel document'); const undoneMap = undone.pixelAssets[map.id]; if (undoneMap.type !== 'tilemap') throw new Error('Expected map'); const undoneLayer = undoneMap.layers[layer.id]; if (undoneLayer.type !== 'tile' || !undoneLayer.chunks) throw new Error('Expected tile layer');
-    expect(readTileAt(undoneLayer.chunks, 1, 1)).toBe(0);
+    expect(readTileAt(undoneLayer.chunks, -33, 34)).toBe(0);
   });
 
   it('atomically refuses a queued portable tile-kit plan after an earlier palette change, then admits a fresh import and undo', async () => {
@@ -813,7 +813,7 @@ describe('document service collaboration semantics', () => {
       0: { id: 0, sourceX: 0, sourceY: 0, imageAssetId: source0.id, probability: 1, animation: [], collisions: [], properties: {} },
       3: { id: 3, sourceX: 0, sourceY: 0, imageAssetId: source3.id, probability: 1, animation: [], collisions: [], properties: {} },
     };
-    const map = createPixelTilemap('Collection object map'); map.tilesetIds = [tileset.id];
+    const map = createPixelTilemap('Collection object map'); map.infinite = true; map.tilesetIds = [tileset.id];
     const layer = map.layers[map.layerIds[0]]; layer.type = 'object'; delete layer.chunks; layer.objects = [];
     document.assetIds = [source0.id, source3.id, tileset.id, map.id];
     document.pixelAssets = { [source0.id]: source0, [source3.id]: source3, [tileset.id]: tileset, [map.id]: map };
@@ -822,7 +822,7 @@ describe('document service collaboration semantics', () => {
 
     const plan = planTileObjectCreation(document, {
       mapId: map.id, layerId: layer.id, tilesetId: tileset.id, tileId: 3,
-      objectId: 'queued-collection-object', point: { x: 4, y: 9 },
+      objectId: 'queued-collection-object', point: { x: -36, y: 41 },
       transforms: { hFlip: false, vFlip: false, diagonal: false },
     });
     const resizedSource = structuredClone(source3); resizedSource.width += 1;
@@ -861,7 +861,7 @@ describe('document service collaboration semantics', () => {
       0: { id: 0, sourceX: 0, sourceY: 0, imageAssetId: source0.id, probability: 1, animation: [], collisions: [], properties: {} },
       3: { id: 3, sourceX: 0, sourceY: 0, imageAssetId: source3.id, probability: 1, animation: [], collisions: [], properties: {} },
     };
-    const map = createPixelTilemap('Collection object map'); map.tilesetIds = [tileset.id];
+    const map = createPixelTilemap('Collection object map'); map.infinite = true; map.tilesetIds = [tileset.id];
     const layer = map.layers[map.layerIds[0]]; layer.type = 'object'; delete layer.chunks; layer.objects = [];
     document.assetIds = [source0.id, source3.id, tileset.id, map.id];
     document.pixelAssets = { [source0.id]: source0, [source3.id]: source3, [tileset.id]: tileset, [map.id]: map };
@@ -870,7 +870,7 @@ describe('document service collaboration semantics', () => {
 
     const placement = planTileObjectCreation(document, {
       mapId: map.id, layerId: layer.id, tilesetId: tileset.id, tileId: 3,
-      objectId: 'queued-stale-collection-object', point: { x: 4, y: 9 },
+      objectId: 'queued-stale-collection-object', point: { x: -36, y: 41 },
       transforms: { hFlip: false, vFlip: false, diagonal: false },
     });
     if (placement.expectedDocumentRevision === undefined) throw new Error('Expected collection document guard');
@@ -1000,7 +1000,7 @@ describe('document service collaboration semantics', () => {
     const removable = createPixelSprite('Removable source', 12, 7);
     document.assetIds.push(removable.id); document.pixelAssets[removable.id] = removable;
     const collection = createImageCollectionTileset(document, 'Queued collection', [retained.id, removable.id], { id: 'queued-removal-collection' });
-    const map = createPixelTilemap('Queued reference map'); map.tilesetIds = [collection.id]; map.width = 1; map.height = 1;
+    const map = createPixelTilemap('Queued reference map'); map.infinite = true; map.tilesetIds = [collection.id]; map.width = 1; map.height = 1;
     const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile' || !layer.chunks) throw new Error('Expected tile layer');
     document.assetIds.push(collection.id, map.id); document.pixelAssets[collection.id] = collection; document.pixelAssets[map.id] = map; document.activeAssetId = collection.id;
     service.addDocument(document);
@@ -1009,7 +1009,7 @@ describe('document service collaboration semantics', () => {
     const rawTarget = encodeTiledGid(collection.firstGid + 1, { hFlip: true, diagonal: true });
     const referenceWrite = service.apply({
       id: createId('tx'), clientOperationId: createId('human-op'), documentId: document.id, actor: HUMAN_ACTOR,
-      label: 'Reference collection tile first', createdAt: nowIso(), operations: [{ kind: 'pixel.tilemap.set', mapId: map.id, layerId: layer.id, changes: [{ x: 0, y: 0, gid: rawTarget }], expectedRevision: layer.revision }],
+      label: 'Reference collection tile first', createdAt: nowIso(), operations: [{ kind: 'pixel.tilemap.set', mapId: map.id, layerId: layer.id, changes: [{ x: -34, y: 35, gid: rawTarget }], expectedRevision: layer.revision }],
     });
     const staleRemoval = service.apply({
       id: createId('tx'), clientOperationId: createId('human-op'), documentId: document.id, expectedDocumentRevision: document.revision, actor: HUMAN_ACTOR,
@@ -1021,14 +1021,14 @@ describe('document service collaboration semantics', () => {
     const afterConflict = service.getDocument(document.id); if (!afterConflict || afterConflict.kind !== 'pixel') throw new Error('Expected pixel document');
     const referencedMap = afterConflict.pixelAssets[map.id]; if (referencedMap.type !== 'tilemap') throw new Error('Expected map');
     const referencedLayer = referencedMap.layers[layer.id]; if (referencedLayer.type !== 'tile' || !referencedLayer.chunks) throw new Error('Expected tile layer');
-    expect(readTileAt(referencedLayer.chunks, 0, 0)).toBe(rawTarget);
+    expect(readTileAt(referencedLayer.chunks, -34, 35)).toBe(rawTarget);
     expect(afterConflict.pixelAssets[collection.id]).toEqual(collection);
     expect(afterConflict.activity.map(({ label }) => label)).toEqual(['Reference collection tile first']);
     expect(() => removeUnusedImageCollectionSource(afterConflict, collection.id, 1)).toThrow(/still references image-collection tile 1/);
 
     expect(await service.apply({
       id: createId('tx'), clientOperationId: createId('human-op'), documentId: document.id, actor: HUMAN_ACTOR,
-      label: 'Clear collection tile reference', createdAt: nowIso(), operations: [{ kind: 'pixel.tilemap.set', mapId: map.id, layerId: layer.id, changes: [{ x: 0, y: 0, gid: 0 }], expectedRevision: referencedLayer.revision }],
+      label: 'Clear collection tile reference', createdAt: nowIso(), operations: [{ kind: 'pixel.tilemap.set', mapId: map.id, layerId: layer.id, changes: [{ x: -34, y: 35, gid: 0 }], expectedRevision: referencedLayer.revision }],
     })).toMatchObject({ status: 'committed', revision: document.revision + 2 });
     const cleared = service.getDocument(document.id); if (!cleared || cleared.kind !== 'pixel') throw new Error('Expected pixel document');
     const retryPlan = removeUnusedImageCollectionSource(cleared, collection.id, 1);

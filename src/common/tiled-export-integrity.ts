@@ -219,6 +219,6 @@ function planTiledExportLayerData(
 export function planTiledMapExport(document: PixelDocument, map: PixelTilemap): TiledMapExportPlan {
   assertTiledExportResourceBudget(map);
   const plan = planTiledExportReferences(document, map);
-  if (plan.tilesets.some(({ tileset }) => isImageCollectionTileset(tileset)) && (map.orientation !== 'orthogonal' || map.infinite)) throw new Error('Tiled image-collection export supports only finite orthogonal maps.');
+  if (plan.tilesets.some(({ tileset }) => isImageCollectionTileset(tileset)) && map.orientation !== 'orthogonal') throw new Error('Tiled image-collection export supports only orthogonal maps.');
   return { ...plan, tileLayers: planTiledExportLayerData(map, plan) };
 }

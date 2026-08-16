@@ -77,7 +77,7 @@ describe('transaction reducer', () => {
     expect(restored.palette).toEqual(document.palette);
   });
 
-  it('refuses image-collection maps outside finite orthogonal mode before canonical mutation', () => {
+  it('admits sparse-infinite orthogonal image-collection maps but refuses isometric mode before canonical mutation', () => {
     const document = createPixelDocument('project', 'Collection mode guard');
     const tileImage = createPixelSprite('Sparse tile', 2, 2);
     const collection = createPixelTileset('Sparse collection', tileImage.id, 2, 2, 1, 1);
@@ -92,13 +92,16 @@ describe('transaction reducer', () => {
       operations: [{ kind: 'pixel.asset.replace', asset, expectedRevision: map.revision }],
     });
 
-    expect(() => applyTransaction(document, replace({ ...map, orientation: 'isometric' }, 'Use isometric mode'))).toThrow(/must remain finite orthogonal/);
-    expect(() => applyTransaction(document, replace({ ...map, infinite: true }, 'Enable infinite chunks'))).toThrow(/must remain finite orthogonal/);
+    expect(() => applyTransaction(document, replace({ ...map, orientation: 'isometric' }, 'Use isometric mode'))).toThrow(/must remain orthogonal/);
     expect(document).toEqual(before);
 
-    const applied = applyTransaction(document, replace({ ...map, width: map.width + 1 }, 'Resize finite map'));
+    const applied = applyTransaction(document, replace({ ...map, infinite: true }, 'Enable sparse infinite chunks'));
     if (applied.document.kind !== 'pixel') throw new Error('Expected pixel document');
-    expect(applied.document.pixelAssets[map.id]).toMatchObject({ width: map.width + 1, orientation: 'orthogonal', infinite: false });
+    expect(applied.document.pixelAssets[map.id]).toMatchObject({ orientation: 'orthogonal', infinite: true, revision: map.revision + 1 });
+    expect(applied.document.activity.at(-1)).toMatchObject({ label: 'Enable sparse infinite chunks', actor: HUMAN_ACTOR });
+    const restored = applyTransaction(applied.document, applied.inverse, { recordActivity: false }).document;
+    if (restored.kind !== 'pixel') throw new Error('Expected pixel document');
+    expect(restored.pixelAssets[map.id]).toMatchObject({ orientation: 'orthogonal', infinite: false });
   });
 
   it('authors a tilemap layer offset through one revisioned replacement with an exact inverse', () => {

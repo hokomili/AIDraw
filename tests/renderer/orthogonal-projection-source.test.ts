@@ -52,10 +52,10 @@ describe('orthogonal projection source parity', () => {
     expect(headless).toContain('sourceAsset.width'); expect(headless).toContain('sourceAsset.height');
     expect(interactive).toContain('mapSourceAsset.width'); expect(interactive).toContain('mapSourceAsset.height');
     expect(interactive).toContain('const atlasMapTilesets = attachedMapTilesets.filter((entry) => Boolean(entry.spriteAssetId))');
-    expect(interactive).toContain("const finiteOrthogonalCollectionTilesets = attachedMapTilesets.filter((entry) => isImageCollectionTileset(entry) && tilemap?.orientation === 'orthogonal' && !tilemap.infinite)");
-    expect(interactive).toContain('const authorableMapTileTilesets = [...atlasMapTilesets, ...finiteOrthogonalCollectionTilesets]');
+    expect(interactive).toContain("const orthogonalCollectionTilesets = attachedMapTilesets.filter((entry) => isImageCollectionTileset(entry) && tilemap?.orientation === 'orthogonal')");
+    expect(interactive).toContain('const authorableMapTileTilesets = [...atlasMapTilesets, ...orthogonalCollectionTilesets]');
     expect(interactive).toContain("currentMapTileChoice?.documentId === document.id");
-    expect(interactive).toContain('const wangTerrainTilesets = [\n    ...atlasMapTilesets,\n    ...finiteOrthogonalCollectionTilesets.filter((entry) => entry.wangSets.length > 0)');
+    expect(interactive).toContain('const wangTerrainTilesets = [\n    ...atlasMapTilesets,\n    ...orthogonalCollectionTilesets.filter((entry) => entry.wangSets.length > 0)');
     expect(interactive).toContain("tool === 'terrain'\n      ? selectedTerrainTileset\n      : currentMapTileTileset");
     expect(interactive).toContain('aria-label="Wang terrain tileset"');
     expect(interactive).toContain('<CurrentMapTileControl');
@@ -76,7 +76,7 @@ describe('orthogonal projection source parity', () => {
     expect(interactive).toContain('else if (tilemap && !tilemapModeError)');
     expect(interactive).toContain('<strong>Unsupported image-collection map mode</strong>');
     expect(interactive).toContain('<strong>Image collection tileset</strong>');
-    expect(interactive).toContain('sparse PNG tile(s) · {asset.columns} display column(s). Per-tile artwork is read-only here; use this tileset from a finite orthogonal map.');
+    expect(interactive).toContain('sparse PNG tile(s) · {asset.columns} display column(s). Per-tile artwork is read-only here; use this tileset from an orthogonal map.');
     expect(interactive.indexOf("asset.type === 'tileset' && isImageCollectionTileset(asset)")).toBeLessThan(interactive.indexOf("asset.type === 'tileset' && !sprite"));
     expect(headless).toContain('assertImageCollectionTilemapMode(document, map);');
   });

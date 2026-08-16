@@ -104,8 +104,8 @@ function requireMap(document: PixelDocument, mapId: string, tileset: PixelTilese
   const map = document.pixelAssets[mapId];
   if (!map || map.type !== 'tilemap') throw new Error(`Tilemap ${mapId} does not exist.`);
   if (!map.tilesetIds.includes(tileset.id)) throw new Error(`Tileset ${tileset.id} is not attached to tilemap ${map.id}.`);
-  if (isImageCollectionTileset(tileset) && (map.orientation !== 'orthogonal' || map.infinite)) {
-    throw new Error('Image-collection Wang terrain requires a finite orthogonal map.');
+  if (isImageCollectionTileset(tileset) && map.orientation !== 'orthogonal') {
+    throw new Error('Image-collection Wang terrain requires an orthogonal map.');
   }
   return map;
 }
@@ -198,11 +198,11 @@ export function planImageCollectionWangMutation(
   }
   validateCollectionAnimationTargets(next);
   const maps = Object.values(document.pixelAssets).filter((asset): asset is PixelTilemap => asset.type === 'tilemap' && asset.tilesetIds.includes(current.id));
-  if (!maps.length) throw new Error('Attach this image collection to a finite orthogonal map before authoring Wang terrain.');
+  if (!maps.length) throw new Error('Attach this image collection to an orthogonal map before authoring Wang terrain.');
   const tileIds = [...new Set(next.wangSets.flatMap(wangSetReferencedTileIds))].sort((left, right) => left - right);
   for (const set of next.wangSets) validateWangTilesetMeaning(next, set);
   for (const map of maps) {
-    if (map.orientation !== 'orthogonal' || map.infinite) throw new Error('Image-collection Wang terrain requires every attached map to remain finite orthogonal.');
+    if (map.orientation !== 'orthogonal') throw new Error('Image-collection Wang terrain requires every attached map to remain orthogonal.');
     assertExactAttachedResolution(document, map, next, tileIds);
   }
   return {

@@ -72,8 +72,8 @@ export function imageCollectionTilemapModeError(document: PixelDocument, map: Pi
   const collection = map.tilesetIds
     .map((id) => document.pixelAssets[id])
     .find((asset): asset is PixelTileset => asset?.type === 'tileset' && isImageCollectionTileset(asset));
-  if (!collection || (map.orientation === 'orthogonal' && !map.infinite)) return undefined;
-  return `Map “${map.name}” uses image-collection tileset “${collection.name}” and must remain finite orthogonal. Detach the collection before changing orientation or enabling infinite chunks.`;
+  if (!collection || map.orientation === 'orthogonal') return undefined;
+  return `Map “${map.name}” uses image-collection tileset “${collection.name}” and must remain orthogonal. Detach the collection before changing orientation.`;
 }
 
 export function assertImageCollectionTilemapMode(document: PixelDocument, map: PixelTilemap): void {

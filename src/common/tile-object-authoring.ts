@@ -161,7 +161,7 @@ export function planTileObjectCreation(document: PixelDocument, request: TileObj
   const tileCount = tilesetLocalIdSpan(tileset);
   if (!Number.isSafeInteger(request.tileId) || request.tileId < 0 || request.tileId >= tileCount) throw new RangeError(`Tile ID must be a whole number from 0 to ${Math.max(0, tileCount - 1)} for tileset “${tileset.name}”.`);
   if (imageCollection && !tileset.tiles[request.tileId]?.imageAssetId) throw new Error(`Tile ${request.tileId} is a sparse gap in image collection “${tileset.name}”. Choose one exact existing tile ID.`);
-  if (imageCollection && (asset.orientation !== 'orthogonal' || asset.infinite)) throw new Error(`Image-collection tile objects require a finite orthogonal map.`);
+  if (imageCollection && asset.orientation !== 'orthogonal') throw new Error(`Image-collection tile objects require an orthogonal map.`);
   if (!tileTransformFlagsAllowed(request.transforms, tileset.transformations)) throw new Error(`The selected H/V/diagonal transform is not permitted by tileset “${tileset.name}”.`);
 
   const baseGid = tileset.firstGid + request.tileId;

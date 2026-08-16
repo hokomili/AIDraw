@@ -57,7 +57,7 @@ describe('image-collection Wang terrain admission', () => {
     expect(wangTerrainSelectionPlansMatch(plan, planWangTerrainSelection(drift, request(source)))).toBe(false);
   });
 
-  it('refuses sparse gaps, missing sources, unsupported modes, overlap, and precedence shadows', () => {
+  it('admits sparse-infinite maps while refusing sparse gaps, missing sources, isometric mode, overlap, and precedence shadows', () => {
     const source = fixture();
     const sourceId = source.collection.tiles[3].imageAssetId!;
     source.collection.tiles[3].imageAssetId = 'missing-source';
@@ -68,8 +68,10 @@ describe('image-collection Wang terrain admission', () => {
     source.collection.wangSets[0].tiles[1].tileId = 3;
     const map = source.document.pixelAssets[source.mapId]; if (map.type !== 'tilemap') throw new Error('Expected map');
     map.infinite = true;
-    expect(() => planWangTerrainSelection(source.document, request(source))).toThrow('finite orthogonal');
-    map.infinite = false;
+    expect(planWangTerrainSelection(source.document, request(source))).toMatchObject({ mapId: map.id, imageCollection: true });
+    map.infinite = false; map.orientation = 'isometric';
+    expect(() => planWangTerrainSelection(source.document, request(source))).toThrow('orthogonal map');
+    map.orientation = 'orthogonal'; map.infinite = true;
     const overlap = createPixelTileset('Overlap', 'missing-atlas', 8, 8, 4, 1); overlap.firstGid = 20;
     source.document.pixelAssets[overlap.id] = overlap; source.document.assetIds.push(overlap.id); map.tilesetIds.push(overlap.id);
     expect(() => planWangTerrainSelection(source.document, request(source))).toThrow('covered by 2');
@@ -98,10 +100,15 @@ describe('image-collection Wang terrain admission', () => {
     expect(() => planImageCollectionWangMutation(source.document, source.collection, next)).toThrow('sparse gap or missing source');
   });
 
-  it('admits metadata replacement only across exact finite attachments and complete source guards', () => {
+  it('admits metadata replacement across exact finite and sparse-infinite orthogonal attachments with complete source guards', () => {
     const source = fixture();
     const next = structuredClone(source.collection);
     next.wangSets[0].name = 'Renamed exact terrain';
+    expect(planImageCollectionWangMutation(source.document, source.collection, next)).toMatchObject({
+      expectedDocumentRevision: source.document.revision,
+      expectedSpriteDependencies: [{ spriteId: source.collection.tiles[0].imageAssetId }, { spriteId: source.collection.tiles[3].imageAssetId }],
+    });
+    const sparseMap = source.document.pixelAssets[source.mapId]; if (sparseMap.type !== 'tilemap') throw new Error('Expected map'); sparseMap.infinite = true;
     expect(planImageCollectionWangMutation(source.document, source.collection, next)).toMatchObject({
       expectedDocumentRevision: source.document.revision,
       expectedSpriteDependencies: [{ spriteId: source.collection.tiles[0].imageAssetId }, { spriteId: source.collection.tiles[3].imageAssetId }],

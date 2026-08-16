@@ -462,8 +462,8 @@ export function preparePortableTileStampKitImport(
     throw new Error('The destination map changed before portable tile kit planning. Reopen the reviewed import.');
   }
   const importsImageCollection = bundle.assets.some((asset) => asset.type === 'tileset' && isImageCollectionTileset(asset));
-  if (importsImageCollection && (map.orientation !== 'orthogonal' || map.infinite)) {
-    throw new Error('Portable image-collection tile kits require a finite orthogonal destination map.');
+  if (importsImageCollection && map.orientation !== 'orthogonal') {
+    throw new Error('Portable image-collection tile kits require an orthogonal destination map.');
   }
   if (importsImageCollection) assertImageCollectionTilemapMode(document, map);
   const makeId = options.makeId ?? createId;
