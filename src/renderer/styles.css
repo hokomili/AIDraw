@@ -667,6 +667,48 @@ html[data-native-titlebar="hidden-inset"] .brand { width: max(calc(118px + var(-
 .custom-property-details code { font: inherit; }
 .custom-property-value { grid-column: 1 / -1; }
 
+/* Source-sheet re-slicing keeps every review decision legible before the existing explicit commit. */
+.tileset-slice-editor { min-width: 0; }
+.tileset-slice-editor .tileset-slice-grid { min-width: 0; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.tileset-slice-editor .tileset-slice-grid .field { min-width: 0; margin-bottom: 0; }
+.tileset-slice-editor .tileset-slice-grid .field > span { font-size: var(--ui-type-caption); }
+.tileset-slice-editor .tileset-slice-grid input { width: 100%; min-width: 0; height: var(--ui-hit-secondary); font-size: var(--ui-type-label); font-variant-numeric: tabular-nums; }
+.slice-legend { position: static; min-width: 0; margin: 6px 0 0; padding: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: stretch; gap: 5px; list-style: none; background: transparent; color: var(--ink); font-size: inherit; }
+.slice-legend li { min-width: 0; padding: 6px; display: grid; grid-template-columns: var(--ui-icon-secondary) minmax(0, 1fr); align-items: center; gap: 6px; border: 1px solid var(--border-soft); border-radius: 7px; background: #fff; }
+.slice-legend i { width: var(--ui-icon-secondary); height: var(--ui-icon-secondary); border-width: 2px; background: transparent; }
+.slice-legend i.current { border-color: #514a58; border-style: dashed; }
+.slice-legend i.draft { border-color: #765bd2; border-style: solid; }
+.slice-legend i.selected { border: 3px double #b64059; }
+.slice-legend span, .slice-legend strong, .slice-legend small { min-width: 0; display: block; white-space: normal; overflow-wrap: anywhere; }
+.slice-legend strong { color: var(--ink); font-size: var(--ui-type-label); line-height: 1.3; }
+.slice-legend small { margin-top: 2px; color: var(--muted); font-size: var(--ui-type-caption); line-height: 1.35; }
+.tileset-remap-options { min-width: 0; gap: 6px; margin-top: 7px; padding: 8px; }
+.tileset-remap-options legend { padding: 0 5px; color: var(--muted); font-size: var(--ui-type-caption); font-weight: 700; }
+.tileset-remap-options label { min-width: 0; min-height: var(--ui-hit-primary); padding: 6px 7px; align-items: flex-start; gap: 8px; border: 1px solid var(--border-soft); border-radius: 7px; background: #fff; cursor: pointer; }
+.tileset-remap-options label:focus-within { border-color: #6948d2; box-shadow: 0 0 0 2px rgba(105, 72, 210, .16); }
+.tileset-remap-options input { width: var(--ui-icon-secondary); height: var(--ui-icon-secondary); flex: 0 0 auto; margin: 1px 0 0; }
+.tileset-remap-options label > span, .tileset-remap-options strong, .tileset-remap-options small { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+.tileset-remap-options strong { color: var(--ink); font-size: var(--ui-type-label); line-height: 1.3; }
+.tileset-remap-options small { margin-top: 2px; font-size: var(--ui-type-caption); line-height: 1.4; }
+.tileset-reslice-impact, .tileset-reslice-error { min-width: 0; margin: 7px 0 0; padding: 8px; font-size: inherit; line-height: 1.4; }
+.tileset-reslice-impact > strong, .tileset-reslice-error > strong { min-width: 0; display: block; color: inherit; font-size: var(--ui-type-label); line-height: 1.35; white-space: normal; overflow-wrap: anywhere; }
+.tileset-reslice-impact dl { min-width: 0; margin: 6px 0 0; display: grid; gap: 5px; }
+.tileset-reslice-impact dl > div { min-width: 0; padding: 6px 7px; border-radius: 7px; background: rgba(255, 255, 255, .58); }
+.tileset-reslice-impact dt { color: inherit; font-size: var(--ui-type-caption); font-weight: 750; }
+.tileset-reslice-impact dd { min-width: 0; margin: 2px 0 0; color: inherit; font-size: var(--ui-type-label); line-height: 1.4; white-space: normal; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.tileset-reslice-error { display: grid; gap: 3px; }
+.tileset-reslice-error > span { min-width: 0; display: block; font-size: var(--ui-type-caption); white-space: normal; overflow-wrap: anywhere; }
+.tileset-reslice-ack { min-width: 0; min-height: var(--ui-hit-primary); padding: 7px 8px; align-items: flex-start; gap: 8px; border: 1px solid #e9b6c2; border-radius: 7px; background: #fff3f5; cursor: pointer; }
+.tileset-reslice-ack:focus-within { border-color: #a33851; box-shadow: 0 0 0 2px rgba(163, 56, 81, .16); }
+.tileset-reslice-ack input { width: var(--ui-icon-secondary); height: var(--ui-icon-secondary); flex: 0 0 auto; margin: 1px 0 0; }
+.tileset-reslice-ack > span, .tileset-reslice-ack strong, .tileset-reslice-ack small { min-width: 0; display: block; white-space: normal; overflow-wrap: anywhere; }
+.tileset-reslice-ack strong { color: #7f4a57; font-size: var(--ui-type-label); line-height: 1.3; }
+.tileset-reslice-ack small { margin-top: 2px; color: #7f4a57; font-size: var(--ui-type-caption); line-height: 1.4; }
+.tileset-reslice-actions { min-width: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.tileset-reslice-actions button { min-width: 0; min-height: var(--ui-hit-secondary); height: auto; padding: 0 9px; font-size: var(--ui-type-caption); font-weight: 700; white-space: normal; overflow-wrap: anywhere; }
+.tileset-reslice-actions button:focus-visible { outline: 2px solid #6948d2; outline-offset: 1px; }
+.tileset-reslice-actions button:disabled { opacity: .45; cursor: default; }
+
 /* Atlas and sparse image-collection tile IDs share one exact native chooser. */
 .tile-definition-grid { max-height: 164px; margin: 0 12px 8px; padding: 2px 4px 2px 2px; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 4px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
 .tile-definition-grid button { min-width: 0; min-height: var(--ui-hit-secondary); padding: 0 2px; display: grid; align-content: center; justify-items: center; gap: 0; border: 1px solid transparent; border-radius: 7px; background: #f1edef; color: var(--muted); text-align: center; cursor: pointer; }
@@ -702,6 +744,7 @@ html[data-native-titlebar="hidden-inset"] .brand { width: max(calc(118px + var(-
   .custom-property-type, .custom-property-value { grid-column: 1; }
   .custom-property-entry-heading { align-items: stretch; flex-direction: column; }
   .custom-property-entry-heading button { width: 100%; }
+  .tileset-slice-editor .tileset-slice-grid, .slice-legend, .tileset-reslice-actions { grid-template-columns: minmax(0, 1fr); }
   .tile-definition-grid { max-height: 154px; grid-template-columns: repeat(5, minmax(0, 1fr)); }
 }
 

@@ -46,12 +46,73 @@ function totalLoss(impact: TilesetResliceImpact): number {
   return impact.droppedMetadataTiles + impact.droppedAnimationFrames + impact.droppedCollisionShapes + impact.droppedCustomProperties + impact.droppedWangColors + impact.droppedWangTiles;
 }
 
+export type TilesetSliceReviewResult =
+  | { kind: 'error'; message: string }
+  | { kind: 'plan'; columns: number; rows: number; impact: TilesetResliceImpact };
+
+export interface TilesetSliceReviewProps {
+  result: TilesetSliceReviewResult;
+  remap: TilesetMetadataRemap;
+  layoutChanged: boolean;
+  requiresAcknowledgement: boolean;
+  acknowledged: boolean;
+  onRemapChange: (remap: TilesetMetadataRemap) => void;
+  onAcknowledgedChange: (acknowledged: boolean) => void;
+  onReset: () => void;
+  onApply: () => void;
+  radioName: string;
+}
+
+export function TilesetSliceLegend({ id }: { id: string }) {
+  return <ul className="slice-legend" id={id} aria-label="Slice preview overlay legend">
+    <li><i className="current" aria-hidden="true" /><span><strong>Current grid</strong><small>Existing slice geometry</small></span></li>
+    <li><i className="draft" aria-hidden="true" /><span><strong>Draft grid</strong><small>Proposed slice geometry</small></span></li>
+    <li><i className="selected" aria-hidden="true" /><span><strong>Selected tile</strong><small>Current source rectangle</small></span></li>
+  </ul>;
+}
+
+export function TilesetSliceReview({
+  result,
+  remap,
+  layoutChanged,
+  requiresAcknowledgement,
+  acknowledged,
+  onRemapChange,
+  onAcknowledgedChange,
+  onReset,
+  onApply,
+  radioName,
+}: TilesetSliceReviewProps) {
+  const plan = result.kind === 'plan' ? result : undefined;
+  const applyDisabled = !plan || !layoutChanged || (requiresAcknowledgement && !acknowledged);
+  return <>
+    <fieldset className="tileset-remap-options">
+      <legend>Metadata remap</legend>
+      <label><input type="radio" name={radioName} checked={remap === 'source-position'} onChange={() => onRemapChange('source-position')} /><span><strong>Follow source positions</strong><small>Keep metadata on cells whose top-left source pixel still exists.</small></span></label>
+      <label><input type="radio" name={radioName} checked={remap === 'tile-id'} onChange={() => onRemapChange('tile-id')} /><span><strong>Keep tile IDs</strong><small>Keep metadata on the same numbered tiles when those IDs still exist.</small></span></label>
+    </fieldset>
+    {result.kind === 'error'
+      ? <p className="tileset-reslice-error" role="alert"><strong>Re-slice unavailable</strong><span>{result.message}</span></p>
+      : <section className={`tileset-reslice-impact ${totalLoss(result.impact) > 0 ? 'has-loss' : ''}`} aria-label="Re-slice impact" role="status">
+        <strong>Planned sheet: {result.columns} × {result.rows} · {result.columns * result.rows} tiles</strong>
+        <dl>
+          <div><dt>Metadata tiles</dt><dd>{result.impact.preservedMetadataTiles} of {result.impact.metadataTiles} preserved</dd></div>
+          <div><dt>Moved metadata</dt><dd>{result.impact.reframedMetadataTiles} reframed · {result.impact.remappedMetadataTileIds} renumbered</dd></div>
+          <div><dt>Dropped metadata</dt><dd>{result.impact.droppedMetadataTiles} tiles · {result.impact.droppedAnimationFrames} animation frames · {result.impact.droppedCollisionShapes} collisions · {result.impact.droppedCustomProperties} properties · {result.impact.droppedWangColors} Wang colors · {result.impact.droppedWangTiles} Wang assignments</dd></div>
+        </dl>
+      </section>}
+    {requiresAcknowledgement && <label className="tileset-reslice-ack"><input type="checkbox" checked={acknowledged} onChange={(event) => onAcknowledgedChange(event.target.checked)} /><span><strong>Review required</strong><small>I reviewed how this re-slice moves or drops metadata.</small></span></label>}
+    <div className="tileset-reslice-actions"><button type="button" disabled={!layoutChanged} onClick={onReset}>Reset</button><button type="button" className="primary" disabled={applyDisabled} onClick={onApply}>Apply re-slice</button></div>
+  </>;
+}
+
 export function TilesetSliceEditor({ palette, tileset, sourceSprite, selectedTileId, onCommit }: TilesetSliceEditorProps) {
   const [draft, setDraft] = useState<SliceDraft>(() => draftFor(tileset));
   const [remap, setRemap] = useState<TilesetMetadataRemap>('source-position');
   const [acknowledged, setAcknowledged] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const patternId = useId().replaceAll(':', '');
+  const legendId = `${patternId}-legend`;
 
   const previewSize = useMemo(() => {
     if (!sourceSprite) return undefined;
@@ -98,36 +159,40 @@ export function TilesetSliceEditor({ palette, tileset, sourceSprite, selectedTil
 
   return <div className="tileset-slice-editor">
     <div className="section-heading"><span>Source-sheet slicing</span><small>Preview before apply</small></div>
-    {sourceSprite && previewSize && <div className="tileset-sheet-preview" role="img" aria-label={`Source sprite with current and draft ${tileset.name} crop grids`} style={{ aspectRatio: `${sourceSprite.width} / ${sourceSprite.height}` }}>
-      <canvas ref={canvasRef} />
-      <svg viewBox={`0 0 ${sourceSprite.width} ${sourceSprite.height}`} preserveAspectRatio="none" aria-hidden="true">
-        <defs>
-          <pattern id={`${patternId}-current`} x={tileset.margin} y={tileset.margin} width={tileset.tileWidth + tileset.spacing} height={tileset.tileHeight + tileset.spacing} patternUnits="userSpaceOnUse"><rect width={tileset.tileWidth} height={tileset.tileHeight} className="current-slice-cell" /></pattern>
-          <pattern id={`${patternId}-draft`} x={draftTileset.margin} y={draftTileset.margin} width={draftTileset.tileWidth + draftTileset.spacing} height={draftTileset.tileHeight + draftTileset.spacing} patternUnits="userSpaceOnUse"><rect width={draftTileset.tileWidth} height={draftTileset.tileHeight} className="draft-slice-cell" /></pattern>
-        </defs>
-        <rect x={tileset.margin} y={tileset.margin} width={currentGridWidth} height={currentGridHeight} fill={`url(#${patternId}-current)`} />
-        {plan && <rect x={draftTileset.margin} y={draftTileset.margin} width={draftGridWidth} height={draftGridHeight} fill={`url(#${patternId}-draft)`} />}
-        {selectedTile && <rect x={selectedTile.sourceX} y={selectedTile.sourceY} width={tileset.tileWidth} height={tileset.tileHeight} className="selected-slice-cell" />}
-      </svg>
-      <span className="slice-legend"><i className="current" />Current <i className="draft" />Draft <i className="selected" />Selected</span>
-    </div>}
+    {sourceSprite && previewSize && <>
+      <div className="tileset-sheet-preview" role="img" aria-label={`Source sprite with current and draft ${tileset.name} crop grids`} aria-describedby={legendId} style={{ aspectRatio: `${sourceSprite.width} / ${sourceSprite.height}` }}>
+        <canvas ref={canvasRef} />
+        <svg viewBox={`0 0 ${sourceSprite.width} ${sourceSprite.height}`} preserveAspectRatio="none" aria-hidden="true">
+          <defs>
+            <pattern id={`${patternId}-current`} x={tileset.margin} y={tileset.margin} width={tileset.tileWidth + tileset.spacing} height={tileset.tileHeight + tileset.spacing} patternUnits="userSpaceOnUse"><rect width={tileset.tileWidth} height={tileset.tileHeight} className="current-slice-cell" /></pattern>
+            <pattern id={`${patternId}-draft`} x={draftTileset.margin} y={draftTileset.margin} width={draftTileset.tileWidth + draftTileset.spacing} height={draftTileset.tileHeight + draftTileset.spacing} patternUnits="userSpaceOnUse"><rect width={draftTileset.tileWidth} height={draftTileset.tileHeight} className="draft-slice-cell" /></pattern>
+          </defs>
+          <rect x={tileset.margin} y={tileset.margin} width={currentGridWidth} height={currentGridHeight} fill={`url(#${patternId}-current)`} />
+          {plan && <rect x={draftTileset.margin} y={draftTileset.margin} width={draftGridWidth} height={draftGridHeight} fill={`url(#${patternId}-draft)`} />}
+          {selectedTile && <rect x={selectedTile.sourceX} y={selectedTile.sourceY} width={tileset.tileWidth} height={tileset.tileHeight} className="selected-slice-cell" />}
+        </svg>
+      </div>
+      <TilesetSliceLegend id={legendId} />
+    </>}
     <div className="tileset-slice-grid">
       <label className="field"><span>Tile width</span><input type="number" min="1" step="1" value={draft.tileWidth} onChange={(event) => setField('tileWidth', event.target.value)} /></label>
       <label className="field"><span>Tile height</span><input type="number" min="1" step="1" value={draft.tileHeight} onChange={(event) => setField('tileHeight', event.target.value)} /></label>
       <label className="field"><span>Margin</span><input type="number" min="0" step="1" value={draft.margin} onChange={(event) => setField('margin', event.target.value)} /></label>
       <label className="field"><span>Spacing</span><input type="number" min="0" step="1" value={draft.spacing} onChange={(event) => setField('spacing', event.target.value)} /></label>
     </div>
-    <fieldset className="tileset-remap-options">
-      <legend>Metadata remap</legend>
-      <label><input type="radio" name={`${patternId}-remap`} checked={remap === 'source-position'} onChange={() => { setRemap('source-position'); setAcknowledged(false); }} /><span><strong>Follow source positions</strong><small>Keep metadata on cells whose top-left source pixel still exists.</small></span></label>
-      <label><input type="radio" name={`${patternId}-remap`} checked={remap === 'tile-id'} onChange={() => { setRemap('tile-id'); setAcknowledged(false); }} /><span><strong>Keep tile IDs</strong><small>Keep metadata on the same numbered tiles when those IDs still exist.</small></span></label>
-    </fieldset>
-    {'error' in planned ? <p className="tileset-reslice-error" role="alert">{planned.error}</p> : <div className={`tileset-reslice-impact ${totalLoss(planned.plan.impact) > 0 ? 'has-loss' : ''}`}>
-      <strong>{planned.plan.tileset.columns} × {planned.plan.tileset.rows} · {planned.plan.tileset.columns * planned.plan.tileset.rows} tiles</strong>
-      <span>{planned.plan.impact.preservedMetadataTiles} of {planned.plan.impact.metadataTiles} metadata-addressed tiles preserved · {planned.plan.impact.reframedMetadataTiles} reframed · {planned.plan.impact.remappedMetadataTileIds} renumbered</span>
-      <span>Drops: {planned.plan.impact.droppedMetadataTiles} tiles · {planned.plan.impact.droppedAnimationFrames} animation frames · {planned.plan.impact.droppedCollisionShapes} collisions · {planned.plan.impact.droppedCustomProperties} properties · {planned.plan.impact.droppedWangColors} Wang colors · {planned.plan.impact.droppedWangTiles} Wang assignments</span>
-    </div>}
-    {requiresAcknowledgement && <label className="tileset-reslice-ack"><input type="checkbox" checked={acknowledged} onChange={(event) => setAcknowledged(event.target.checked)} /><span>I reviewed how this re-slice moves or drops metadata.</span></label>}
-    <div className="tileset-reslice-actions"><button type="button" disabled={!layoutChanged} onClick={() => { setDraft(draftFor(tileset)); setAcknowledged(false); }}>Reset</button><button type="button" className="primary" disabled={!plan || !layoutChanged || (requiresAcknowledgement && !acknowledged)} onClick={apply}>Apply re-slice</button></div>
+    <TilesetSliceReview
+      result={'error' in planned
+        ? { kind: 'error', message: planned.error ?? 'The requested slice is invalid.' }
+        : { kind: 'plan', columns: planned.plan.tileset.columns, rows: planned.plan.tileset.rows, impact: planned.plan.impact }}
+      remap={remap}
+      layoutChanged={layoutChanged}
+      requiresAcknowledgement={requiresAcknowledgement}
+      acknowledged={acknowledged}
+      onRemapChange={(nextRemap) => { setRemap(nextRemap); setAcknowledged(false); }}
+      onAcknowledgedChange={setAcknowledged}
+      onReset={() => { setDraft(draftFor(tileset)); setAcknowledged(false); }}
+      onApply={apply}
+      radioName={`${patternId}-remap`}
+    />
   </div>;
 }

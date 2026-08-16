@@ -5,10 +5,17 @@ describe('tileset slice editor source wiring', () => {
   it('previews controlled slice drafts and requires explicit metadata remap application', async () => {
     const source = await readFile(new URL('../../src/renderer/components/TilesetSliceEditor.tsx', import.meta.url), 'utf8');
     expect(source).toContain("planTilesetReslice(tileset");
+    expect(source).toContain('<TilesetSliceReview');
     expect(source).toContain('Follow source positions');
     expect(source).toContain('Keep tile IDs');
+    expect(source).toContain('onRemapChange={(nextRemap) => { setRemap(nextRemap); setAcknowledged(false); }}');
     expect(source).toContain('I reviewed how this re-slice moves or drops metadata.');
+    expect(source).toContain('onReset={() => { setDraft(draftFor(tileset)); setAcknowledged(false); }}');
     expect(source).toContain('Apply re-slice');
+    expect(source).toContain('onApply={apply}');
+    expect(source).toContain('plan.impact.reframedMetadataTiles > 0 || plan.impact.remappedMetadataTileIds > 0 || totalLoss(plan.impact) > 0');
+    expect(source).toContain('if (!plan || !layoutChanged || (requiresAcknowledgement && !acknowledged)) return;');
+    expect(source).toContain('onCommit(plan.tileset, nextSelected, plan.impact);');
     expect(source).toContain('drawSpriteThumbnail');
     expect(source).not.toContain('onBlur=');
   });
@@ -24,6 +31,7 @@ describe('tileset slice editor source wiring', () => {
     expect(styles).toContain('.tileset-sheet-preview');
     expect(styles).toContain('.draft-slice-cell');
     expect(styles).toContain('.tileset-reslice-ack');
+    expect(styles).toContain('/* Source-sheet re-slicing keeps every review decision legible before the existing explicit commit. */');
   });
 
   it('authors bounded signed tileset drawing offsets and settles semantically equal no-op drafts', async () => {
