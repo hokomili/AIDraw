@@ -14,40 +14,40 @@ export const AGENT_CLIENTS: readonly AgentClientDescriptor[] = [
     id: 'codex',
     name: 'Codex',
     configuration: 'toml',
-    configurationDescription: 'the user Codex config.toml file',
-    restartInstruction: 'Fully quit and restart Codex, then start a new task.',
+    configurationDescription: 'a Codex TOML snippet',
+    restartInstruction: 'Reload Codex once after adding the AIDraw bridge. Later AIDraw restarts need no client change.',
     documentationUrl: 'https://developers.openai.com/codex/mcp/',
   },
   {
     id: 'claude-code',
     name: 'Claude Code',
     configuration: 'json',
-    configurationDescription: 'the user-scoped ~/.claude.json file',
-    restartInstruction: 'Start a new Claude Code session, then check /mcp for AIDraw.',
+    configurationDescription: 'a Claude Code JSON snippet',
+    restartInstruction: 'Reload Claude Code once after adding the AIDraw bridge. Later AIDraw restarts need no client change.',
     documentationUrl: 'https://code.claude.com/docs/en/mcp',
   },
   {
     id: 'opencode',
     name: 'OpenCode',
     configuration: 'jsonc',
-    configurationDescription: 'the global OpenCode JSON or JSONC configuration',
-    restartInstruction: 'Restart OpenCode, then run opencode mcp list to verify AIDraw.',
+    configurationDescription: 'an OpenCode JSON snippet',
+    restartInstruction: 'Reload OpenCode once after adding the AIDraw bridge. Later AIDraw restarts need no client change.',
     documentationUrl: 'https://opencode.ai/docs/mcp-servers/',
   },
   {
     id: 'antigravity',
     name: 'Antigravity',
     configuration: 'json',
-    configurationDescription: 'the global ~/.gemini/config/mcp_config.json file',
-    restartInstruction: 'Restart Antigravity and verify AIDraw in Agent Settings → Customizations.',
+    configurationDescription: 'an Antigravity JSON snippet',
+    restartInstruction: 'Reload Antigravity once after adding the AIDraw bridge. Later AIDraw restarts need no client change.',
     documentationUrl: 'https://www.antigravity.google/docs/mcp',
   },
   {
     id: 'generic',
     name: 'Other MCP client',
     configuration: 'manual',
-    configurationDescription: 'your client’s Streamable HTTP MCP settings',
-    restartInstruction: 'Reconnect or restart the client after adding the AIDraw endpoint.',
+    configurationDescription: 'your client’s stdio MCP settings',
+    restartInstruction: 'Reload the client once after adding the AIDraw bridge. Later AIDraw restarts need no client change.',
     documentationUrl: 'https://modelcontextprotocol.io/specification/2025-11-25/basic/transports',
   },
 ] as const;
@@ -63,14 +63,12 @@ export function isAgentClientId(value: unknown): value is AgentClientId {
 }
 
 export interface AgentClientSetupResult {
-  status: 'configured' | 'cancelled' | 'manual';
+  status: 'manual';
   clientId: AgentClientId;
   clientName: string;
   message: string;
-  restartRequired: boolean;
+  restartRequired: false;
   restartInstruction: string;
   documentationUrl: string;
-  configPath?: string;
-  backupPath?: string;
   setupSnippet?: string;
 }

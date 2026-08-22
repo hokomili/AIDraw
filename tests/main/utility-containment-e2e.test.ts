@@ -99,7 +99,6 @@ describe('isolated FND-09 utility containment hook', () => {
     const evidence = await runFnd09UtilityContainmentScenario({
       service: { getActiveDocumentId: () => document.id, getDocument: (documentId) => documentId === document.id ? structuredClone(document) : undefined },
       rasterUtilities: supervisor,
-      generationUtilities: { status: () => ({ running: false }) },
     }, configuration);
 
     expect(evidence).toMatchObject({
@@ -108,8 +107,7 @@ describe('isolated FND-09 utility containment hook', () => {
       crash: { workerPid: 101, error: { message: expect.stringContaining('exited unexpectedly with code 9') }, restartPid: 202, queuedExport: { warnings: [] } },
       cancellation: { workerPid: 202, error: { name: 'AbortError' }, restartPid: 303, queuedExport: { warnings: [] } },
       workerPidsDistinct: true,
-      generationLaneUntouched: true,
-      network: { nonLoopbackRequests: 0, externalProviderRequests: 0, paidRequests: 0 },
+      network: { nonLoopbackRequests: 0 },
     });
     expect(workers[1].killed).toBe(true);
     const retained = await readFile(configuration.probePath, 'utf8');
@@ -127,7 +125,7 @@ describe('isolated FND-09 utility containment hook', () => {
     try {
       await expect(fetch('https://example.invalid/forbidden')).rejects.toThrow('blocked a non-loopback request');
       expect(transport).not.toHaveBeenCalled();
-      expect(JSON.parse(await readFile(configuration.networkSentinelPath, 'utf8'))).toMatchObject({ blocked: true, hostname: 'example.invalid', nonLoopbackRequests: 1, externalProviderRequests: 0, paidRequests: 0 });
+      expect(JSON.parse(await readFile(configuration.networkSentinelPath, 'utf8'))).toMatchObject({ blocked: true, hostname: 'example.invalid', nonLoopbackRequests: 1 });
     } finally {
       restore();
       globalThis.fetch = originalFetch;

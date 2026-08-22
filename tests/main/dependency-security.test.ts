@@ -6,7 +6,9 @@ import process from 'node:process';
 import { describe, expect, it } from 'vitest';
 import {
   COMPLETE_AUDIT_COMMAND,
+  EXPECTED_DIRECT_DEPENDENCY_COUNTS,
   EXPECTED_ELECTRON_VERSION,
+  EXPECTED_EXTERNAL_REGISTRY_PACKAGES,
   assertPackagedElectronVersion,
   inspectDependencySecurityPolicy,
 } from '../../scripts/dependency-security.mjs';
@@ -29,7 +31,9 @@ describe('dependency and packaged-runtime security policy', () => {
       forge: '7.11.2',
       packager: '18.4.4',
       extractor: '@electron-internal/extract-zip@1.0.5',
-      externalRegistryPackages: 701,
+      manifestDependencyCounts: EXPECTED_DIRECT_DEPENDENCY_COUNTS,
+      lockRootDependencyCounts: EXPECTED_DIRECT_DEPENDENCY_COUNTS,
+      externalRegistryPackages: EXPECTED_EXTERNAL_REGISTRY_PACKAGES,
       repositoryWorkspaces: ['packages/canvas', 'packages/core'],
       overrides: {
         '@electron/rebuild': '4.2.0',
@@ -38,6 +42,39 @@ describe('dependency and packaged-runtime security policy', () => {
         tmp: '0.2.7',
       },
     });
+    expect(result.manifestDependencyCounts).toEqual({ runtime: 24, development: 28, optional: 0, peer: 0, total: 52 });
+    expect(result.lockRootDependencyCounts).toEqual({ runtime: 24, development: 28, optional: 0, peer: 0, total: 52 });
+    expect(result.externalRegistryPackages).toBe(699);
+  });
+
+  it('fails closed on direct-census, lock-root, retired-dependency, or external-record drift', async () => {
+    const inputs = await currentPolicyInputs();
+
+    const manifestCount = structuredClone(inputs);
+    delete (manifestCount.packageJson.dependencies as Record<string, string>).zod;
+    expect(() => inspectDependencySecurityPolicy(manifestCount)).toThrow(/package\.json runtime dependency count must be exactly 24; found 23/);
+
+    const optionalCount = structuredClone(inputs);
+    optionalCount.packageJson.optionalDependencies = { optional: '1.0.0' };
+    expect(() => inspectDependencySecurityPolicy(optionalCount)).toThrow(/package\.json optional dependency count must be exactly 0; found 1/);
+
+    const lockRootCount = structuredClone(inputs);
+    delete (((lockRootCount.lockJson.packages as Record<string, unknown>)[''] as Record<string, unknown>).devDependencies as Record<string, string>).vitest;
+    expect(() => inspectDependencySecurityPolicy(lockRootCount)).toThrow(/package-lock\.json root development dependency count must be exactly 28; found 27/);
+
+    const retiredManifest = structuredClone(inputs);
+    (retiredManifest.packageJson.dependencies as Record<string, string>).openai = '1.0.0';
+    expect(() => inspectDependencySecurityPolicy(retiredManifest)).toThrow(/must not declare retired dependency openai/);
+
+    const retiredLock = structuredClone(inputs);
+    (retiredLock.lockJson.packages as Record<string, unknown>)['node_modules/jsonc-parser'] = structuredClone(
+      (retiredLock.lockJson.packages as Record<string, unknown>)['node_modules/zod'],
+    );
+    expect(() => inspectDependencySecurityPolicy(retiredLock)).toThrow(/must not contain retired dependency jsonc-parser/);
+
+    const externalCount = structuredClone(inputs);
+    delete (externalCount.lockJson.packages as Record<string, unknown>)['node_modules/zod'];
+    expect(() => inspectDependencySecurityPolicy(externalCount)).toThrow(/external non-link package count must be exactly 699; found 698/);
   });
 
   it('requires registry tarballs and SHA-512 integrity across every external non-link lock entry', async () => {

@@ -20,6 +20,8 @@ import {
   executeBatchExport,
   parseCliArguments,
   runCliInvocation,
+  selectCliArguments,
+  selectStartupCommand,
   type BatchExportResult,
   type CliCommand,
 } from '@main/cli';
@@ -136,6 +138,40 @@ describe('AIDraw CLI', () => {
     expect(cliHelp('AIDraw')).toContain('GIF requires 10 ms step multiples');
     expect(() => parseCliArguments(['--batch', 'sprite.aidraw', '--palette-cycle', 'Glow', '--save-as', 'glow.png'])).toThrow('requires both --palette-cycle and --palette-cycle-frame');
     expect(() => parseCliArguments(['--batch', 'sprite.aidraw', '--animation-tag', 'Idle', '--palette-cycle', 'Glow', '--palette-cycle-frame', 'Idle', '--save-as', 'glow.png'])).toThrow('either --animation-tag or a palette cycle');
+  });
+
+  it('keeps the app-owned isolated profile switch out of packaged batch arguments', () => {
+    const selected = selectCliArguments([
+      '--user-data-dir=/tmp/AIDraw RC profile',
+      '--batch',
+      'sprite.aidraw',
+      '--scale',
+      '3',
+      '--save-as',
+      'sprite.png',
+    ]);
+    expect(selected).toEqual(['--batch', 'sprite.aidraw', '--scale', '3', '--save-as', 'sprite.png']);
+    expect(parseCliArguments(selected)).toMatchObject({
+      kind: 'batch-export', inputPath: 'sprite.aidraw', outputPath: 'sprite.png', scale: 3,
+    });
+  });
+
+  it.each([
+    ['version', ['--user-data-dir', '/tmp/ambiguous', '--version']],
+    ['help', ['--help', '--user-data-dir', '/tmp/ambiguous']],
+    ['batch', ['--batch', 'sprite.aidraw', '--save-as', 'sprite.png', '--user-data-dir', '/tmp/ambiguous']],
+    ['headless', ['--user-data-dir', '/tmp/ambiguous', '--headless']],
+    ['bridge', ['--mcp-bridge', '--user-data-dir', '/tmp/ambiguous']],
+    ['ordinary launch', ['--user-data-dir', '/tmp/ambiguous']],
+  ])('refuses the ambiguous split profile selector before the %s surface can advance', (_label, arguments_) => {
+    expect(() => selectCliArguments(arguments_)).toThrow('must use the unambiguous --user-data-dir=<profile> form');
+    expect(() => parseCliArguments(arguments_)).toThrow('must use the unambiguous --user-data-dir=<profile> form');
+  });
+
+  it('gives a captured profile-selector refusal precedence over bridge startup', () => {
+    expect(selectStartupCommand(['--mcp-bridge'], true, true)).toBe('cli');
+    expect(selectStartupCommand(['--mcp-bridge'], true, false)).toBe('mcp-bridge');
+    expect(selectStartupCommand(['--headless'], false, false)).toBe('headless');
   });
 
   it('exports a scaled GIF without starting the editor engine', async () => {

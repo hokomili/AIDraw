@@ -175,7 +175,7 @@ describe('existing map storage mode presentation', () => {
     expect(changelog).toContain('UX-01/MAP-07/MAP-08 existing-map mode presentation correction');
     expect(architecture).toContain('Expanded existing-map geometry reuses the same renderer-only finite/sparse choice projection');
     expect(tracker).toContain('A bounded source/headless UX-01/MAP-07/MAP-08 checkpoint (2026-08-17)');
-    expect(tracker).toContain('The current bounded MAP-08/MAP-13 source/headless candidate completes image-collection isometric projection before admitting its exact dependent workflows');
+    expect(tracker).toContain('That synchronized base already contains the finite/sparse orthogonal/isometric image-collection projection');
     expect(testing).toContain('Prior source/headless existing-map mode presentation checkpoint');
     for (const truth of [changelog, architecture, tracker, testing]) {
       expect(truth).toContain('Finite map');

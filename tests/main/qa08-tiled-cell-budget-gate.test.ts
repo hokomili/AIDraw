@@ -38,11 +38,11 @@ describe('QA-08 opt-in aggregate Tiled cell-budget gate', () => {
   });
 
   it('builds only the exact bounded direct-child invocation and sanitized environment', () => {
-    expect(qa08CellBudgetChildArgs('accept')).toEqual(expect.arrayContaining(['--max-old-space-size=1024', '--expose-gc', 'run', '--reporter=basic']));
+    expect(qa08CellBudgetChildArgs('accept')).toEqual(expect.arrayContaining(['--max-old-space-size=1024', '--expose-gc', 'run', '--cache=false', '--reporter=basic']));
     expect(() => qa08CellBudgetChildArgs('other' as 'accept')).toThrow(/Unknown QA-08 scenario/);
-    const environment = qa08CellBudgetChildEnvironment(retainedRoot, 'accept', { PATH: 'test-path', OPENAI_API_KEY: 'must-not-pass', NODE_OPTIONS: '--inspect' });
+    const environment = qa08CellBudgetChildEnvironment(retainedRoot, 'accept', { PATH: 'test-path', UNRELATED_SECRET: 'must-not-pass', NODE_OPTIONS: '--inspect' });
     expect(environment).toMatchObject({ PATH: 'test-path', AIDRAW_QA08_CELL_BUDGET_SCENARIO: 'accept', NO_COLOR: '1', HTTP_PROXY: 'http://127.0.0.1:9' });
-    expect(environment).not.toHaveProperty('OPENAI_API_KEY'); expect(environment).not.toHaveProperty('NODE_OPTIONS'); expect(environment).not.toHaveProperty('FORCE_COLOR');
+    expect(environment).not.toHaveProperty('UNRELATED_SECRET'); expect(environment).not.toHaveProperty('NODE_OPTIONS'); expect(environment).not.toHaveProperty('FORCE_COLOR');
   });
 
   it('self-tests every guard without spawning a child or creating a root', () => {

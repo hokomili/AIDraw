@@ -3,7 +3,6 @@ export type DesktopPlatformId = 'windows' | 'macos' | 'linux' | 'unsupported';
 export interface DesktopPlatformInfo {
   id: DesktopPlatformId;
   label: string;
-  credentialProtection: string;
 }
 
 export function desktopPlatformId(platform: NodeJS.Platform): DesktopPlatformId {
@@ -13,21 +12,15 @@ export function desktopPlatformId(platform: NodeJS.Platform): DesktopPlatformId 
   return 'unsupported';
 }
 
-export function desktopPlatformInfo(platform: NodeJS.Platform, linuxBackend?: string): DesktopPlatformInfo {
+export function desktopPlatformInfo(platform: NodeJS.Platform): DesktopPlatformInfo {
   switch (desktopPlatformId(platform)) {
     case 'windows':
-      return { id: 'windows', label: 'Windows', credentialProtection: 'Windows DPAPI' };
+      return { id: 'windows', label: 'Windows' };
     case 'macos':
-      return { id: 'macos', label: 'macOS', credentialProtection: 'macOS Keychain' };
+      return { id: 'macos', label: 'macOS' };
     case 'linux':
-      return {
-        id: 'linux',
-        label: 'Linux',
-        credentialProtection: linuxBackend && linuxBackend !== 'unknown'
-          ? `Linux secret store (${linuxBackend.replaceAll('_', ' ')})`
-          : 'Linux secret store',
-      };
+      return { id: 'linux', label: 'Linux' };
     default:
-      return { id: 'unsupported', label: platform, credentialProtection: 'Unavailable' };
+      return { id: 'unsupported', label: platform };
   }
 }

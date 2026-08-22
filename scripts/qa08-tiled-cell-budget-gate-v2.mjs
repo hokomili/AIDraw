@@ -61,6 +61,7 @@ export function qa08CellBudgetChildArgsV2(scenario) {
     '--expose-gc',
     resolve(repositoryRoot, 'node_modules', 'vitest', 'vitest.mjs'),
     'run',
+    '--cache=false',
     '--config', resolve(repositoryRoot, 'scripts', 'vitest.qa08-tiled-cell-budget-v2.config.mjs'),
   ];
 }
@@ -140,7 +141,7 @@ export function runQa08CellBudgetSelfTestV2() {
   }
   if (rejected.length !== 6) throw new Error('QA-08 v2 preflight self-test did not fail closed for every unsafe case.');
   const args = qa08CellBudgetChildArgsV2('accept');
-  if (!args.includes('--max-old-space-size=1024') || !args.includes('--expose-gc') || args.some((argument) => argument.startsWith('--reporter'))) throw new Error('QA-08 v2 child startup contract is invalid.');
+  if (!args.includes('--max-old-space-size=1024') || !args.includes('--expose-gc') || !args.includes('--cache=false') || args.some((argument) => argument.startsWith('--reporter'))) throw new Error('QA-08 v2 child startup contract is invalid.');
   return { childSpawned: false, rootCreated: false, acceptedRoot: accepted.root, rejected, timeoutMs: QA08_TILED_CELL_BUDGET_CONTRACT_V2.childTimeoutMs, reporterOverride: false };
 }
 

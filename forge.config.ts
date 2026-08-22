@@ -34,8 +34,8 @@ const macSigningOptions = macSigningIdentity
         hardenedRuntime: false,
         timestamp: 'none',
         // A default ad-hoc designated requirement is a changing CDHash. Keep a
-        // stable identifier requirement so a rebuilt development app does not
-        // silently acquire a different Keychain access identity every time.
+        // stable identifier requirement so rebuilt development bundles retain
+        // a predictable local code identity.
         ...(filePath.endsWith('/AIDraw.app')
           ? { requirements: `=designated => identifier "${macBundleIdentifier}"` }
           : {}),

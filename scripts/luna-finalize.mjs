@@ -3,6 +3,7 @@ import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import process from 'node:process';
 import { setTimeout } from 'node:timers';
+import { initializeDirectMcp, readMcpConnectionHandoff } from './mcp-direct-client.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 const outputName = process.env.AIDRAW_OUTPUT_NAME ?? 'luna-mcp-pixel-animation-20260802-final';
@@ -42,14 +43,9 @@ async function stopEngine() {
   });
 }
 
-const connection = JSON.parse(await readFile(connectionPath, 'utf8'));
+const connection = await readMcpConnectionHandoff(connectionPath);
 const pending = JSON.parse(await readFile(pendingPath, 'utf8'));
-const baseHeaders = { authorization: `Bearer ${connection.token}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json' };
-const initialized = await rpc(connection.url, baseHeaders, 'initialize', { protocolVersion: '2026-07-28', capabilities: {}, clientInfo: { name: 'Luna finalizer', version: '1.0' } });
-const sessionId = initialized.response.headers.get('mcp-session-id');
-if (!sessionId) throw new Error('MCP session ID missing during finalization.');
-const headers = { ...baseHeaders, 'mcp-session-id': sessionId };
-await globalThis.fetch(connection.url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) });
+const { headers } = await initializeDirectMcp(connection, { clientInfo: { name: 'Luna finalizer', version: '1.0' } });
 const jobs = {};
 for (const jobId of pending.approvalJobs) jobs[jobId] = toolValue((await rpc(connection.url, headers, 'tools/call', { name: 'job_manage', arguments: { action: 'inspect', jobId, timeoutMs: 0 } })).body, 'job_manage');
 const traceBody = (await rpc(connection.url, headers, 'resources/read', { uri: `aidraw://documents/${pending.documentId}/trace` })).body;
@@ -78,5 +74,5 @@ await stopEngine();
 await rm(connectionPath, { force: true }).catch(() => undefined);
 await rm(pendingPath, { force: true }).catch(() => undefined);
 await rm(profileDir, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 }).catch(() => undefined);
-await writeFile(completionPath, `${JSON.stringify({ completedAt: new Date().toISOString(), engineStopped: true, credentialsRemoved: true }, null, 2)}\n`, 'utf8');
+await writeFile(completionPath, `${JSON.stringify({ completedAt: new Date().toISOString(), engineStopped: true, authorityHandoffRemoved: true }, null, 2)}\n`, 'utf8');
 process.stdout.write(JSON.stringify({ verdict: report.verdict, documentId: report.document.id, traceEntries: report.trace.entryCount, jobs }, null, 2));

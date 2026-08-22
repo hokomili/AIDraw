@@ -1,26 +1,18 @@
 import { quantizeImageToPalette } from './quantize-image';
 import { runImportUtilityRequest } from './utility-import';
 import {
-  assertNormalizeGenerationAcceptanceInput,
   assertImportUtilityResponseEnvelope,
   assertQuantizeUtilityParameters,
-  assertRenderGenerationApprovalPreviewUtilityRequest,
   assertValidateImageUtilityRequest,
-  isGenerationProgressUtilityResponse,
   MAX_QUANTIZE_UTILITY_BASE64_CHARACTERS,
   type SerializedExportArtifact,
   type UtilityRequest,
   type UtilityResponse,
 } from './utility-contract';
-import { renderUtilityImagePreview, validateUtilityImage } from './utility-image-validation';
+import { validateUtilityImage } from './utility-image-validation';
 import { boundedUtilityErrorMessage } from './utility-resource-policy';
 import { isAbsolute } from 'node:path';
 import { validateSpriteSheetSliceOptions } from '../common/sprite-sheet';
-import { validateGenerationRequest } from '../common/generation-capabilities';
-import {
-  resolveFnd09GenerationNormalizationE2eFromEnvironment,
-  writeFnd09GenerationNormalizationE2eProbe,
-} from './generation-normalization-e2e-contract';
 import {
   corruptFnd09ObservationIdat,
   FND09_OBSERVATION_CODEC_E2E_HOLD_MS,
@@ -44,26 +36,12 @@ import {
   isFnd09ImportResultE2eEnabled,
   isFnd09ImportResultFault,
 } from './utility-import-result-e2e-contract';
-import {
-  createFnd09GenerationResultOutputs,
-  FND09_GENERATION_RESULT_E2E_HOLD_MS,
-  isFnd09GenerationResultE2eEnabled,
-  isFnd09GenerationResultFixture,
-  isFnd09GenerationResultRequest,
-} from './utility-generation-result-e2e-contract';
-
-const generationControllers = new Map<string, AbortController>();
-
 function validateRequest(value: unknown): UtilityRequest {
   if (!value || typeof value !== 'object') throw new Error('Utility request must be an object.');
   const base = value as { id?: unknown; kind?: unknown };
-  if (typeof base.id !== 'string' || !base.id || !['validate-image', 'render-generation-approval-preview', 'quantize-image', 'export-document', 'import-document', 'inspect-sprite-sheet', 'capture-observation', 'generation-run', 'normalize-generation-acceptance', 'containment-probe'].includes(String(base.kind))) throw new Error('Unknown utility request.');
+  if (typeof base.id !== 'string' || !base.id || !['validate-image', 'quantize-image', 'export-document', 'import-document', 'inspect-sprite-sheet', 'capture-observation', 'containment-probe'].includes(String(base.kind))) throw new Error('Unknown utility request.');
   if (base.kind === 'validate-image') {
     assertValidateImageUtilityRequest(value);
-    return value;
-  }
-  if (base.kind === 'render-generation-approval-preview') {
-    assertRenderGenerationApprovalPreviewUtilityRequest(value);
     return value;
   }
   if (base.kind === 'containment-probe') {
@@ -78,27 +56,6 @@ function validateRequest(value: unknown): UtilityRequest {
         : 'The utility containment probe is unavailable outside isolated packaged QA.';
       throw new Error(message);
     }
-    return request as UtilityRequest;
-  }
-  if (base.kind === 'generation-run') {
-    const request = value as Partial<Extract<UtilityRequest, { kind: 'generation-run' }>>;
-    if (!request.document || typeof request.document !== 'object' || !['illustration', 'pixel'].includes(request.document.kind)) throw new Error('Generation utility requires a canonical document.');
-    if (!request.request || typeof request.request !== 'object') throw new Error('Generation utility requires a provider request.');
-    if (typeof request.jobId !== 'string' || !request.jobId || request.jobId.length > 200) throw new Error('Generation utility requires a bounded job id.');
-    if (request.credential !== undefined && (typeof request.credential !== 'string' || request.credential.length < 1 || request.credential.length > 8_192)) throw new Error('Generation utility credential is invalid.');
-    if (Buffer.byteLength(JSON.stringify(request.request), 'utf8') > 2 * 1024 * 1024) throw new Error('Generation utility request exceeds 2 MiB.');
-    validateGenerationRequest(request.document, request.request);
-    if (request.e2eResultFixture !== undefined && (!isFnd09GenerationResultFixture(request.e2eResultFixture)
-      || !isFnd09GenerationResultE2eEnabled({ nodeEnv: process.env.NODE_ENV, enabled: process.env.AIDRAW_E2E_UTILITY_GENERATION_RESULT })
-      || request.credential !== undefined
-      || !isFnd09GenerationResultRequest(request.request))) {
-      throw new Error('The generation-result probe is unavailable outside isolated packaged QA.');
-    }
-    return request as UtilityRequest;
-  }
-  if (base.kind === 'normalize-generation-acceptance') {
-    const request = value as Partial<Extract<UtilityRequest, { kind: 'normalize-generation-acceptance' }>>;
-    assertNormalizeGenerationAcceptanceInput(request.output);
     return request as UtilityRequest;
   }
   if (base.kind === 'capture-observation') {
@@ -171,11 +128,6 @@ if (!process.parentPort) throw new Error('AIDraw utility worker requires an Elec
 
 process.parentPort.on('message', (event) => {
   const control = event.data as { id?: unknown; kind?: unknown };
-  if (control?.kind === 'utility-cancel' && typeof control.id === 'string') { generationControllers.get(control.id)?.abort(); return; }
-  const generationController = control?.kind === 'generation-run' && typeof control.id === 'string'
-    ? new AbortController()
-    : undefined;
-  if (generationController) generationControllers.set(control.id as string, generationController);
   void (async () => {
     let id = typeof control.id === 'string' ? control.id : 'unknown';
     try {
@@ -187,18 +139,6 @@ process.parentPort.on('message', (event) => {
           { mimeType: request.mimeType, width: request.width, height: request.height },
         );
         process.parentPort!.postMessage({ id, ok: true, kind: request.kind, ...decoded } satisfies UtilityResponse);
-      } else if (request.kind === 'render-generation-approval-preview') {
-        const preview = await renderUtilityImagePreview(
-          Buffer.from(request.encodedBase64, 'base64'),
-          { mimeType: request.mimeType, width: request.width, height: request.height },
-          { width: request.previewWidth, height: request.previewHeight },
-        );
-        process.parentPort!.postMessage({
-          id,
-          ok: true,
-          kind: request.kind,
-          previewDataBase64: preview.toString('base64'),
-        } satisfies UtilityResponse);
       } else if (request.kind === 'containment-probe') {
         if (request.mode === 'crash') setTimeout(() => process.crash(), 100);
         if (request.mode === 'crash' || request.mode === 'hang') await new Promise<never>(() => undefined);
@@ -278,33 +218,9 @@ process.parentPort.on('message', (event) => {
           await new Promise((resolveWait) => setTimeout(resolveWait, FND09_OBSERVATION_CODEC_E2E_HOLD_MS));
         }
         process.parentPort!.postMessage({ id, ok: true, kind: request.kind, result } satisfies UtilityResponse);
-      } else if (request.kind === 'normalize-generation-acceptance') {
-        const { normalizeGeneratedOutputForAcceptance } = await import('./normalize-generation-output');
-        const result = await normalizeGeneratedOutputForAcceptance(request.output);
-        const fixture = resolveFnd09GenerationNormalizationE2eFromEnvironment();
-        if (fixture) await writeFnd09GenerationNormalizationE2eProbe(fixture, request.output, result);
-        process.parentPort!.postMessage({ id, ok: true, kind: request.kind, result } satisfies UtilityResponse);
-      } else {
-        const controller = generationController ?? new AbortController();
-        let outputs: unknown[];
-        if (request.e2eResultFixture) {
-          outputs = createFnd09GenerationResultOutputs(request.request, request.e2eResultFixture);
-        } else {
-          const { runGenerationProvider } = await import('./generation-provider-runner');
-          outputs = await runGenerationProvider(request, { signal: controller.signal, onProgress: (progress, message) => {
-            const response = { id, ok: true, kind: 'generation-progress' as const, progress, message };
-            if (isGenerationProgressUtilityResponse(request, response)) process.parentPort!.postMessage(response satisfies UtilityResponse);
-          } });
-        }
-        if (request.e2eResultFixture !== undefined && request.e2eResultFixture !== 'valid') {
-          await new Promise((resolveWait) => setTimeout(resolveWait, FND09_GENERATION_RESULT_E2E_HOLD_MS));
-        }
-        process.parentPort!.postMessage({ id, ok: true, kind: request.kind, outputs } as unknown as UtilityResponse);
       }
     } catch (error) {
       process.parentPort!.postMessage({ id, ok: false, error: { code: 'utility_failed', message: boundedUtilityErrorMessage(error) } } satisfies UtilityResponse);
-    } finally {
-      if (generationController) generationControllers.delete(id);
     }
   })();
 });

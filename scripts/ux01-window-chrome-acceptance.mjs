@@ -23,7 +23,7 @@ export const UX01_WINDOW_CHROME_FILES = Object.freeze({
   failure: 'ux01-window-chrome-failure.json',
   cleanup: 'ux01-window-chrome-cleanup.json',
   forbiddenNetwork: 'ux01-window-chrome-forbidden-network.json',
-  providerCredentials: join('credentials', 'generation.json'),
+  retiredProviderStore: join('credentials', 'generation.json'),
 });
 const UX01_WINDOW_CHROME_CHILD_ENVIRONMENTS = Object.freeze([
   'HOME', 'LOGNAME', 'USER', 'PATH', 'SHELL', 'TMPDIR', 'LANG', 'LC_ALL', '__CF_USER_TEXT_ENCODING',
@@ -95,7 +95,7 @@ export function resolveUx01WindowChromeAcceptance({ workspacePath = process.cwd(
 export function assertUx01WindowChromeSafeReporterEnvironment(environment = process.env) {
   const configured = UX01_WINDOW_CHROME_UNSAFE_REPORT_ENVIRONMENTS.filter((name) => String(environment[name] ?? '').trim());
   if (configured.length) {
-    throw new Error(`UX-01 window-chrome acceptance rejects credential-capable Playwright report configuration: ${configured.join(', ')}.`);
+    throw new Error(`UX-01 window-chrome acceptance rejects secret-bearing Playwright report configuration: ${configured.join(', ')}.`);
   }
   return true;
 }

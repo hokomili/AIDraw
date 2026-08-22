@@ -39,8 +39,8 @@ export function inspectRepositoryPaths(inputPaths) {
 
     const leaf = components.at(-1) ?? '';
     if (GENERATED_FILE.test(leaf) || GENERATED_EXTENSION.test(leaf)) add('platform_artifact', path, `Platform-generated artifact must not be tracked: ${JSON.stringify(leaf)}.`);
-    const providerCredentialFile = leaf.toLowerCase() === 'generation.json' && components.slice(0, -1).some((component) => component.toLowerCase() === 'credentials');
-    if ((/^\.env(?:\..+)?$/i.test(leaf) && leaf.toLowerCase() !== '.env.example') || leaf.toLowerCase() === '.npmrc' || SECRET_NAME.test(leaf) || providerCredentialFile || SECRET_EXTENSION.test(leaf)) {
+    const retiredProviderStoreFile = leaf.toLowerCase() === 'generation.json' && components.slice(0, -1).some((component) => component.toLowerCase() === 'credentials');
+    if ((/^\.env(?:\..+)?$/i.test(leaf) && leaf.toLowerCase() !== '.env.example') || leaf.toLowerCase() === '.npmrc' || SECRET_NAME.test(leaf) || retiredProviderStoreFile || SECRET_EXTENSION.test(leaf)) {
       add('secret_or_credential', path, `Credential/bootstrap/signing material must not be tracked: ${JSON.stringify(leaf)}.`);
     }
 

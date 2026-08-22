@@ -5,6 +5,7 @@ import { dirname, join, resolve } from 'node:path';
 import process from 'node:process';
 import { promisify } from 'node:util';
 import { assertConnectionFileReplaceable, assertForceStopIdentity, buildRedactedConnection, processProbeErrorMeansAlive, requiresUnsandboxedGuiLaunch } from './qa-session-safety.mjs';
+import { readMcpConnectionHandoff } from './mcp-direct-client.mjs';
 
 const execFileAsync = promisify(execFile);
 const FLAG_ARGUMENTS = new Set(['force-on-timeout']);
@@ -26,8 +27,8 @@ The launch-context acknowledgement prevents accidental sandboxed GUI startup.
 Force-on-timeout is an opt-in last resort. It terminates the recorded PID only
 after the live executable, SHA-256, command-line profile, connection PID, and
 loopback MCP URL all match the manifest; normal stop never force-terminates.
-Session files contain local bearer credentials and must stay below ignored
-test-results/.
+Session files contain one engine process's ephemeral authority handoff and must
+stay below ignored test-results/.
 `;
 
 function parseArguments(argv) {
@@ -83,11 +84,14 @@ async function waitForExit(child, timeoutMs = 10_000) {
   });
 }
 
-async function health(url) {
+async function health(url, token) {
   const healthUrl = new globalThis.URL(url);
   healthUrl.pathname = '/health';
   healthUrl.search = '';
-  const response = await globalThis.fetch(healthUrl, { signal: globalThis.AbortSignal.timeout(1_500) });
+  const response = await globalThis.fetch(healthUrl, {
+    headers: { authorization: `Bearer ${token}` },
+    signal: globalThis.AbortSignal.timeout(1_500),
+  });
   if (!response.ok) throw new Error(`Health endpoint returned ${response.status}.`);
   return { url: healthUrl.toString(), body: await response.json().catch(() => ({})) };
 }
@@ -119,10 +123,9 @@ async function waitForConnection(connectionPath, expectedPid, startedAt) {
     try {
       const fileInfo = await stat(connectionPath);
       if (fileInfo.mtimeMs + 1_000 < startedAt) throw new Error('Connection file is stale.');
-      const connection = JSON.parse(await readFile(connectionPath, 'utf8'));
-      if (!connection.url || !connection.token || !connection.pid) throw new Error('Connection file is incomplete.');
+      const connection = await readMcpConnectionHandoff(connectionPath);
       if (Number(connection.pid) !== expectedPid) throw new Error(`Connection PID ${connection.pid} does not match launched PID ${expectedPid}.`);
-      const healthResult = await health(connection.url);
+      const healthResult = await health(connection.url, connection.token);
       return { connection, health: healthResult };
     } catch (error) {
       lastError = error;
@@ -142,8 +145,8 @@ async function loadManifest(values) {
 }
 
 async function redactConnection(manifest) {
-  if (isProcessAlive(Number(manifest.pid))) throw new Error(`Refusing to redact connection credentials while QA PID ${manifest.pid} is still alive.`);
-  const connection = JSON.parse(await readFile(manifest.connection, 'utf8'));
+  if (isProcessAlive(Number(manifest.pid))) throw new Error(`Refusing to redact the connection authority while QA PID ${manifest.pid} is still alive.`);
+  const connection = await readMcpConnectionHandoff(manifest.connection);
   const redacted = buildRedactedConnection(connection, manifest);
   await writeFile(manifest.connection, `${JSON.stringify(redacted, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
   return redacted;
@@ -182,7 +185,7 @@ async function readNativeProcessIdentity(pid) {
 }
 
 async function verifyProcessIdentity(manifest) {
-  const connection = JSON.parse(await readFile(manifest.connection, 'utf8'));
+  const connection = await readMcpConnectionHandoff(manifest.connection);
   const currentExeSha256 = await sha256(manifest.exe);
   const processIdentity = await readNativeProcessIdentity(Number(manifest.pid));
   return assertForceStopIdentity({ manifest, connection, currentExeSha256, processIdentity });
@@ -253,11 +256,11 @@ async function start(values) {
 
 async function show(values) {
   const { manifestPath, manifest } = await loadManifest(values);
-  const connection = JSON.parse(await readFile(manifest.connection, 'utf8'));
+  const connection = await readMcpConnectionHandoff(manifest.connection);
   if (Number(connection.pid) !== Number(manifest.pid) || connection.url !== manifest.mcpUrl) {
     throw new Error('Refusing to show an editor because the session connection identity changed.');
   }
-  await health(manifest.mcpUrl);
+  await health(manifest.mcpUrl, connection.token);
   const child = spawn(manifest.exe, [`--user-data-dir=${manifest.profile}`], {
     detached: false,
     stdio: 'ignore',
@@ -274,10 +277,10 @@ async function show(values) {
 async function status(values) {
   const { manifestPath, manifest } = await loadManifest(values);
   const currentHash = await sha256(manifest.exe);
-  const connection = JSON.parse(await readFile(manifest.connection, 'utf8'));
+  const connection = await readMcpConnectionHandoff(manifest.connection);
   let healthResult;
   let healthError;
-  try { healthResult = await health(manifest.mcpUrl); } catch (error) { healthError = error instanceof Error ? error.message : String(error); }
+  try { healthResult = await health(manifest.mcpUrl, connection.token); } catch (error) { healthError = error instanceof Error ? error.message : String(error); }
   let processIdentity;
   let processIdentityError;
   if (isProcessAlive(Number(manifest.pid)) && ['win32', 'darwin'].includes(process.platform)) {
@@ -341,7 +344,7 @@ async function stop(values) {
     ...manifest,
     stoppedAt: new Date().toISOString(),
     stopped,
-    connectionCredentialsRedacted: Boolean(redactedConnection),
+    connectionAuthorityRedacted: Boolean(redactedConnection),
     forceOnTimeout,
     forceAttempted,
     forced: Boolean(forceVerification && stopped),
@@ -349,16 +352,16 @@ async function stop(values) {
     forceRefused,
   };
   await writeFile(manifestPath, `${JSON.stringify(updated, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
-  process.stdout.write(`${JSON.stringify({ manifestPath, signalExitCode, stopped, pid: manifest.pid, connectionCredentialsRedacted: Boolean(redactedConnection), forceAttempted, forced: Boolean(forceVerification && stopped), forceVerification, forceRefused }, null, 2)}\n`);
+  process.stdout.write(`${JSON.stringify({ manifestPath, signalExitCode, stopped, pid: manifest.pid, connectionAuthorityRedacted: Boolean(redactedConnection), forceAttempted, forced: Boolean(forceVerification && stopped), forceVerification, forceRefused }, null, 2)}\n`);
   if (!stopped) process.exitCode = 1;
 }
 
 async function redact(values) {
   const { manifestPath, manifest } = await loadManifest(values);
   await redactConnection(manifest);
-  const updated = { ...manifest, connectionCredentialsRedacted: true };
+  const updated = { ...manifest, connectionAuthorityRedacted: true };
   await writeFile(manifestPath, `${JSON.stringify(updated, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
-  process.stdout.write(`${JSON.stringify({ manifestPath, pid: manifest.pid, connectionCredentialsRedacted: true }, null, 2)}\n`);
+  process.stdout.write(`${JSON.stringify({ manifestPath, pid: manifest.pid, connectionAuthorityRedacted: true }, null, 2)}\n`);
 }
 
 const { command, values } = parseArguments(process.argv.slice(2));

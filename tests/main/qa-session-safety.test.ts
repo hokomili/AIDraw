@@ -11,10 +11,10 @@ const baseline: ForceStopIdentityInput = {
     trustedFolders: ['C:\\qa runs\\output'],
   },
   connection: {
-    version: 1,
+    version: 2,
     pid: 4312,
     url: 'http://127.0.0.1:48200/mcp',
-    token: 'PRIVATE-BEARER-TOKEN',
+    token: 'C'.repeat(43),
     activeDocumentId: 'doc-1',
   },
   currentExeSha256: 'ABC123',
@@ -76,16 +76,16 @@ describe('QA session force-stop safety', () => {
     expect(assertForceStopIdentity(macInput)).toMatchObject({ pid: 8123, exe: macInput.manifest.exe, profile: macInput.manifest.profile });
   });
 
-  it('redacts bearer credentials while preserving non-secret cleanup identity', () => {
+  it('redacts the process authority while preserving non-secret cleanup identity', () => {
     const redacted = buildRedactedConnection(baseline.connection, baseline.manifest, '2026-08-05T00:00:00.000Z');
     expect(redacted).toEqual({
-      version: 1,
+      version: 2,
       url: baseline.manifest.mcpUrl,
       activeDocumentId: 'doc-1',
       pid: baseline.manifest.pid,
       trustedFolders: baseline.manifest.trustedFolders,
       stoppedAt: '2026-08-05T00:00:00.000Z',
-      credentialsRedacted: true,
+      authorityRedacted: true,
     });
     expect(JSON.stringify(redacted)).not.toContain(baseline.connection.token);
     expect(redacted).not.toHaveProperty('token');

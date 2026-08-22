@@ -28,7 +28,6 @@ import {
   FND05_UNRESPONSIVE_REPLACEMENT_WAIT_MS,
   FND05_UNRESPONSIVE_STALL_EXPRESSION,
   FND05_UNRESPONSIVE_STALL_MS,
-  inspectFnd05EncryptedToken,
   observeFnd05DeliberatePageCrash,
   parseFnd05OwnedProcesses,
   redactFnd05FailureText,
@@ -36,11 +35,11 @@ import {
   resolveFnd05UnresponsiveAcceptance,
 } from '../../scripts/fnd05-packaged-acceptance.mjs';
 import {
-  inspectPackagedMcpCredential,
   resolvePackagedE2eArtifact,
   spawnPackagedE2e,
   waitForPackagedE2eReady,
 } from '../../scripts/packaged-e2e-runtime.mjs';
+import { initializeDirectMcp, readMcpConnectionHandoff } from '../../scripts/mcp-direct-client.mjs';
 
 const execute = promisify(execFile);
 const artifact = resolvePackagedE2eArtifact();
@@ -55,9 +54,10 @@ const networkDisabledArguments = [
 ];
 
 interface McpConnection {
-  version: number;
+  version: 2;
   url: string;
   token: string;
+  authority: 'engine-process';
   activeDocumentId: string;
   pid: number;
   trustedFolders: string[];
@@ -82,7 +82,7 @@ interface CleanupRecord {
   ownerExitCode?: number | null;
   signalPid?: number;
   signalExitCode?: number | null;
-  connectionCredentials: 'redacted-after-graceful-stop' | 'absent' | 'live-owner-not-stopped';
+  connectionAuthority: 'redacted-after-graceful-stop' | 'absent' | 'live-owner-not-stopped';
   ownedSurvivors: Array<{ pid: number; ppid: number; type: string }>;
   graceful: boolean;
   error?: string;
@@ -169,11 +169,8 @@ async function waitForConnection(path: string, child: ChildProcess): Promise<Mcp
     timeoutMs: 20_000,
     attempt: async () => {
       try {
-        const value = JSON.parse(await readFile(path, 'utf8')) as Partial<McpConnection>;
-        if (value.version !== 1 || !value.url || !value.token || !value.activeDocumentId || !Number.isInteger(value.pid)) return undefined;
-        const url = new URL(value.url);
-        if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || url.pathname !== '/mcp') throw new Error('The FND-05 MCP endpoint is not an exact loopback /mcp URL.');
-        return { ...value, trustedFolders: value.trustedFolders ?? [] } as McpConnection;
+        const value = await readMcpConnectionHandoff(path);
+        return value.activeDocumentId ? value as McpConnection : undefined;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT' || error instanceof SyntaxError) return undefined;
         throw error;
@@ -205,8 +202,6 @@ async function startOwner(run: OwnerRun, profile: string, stripProviderEnvironme
     stdio: ['ignore', 'ignore', 'pipe'],
     ...(stripProviderEnvironment ? {
       env: {
-        OPENAI_API_KEY: '',
-        STABILITY_API_KEY: '',
         HTTP_PROXY: 'http://127.0.0.1:9',
         HTTPS_PROXY: 'http://127.0.0.1:9',
         ALL_PROXY: 'socks5://127.0.0.1:9',
@@ -364,15 +359,9 @@ async function callMcpTool(url: string, headers: Record<string, string>, id: num
 }
 
 async function connectMcp(connection: McpConnection): Promise<{ actor: Actor; headers: Record<string, string> }> {
-  const initialize = await fetch(connection.url, {
-    method: 'POST',
-    headers: { authorization: `Bearer ${connection.token}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2026-07-28', capabilities: {}, clientInfo: { name: 'fnd05-stale-renderer-e2e', version: '1.0' } } }),
+  const { headers } = await initializeDirectMcp(connection, {
+    clientInfo: { name: 'fnd05-stale-renderer-e2e', version: '1.0' },
   });
-  const sessionId = initialize.headers.get('mcp-session-id');
-  if (!initialize.ok || !sessionId) throw new Error('The retained FND-05 MCP session is unavailable.');
-  const headers = { authorization: `Bearer ${connection.token}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json', 'mcp-session-id': sessionId };
-  await fetch(connection.url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) });
   const joined = await callMcpTool(connection.url, headers, 2, 'session_manage', {
     action: 'join',
     name: 'FND-05 recovery probe',
@@ -407,7 +396,7 @@ async function redactConnection(path: string): Promise<{ status: 'redacted-after
   const connection = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
   const secret = typeof connection.token === 'string' ? connection.token : undefined;
   delete connection.token;
-  await writeFile(path, `${JSON.stringify({ ...connection, credentialStatus: 'redacted-after-graceful-stop' }, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+  await writeFile(path, `${JSON.stringify({ ...connection, authorityStatus: 'redacted-after-graceful-stop' }, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
   return { status: 'redacted-after-graceful-stop', secret };
 }
 
@@ -446,7 +435,7 @@ async function stopOwner(run: OwnerRun, profile: string, secrets: string[]): Pro
     ownerExitCode: run.child?.exitCode,
     signalPid,
     signalExitCode,
-    connectionCredentials: redacted.status,
+    connectionAuthority: redacted.status,
     ownedSurvivors,
     graceful,
     ...(cleanupError ? { error: cleanupError.message } : {}),
@@ -556,7 +545,7 @@ test(FND05_PACKAGED_SCENARIO, async () => {
     expect(replacementTarget.targetId).not.toBe(beforeTarget.targetId);
     expect(afterProcess.rendererPid).not.toBe(beforeProcess.rendererPid);
     expect(owner.child!.pid).toBe(ownerConnection.pid);
-    expect((JSON.parse(await readFile(configured.paths.ownerConnection, 'utf8')) as McpConnection).pid).toBe(ownerPid);
+    expect((await readMcpConnectionHandoff(configured.paths.ownerConnection)).pid).toBe(ownerPid);
 
     const inspectedAfterLoss = await callMcpTool(ownerConnection.url, client.headers, requestId++, 'session_manage', { action: 'inspect', documentId: canonicalBefore.documentId });
     expect(inspectedAfterLoss).toMatchObject({ workspace: { humanOccupancy: { active: false, locks: [] }, editorAdvisory: { attached: true, documentId: canonicalBefore.documentId } } });
@@ -611,7 +600,7 @@ test(FND05_PACKAGED_SCENARIO, async () => {
     const firstCleanup = await stopOwner(owner, configured.profile, secrets);
     cleanup.push(firstCleanup);
     active = undefined;
-    expect(firstCleanup).toMatchObject({ graceful: true, ownerPid, ownerExitCode: 0, signalExitCode: 0, connectionCredentials: 'redacted-after-graceful-stop', ownedSurvivors: [] });
+    expect(firstCleanup).toMatchObject({ graceful: true, ownerPid, ownerExitCode: 0, signalExitCode: 0, connectionAuthority: 'redacted-after-graceful-stop', ownedSurvivors: [] });
 
     const relaunch: OwnerRun = { phase: 'relaunch', connectionPath: configured.paths.relaunchConnection, stderr: [], externalRendererRequests: [] };
     active = relaunch;
@@ -640,17 +629,16 @@ test(FND05_PACKAGED_SCENARIO, async () => {
       engine: { running: true, uiAttached: true, mode: 'interactive' },
     });
 
-    const encryptedCredential = JSON.parse(await readFile(configured.paths.tokenCredentials, 'utf8')) as unknown;
-    inspectPackagedMcpCredential(encryptedCredential, ownerConnection.token);
-    inspectPackagedMcpCredential(encryptedCredential, relaunchConnection.token);
-    expect(await access(configured.paths.providerCredentials).then(() => true, () => false)).toBe(false);
+    expect(relaunchConnection.token).not.toBe(ownerConnection.token);
+    expect(await access(configured.paths.retiredAuthorityStore).then(() => true, () => false)).toBe(false);
+    expect(await access(configured.paths.retiredProviderStore).then(() => true, () => false)).toBe(false);
     expect(await access(configured.paths.forbiddenNetwork).then(() => true, () => false)).toBe(false);
     expect([...owner.externalRendererRequests, ...relaunch.externalRendererRequests]).toEqual([]);
 
     const relaunchCleanup = await stopOwner(relaunch, configured.profile, secrets);
     cleanup.push(relaunchCleanup);
     active = undefined;
-    expect(relaunchCleanup).toMatchObject({ graceful: true, ownerPid: relaunchPid, ownerExitCode: 0, signalExitCode: 0, connectionCredentials: 'redacted-after-graceful-stop', ownedSurvivors: [] });
+    expect(relaunchCleanup).toMatchObject({ graceful: true, ownerPid: relaunchPid, ownerExitCode: 0, signalExitCode: 0, connectionAuthority: 'redacted-after-graceful-stop', ownedSurvivors: [] });
 
     const executableInfo = await stat(executable);
     const asarInfo = await stat(asar);
@@ -664,7 +652,7 @@ test(FND05_PACKAGED_SCENARIO, async () => {
       canonicalContinuity: { documentId: canonicalBefore.documentId, revisionBeforeLoss: canonicalBefore.revision, revisionAfterRetry: canonicalBefore.revision + 1, objectId: canonicalBefore.object.id, humanUndoHistoryPresentAfterLoss: true, activityPreservedAfterLoss: true, transientHumanOccupancyCleared: true },
       closeAndReopen: { sameOwner: true, sameDocument: true, sameRevision: true, exactlyOneWindow: true, rendererPid: reopenedProcess.rendererPid },
       sameProfileRelaunch: { profile: configured.profile, previousOwnerPid: ownerPid, relaunchOwnerPid: relaunchPid, restoredDocumentId: canonicalBefore.documentId, restoredRevision: canonicalBefore.revision + 1, rendererPid: relaunchProcess.rendererPid },
-      credentialsAndNetwork: { connectionFilesRedactedAfterConfirmedExit: true, localMcpCredentialEncryptedAtRest: true, providerCredentialFileAbsent: true, rendererExternalRequestsObserved: 0, backgroundNetworkDisabled: true },
+      authorityAndNetwork: { explicitHandoffsRedactedAfterConfirmedExit: true, engineRestartChangedAuthority: true, retiredPersistentStoresAbsent: true, rendererExternalRequestsObserved: 0, backgroundNetworkDisabled: true },
       cleanup,
     };
   } catch (error) {
@@ -710,7 +698,7 @@ test(FND05_UNRESPONSIVE_PACKAGED_SCENARIO, async ({ browserName }, testInfo) => 
   test.setTimeout(180_000);
   expect(browserName).toBe('chromium');
   if (process.env.AIDRAW_E2E_FND05_UNRESPONSIVE_WRAPPER !== '1' || process.env.PLAYWRIGHT_NO_COPY_PROMPT !== '1') {
-    throw new Error('FND-05 unresponsive-renderer acceptance must run through its credential-safe wrapper.');
+    throw new Error('FND-05 unresponsive-renderer acceptance must run through its authority-safe wrapper.');
   }
   if (testInfo.project.metadata.suite !== 'retained-fnd05-unresponsive-renderer'
     || testInfo.project.metadata.automaticCredentialCapableArtifacts !== false) {
@@ -960,7 +948,7 @@ test(FND05_UNRESPONSIVE_PACKAGED_SCENARIO, async ({ browserName }, testInfo) => 
     expect(afterProcess.rendererPid).not.toBe(beforeProcess.rendererPid);
     expect(afterProcess.observedReplacementRendererPids).toEqual([afterProcess.rendererPid]);
     expect(owner.child!.pid).toBe(ownerConnection.pid);
-    expect((JSON.parse(await readFile(configured.paths.ownerConnection, 'utf8')) as McpConnection).pid).toBe(ownerPid);
+    expect((await readMcpConnectionHandoff(configured.paths.ownerConnection)).pid).toBe(ownerPid);
 
     expect(['rejected-after-debugger-detach', 'pending-after-debugger-detach']).toContain(stallProof.command);
 
@@ -1017,18 +1005,15 @@ test(FND05_UNRESPONSIVE_PACKAGED_SCENARIO, async ({ browserName }, testInfo) => 
       activityLabels: expect.arrayContaining(['Prepare persistent renderer recovery', 'Retry after persistent renderer stall']),
     });
 
-    const encryptedCredential = JSON.parse(await readFile(configured.paths.tokenCredentials, 'utf8')) as unknown;
-    const encryptedToken = inspectFnd05EncryptedToken(encryptedCredential, ownerConnection.token);
-    if (!encryptedToken.encryptedValuePresent) throw new Error('The FND-05 encrypted credential shape was not confirmed.');
-    if (((await stat(configured.paths.tokenCredentials)).mode & 0o777) !== 0o600) throw new Error('The FND-05 encrypted credential record is not mode 0600.');
-    expect(await access(configured.paths.providerCredentials).then(() => true, () => false)).toBe(false);
+    expect(await access(configured.paths.retiredAuthorityStore).then(() => true, () => false)).toBe(false);
+    expect(await access(configured.paths.retiredProviderStore).then(() => true, () => false)).toBe(false);
     expect(await access(configured.paths.forbiddenNetwork).then(() => true, () => false)).toBe(false);
     expect(owner.externalRendererRequests).toEqual([]);
 
     const ownerCleanup = await stopOwner(owner, configured.profile, secrets);
     cleanup.push(ownerCleanup);
     active = undefined;
-    expect(ownerCleanup).toMatchObject({ graceful: true, ownerPid, ownerExitCode: 0, signalExitCode: 0, connectionCredentials: 'redacted-after-graceful-stop', ownedSurvivors: [] });
+    expect(ownerCleanup).toMatchObject({ graceful: true, ownerPid, ownerExitCode: 0, signalExitCode: 0, connectionAuthority: 'redacted-after-graceful-stop', ownedSurvivors: [] });
 
     const executableInfo = await stat(executable);
     const asarInfo = await stat(asar);
@@ -1112,10 +1097,9 @@ test(FND05_UNRESPONSIVE_PACKAGED_SCENARIO, async ({ browserName }, testInfo) => 
         transientHumanOccupancyClearedAfterConfirmedDetach: true,
         sameAgentRetryCommitted: true,
       },
-      credentialsAndNetwork: {
+      authorityAndNetwork: {
         connectionFileRedactedAfterConfirmedExit: true,
-        localMcpCredentialEncryptedAtRest: true,
-        providerCredentialFileAbsent: true,
+        retiredPersistentStoresAbsent: true,
         rendererExternalRequestsObserved: 0,
         backgroundNetworkDisabled: true,
       },

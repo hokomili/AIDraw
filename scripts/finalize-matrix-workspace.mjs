@@ -3,11 +3,12 @@ import { readFile, readdir, mkdir, rename, rmdir, writeFile } from 'node:fs/prom
 import { join, resolve } from 'node:path';
 import process from 'node:process';
 import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate';
+import { initializeDirectMcp, readMcpConnectionHandoff } from './mcp-direct-client.mjs';
 
 const APPLY = process.argv.includes('--apply');
 const VERIFY_EXISTING = process.argv.includes('--verify-existing');
 const TARGET_DIR = process.env.AIDRAW_MATRIX_DIR ?? 'C:\\Users\\hokom\\Desktop\\AI Generated';
-const CODEX_CONFIG = process.env.CODEX_CONFIG_PATH ?? 'C:\\Users\\hokom\\.codex\\config.toml';
+const MCP_CONNECTION_HANDOFF = process.env.AIDRAW_MCP_CONNECTION_HANDOFF;
 const APP_VERSION = '1.0.0';
 const TRANSPARENT_PREVIEW = Uint8Array.from(Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAE/wH+Q5ZkAAAAAElFTkSuQmCC',
@@ -104,24 +105,19 @@ function parseRpcPayload(text) {
 }
 
 async function connectMcp() {
-  const config = await readFile(CODEX_CONFIG, 'utf8');
-  const section = config.match(/\[mcp_servers\.aidraw\]([\s\S]*?)(?=\r?\n\[|$)/)?.[1];
-  const url = section?.match(/^\s*url\s*=\s*"([^"]+)"/m)?.[1];
-  const token = section?.match(/Authorization\s*=\s*"Bearer\s+([^"]+)"/i)?.[1];
-  if (!url || !token) throw new Error('Codex does not contain a usable [mcp_servers.aidraw] URL and bearer token.');
-  const baseHeaders = { authorization: `Bearer ${token}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json' };
-  let rpcId = 0;
+  if (!MCP_CONNECTION_HANDOFF) throw new Error('AIDRAW_MCP_CONNECTION_HANDOFF must name a caller-owned version-two QA handoff.');
+  const connection = await readMcpConnectionHandoff(resolve(MCP_CONNECTION_HANDOFF));
+  let rpcId = 1;
   async function rpc(headers, method, params = {}) {
-    const response = await globalThis.fetch(url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', id: ++rpcId, method, params }) });
+    const response = await globalThis.fetch(connection.url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', id: ++rpcId, method, params }) });
     const body = parseRpcPayload(await response.text());
     if (!response.ok || body.error) throw new Error(`${method}: ${JSON.stringify(body.error ?? body)}`);
     return { response, body };
   }
-  const initialized = await rpc(baseHeaders, 'initialize', { protocolVersion: '2026-07-28', capabilities: {}, clientInfo: { name: 'AIDraw final-results consolidator', version: APP_VERSION } });
-  const sessionId = initialized.response.headers.get('mcp-session-id');
-  if (!sessionId) throw new Error('The live AIDraw engine did not return an MCP session ID.');
-  const headers = { ...baseHeaders, 'mcp-session-id': sessionId };
-  await globalThis.fetch(url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) });
+  const { headers } = await initializeDirectMcp(connection, {
+    requestId: 1,
+    clientInfo: { name: 'AIDraw final-results consolidator', version: APP_VERSION },
+  });
   return {
     async tool(name, args) {
       const { body } = await rpc(headers, 'tools/call', { name, arguments: args });

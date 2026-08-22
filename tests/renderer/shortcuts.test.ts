@@ -183,8 +183,10 @@ describe('keyboard shortcut reference', () => {
     expect(readme).toContain('exactly 40 eligible bindings: all 39 tools displayed across the illustration (19) and pixel (20) rails plus the renderer-owned inspector toggle');
     expect(readme).toContain('Later still-free new mnemonics are reserved before fallback selection');
     expect(readme).toContain('remaining command/native-menu remapping');
-    expect(tracker).toContain('clean and live-synchronized through base `6aa413bc92c9fb33e100741fd7480d3086930189`');
-    expect(tracker).toContain('The current bounded MAP-08/MAP-13 source/headless candidate completes image-collection isometric projection before admitting its exact dependent workflows');
+    expect(tracker).toContain('clean and live-synchronized through base `e66bb99429d8e17c86604760146950efdeb350c8`');
+    expect(tracker).toContain('That synchronized base already contains the finite/sparse orthogonal/isometric image-collection projection');
+    expect(tracker).toContain('The current ordinary worktree is one wholly unstaged provider-free stable-bridge and local RC-preparation candidate over that base');
+    expect(tracker).toContain('It preserves the accepted exact 21-path MAP-03/MAP-07/MAP-13 non-highest-ID-to-existing-gap movement candidate');
     expect(tracker).toContain('A deliberate previewed version-2 portable kit carries every and only reached atlas or image-collection dependency');
     expect(tracker).toContain('all **39 displayed tool activations**—19 illustration and 20 pixel—plus the renderer-owned inspector toggle');
     expect(tracker).toContain('later still-free new mnemonics remain reserved from earlier fallbacks');

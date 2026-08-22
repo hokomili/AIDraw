@@ -113,7 +113,7 @@ export function assertObservationCodecObserverNoForceSource(observerSource) {
     'resultReturnedToCaller: false',
     'corruptUtilityPayloadNotPublished: true',
     'await quitGracefully(profile, child)',
-    "credentialStatus).toBe('redacted-after-graceful-stop')",
+    "authorityStatus).toBe('redacted-after-graceful-stop')",
   ]) {
     if (!scenario.includes(marker)) throw new Error(`Observation codec scenario is missing ${marker}.`);
   }

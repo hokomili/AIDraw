@@ -5,7 +5,6 @@ import {
   assertUx01ContentSizeRequest,
   assertUx01EvidenceRedacted,
   assertUx01SafeReporterEnvironment,
-  inspectUx01EncryptedToken,
   parseUx01WindowMeasurement,
   parseUx01OwnedProcesses,
   redactUx01FailureText,
@@ -100,7 +99,10 @@ describe('UX-01 retained exact-package acceptance boundary', () => {
     expect(acceptance).toContain('exactly **one** wrapper invocation');
     expect(acceptance).toContain('Evidence SHA-256 is `6ac62913c5028d56f3f705f331c1b597264d62eae40a77b429cb75a96fde1f09`');
     expect(acceptance).toContain('UX-01 therefore remains **Working/P0**');
-    expect(acceptance).toContain('Never rerun, reuse, relaunch, rewrite, or delete r5');
+    expect(acceptance).toContain('The protected r5 profile, screenshots, output, and receipts remain immutable');
+    expect(acceptance).toContain('Its exact `F8DBFB8D…B1AFC` ASAR subject was erroneously removed');
+    expect(acceptance).toContain('re-execution, package-integrity re-audit, and byte-identical rebuild claims are explicitly unearned');
+    expect(acceptance).not.toContain('delete r5, its package');
 
     expect(changelog).not.toContain('A fresh secure package/profile/output is required for complete native acceptance');
     expect(truth).not.toContain('Still required before Verified: a fresh exact-package run');
@@ -149,32 +151,18 @@ describe('UX-01 retained exact-package acceptance boundary', () => {
     ]);
   });
 
-  it('redacts live values and rejects credential-shaped retained evidence', () => {
+  it('redacts live values and rejects secret-bearing retained evidence', () => {
     const secret = 'ux01-private-token-value';
     const failure = redactUx01FailureText(`Authorization: Bearer ${secret}; token=${secret}`, [secret]);
     expect(failure).not.toContain(secret);
     expect(assertUx01EvidenceRedacted(JSON.stringify({ status: 'failed', failure }), [secret])).toBe(true);
-    expect(() => assertUx01EvidenceRedacted(JSON.stringify({ token: secret }), [secret])).toThrow(/credential-shaped/);
-    expect(() => assertUx01EvidenceRedacted(JSON.stringify({ detail: `Bearer ${secret}` }), [secret])).toThrow(/credential-shaped/);
+    expect(() => assertUx01EvidenceRedacted(JSON.stringify({ token: secret }), [secret])).toThrow(/secret-bearing/);
+    expect(() => assertUx01EvidenceRedacted(JSON.stringify({ detail: `Bearer ${secret}` }), [secret])).toThrow(/secret-bearing/);
   });
 
-  it('checks encrypted token shape without returning or reporting either token value', () => {
-    const liveToken = 'synthetic-live-token-that-must-not-reach-playwright';
-    expect(inspectUx01EncryptedToken({ version: 2, status: 'active', encryption: 'electron-safe-storage', value: 'encrypted-ciphertext' }, liveToken)).toEqual({
-      version: 2,
-      status: 'active',
-      encryption: 'electron-safe-storage',
-      encryptedValuePresent: true,
-    });
-    let message = '';
-    try {
-      inspectUx01EncryptedToken({ version: 2, status: 'active', encryption: 'electron-safe-storage', value: liveToken }, liveToken);
-    } catch (error) {
-      message = error instanceof Error ? error.message : String(error);
-    }
-    expect(message).toMatch(/expected encrypted safe-storage record/);
-    expect(message).not.toContain(liveToken);
-    expect(() => inspectUx01EncryptedToken({ version: 1, encryption: 'electron-safe-storage', value: 'legacy-ciphertext' }, liveToken)).toThrow(/expected encrypted safe-storage record/);
+  it('keeps retired persistent provider and MCP authority paths as absence sentinels', () => {
+    expect(UX01_PACKAGED_FILES.retiredProviderStore).toBe(join('credentials', 'generation.json'));
+    expect(UX01_PACKAGED_FILES.retiredAuthorityStore).toBe(join('credentials', 'mcp-token.json'));
   });
 
   it('parses only trusted bounded renderer window geometry and bounded content requests', () => {
@@ -258,7 +246,8 @@ describe('UX-01 retained exact-package acceptance boundary', () => {
     expect(source).toContain("keyboardActions.push('inspector Add paint layer by Enter')");
     expect(source).toContain("pointerActions.push('map asset add and last tile-grid cell')");
     expect(source).toContain("signalOwner(profile, '--quit-engine')");
-    expect(source).toContain('inspectUx01EncryptedToken(tokenFile, connection.token)');
+    expect(source).toContain('configured.paths.retiredAuthorityStore');
+    expect(source).not.toMatch(/safe-storage|EncryptedToken|tokenCredentials/);
     expect(source).not.toMatch(/expect\([^\n]*connection\.token/);
     expect(source.match(/screenshotRecord\(page, configured\.screenshots\[\d\]\)/g)).toHaveLength(4);
     expect(source).not.toContain('injectRendererRecoveryTestEvent');
@@ -267,7 +256,7 @@ describe('UX-01 retained exact-package acceptance boundary', () => {
     expect(source).not.toMatch(/\brm\s*\(/);
   });
 
-  it('runs only through the credential-safe user-only wrapper and dedicated list reporter', async () => {
+  it('runs only through the private-evidence user-only wrapper and dedicated list reporter', async () => {
     const [wrapper, config, playwrightArtifacts] = await Promise.all([
       readFile(resolve('scripts/run-ux01-density-acceptance.mjs'), 'utf8'),
       readFile(resolve('playwright.ux01.config.ts'), 'utf8'),

@@ -3,11 +3,8 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { access, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
-import {
-  inspectPackagedMcpCredential,
-  resolvePackagedE2eArtifact,
-  spawnPackagedE2e,
-} from '../../scripts/packaged-e2e-runtime.mjs';
+import { initializeDirectMcp, parseMcpConnectionHandoff } from '../../scripts/mcp-direct-client.mjs';
+import { resolvePackagedE2eArtifact, spawnPackagedE2e } from '../../scripts/packaged-e2e-runtime.mjs';
 
 const scenarioName = 'FND-09-UTILITY-CONTAINMENT exact package contains crash and cancellation before clean restart';
 const profilePrefix = 'aidraw-e2e-fnd09-utility-containment-';
@@ -21,8 +18,6 @@ const exportResultScenarioName = 'FND-09-EXPORT-RESULT exact package rejects inv
 const exportResultProfilePrefix = 'aidraw-e2e-fnd09-export-result-';
 const importResultScenarioName = 'FND-09-IMPORT-RESULT exact package rejects invalid imported output and recovers queued import work';
 const importResultProfilePrefix = 'aidraw-e2e-fnd09-import-result-';
-const generationResultScenarioName = 'FND-09-GENERATION-RESULT exact package rejects invalid generated output and recovers queued generation work';
-const generationResultProfilePrefix = 'aidraw-e2e-fnd09-generation-result-';
 const packagedArtifact = resolvePackagedE2eArtifact();
 const packagedExecutable = packagedArtifact.executable;
 const packagedAsar = packagedArtifact.asar;
@@ -33,9 +28,10 @@ interface McpMessage {
 }
 
 interface McpConnection {
-  version: number;
+  version: 2;
   url: string;
   token: string;
+  authority: 'engine-process';
   activeDocumentId: string;
   pid: number;
   trustedFolders: string[];
@@ -63,8 +59,7 @@ interface UtilityProbeEvidence {
     queuedExport: { bytes: number; sha256: string; warnings: string[] };
   };
   workerPidsDistinct?: boolean;
-  generationLaneUntouched?: boolean;
-  network: { nonLoopbackRequests: number; externalProviderRequests: number; paidRequests: number };
+  network: { nonLoopbackRequests: number };
 }
 
 interface UtilityPressureProbeEvidence {
@@ -92,7 +87,6 @@ interface UtilityPressureProbeEvidence {
   cancellation?: { label: string; error: { name: string; message: string }; queuedAfterCancellation: number };
   refill?: { label: string; queuedAfterRefill: number };
   drain?: { expectedOrder: string[]; completionOrder: string[]; sameWorker: boolean; workerPid: number; queuedAfterDrain: number };
-  generationLaneUntouched?: boolean;
   privacy?: { rawUtilityPayloadsPublished: boolean; publicJobCreated: boolean };
 }
 
@@ -119,9 +113,8 @@ interface UtilityObservationCodecProbeEvidence {
     fixedCorruptResponseHoldMs: number;
     observation: { available: boolean; mimeType: string; width: number; height: number; scale: number; bytes: number; sha256: string };
   };
-  generationLaneUntouched?: boolean;
   privacy?: { rendererCreated: boolean; corruptPayloadPublished: boolean; publicJobCreated: boolean };
-  network: { nonLoopbackRequests: number; externalProviderRequests: number; paidRequests: number };
+  network: { nonLoopbackRequests: number };
 }
 
 interface UtilityQuantizationResultProbeEvidence {
@@ -153,9 +146,8 @@ interface UtilityQuantizationResultProbeEvidence {
   };
   fixedInvalidResponseHoldMs?: number;
   workerPidsDistinct?: boolean;
-  generationLaneUntouched?: boolean;
   privacy?: { rendererCreated: boolean; invalidPayloadPublished: boolean; publicJobCreated: boolean };
-  network: { nonLoopbackRequests: number; externalProviderRequests: number; paidRequests: number };
+  network: { nonLoopbackRequests: number };
 }
 
 interface UtilityExportResultProbeEvidence {
@@ -188,10 +180,9 @@ interface UtilityExportResultProbeEvidence {
   companion?: UtilityExportResultProbeEvidence['primary'];
   fixedInvalidResponseHoldMs?: number;
   workerPidsDistinct?: boolean;
-  generationLaneUntouched?: boolean;
   privacy?: { rendererCreated: boolean; invalidPayloadPublished: boolean; publicJobCreated: boolean };
   filesystem?: { exportTargetsCreated: number };
-  network: { nonLoopbackRequests: number; externalProviderRequests: number; paidRequests: number };
+  network: { nonLoopbackRequests: number };
 }
 
 interface UtilityImportResultProbeEvidence {
@@ -229,73 +220,9 @@ interface UtilityImportResultProbeEvidence {
   warningShape?: UtilityImportResultProbeEvidence['documentSchema'];
   fixedInvalidResponseHoldMs?: number;
   workerPidsDistinct?: boolean;
-  generationLaneUntouched?: boolean;
   privacy?: { rendererCreated: boolean; invalidPayloadPublished: boolean; publicJobCreated: boolean };
   filesystem?: { importInputsCreated: number; outputTargetsCreated: number };
-  network: { nonLoopbackRequests: number; externalProviderRequests: number; paidRequests: number };
-}
-
-interface UtilityGenerationResultFaultEvidence {
-  fault: string;
-  contract: string;
-  workerPid: number;
-  error: { name: string; message: string };
-  resultReturnedToCaller: boolean;
-  payloadRetained: boolean;
-  rejectedBeforePreviewOrJobUse: boolean;
-  queuedRecovery: {
-    workerPid: number;
-    workerReplaced: boolean;
-    queued: boolean;
-    outputCount: number;
-    mimeType: string;
-    width: number;
-    height: number;
-    seed: number;
-    providerMetadataRecord: boolean;
-    bytes: number;
-    sha256: string;
-    semanticSha256: string;
-  };
-}
-
-interface UtilityGenerationResultProbeEvidence {
-  version: number;
-  scenario: string;
-  result: 'passed' | 'failed';
-  canonical: {
-    before: { documentId: string; revision: number; sha256: string };
-    after?: { documentId: string; revision: number; sha256: string };
-    unchanged?: boolean;
-  };
-  requestContract?: {
-    provider: string;
-    mode: string;
-    resultCount: number;
-    width: number;
-    height: number;
-    seed: number;
-    credentialSupplied: boolean;
-    providerInvoked: boolean;
-  };
-  resultCount?: UtilityGenerationResultFaultEvidence;
-  mimeHeader?: UtilityGenerationResultFaultEvidence;
-  dimensionHeader?: UtilityGenerationResultFaultEvidence;
-  seed?: UtilityGenerationResultFaultEvidence;
-  metadata?: UtilityGenerationResultFaultEvidence;
-  fixedInvalidResponseHoldMs?: number;
-  workerPidsDistinct?: boolean;
-  recoverySemanticHashesAgree?: boolean;
-  rasterLaneUntouched?: boolean;
-  privacy?: {
-    rendererCreated: boolean;
-    invalidPayloadPublished: boolean;
-    publicJobCreated: boolean;
-    promptRetained: boolean;
-    providerMetadataRetained: boolean;
-  };
-  filesystem?: { inputTargetsCreated: number; outputTargetsCreated: number };
-  network: { nonLoopbackRequests: number; externalProviderRequests: number; paidRequests: number };
+  network: { nonLoopbackRequests: number };
 }
 
 function parseMcp(text: string): McpMessage {
@@ -325,17 +252,9 @@ async function callTool(url: string, headers: Record<string, string>, id: number
 }
 
 async function connectMcp(connection: McpConnection): Promise<Record<string, string>> {
-  const response = await fetch(connection.url, {
-    method: 'POST',
-    headers: { authorization: `Bearer ${connection.token}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2026-07-28', capabilities: {}, clientInfo: { name: 'fnd09-packaged-utility-observer', version: '1.0.0' } } }),
-  });
-  const sessionId = response.headers.get('mcp-session-id');
-  const initialized = parseMcp(await response.text());
-  if (!response.ok || !sessionId || !initialized.result) throw new Error('The packaged FND-09 MCP observer could not initialize.');
-  const headers = { authorization: `Bearer ${connection.token}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json', 'mcp-session-id': sessionId };
-  await fetch(connection.url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) });
-  return headers;
+  return (await initializeDirectMcp(connection, {
+    clientInfo: { name: 'fnd09-packaged-utility-observer', version: '1.0.0' },
+  })).headers;
 }
 
 async function waitForJson<T>(path: string, child: ChildProcess, label: string): Promise<T> {
@@ -349,8 +268,8 @@ async function waitForJson<T>(path: string, child: ChildProcess, label: string):
 }
 
 async function waitForConnection(path: string, child: ChildProcess): Promise<McpConnection> {
-  const connection = await waitForJson<Partial<McpConnection>>(path, child, 'its isolated MCP connection');
-  if (connection.version !== 1 || !connection.url || !connection.token || !connection.activeDocumentId || !Number.isInteger(connection.pid)) {
+  const connection = parseMcpConnectionHandoff(await waitForJson<unknown>(path, child, 'its isolated MCP connection'));
+  if (!connection?.activeDocumentId) {
     throw new Error('The packaged FND-09 MCP connection has the wrong shape.');
   }
   return connection as McpConnection;
@@ -376,7 +295,7 @@ async function redactConnection(path: string): Promise<'redacted-after-graceful-
   if (!await access(path).then(() => true, () => false)) return 'absent';
   const connection = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
   delete connection.token;
-  await writeFile(path, `${JSON.stringify({ ...connection, credentialStatus: 'redacted-after-graceful-stop' }, null, 2)}\n`, 'utf8');
+  await writeFile(path, `${JSON.stringify({ ...connection, authorityStatus: 'redacted-after-graceful-stop' }, null, 2)}\n`, 'utf8');
   return 'redacted-after-graceful-stop';
 }
 
@@ -408,11 +327,11 @@ test(scenarioName, async () => {
   const connectionPath = join(profile, 'mcp-connection.json');
   const probePath = join(profile, 'fnd09-utility-containment-probe.json');
   const evidencePath = join(profile, 'fnd09-utility-containment-evidence.json');
-  const tokenPath = join(profile, 'credentials', 'mcp-token.json');
+  const retiredAuthorityStorePath = join(profile, 'credentials', 'mcp-token.json');
   const trustSettingsPath = join(profile, 'trusted-folders.json');
-  const providerCredentialsPath = join(profile, 'credentials', 'generation.json');
+  const retiredProviderStorePath = join(profile, 'credentials', 'generation.json');
   const forbiddenNetworkPath = join(profile, 'fnd09-forbidden-network.json');
-  for (const path of [connectionPath, probePath, evidencePath, tokenPath, trustSettingsPath, providerCredentialsPath, forbiddenNetworkPath]) {
+  for (const path of [connectionPath, probePath, evidencePath, retiredAuthorityStorePath, trustSettingsPath, retiredProviderStorePath, forbiddenNetworkPath]) {
     expect(await access(path).then(() => true, () => false), `${path} must be absent before launch`).toBe(false);
   }
 
@@ -440,7 +359,7 @@ test(scenarioName, async () => {
 
   let failure: Error | undefined;
   let runtimeEvidence: Record<string, unknown> | undefined;
-  let credentialStatus: 'redacted-after-graceful-stop' | 'absent' = 'absent';
+  let authorityStatus: 'redacted-after-graceful-stop' | 'absent' = 'absent';
   let executableBytes = 0;
   let asarBytes = 0;
   try {
@@ -461,15 +380,13 @@ test(scenarioName, async () => {
       crash: { workerPid: expect.any(Number), restartPid: expect.any(Number), queuedExport: { bytes: expect.any(Number), sha256: expect.any(String), warnings: [] } },
       cancellation: { workerPid: expect.any(Number), restartPid: expect.any(Number), error: { name: 'AbortError' }, queuedExport: { bytes: expect.any(Number), sha256: expect.any(String), warnings: [] } },
       workerPidsDistinct: true,
-      generationLaneUntouched: true,
-      network: { nonLoopbackRequests: 0, externalProviderRequests: 0, paidRequests: 0 },
+      network: { nonLoopbackRequests: 0 },
     });
     expect(probe.crash?.error.message).toContain('exited unexpectedly');
     expect(probe.crash?.queuedExport).toEqual(probe.cancellation?.queuedExport);
     expect(new Set([probe.crash?.workerPid, probe.crash?.restartPid, probe.cancellation?.restartPid]).size).toBe(3);
 
-    const tokenFile = JSON.parse(await readFile(tokenPath, 'utf8')) as unknown;
-    inspectPackagedMcpCredential(tokenFile, connection.token);
+    expect(await access(retiredAuthorityStorePath).then(() => true, () => false)).toBe(false);
 
     const headers = await connectMcp(connection);
     const joined = await callTool(connection.url, headers, 2, 'session_manage', { action: 'join', name: 'FND-09 utility observer', color: '#4f79b8' });
@@ -484,7 +401,7 @@ test(scenarioName, async () => {
     const jobs = await callTool(connection.url, headers, 4, 'job_manage', { action: 'list' });
     expect(jobs).toEqual({ jobs: [] });
 
-    for (const sentinel of [trustSettingsPath, providerCredentialsPath, forbiddenNetworkPath]) {
+    for (const sentinel of [trustSettingsPath, retiredProviderStorePath, retiredAuthorityStorePath, forbiddenNetworkPath]) {
       expect(await access(sentinel).then(() => true, () => false)).toBe(false);
     }
     executableBytes = (await stat(packagedExecutable)).size;
@@ -497,8 +414,8 @@ test(scenarioName, async () => {
       containment: probe,
       authenticatedMcp: { documentId: connection.activeDocumentId, revision: observed.revision, canonicalMatchedProbe: true, postRestartPngAvailable: true, publicJobs: [] },
       privacy: { publicJobSummariesEmpty: true, rawUtilityResultsNotPublished: true },
-      network: { nonLoopbackRequests: 0, externalProviderRequests: 0, paidRequests: 0 },
-      sentinels: { trustAbsent: true, providerCredentialsAbsent: true, forbiddenNetworkAbsent: true },
+      network: { nonLoopbackRequests: 0 },
+      sentinels: { trustAbsent: true, retiredPersistentStoresAbsent: true, forbiddenNetworkAbsent: true },
     };
   } catch (error) {
     failure = error instanceof Error ? error : new Error(String(error));
@@ -506,7 +423,7 @@ test(scenarioName, async () => {
     let cleanupError: Error | undefined;
     try { await quitGracefully(profile, child); }
     catch (error) { cleanupError = error instanceof Error ? error : new Error('The packaged FND-09 engine did not stop gracefully.'); }
-    try { credentialStatus = await redactConnection(connectionPath); }
+    try { authorityStatus = await redactConnection(connectionPath); }
     catch (error) { cleanupError ??= error instanceof Error ? error : new Error('The packaged FND-09 connection could not be redacted.'); }
 
     const retainedEvidence = {
@@ -516,14 +433,14 @@ test(scenarioName, async () => {
       }),
       result: failure || cleanupError ? 'failed' : 'passed',
       error: failure?.message ?? cleanupError?.message,
-      cleanup: { gracefulOnly: true, exitCode: child.exitCode, credentialStatus },
+      cleanup: { gracefulOnly: true, exitCode: child.exitCode, authorityStatus },
     };
     await writeFile(evidencePath, `${JSON.stringify(retainedEvidence, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
     if (!failure && cleanupError) failure = cleanupError;
   }
 
   expect(child.exitCode).toBe(0);
-  expect(credentialStatus).toBe('redacted-after-graceful-stop');
+  expect(authorityStatus).toBe('redacted-after-graceful-stop');
   const retainedConnection = await readFile(connectionPath, 'utf8');
   expect(retainedConnection).toContain('redacted-after-graceful-stop');
   expect(retainedConnection).not.toMatch(/"token"|Authorization|Bearer/i);
@@ -556,11 +473,11 @@ test(pressureScenarioName, async () => {
   const connectionPath = join(profile, 'mcp-connection.json');
   const probePath = join(profile, 'fnd09-utility-pressure-probe.json');
   const evidencePath = join(profile, 'fnd09-utility-pressure-evidence.json');
-  const tokenPath = join(profile, 'credentials', 'mcp-token.json');
+  const retiredAuthorityStorePath = join(profile, 'credentials', 'mcp-token.json');
   const trustSettingsPath = join(profile, 'trusted-folders.json');
-  const providerCredentialsPath = join(profile, 'credentials', 'generation.json');
+  const retiredProviderStorePath = join(profile, 'credentials', 'generation.json');
   const forbiddenNetworkPath = join(profile, 'fnd09-pressure-forbidden-network.json');
-  for (const path of [connectionPath, probePath, evidencePath, tokenPath, trustSettingsPath, providerCredentialsPath, forbiddenNetworkPath]) {
+  for (const path of [connectionPath, probePath, evidencePath, retiredAuthorityStorePath, trustSettingsPath, retiredProviderStorePath, forbiddenNetworkPath]) {
     expect(await access(path).then(() => true, () => false), `${path} must be absent before launch`).toBe(false);
   }
 
@@ -588,7 +505,7 @@ test(pressureScenarioName, async () => {
 
   let failure: Error | undefined;
   let runtimeEvidence: Record<string, unknown> | undefined;
-  let credentialStatus: 'redacted-after-graceful-stop' | 'absent' = 'absent';
+  let authorityStatus: 'redacted-after-graceful-stop' | 'absent' = 'absent';
   let executableBytes = 0;
   let asarBytes = 0;
   try {
@@ -615,14 +532,12 @@ test(pressureScenarioName, async () => {
       cancellation: { label: 'queued-10', error: { name: 'AbortError' }, queuedAfterCancellation: 31 },
       refill: { label: 'replacement', queuedAfterRefill: 32 },
       drain: { expectedOrder, completionOrder: expectedOrder, sameWorker: true, workerPid: expect.any(Number), queuedAfterDrain: 0 },
-      generationLaneUntouched: true,
       privacy: { rawUtilityPayloadsPublished: false, publicJobCreated: false },
     });
     expect(probe.admission?.activeWorkerPid).toBe(probe.drain?.workerPid);
     expect(probe.admission?.overflowError.message).toBe('Utility queue reached the 32-task waiting limit. Retry after current work completes.');
 
-    const tokenFile = JSON.parse(await readFile(tokenPath, 'utf8')) as unknown;
-    inspectPackagedMcpCredential(tokenFile, connection.token);
+    expect(await access(retiredAuthorityStorePath).then(() => true, () => false)).toBe(false);
 
     const headers = await connectMcp(connection);
     const joined = await callTool(connection.url, headers, 2, 'session_manage', { action: 'join', name: 'FND-09 pressure observer', color: '#7456a8' });
@@ -633,7 +548,7 @@ test(pressureScenarioName, async () => {
     const jobs = await callTool(connection.url, headers, 4, 'job_manage', { action: 'list' });
     expect(jobs).toEqual({ jobs: [] });
 
-    for (const sentinel of [trustSettingsPath, providerCredentialsPath, forbiddenNetworkPath]) {
+    for (const sentinel of [trustSettingsPath, retiredProviderStorePath, retiredAuthorityStorePath, forbiddenNetworkPath]) {
       expect(await access(sentinel).then(() => true, () => false)).toBe(false);
     }
     executableBytes = (await stat(packagedExecutable)).size;
@@ -646,7 +561,7 @@ test(pressureScenarioName, async () => {
       pressure: probe,
       authenticatedMcp: { documentId: connection.activeDocumentId, revision: observed.revision, canonicalMatchedProbe: true, publicJobs: [] },
       privacy: { publicJobSummariesEmpty: true, rawUtilityPayloadsNotPublished: true },
-      sentinels: { trustAbsent: true, providerCredentialsAbsent: true, forbiddenNetworkAbsent: true },
+      sentinels: { trustAbsent: true, retiredPersistentStoresAbsent: true, forbiddenNetworkAbsent: true },
     };
   } catch (error) {
     failure = error instanceof Error ? error : new Error(String(error));
@@ -654,7 +569,7 @@ test(pressureScenarioName, async () => {
     let cleanupError: Error | undefined;
     try { await quitGracefully(profile, child); }
     catch (error) { cleanupError = error instanceof Error ? error : new Error('The packaged FND-09 pressure engine did not stop gracefully.'); }
-    try { credentialStatus = await redactConnection(connectionPath); }
+    try { authorityStatus = await redactConnection(connectionPath); }
     catch (error) { cleanupError ??= error instanceof Error ? error : new Error('The packaged FND-09 pressure connection could not be redacted.'); }
 
     const retainedEvidence = {
@@ -664,14 +579,14 @@ test(pressureScenarioName, async () => {
       }),
       result: failure || cleanupError ? 'failed' : 'passed',
       error: failure?.message ?? cleanupError?.message,
-      cleanup: { gracefulOnly: true, exitCode: child.exitCode, credentialStatus },
+      cleanup: { gracefulOnly: true, exitCode: child.exitCode, authorityStatus },
     };
     await writeFile(evidencePath, `${JSON.stringify(retainedEvidence, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
     if (!failure && cleanupError) failure = cleanupError;
   }
 
   expect(child.exitCode).toBe(0);
-  expect(credentialStatus).toBe('redacted-after-graceful-stop');
+  expect(authorityStatus).toBe('redacted-after-graceful-stop');
   const retainedConnection = await readFile(connectionPath, 'utf8');
   expect(retainedConnection).toContain('redacted-after-graceful-stop');
   expect(retainedConnection).not.toMatch(/"token"|Authorization|Bearer/i);
@@ -706,11 +621,11 @@ test(observationCodecScenarioName, async () => {
   const connectionPath = join(profile, 'mcp-connection.json');
   const probePath = join(profile, 'fnd09-observation-codec-probe.json');
   const evidencePath = join(profile, 'fnd09-observation-codec-evidence.json');
-  const tokenPath = join(profile, 'credentials', 'mcp-token.json');
+  const retiredAuthorityStorePath = join(profile, 'credentials', 'mcp-token.json');
   const trustSettingsPath = join(profile, 'trusted-folders.json');
-  const providerCredentialsPath = join(profile, 'credentials', 'generation.json');
+  const retiredProviderStorePath = join(profile, 'credentials', 'generation.json');
   const forbiddenNetworkPath = join(profile, 'fnd09-observation-codec-forbidden-network.json');
-  for (const path of [connectionPath, probePath, evidencePath, tokenPath, trustSettingsPath, providerCredentialsPath, forbiddenNetworkPath]) {
+  for (const path of [connectionPath, probePath, evidencePath, retiredAuthorityStorePath, trustSettingsPath, retiredProviderStorePath, forbiddenNetworkPath]) {
     expect(await access(path).then(() => true, () => false), `${path} must be absent before launch`).toBe(false);
   }
 
@@ -738,7 +653,7 @@ test(observationCodecScenarioName, async () => {
 
   let failure: Error | undefined;
   let runtimeEvidence: Record<string, unknown> | undefined;
-  let credentialStatus: 'redacted-after-graceful-stop' | 'absent' = 'absent';
+  let authorityStatus: 'redacted-after-graceful-stop' | 'absent' = 'absent';
   let executableBytes = 0;
   let asarBytes = 0;
   try {
@@ -770,14 +685,12 @@ test(observationCodecScenarioName, async () => {
         fixedCorruptResponseHoldMs: 150,
         observation: { available: true, mimeType: 'image/png', width: 8, height: 6, scale: 1, bytes: expect.any(Number), sha256: expect.stringMatching(/^[A-F0-9]{64}$/) },
       },
-      generationLaneUntouched: true,
       privacy: { rendererCreated: false, corruptPayloadPublished: false, publicJobCreated: false },
-      network: { nonLoopbackRequests: 0, externalProviderRequests: 0, paidRequests: 0 },
+      network: { nonLoopbackRequests: 0 },
     });
     expect(probe.corrupt?.workerPid).not.toBe(probe.recovery?.workerPid);
 
-    const tokenFile = JSON.parse(await readFile(tokenPath, 'utf8')) as unknown;
-    inspectPackagedMcpCredential(tokenFile, connection.token);
+    expect(await access(retiredAuthorityStorePath).then(() => true, () => false)).toBe(false);
 
     const headers = await connectMcp(connection);
     const listed = await postMcp(connection.url, headers, 2, 'tools/list', {});
@@ -807,7 +720,7 @@ test(observationCodecScenarioName, async () => {
     const jobs = await callTool(connection.url, headers, 5, 'job_manage', { action: 'list' });
     expect(jobs).toEqual({ jobs: [] });
 
-    for (const sentinel of [trustSettingsPath, providerCredentialsPath, forbiddenNetworkPath]) {
+    for (const sentinel of [trustSettingsPath, retiredProviderStorePath, retiredAuthorityStorePath, forbiddenNetworkPath]) {
       expect(await access(sentinel).then(() => true, () => false)).toBe(false);
     }
     executableBytes = (await stat(packagedExecutable)).size;
@@ -820,8 +733,8 @@ test(observationCodecScenarioName, async () => {
       observationCodec: probe,
       authenticatedMcp: { documentId: connection.activeDocumentId, revision: observed.revision, canonicalMatchedProbe: true, recoveryPngMatchedProbe: true, publicJobs: [] },
       privacy: { hookAbsentFromToolsList: true, corruptUtilityPayloadNotPublished: true, publicJobSummariesEmpty: true },
-      network: { nonLoopbackRequests: 0, externalProviderRequests: 0, paidRequests: 0 },
-      sentinels: { trustAbsent: true, providerCredentialsAbsent: true, forbiddenNetworkAbsent: true },
+      network: { nonLoopbackRequests: 0 },
+      sentinels: { trustAbsent: true, retiredPersistentStoresAbsent: true, forbiddenNetworkAbsent: true },
     };
   } catch (error) {
     failure = error instanceof Error ? error : new Error(String(error));
@@ -829,7 +742,7 @@ test(observationCodecScenarioName, async () => {
     let cleanupError: Error | undefined;
     try { await quitGracefully(profile, child); }
     catch (error) { cleanupError = error instanceof Error ? error : new Error('The packaged FND-09 observation codec engine did not stop gracefully.'); }
-    try { credentialStatus = await redactConnection(connectionPath); }
+    try { authorityStatus = await redactConnection(connectionPath); }
     catch (error) { cleanupError ??= error instanceof Error ? error : new Error('The packaged FND-09 observation codec connection could not be redacted.'); }
 
     const retainedEvidence = {
@@ -839,14 +752,14 @@ test(observationCodecScenarioName, async () => {
       }),
       result: failure || cleanupError ? 'failed' : 'passed',
       error: failure?.message ?? cleanupError?.message,
-      cleanup: { gracefulOnly: true, exitCode: child.exitCode, credentialStatus },
+      cleanup: { gracefulOnly: true, exitCode: child.exitCode, authorityStatus },
     };
     await writeFile(evidencePath, `${JSON.stringify(retainedEvidence, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
     if (!failure && cleanupError) failure = cleanupError;
   }
 
   expect(child.exitCode).toBe(0);
-  expect(credentialStatus).toBe('redacted-after-graceful-stop');
+  expect(authorityStatus).toBe('redacted-after-graceful-stop');
   const retainedConnection = await readFile(connectionPath, 'utf8');
   expect(retainedConnection).toContain('redacted-after-graceful-stop');
   expect(retainedConnection).not.toMatch(/"token"|Authorization|Bearer/i);
@@ -884,11 +797,11 @@ test(quantizationResultScenarioName, async () => {
   const connectionPath = join(profile, 'mcp-connection.json');
   const probePath = join(profile, 'fnd09-quantization-result-probe.json');
   const evidencePath = join(profile, 'fnd09-quantization-result-evidence.json');
-  const tokenPath = join(profile, 'credentials', 'mcp-token.json');
+  const retiredAuthorityStorePath = join(profile, 'credentials', 'mcp-token.json');
   const trustSettingsPath = join(profile, 'trusted-folders.json');
-  const providerCredentialsPath = join(profile, 'credentials', 'generation.json');
+  const retiredProviderStorePath = join(profile, 'credentials', 'generation.json');
   const forbiddenNetworkPath = join(profile, 'fnd09-quantization-result-forbidden-network.json');
-  for (const path of [connectionPath, probePath, evidencePath, tokenPath, trustSettingsPath, providerCredentialsPath, forbiddenNetworkPath]) {
+  for (const path of [connectionPath, probePath, evidencePath, retiredAuthorityStorePath, trustSettingsPath, retiredProviderStorePath, forbiddenNetworkPath]) {
     expect(await access(path).then(() => true, () => false), `${path} must be absent before launch`).toBe(false);
   }
 
@@ -916,7 +829,7 @@ test(quantizationResultScenarioName, async () => {
 
   let failure: Error | undefined;
   let runtimeEvidence: Record<string, unknown> | undefined;
-  let credentialStatus: 'redacted-after-graceful-stop' | 'absent' = 'absent';
+  let authorityStatus: 'redacted-after-graceful-stop' | 'absent' = 'absent';
   let executableBytes = 0;
   let asarBytes = 0;
   try {
@@ -954,17 +867,15 @@ test(quantizationResultScenarioName, async () => {
       },
       fixedInvalidResponseHoldMs: 150,
       workerPidsDistinct: true,
-      generationLaneUntouched: true,
       privacy: { rendererCreated: false, invalidPayloadPublished: false, publicJobCreated: false },
-      network: { nonLoopbackRequests: 0, externalProviderRequests: 0, paidRequests: 0 },
+      network: { nonLoopbackRequests: 0 },
     });
     expect(probe.overBudget?.workerPid).not.toBe(probe.overBudget?.queuedRecovery.workerPid);
     expect(probe.contradictory?.workerPid).toBe(probe.overBudget?.queuedRecovery.workerPid);
     expect(probe.contradictory?.workerPid).not.toBe(probe.contradictory?.queuedRecovery.workerPid);
     expect(probe.overBudget?.queuedRecovery.sha256).toBe(probe.contradictory?.queuedRecovery.sha256);
 
-    const tokenFile = JSON.parse(await readFile(tokenPath, 'utf8')) as unknown;
-    inspectPackagedMcpCredential(tokenFile, connection.token);
+    expect(await access(retiredAuthorityStorePath).then(() => true, () => false)).toBe(false);
 
     const headers = await connectMcp(connection);
     const listed = await postMcp(connection.url, headers, 2, 'tools/list', {});
@@ -983,7 +894,7 @@ test(quantizationResultScenarioName, async () => {
     const jobs = await callTool(connection.url, headers, 5, 'job_manage', { action: 'list' });
     expect(jobs).toEqual({ jobs: [] });
 
-    for (const sentinel of [trustSettingsPath, providerCredentialsPath, forbiddenNetworkPath]) {
+    for (const sentinel of [trustSettingsPath, retiredProviderStorePath, retiredAuthorityStorePath, forbiddenNetworkPath]) {
       expect(await access(sentinel).then(() => true, () => false)).toBe(false);
     }
     executableBytes = (await stat(packagedExecutable)).size;
@@ -996,8 +907,8 @@ test(quantizationResultScenarioName, async () => {
       quantizationResult: probe,
       authenticatedMcp: { documentId: connection.activeDocumentId, revision: observed.revision, canonicalMatchedProbe: true, publicJobs: [] },
       privacy: { hookAbsentFromToolsList: true, invalidUtilityPayloadsNotPublished: true, publicJobSummariesEmpty: true },
-      network: { nonLoopbackRequests: 0, externalProviderRequests: 0, paidRequests: 0 },
-      sentinels: { trustAbsent: true, providerCredentialsAbsent: true, forbiddenNetworkAbsent: true },
+      network: { nonLoopbackRequests: 0 },
+      sentinels: { trustAbsent: true, retiredPersistentStoresAbsent: true, forbiddenNetworkAbsent: true },
     };
   } catch (error) {
     failure = error instanceof Error ? error : new Error(String(error));
@@ -1005,7 +916,7 @@ test(quantizationResultScenarioName, async () => {
     let cleanupError: Error | undefined;
     try { await quitGracefully(profile, child); }
     catch (error) { cleanupError = error instanceof Error ? error : new Error('The packaged FND-09 quantization-result engine did not stop gracefully.'); }
-    try { credentialStatus = await redactConnection(connectionPath); }
+    try { authorityStatus = await redactConnection(connectionPath); }
     catch (error) { cleanupError ??= error instanceof Error ? error : new Error('The packaged FND-09 quantization-result connection could not be redacted.'); }
 
     const retainedEvidence = {
@@ -1015,14 +926,14 @@ test(quantizationResultScenarioName, async () => {
       }),
       result: failure || cleanupError ? 'failed' : 'passed',
       error: failure?.message ?? cleanupError?.message,
-      cleanup: { gracefulOnly: true, exitCode: child.exitCode, credentialStatus },
+      cleanup: { gracefulOnly: true, exitCode: child.exitCode, authorityStatus },
     };
     await writeFile(evidencePath, `${JSON.stringify(retainedEvidence, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
     if (!failure && cleanupError) failure = cleanupError;
   }
 
   expect(child.exitCode).toBe(0);
-  expect(credentialStatus).toBe('redacted-after-graceful-stop');
+  expect(authorityStatus).toBe('redacted-after-graceful-stop');
   const retainedConnection = await readFile(connectionPath, 'utf8');
   expect(retainedConnection).toContain('redacted-after-graceful-stop');
   expect(retainedConnection).not.toMatch(/"token"|Authorization|Bearer/i);
@@ -1060,11 +971,11 @@ test(exportResultScenarioName, async () => {
   const connectionPath = join(profile, 'mcp-connection.json');
   const probePath = join(profile, 'fnd09-export-result-probe.json');
   const evidencePath = join(profile, 'fnd09-export-result-evidence.json');
-  const tokenPath = join(profile, 'credentials', 'mcp-token.json');
+  const retiredAuthorityStorePath = join(profile, 'credentials', 'mcp-token.json');
   const trustSettingsPath = join(profile, 'trusted-folders.json');
-  const providerCredentialsPath = join(profile, 'credentials', 'generation.json');
+  const retiredProviderStorePath = join(profile, 'credentials', 'generation.json');
   const forbiddenNetworkPath = join(profile, 'fnd09-export-result-forbidden-network.json');
-  for (const path of [connectionPath, probePath, evidencePath, tokenPath, trustSettingsPath, providerCredentialsPath, forbiddenNetworkPath]) {
+  for (const path of [connectionPath, probePath, evidencePath, retiredAuthorityStorePath, trustSettingsPath, retiredProviderStorePath, forbiddenNetworkPath]) {
     expect(await access(path).then(() => true, () => false), `${path} must be absent before launch`).toBe(false);
   }
 
@@ -1092,7 +1003,7 @@ test(exportResultScenarioName, async () => {
 
   let failure: Error | undefined;
   let runtimeEvidence: Record<string, unknown> | undefined;
-  let credentialStatus: 'redacted-after-graceful-stop' | 'absent' = 'absent';
+  let authorityStatus: 'redacted-after-graceful-stop' | 'absent' = 'absent';
   let executableBytes = 0;
   let asarBytes = 0;
   try {
@@ -1141,10 +1052,9 @@ test(exportResultScenarioName, async () => {
       },
       fixedInvalidResponseHoldMs: 150,
       workerPidsDistinct: true,
-      generationLaneUntouched: true,
       privacy: { rendererCreated: false, invalidPayloadPublished: false, publicJobCreated: false },
       filesystem: { exportTargetsCreated: 0 },
-      network: { nonLoopbackRequests: 0, externalProviderRequests: 0, paidRequests: 0 },
+      network: { nonLoopbackRequests: 0 },
     });
     expect(probe.primary?.workerPid).not.toBe(probe.primary?.queuedRecovery.workerPid);
     expect(probe.companion?.workerPid).toBe(probe.primary?.queuedRecovery.workerPid);
@@ -1152,8 +1062,7 @@ test(exportResultScenarioName, async () => {
     expect(probe.primary?.queuedRecovery.primary.sha256).toBe(probe.companion?.queuedRecovery.primary.sha256);
     expect(probe.primary?.queuedRecovery.companion.sha256).toBe(probe.companion?.queuedRecovery.companion.sha256);
 
-    const tokenFile = JSON.parse(await readFile(tokenPath, 'utf8')) as unknown;
-    inspectPackagedMcpCredential(tokenFile, connection.token);
+    expect(await access(retiredAuthorityStorePath).then(() => true, () => false)).toBe(false);
 
     const headers = await connectMcp(connection);
     const listed = await postMcp(connection.url, headers, 2, 'tools/list', {});
@@ -1172,7 +1081,7 @@ test(exportResultScenarioName, async () => {
     const jobs = await callTool(connection.url, headers, 5, 'job_manage', { action: 'list' });
     expect(jobs).toEqual({ jobs: [] });
 
-    for (const sentinel of [trustSettingsPath, providerCredentialsPath, forbiddenNetworkPath]) {
+    for (const sentinel of [trustSettingsPath, retiredProviderStorePath, retiredAuthorityStorePath, forbiddenNetworkPath]) {
       expect(await access(sentinel).then(() => true, () => false)).toBe(false);
     }
     executableBytes = (await stat(packagedExecutable)).size;
@@ -1186,8 +1095,8 @@ test(exportResultScenarioName, async () => {
       authenticatedMcp: { documentId: connection.activeDocumentId, revision: observed.revision, canonicalMatchedProbe: true, publicJobs: [] },
       privacy: { hookAbsentFromToolsList: true, invalidUtilityPayloadsNotPublished: true, publicJobSummariesEmpty: true },
       filesystem: { exportTargetsCreated: 0 },
-      network: { nonLoopbackRequests: 0, externalProviderRequests: 0, paidRequests: 0 },
-      sentinels: { trustAbsent: true, providerCredentialsAbsent: true, forbiddenNetworkAbsent: true },
+      network: { nonLoopbackRequests: 0 },
+      sentinels: { trustAbsent: true, retiredPersistentStoresAbsent: true, forbiddenNetworkAbsent: true },
     };
   } catch (error) {
     failure = error instanceof Error ? error : new Error(String(error));
@@ -1195,7 +1104,7 @@ test(exportResultScenarioName, async () => {
     let cleanupError: Error | undefined;
     try { await quitGracefully(profile, child); }
     catch (error) { cleanupError = error instanceof Error ? error : new Error('The packaged FND-09 export-result engine did not stop gracefully.'); }
-    try { credentialStatus = await redactConnection(connectionPath); }
+    try { authorityStatus = await redactConnection(connectionPath); }
     catch (error) { cleanupError ??= error instanceof Error ? error : new Error('The packaged FND-09 export-result connection could not be redacted.'); }
 
     const retainedEvidence = {
@@ -1205,14 +1114,14 @@ test(exportResultScenarioName, async () => {
       }),
       result: failure || cleanupError ? 'failed' : 'passed',
       error: failure?.message ?? cleanupError?.message,
-      cleanup: { gracefulOnly: true, exitCode: child.exitCode, credentialStatus },
+      cleanup: { gracefulOnly: true, exitCode: child.exitCode, authorityStatus },
     };
     await writeFile(evidencePath, `${JSON.stringify(retainedEvidence, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
     if (!failure && cleanupError) failure = cleanupError;
   }
 
   expect(child.exitCode).toBe(0);
-  expect(credentialStatus).toBe('redacted-after-graceful-stop');
+  expect(authorityStatus).toBe('redacted-after-graceful-stop');
   const retainedConnection = await readFile(connectionPath, 'utf8');
   expect(retainedConnection).toContain('redacted-after-graceful-stop');
   expect(retainedConnection).not.toMatch(/"token"|Authorization|Bearer/i);
@@ -1251,11 +1160,11 @@ test(importResultScenarioName, async () => {
   const probePath = join(profile, 'fnd09-import-result-probe.json');
   const fixturePath = join(profile, 'fnd09-import-result-fixture.svg');
   const evidencePath = join(profile, 'fnd09-import-result-evidence.json');
-  const tokenPath = join(profile, 'credentials', 'mcp-token.json');
+  const retiredAuthorityStorePath = join(profile, 'credentials', 'mcp-token.json');
   const trustSettingsPath = join(profile, 'trusted-folders.json');
-  const providerCredentialsPath = join(profile, 'credentials', 'generation.json');
+  const retiredProviderStorePath = join(profile, 'credentials', 'generation.json');
   const forbiddenNetworkPath = join(profile, 'fnd09-import-result-forbidden-network.json');
-  for (const path of [connectionPath, probePath, fixturePath, evidencePath, tokenPath, trustSettingsPath, providerCredentialsPath, forbiddenNetworkPath]) {
+  for (const path of [connectionPath, probePath, fixturePath, evidencePath, retiredAuthorityStorePath, trustSettingsPath, retiredProviderStorePath, forbiddenNetworkPath]) {
     expect(await access(path).then(() => true, () => false), `${path} must be absent before launch`).toBe(false);
   }
 
@@ -1283,7 +1192,7 @@ test(importResultScenarioName, async () => {
 
   let failure: Error | undefined;
   let runtimeEvidence: Record<string, unknown> | undefined;
-  let credentialStatus: 'redacted-after-graceful-stop' | 'absent' = 'absent';
+  let authorityStatus: 'redacted-after-graceful-stop' | 'absent' = 'absent';
   let executableBytes = 0;
   let asarBytes = 0;
   try {
@@ -1328,10 +1237,9 @@ test(importResultScenarioName, async () => {
       },
       fixedInvalidResponseHoldMs: 150,
       workerPidsDistinct: true,
-      generationLaneUntouched: true,
       privacy: { rendererCreated: false, invalidPayloadPublished: false, publicJobCreated: false },
       filesystem: { importInputsCreated: 1, outputTargetsCreated: 0 },
-      network: { nonLoopbackRequests: 0, externalProviderRequests: 0, paidRequests: 0 },
+      network: { nonLoopbackRequests: 0 },
     });
     expect(probe.documentSchema?.workerPid).not.toBe(probe.documentSchema?.queuedRecovery.workerPid);
     expect(probe.warningShape?.workerPid).toBe(probe.documentSchema?.queuedRecovery.workerPid);
@@ -1342,8 +1250,7 @@ test(importResultScenarioName, async () => {
     expect(fixture.byteLength).toBe(probe.realImporter?.fixtureBytes);
     expect(createHash('sha256').update(fixture).digest('hex').toUpperCase()).toBe(probe.realImporter?.fixtureSha256);
 
-    const tokenFile = JSON.parse(await readFile(tokenPath, 'utf8')) as unknown;
-    inspectPackagedMcpCredential(tokenFile, connection.token);
+    expect(await access(retiredAuthorityStorePath).then(() => true, () => false)).toBe(false);
 
     const headers = await connectMcp(connection);
     const listed = await postMcp(connection.url, headers, 2, 'tools/list', {});
@@ -1362,7 +1269,7 @@ test(importResultScenarioName, async () => {
     const jobs = await callTool(connection.url, headers, 5, 'job_manage', { action: 'list' });
     expect(jobs).toEqual({ jobs: [] });
 
-    for (const sentinel of [trustSettingsPath, providerCredentialsPath, forbiddenNetworkPath]) {
+    for (const sentinel of [trustSettingsPath, retiredProviderStorePath, retiredAuthorityStorePath, forbiddenNetworkPath]) {
       expect(await access(sentinel).then(() => true, () => false)).toBe(false);
     }
     executableBytes = (await stat(packagedExecutable)).size;
@@ -1376,8 +1283,8 @@ test(importResultScenarioName, async () => {
       authenticatedMcp: { documentId: connection.activeDocumentId, revision: observed.revision, canonicalMatchedProbe: true, publicJobs: [] },
       privacy: { hookAbsentFromToolsList: true, invalidUtilityPayloadsNotPublished: true, publicJobSummariesEmpty: true },
       filesystem: { importInputsCreated: 1, outputTargetsCreated: 0 },
-      network: { nonLoopbackRequests: 0, externalProviderRequests: 0, paidRequests: 0 },
-      sentinels: { trustAbsent: true, providerCredentialsAbsent: true, forbiddenNetworkAbsent: true },
+      network: { nonLoopbackRequests: 0 },
+      sentinels: { trustAbsent: true, retiredPersistentStoresAbsent: true, forbiddenNetworkAbsent: true },
     };
   } catch (error) {
     failure = error instanceof Error ? error : new Error(String(error));
@@ -1385,7 +1292,7 @@ test(importResultScenarioName, async () => {
     let cleanupError: Error | undefined;
     try { await quitGracefully(profile, child); }
     catch (error) { cleanupError = error instanceof Error ? error : new Error('The packaged FND-09 import-result engine did not stop gracefully.'); }
-    try { credentialStatus = await redactConnection(connectionPath); }
+    try { authorityStatus = await redactConnection(connectionPath); }
     catch (error) { cleanupError ??= error instanceof Error ? error : new Error('The packaged FND-09 import-result connection could not be redacted.'); }
 
     const retainedEvidence = {
@@ -1395,14 +1302,14 @@ test(importResultScenarioName, async () => {
       }),
       result: failure || cleanupError ? 'failed' : 'passed',
       error: failure?.message ?? cleanupError?.message,
-      cleanup: { gracefulOnly: true, exitCode: child.exitCode, credentialStatus },
+      cleanup: { gracefulOnly: true, exitCode: child.exitCode, authorityStatus },
     };
     await writeFile(evidencePath, `${JSON.stringify(retainedEvidence, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
     if (!failure && cleanupError) failure = cleanupError;
   }
 
   expect(child.exitCode).toBe(0);
-  expect(credentialStatus).toBe('redacted-after-graceful-stop');
+  expect(authorityStatus).toBe('redacted-after-graceful-stop');
   const retainedConnection = await readFile(connectionPath, 'utf8');
   expect(retainedConnection).toContain('redacted-after-graceful-stop');
   expect(retainedConnection).not.toMatch(/"token"|Authorization|Bearer/i);
@@ -1413,199 +1320,3 @@ test(importResultScenarioName, async () => {
   if (failure) throw failure;
 });
 // FND-09-IMPORT-RESULT observer end.
-
-test(generationResultScenarioName, async () => {
-  // This audited observer must never let Playwright terminate its worker on a timeout.
-  // Every bounded wait below rejects without signaling either the app or quit helper.
-  test.setTimeout(0);
-  const configuredProfile = process.env.AIDRAW_E2E_FND09_GENERATION_RESULT_PROFILE;
-  if (!configuredProfile) throw new Error('AIDRAW_E2E_FND09_GENERATION_RESULT_PROFILE must name the fresh retained profile authorized for this exact run.');
-  const retainedRoot = resolve(process.cwd(), 'test-results', 'retained');
-  const profile = resolve(configuredProfile);
-  const retainedRelative = relative(retainedRoot, profile);
-  if (!retainedRelative || retainedRelative.startsWith('..') || isAbsolute(retainedRelative) || dirname(profile) !== retainedRoot || !basename(profile).startsWith(generationResultProfilePrefix)) {
-    throw new Error(`AIDRAW_E2E_FND09_GENERATION_RESULT_PROFILE must be a new ${generationResultProfilePrefix}* direct child of test-results/retained.`);
-  }
-  if (await access(profile).then(() => true, () => false)) throw new Error(`The immutable FND-09 generation-result profile already exists: ${profile}`);
-
-  const expectedExecutableHash = process.env.AIDRAW_E2E_FND09_GENERATION_RESULT_EXE_SHA256?.toUpperCase();
-  const expectedAsarHash = process.env.AIDRAW_E2E_FND09_GENERATION_RESULT_ASAR_SHA256?.toUpperCase();
-  if (!expectedExecutableHash || !expectedAsarHash) throw new Error('Exact FND-09 generation-result executable and ASAR SHA-256 declarations are required.');
-  const executableHash = await sha256(packagedExecutable);
-  const asarHash = await sha256(packagedAsar);
-  expect(executableHash).toBe(expectedExecutableHash);
-  expect(asarHash).toBe(expectedAsarHash);
-
-  await mkdir(profile, { recursive: false });
-  const connectionPath = join(profile, 'mcp-connection.json');
-  const probePath = join(profile, 'fnd09-generation-result-probe.json');
-  const evidencePath = join(profile, 'fnd09-generation-result-evidence.json');
-  const tokenPath = join(profile, 'credentials', 'mcp-token.json');
-  const trustSettingsPath = join(profile, 'trusted-folders.json');
-  const providerCredentialsPath = join(profile, 'credentials', 'generation.json');
-  const forbiddenNetworkPath = join(profile, 'fnd09-generation-result-forbidden-network.json');
-  for (const path of [connectionPath, probePath, evidencePath, tokenPath, trustSettingsPath, providerCredentialsPath, forbiddenNetworkPath]) {
-    expect(await access(path).then(() => true, () => false), `${path} must be absent before launch`).toBe(false);
-  }
-
-  const child = spawn(packagedExecutable, [
-    '--disable-background-networking',
-    '--disable-component-update',
-    '--disable-domain-reliability',
-    '--disable-sync',
-    '--no-pings',
-    `--user-data-dir=${profile}`,
-    '--headless',
-    `--write-mcp-connection=${connectionPath}`,
-  ], {
-    env: {
-      ...process.env,
-      NODE_ENV: 'test',
-      OPENAI_API_KEY: '',
-      STABILITY_API_KEY: '',
-      COMFYUI_API_KEY: '',
-      AIDRAW_E2E_UTILITY_GENERATION_RESULT: '1',
-      AIDRAW_E2E_FND09_GENERATION_RESULT_PROFILE: profile,
-      AIDRAW_E2E_FND09_GENERATION_RESULT_PROBE_PATH: probePath,
-      AIDRAW_E2E_FND09_GENERATION_RESULT_NETWORK_SENTINEL_PATH: forbiddenNetworkPath,
-    },
-    stdio: ['ignore', 'ignore', 'pipe'],
-    windowsHide: process.platform === 'win32',
-  });
-
-  let failure: Error | undefined;
-  let runtimeEvidence: Record<string, unknown> | undefined;
-  let credentialStatus: 'redacted-after-graceful-stop' | 'absent' = 'absent';
-  let executableBytes = 0;
-  let asarBytes = 0;
-  try {
-    const connection = await waitForConnection(connectionPath, child);
-    expect(connection.pid).toBe(child.pid);
-    expect(connection.trustedFolders).toEqual([]);
-    const mcpUrl = new URL(connection.url);
-    expect(mcpUrl.protocol).toBe('http:');
-    expect(mcpUrl.hostname).toBe('127.0.0.1');
-    expect(mcpUrl.pathname).toBe('/mcp');
-
-    const probe = await waitForJson<UtilityGenerationResultProbeEvidence>(probePath, child, 'its fixed generation-result probe');
-    const recoveryShape = {
-      workerPid: expect.any(Number), workerReplaced: true, queued: true,
-      outputCount: 1, mimeType: 'image/png', width: 1, height: 1, seed: 24_681_357,
-      providerMetadataRecord: true, bytes: expect.any(Number), sha256: expect.stringMatching(/^[A-F0-9]{64}$/), semanticSha256: expect.stringMatching(/^[A-F0-9]{64}$/),
-    };
-    expect(probe).toMatchObject({
-      version: 1,
-      scenario: 'FND-09 packaged generation result containment',
-      result: 'passed',
-      canonical: { before: { documentId: connection.activeDocumentId }, after: { documentId: connection.activeDocumentId }, unchanged: true },
-      requestContract: { provider: 'stability', mode: 'create', resultCount: 1, width: 1, height: 1, seed: 24_681_357, credentialSupplied: false, providerInvoked: false },
-      resultCount: {
-        fault: 'result-count', contract: 'originating resultCount', workerPid: expect.any(Number),
-        error: { message: 'Generation utility returned more than the requested 1 result.' },
-        resultReturnedToCaller: false, payloadRetained: false, rejectedBeforePreviewOrJobUse: true, queuedRecovery: recoveryShape,
-      },
-      mimeHeader: {
-        fault: 'mime-header', contract: 'MIME/header agreement', workerPid: expect.any(Number),
-        error: { message: 'Generation utility returned a malformed image result.' },
-        resultReturnedToCaller: false, payloadRetained: false, rejectedBeforePreviewOrJobUse: true, queuedRecovery: recoveryShape,
-      },
-      dimensionHeader: {
-        fault: 'dimension-header', contract: 'declared/header dimensions', workerPid: expect.any(Number),
-        error: { message: 'Generation utility returned a malformed image result.' },
-        resultReturnedToCaller: false, payloadRetained: false, rejectedBeforePreviewOrJobUse: true, queuedRecovery: recoveryShape,
-      },
-      seed: {
-        fault: 'seed', contract: 'request-derived Stability seed', workerPid: expect.any(Number),
-        error: { message: 'Generation utility returned a malformed result.' },
-        resultReturnedToCaller: false, payloadRetained: false, rejectedBeforePreviewOrJobUse: true, queuedRecovery: recoveryShape,
-      },
-      metadata: {
-        fault: 'metadata', contract: 'record-shaped provider metadata', workerPid: expect.any(Number),
-        error: { message: 'Generation utility returned a malformed result.' },
-        resultReturnedToCaller: false, payloadRetained: false, rejectedBeforePreviewOrJobUse: true, queuedRecovery: recoveryShape,
-      },
-      fixedInvalidResponseHoldMs: 150,
-      workerPidsDistinct: true,
-      recoverySemanticHashesAgree: true,
-      rasterLaneUntouched: true,
-      privacy: { rendererCreated: false, invalidPayloadPublished: false, publicJobCreated: false, promptRetained: false, providerMetadataRetained: false },
-      filesystem: { inputTargetsCreated: 0, outputTargetsCreated: 0 },
-      network: { nonLoopbackRequests: 0, externalProviderRequests: 0, paidRequests: 0 },
-    });
-    const faults = [probe.resultCount, probe.mimeHeader, probe.dimensionHeader, probe.seed, probe.metadata];
-    for (let index = 1; index < faults.length; index += 1) expect(faults[index]?.workerPid).toBe(faults[index - 1]?.queuedRecovery.workerPid);
-    const workerPids = [faults[0]?.workerPid, ...faults.map((entry) => entry?.queuedRecovery.workerPid)];
-    expect(new Set(workerPids).size).toBe(6);
-    expect(new Set(faults.map((entry) => entry?.queuedRecovery.semanticSha256)).size).toBe(1);
-
-    const tokenFile = JSON.parse(await readFile(tokenPath, 'utf8')) as unknown;
-    inspectPackagedMcpCredential(tokenFile, connection.token);
-
-    const headers = await connectMcp(connection);
-    const listed = await postMcp(connection.url, headers, 2, 'tools/list', {});
-    const listedTools = listed.result?.tools;
-    if (!Array.isArray(listedTools)) throw new Error('The packaged MCP observer did not receive tools/list.');
-    const toolNames = listedTools.map((entry) => String((entry as { name?: unknown }).name));
-    expect(toolNames).not.toContain('runE2eGenerationResultProbe');
-    expect(toolNames).not.toContain('generation-result-probe');
-    expect(toolNames).not.toContain('e2eResultFixture');
-
-    const joined = await callTool(connection.url, headers, 3, 'session_manage', { action: 'join', name: 'FND-09 generation result observer', color: '#8a5b32' });
-    expect(joined).toMatchObject({ actor: { kind: 'agent', name: 'FND-09 generation result observer', color: '#8a5b32' } });
-    const observed = await callTool(connection.url, headers, 4, 'canvas_observe', { documentId: connection.activeDocumentId, includePng: false });
-    expect(observed).toMatchObject({ document: { id: connection.activeDocumentId, revision: probe.canonical.before.revision }, revision: probe.canonical.before.revision });
-    expect(createHash('sha256').update(JSON.stringify(observed.document)).digest('hex').toUpperCase()).toBe(probe.canonical.before.sha256);
-    const jobs = await callTool(connection.url, headers, 5, 'job_manage', { action: 'list' });
-    expect(jobs).toEqual({ jobs: [] });
-
-    for (const sentinel of [trustSettingsPath, providerCredentialsPath, forbiddenNetworkPath]) {
-      expect(await access(sentinel).then(() => true, () => false)).toBe(false);
-    }
-    executableBytes = (await stat(packagedExecutable)).size;
-    asarBytes = (await stat(packagedAsar)).size;
-    runtimeEvidence = {
-      scenario: generationResultScenarioName,
-      package: { executable: packagedExecutable, executableBytes, executableSha256: executableHash, asar: packagedAsar, asarBytes, asarSha256: asarHash },
-      launch: { mode: 'headless', rendererCreated: false, connectionPidMatched: true, loopbackMcpOnly: true, trustedFolders: [] },
-      actor: { name: 'FND-09 generation result observer', color: '#8a5b32' },
-      generationResult: probe,
-      authenticatedMcp: { documentId: connection.activeDocumentId, revision: observed.revision, canonicalMatchedProbe: true, publicJobs: [] },
-      privacy: { hookAbsentFromToolsList: true, invalidUtilityPayloadsNotPublished: true, publicJobSummariesEmpty: true, promptsRetained: false, providerMetadataRetained: false },
-      filesystem: { inputTargetsCreated: 0, outputTargetsCreated: 0 },
-      network: { nonLoopbackRequests: 0, externalProviderRequests: 0, paidRequests: 0 },
-      sentinels: { trustAbsent: true, providerCredentialsAbsent: true, forbiddenNetworkAbsent: true },
-    };
-  } catch (error) {
-    failure = error instanceof Error ? error : new Error(String(error));
-  } finally {
-    let cleanupError: Error | undefined;
-    try { await quitGracefully(profile, child); }
-    catch (error) { cleanupError = error instanceof Error ? error : new Error('The packaged FND-09 generation-result engine did not stop gracefully.'); }
-    try { credentialStatus = await redactConnection(connectionPath); }
-    catch (error) { cleanupError ??= error instanceof Error ? error : new Error('The packaged FND-09 generation-result connection could not be redacted.'); }
-
-    const retainedEvidence = {
-      ...(runtimeEvidence ?? {
-        scenario: generationResultScenarioName,
-        package: { executable: packagedExecutable, executableBytes, executableSha256: executableHash, asar: packagedAsar, asarBytes, asarSha256: asarHash },
-      }),
-      result: failure || cleanupError ? 'failed' : 'passed',
-      error: failure?.message ?? cleanupError?.message,
-      cleanup: { gracefulOnly: true, exitCode: child.exitCode, credentialStatus },
-    };
-    await writeFile(evidencePath, `${JSON.stringify(retainedEvidence, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
-    if (!failure && cleanupError) failure = cleanupError;
-  }
-
-  expect(child.exitCode).toBe(0);
-  expect(credentialStatus).toBe('redacted-after-graceful-stop');
-  const retainedConnection = await readFile(connectionPath, 'utf8');
-  expect(retainedConnection).toContain('redacted-after-graceful-stop');
-  expect(retainedConnection).not.toMatch(/"token"|Authorization|Bearer/i);
-  const retainedProbe = await readFile(probePath, 'utf8');
-  expect(retainedProbe).not.toMatch(/"data(?:Base64)?"\s*:|"token"|Authorization|Bearer|"prompt"\s*:|"credential"\s*:|"providerMetadata"\s*:/i);
-  const retainedEvidence = await readFile(evidencePath, 'utf8');
-  expect(retainedEvidence).not.toMatch(/"data(?:Base64)?"\s*:|"token"|Authorization|Bearer|"prompt"\s*:|"credential"\s*:|"providerMetadata"\s*:/i);
-  if (failure) throw failure;
-});
-// FND-09-GENERATION-RESULT observer end.

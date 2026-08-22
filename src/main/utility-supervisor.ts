@@ -1,30 +1,22 @@
 import { isAbsolute, join } from 'node:path';
-import { createId, type AIDrawDocument, type DocumentAsset, type PaletteEntry } from '@aidraw/core';
+import { createId, type AIDrawDocument, type PaletteEntry } from '@aidraw/core';
 import type { ExportFormat, ExportOptions } from '../common/contracts';
 import type { ExportArtifact } from './export-document';
 import type { QuantizeImageOptions } from './quantize-image';
 import {
   assertExportUtilityResponse,
-  assertNormalizeGenerationAcceptanceInput,
-  assertNormalizeGenerationAcceptanceUtilityResponse,
-  assertGenerationUtilityResponse,
   assertInspectSpriteSheetUtilityResponse,
   isBoundedUtilityErrorResponse,
-  isGenerationProgressUtilityResponse,
   assertObservationUtilityResponse,
   assertQuantizeUtilityResponse,
   assertQuantizeUtilityParameters,
-  assertRenderGenerationApprovalPreviewUtilityResponse,
   assertValidateImageUtilityResponse,
-  generationApprovalPreviewDimensions,
   MAX_IMAGE_VALIDATION_UTILITY_SOURCE_BYTES,
   validateImportUtilityResponse,
   MAX_QUANTIZE_UTILITY_SOURCE_BYTES,
   type ExportUtilityRequest,
   type InspectSpriteSheetUtilityRequest,
   type QuantizeUtilityRequest,
-  type RenderGenerationApprovalPreviewUtilityRequest,
-  type UtilityCancelRequest,
   type UtilityContainmentProbeRequest,
   type UtilityRequest,
   type UtilityResponse,
@@ -32,17 +24,14 @@ import {
 } from './utility-contract';
 import {
   displayImageDimensions,
-  inspectDocumentImageAsset,
   inspectEmbeddedDocumentImageAssets,
   inspectImageHeader,
-  MAX_INLINE_ASSET_BYTES,
   MAX_INLINE_IMAGE_DIMENSION,
   MAX_INLINE_IMAGE_PIXELS,
   type ExpectedDecodedImage,
 } from './transaction-policy';
 import type { SpriteSheetSliceOptions } from '../common/sprite-sheet';
 import type { ObservationRequest } from './capture-observation';
-import type { GeneratedAcceptancePreparation, GeneratedOutput, GenerationRequest } from '../common/generation';
 import type { InterchangeFidelityEntry } from '../common/interchange-fidelity';
 import {
   FND09_OBSERVATION_CODEC_E2E_MAX_PIXELS,
@@ -66,12 +55,6 @@ import {
   isFnd09ImportResultE2eEnabled,
   type Fnd09ImportResultFault,
 } from './utility-import-result-e2e-contract';
-import {
-  FND09_GENERATION_RESULT_E2E_PROMPT,
-  FND09_GENERATION_RESULT_E2E_SEED,
-  isFnd09GenerationResultE2eEnabled,
-  type Fnd09GenerationResultFixture,
-} from './utility-generation-result-e2e-contract';
 
 export interface UtilityProcessLike {
   on(event: 'message', listener: (message: unknown) => void): this;
@@ -102,7 +85,6 @@ interface PendingTask {
   signal?: AbortSignal;
   onAbort?: () => void;
   timer?: NodeJS.Timeout;
-  onProgress?: (progress: number, message: string) => void;
   resolve: (response: Extract<UtilityResponse, { ok: true }>) => void;
   reject: (error: Error) => void;
 }
@@ -130,7 +112,6 @@ export class RasterUtilitySupervisor {
   private worker?: UtilityProcessLike;
   private starting?: Promise<UtilityProcessLike>;
   private current?: PendingTask;
-  private cancelling?: { worker: UtilityProcessLike; taskId: string; timer: NodeJS.Timeout };
   private readonly queue: PendingTask[] = [];
   private stopped = false;
 
@@ -164,37 +145,6 @@ export class RasterUtilitySupervisor {
     };
     return this.enqueue(request, control).then((response) => {
       if (response.kind !== 'validate-image') throw new Error('Raster utility returned the wrong image-validation result kind.');
-    });
-  }
-
-  renderGenerationApprovalPreview(
-    asset: DocumentAsset,
-    control: { signal?: AbortSignal; timeoutMs?: number } = {},
-  ): Promise<{ width: number; height: number; previewPng: Buffer }> {
-    let inspected: ReturnType<typeof inspectDocumentImageAsset>;
-    try {
-      inspected = inspectDocumentImageAsset(asset, {
-        maxBytes: MAX_INLINE_ASSET_BYTES,
-        limitLabel: '1.5 MB',
-        label: `Generation approval source ${asset.id}`,
-      });
-    } catch (error) {
-      return Promise.reject(error instanceof Error ? error : new Error(String(error)));
-    }
-    const preview = generationApprovalPreviewDimensions(inspected.expected.width, inspected.expected.height);
-    const request: RenderGenerationApprovalPreviewUtilityRequest = {
-      id: createId('utility'),
-      kind: 'render-generation-approval-preview',
-      encodedBase64: inspected.bytes.toString('base64'),
-      mimeType: inspected.expected.mimeType,
-      width: inspected.expected.width,
-      height: inspected.expected.height,
-      previewWidth: preview.width,
-      previewHeight: preview.height,
-    };
-    return this.enqueue(request, { ...control, timeoutMs: control.timeoutMs ?? 15_000 }).then((response) => {
-      if (response.kind !== request.kind) throw new Error('Raster utility returned the wrong generation approval preview result kind.');
-      return { width: request.width, height: request.height, previewPng: Buffer.from(response.previewDataBase64, 'base64') };
     });
   }
 
@@ -453,80 +403,6 @@ export class RasterUtilitySupervisor {
     });
   }
 
-  generate(
-    jobId: string,
-    document: AIDrawDocument,
-    request: GenerationRequest,
-    credential: string | undefined,
-    control: { signal?: AbortSignal; timeoutMs?: number; onProgress?: (progress: number, message: string) => void } = {},
-  ): Promise<GeneratedOutput[]> {
-    const utilityRequest: Extract<UtilityRequest, { kind: 'generation-run' }> = {
-      id: createId('utility'),
-      kind: 'generation-run',
-      jobId,
-      document: structuredClone(document),
-      request: structuredClone(request),
-      credential,
-    };
-    return this.enqueue(utilityRequest, { ...control, timeoutMs: control.timeoutMs ?? 11 * 60_000 }).then((response) => {
-      if (response.kind !== 'generation-run') throw new Error('Generation utility returned the wrong result kind.');
-      return response.outputs;
-    });
-  }
-
-  /** Exercise only the fixed provider-free packaged-QA generation-result boundary. */
-  runE2eGenerationResultProbe(
-    document: AIDrawDocument,
-    fixture: Fnd09GenerationResultFixture,
-    control: { signal?: AbortSignal; timeoutMs?: number } = {},
-  ): Promise<GeneratedOutput[]> {
-    if (!isFnd09GenerationResultE2eEnabled({
-      nodeEnv: process.env.NODE_ENV,
-      enabled: process.env.AIDRAW_E2E_UTILITY_GENERATION_RESULT,
-    })) {
-      return Promise.reject(new Error('The generation-result probe is unavailable outside isolated packaged QA.'));
-    }
-    const request: Extract<UtilityRequest, { kind: 'generation-run' }> = {
-      id: createId('utility'),
-      kind: 'generation-run',
-      jobId: 'fnd09-generation-result-local-fixture',
-      document: structuredClone(document),
-      request: {
-        documentId: document.id,
-        provider: 'stability',
-        mode: 'create',
-        prompt: FND09_GENERATION_RESULT_E2E_PROMPT,
-        sourceAssetIds: [],
-        size: { width: 1, height: 1 },
-        resultCount: 1,
-        seed: FND09_GENERATION_RESULT_E2E_SEED,
-        providerOptions: {},
-      },
-      e2eResultFixture: fixture,
-    };
-    return this.enqueue(request, { ...control, timeoutMs: control.timeoutMs ?? 15_000 }).then((response) => {
-      if (response.kind !== 'generation-run') throw new Error('Generation utility returned the wrong generation-result probe kind.');
-      return response.outputs;
-    });
-  }
-
-  normalizeGeneratedOutput(
-    output: GeneratedOutput,
-    control: { signal?: AbortSignal; timeoutMs?: number } = {},
-  ): Promise<GeneratedAcceptancePreparation> {
-    try { assertNormalizeGenerationAcceptanceInput(output); }
-    catch (error) { return Promise.reject(error instanceof Error ? error : new Error(String(error))); }
-    const utilityRequest: Extract<UtilityRequest, { kind: 'normalize-generation-acceptance' }> = {
-      id: createId('utility'),
-      kind: 'normalize-generation-acceptance',
-      output: structuredClone(output),
-    };
-    return this.enqueue(utilityRequest, control).then((response) => {
-      if (response.kind !== 'normalize-generation-acceptance') throw new Error('Raster utility returned the wrong generation-acceptance result kind.');
-      return response.result;
-    });
-  }
-
   status(): { running: boolean; pid?: number; queued: number; activeTaskId?: string } {
     return { running: Boolean(this.worker), pid: this.worker?.pid, queued: this.queue.length, activeTaskId: this.current?.request.id };
   }
@@ -556,7 +432,6 @@ export class RasterUtilitySupervisor {
     const error = abortError('Raster utility supervisor stopped.');
     if (this.current) this.finish(this.current, error);
     for (const task of this.queue.splice(0)) this.finish(task, error);
-    if (this.cancelling) { clearTimeout(this.cancelling.timer); this.cancelling = undefined; }
     const worker = this.worker;
     this.worker = undefined;
     worker?.kill();
@@ -568,32 +443,15 @@ export class RasterUtilitySupervisor {
     if (this.current?.request.id !== id) return;
     const task = this.current;
     const worker = this.worker;
-    if (task.request.kind === 'generation-run' && worker) { this.beginGracefulGenerationCancel(task, worker, abortError()); return; }
     this.current = undefined; this.finish(task, abortError()); this.worker = undefined; worker?.kill(); void this.pump();
   }
 
-  private beginGracefulGenerationCancel(task: PendingTask, worker: UtilityProcessLike, error: Error): void {
-    this.current = undefined; this.finish(task, error);
-    try { worker.postMessage({ id: task.request.id, kind: 'utility-cancel' } satisfies UtilityCancelRequest); }
-    catch { if (this.worker === worker) this.worker = undefined; worker.kill(); void this.pump(); return; }
-    const timer = setTimeout(() => this.finishGracefulGenerationCancel(worker, task.request.id), 2_500); timer.unref();
-    this.cancelling = { worker, taskId: task.request.id, timer };
-  }
-
-  private finishGracefulGenerationCancel(worker: UtilityProcessLike, taskId: string, killWorker = true): void {
-    if (!this.cancelling || this.cancelling.worker !== worker || this.cancelling.taskId !== taskId) return;
-    clearTimeout(this.cancelling.timer); this.cancelling = undefined;
-    if (this.worker === worker) this.worker = undefined;
-    if (killWorker) worker.kill();
-    void this.pump();
-  }
-
-  private enqueue(request: UtilityRequest, control: { signal?: AbortSignal; timeoutMs?: number; onProgress?: (progress: number, message: string) => void }): Promise<Extract<UtilityResponse, { ok: true }>> {
+  private enqueue(request: UtilityRequest, control: { signal?: AbortSignal; timeoutMs?: number }): Promise<Extract<UtilityResponse, { ok: true }>> {
     if (this.stopped) return Promise.reject(new Error('Raster utility supervisor is stopped.'));
     if (control.signal?.aborted) return Promise.reject(abortError());
     if (this.queue.length >= MAX_QUEUED_UTILITY_TASKS) return Promise.reject(new UtilityBackpressureError());
     return new Promise((resolve, reject) => {
-      const task: PendingTask = { request, timeoutMs: control.timeoutMs ?? 120_000, signal: control.signal, onProgress: control.onProgress, resolve, reject };
+      const task: PendingTask = { request, timeoutMs: control.timeoutMs ?? 120_000, signal: control.signal, resolve, reject };
       task.onAbort = () => this.cancel(request.id);
       control.signal?.addEventListener('abort', task.onAbort, { once: true });
       this.queue.push(task);
@@ -615,7 +473,7 @@ export class RasterUtilitySupervisor {
   }
 
   private async pump(): Promise<void> {
-    if (this.stopped || this.current || this.cancelling || this.queue.length === 0) return;
+    if (this.stopped || this.current || this.queue.length === 0) return;
     let worker: UtilityProcessLike;
     try { worker = await this.ensureWorker(); }
     catch (error) {
@@ -624,14 +482,13 @@ export class RasterUtilitySupervisor {
       if (this.queue.length) void this.pump();
       return;
     }
-    if (this.stopped || this.current || this.cancelling) return;
+    if (this.stopped || this.current) return;
     const task = this.queue.shift();
     if (!task) return;
     this.current = task;
     task.timer = setTimeout(() => {
       if (this.current !== task) return;
       const error = new Error(`Raster utility task timed out after ${task.timeoutMs} ms.`);
-      if (task.request.kind === 'generation-run') { this.beginGracefulGenerationCancel(task, worker, error); return; }
       this.current = undefined; this.finish(task, error); if (this.worker === worker) this.worker = undefined; worker.kill(); void this.pump();
     }, task.timeoutMs);
     task.timer.unref();
@@ -648,15 +505,10 @@ export class RasterUtilitySupervisor {
   private handleMessage(worker: UtilityProcessLike, value: unknown): void {
     if (!value || typeof value !== 'object') return;
     const response = value as UtilityResponse;
-    if (this.cancelling?.worker === worker && response.id === this.cancelling.taskId && (!response.ok || response.kind !== 'generation-progress')) { this.finishGracefulGenerationCancel(worker, response.id); return; }
     if (worker !== this.worker || !this.current) return;
     if (response.id !== this.current.request.id) return;
     if (typeof response.ok !== 'boolean') {
       this.rejectInvalidResponse(worker, this.current, new Error('Raster utility returned a malformed response envelope.'));
-      return;
-    }
-    if (response.ok && response.kind === 'generation-progress') {
-      if (isGenerationProgressUtilityResponse(this.current.request, response)) this.current.onProgress?.(response.progress, response.message);
       return;
     }
     const task = this.current;
@@ -664,12 +516,9 @@ export class RasterUtilitySupervisor {
       try {
         if (response.kind !== task.request.kind) throw new Error('Raster utility returned the wrong result kind.');
         if (task.request.kind === 'validate-image') assertValidateImageUtilityResponse(task.request, response);
-        if (task.request.kind === 'render-generation-approval-preview') assertRenderGenerationApprovalPreviewUtilityResponse(task.request, response);
         if (task.request.kind === 'quantize-image') assertQuantizeUtilityResponse(task.request, response);
         if (task.request.kind === 'export-document') assertExportUtilityResponse(task.request, response);
         if (task.request.kind === 'capture-observation') assertObservationUtilityResponse(task.request, response);
-        if (task.request.kind === 'generation-run') assertGenerationUtilityResponse(task.request, response);
-        if (task.request.kind === 'normalize-generation-acceptance') assertNormalizeGenerationAcceptanceUtilityResponse(task.request, response);
         if (task.request.kind === 'import-document') {
           const imported = validateImportUtilityResponse(task.request, response);
           Object.assign(response, imported);
@@ -698,7 +547,6 @@ export class RasterUtilitySupervisor {
   }
 
   private handleExit(worker: UtilityProcessLike, code: number): void {
-    if (this.cancelling?.worker === worker) { const taskId = this.cancelling.taskId; this.finishGracefulGenerationCancel(worker, taskId, false); return; }
     if (worker !== this.worker) return;
     this.worker = undefined;
     if (this.current) {

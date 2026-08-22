@@ -7,11 +7,9 @@ import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 
 export const PACKAGED_E2E_SUITE_ENV = 'AIDRAW_E2E_SUITE';
-export const PACKAGED_E2E_RETAINED_TITLE_PATTERN = /(?:MCP-COLD-DISCOVERY|FND-02-PACKAGED-SECURITY|FND-05-(?:STALE|UNRESPONSIVE)-RENDERER|UX-01-(?:DENSITY|WINDOW-CHROME)|UX-09-TEXT-REFLOW|FND-09-)/;
+export const PACKAGED_E2E_RETAINED_TITLE_PATTERN = /(?:MCP-COLD-DISCOVERY|FND-02-PACKAGED-SECURITY|FND-05-(?:STALE|UNRESPONSIVE)-RENDERER|UX-01-(?:DENSITY|WINDOW-CHROME)|UX-09-TEXT-REFLOW|FND-09-(?!GENERATION(?:-RESULT|-NORMALIZATION)?\b))/;
 export const PACKAGED_E2E_SELF_CONTAINED_CASES = 27;
-export const PACKAGED_E2E_RETAINED_CASES = 15;
-
-const PACKAGED_MCP_CREDENTIAL_ERROR = 'The packaged MCP credential is not the expected encrypted safe-storage record.';
+export const PACKAGED_E2E_RETAINED_CASES = 13;
 
 export const PACKAGED_E2E_RETAINED_PROFILE_ENVS = Object.freeze([
   'AIDRAW_E2E_MCP_DISCOVERY_PROFILE',
@@ -27,8 +25,6 @@ export const PACKAGED_E2E_RETAINED_PROFILE_ENVS = Object.freeze([
   'AIDRAW_E2E_FND09_QUANTIZATION_RESULT_PROFILE',
   'AIDRAW_E2E_FND09_EXPORT_RESULT_PROFILE',
   'AIDRAW_E2E_FND09_IMPORT_RESULT_PROFILE',
-  'AIDRAW_E2E_FND09_GENERATION_RESULT_PROFILE',
-  'AIDRAW_E2E_FND09_NORMALIZATION_PROFILE',
 ]);
 
 const RETAINED_TITLE_MARKERS = Object.freeze([
@@ -50,30 +46,6 @@ function nonEmpty(value) {
 function normalizeArch(arch) {
   if (arch === 'arm') return 'armv7l';
   return arch;
-}
-
-export function inspectPackagedMcpCredential(value, liveToken) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error(PACKAGED_MCP_CREDENTIAL_ERROR);
-  }
-  const record = value;
-  if (Object.keys(record).sort().join(',') !== 'encryption,status,value,version'
-    || record.version !== 2
-    || record.status !== 'active'
-    || record.encryption !== 'electron-safe-storage'
-    || typeof record.value !== 'string'
-    || !record.value
-    || typeof liveToken !== 'string'
-    || !liveToken
-    || record.value === liveToken) {
-    throw new Error(PACKAGED_MCP_CREDENTIAL_ERROR);
-  }
-  return {
-    version: 2,
-    status: 'active',
-    encryption: 'electron-safe-storage',
-    encryptedValuePresent: true,
-  };
 }
 
 export function resolvePackagedE2eArtifact({

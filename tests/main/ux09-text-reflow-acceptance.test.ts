@@ -10,7 +10,6 @@ import {
   classifyUx09RendererRequest,
   exerciseUx09ScrollBoundaries,
   hasExactUx09ProcessShape,
-  inspectUx09EncryptedToken,
   isUx09ExactTextFit,
   isUx09RectContained,
   parseUx09OwnedProcesses,
@@ -129,7 +128,7 @@ describe('UX-09 exact-package 32 px text-reflow boundary', () => {
       ...declared,
       PATH: '/safe/bin',
       HOME: '/safe/home',
-      OPENAI_API_KEY: 'must-not-pass',
+      UNRELATED_SECRET: 'must-not-pass',
       HTTP_PROXY: 'http://proxy.invalid',
       PLAYWRIGHT_HTML_OUTPUT_DIR: '/unsafe/reporter',
     });
@@ -140,14 +139,14 @@ describe('UX-09 exact-package 32 px text-reflow boundary', () => {
       AIDRAW_E2E_UX09_TEXT_REFLOW_WRAPPER: '1',
       PLAYWRIGHT_NO_COPY_PROMPT: '1',
     });
-    expect(child).not.toHaveProperty('OPENAI_API_KEY');
+    expect(child).not.toHaveProperty('UNRELATED_SECRET');
     expect(child).not.toHaveProperty('HTTP_PROXY');
     expect(child).not.toHaveProperty('PLAYWRIGHT_HTML_OUTPUT_DIR');
     expect(assertUx09TextReflowSafeReporterEnvironment({})).toBe(true);
     expect(() => assertUx09TextReflowSafeReporterEnvironment({ PLAYWRIGHT_JSON_OUTPUT_FILE: '/tmp/unsafe' })).toThrow(/PLAYWRIGHT_JSON_OUTPUT_FILE/);
   });
 
-  it('finds only exact-profile processes and retains no credential-shaped evidence', () => {
+  it('finds only exact-profile processes and retains no secret-bearing evidence', () => {
     const profile = resolve('test-results/retained/aidraw-e2e-ux09-text-reflow-20260816t120000z-87436fe-ux09');
     const table = [
       ` 100 1 /candidate/AIDraw --user-data-dir=${profile}`,
@@ -171,7 +170,7 @@ describe('UX-09 exact-package 32 px text-reflow boundary', () => {
     const redacted = redactUx09FailureText(`Authorization: Bearer ${secret}; token=${secret}`, [secret]);
     expect(redacted).not.toContain(secret);
     expect(assertUx09EvidenceRedacted(JSON.stringify({ result: 'failed', redacted }), [secret])).toBe(true);
-    expect(() => assertUx09EvidenceRedacted(JSON.stringify({ token: secret }), [secret])).toThrow(/credential-shaped/);
+    expect(() => assertUx09EvidenceRedacted(JSON.stringify({ token: secret }), [secret])).toThrow(/secret-bearing/);
   });
 
   it('exercises both scroll boundaries and restores a surface that starts at its maximum', async () => {
@@ -553,22 +552,9 @@ describe('UX-09 exact-package 32 px text-reflow boundary', () => {
     }
   });
 
-  it('checks only the encrypted credential envelope without reporting its values', () => {
-    const live = 'synthetic-live-token';
-    expect(inspectUx09EncryptedToken({ version: 2, status: 'active', encryption: 'electron-safe-storage', value: 'ciphertext' }, live)).toEqual({
-      version: 2,
-      status: 'active',
-      encryption: 'electron-safe-storage',
-      encryptedValuePresent: true,
-    });
-    let message = '';
-    try {
-      inspectUx09EncryptedToken({ version: 2, status: 'active', encryption: 'electron-safe-storage', value: live }, live);
-    } catch (error) {
-      message = error instanceof Error ? error.message : String(error);
-    }
-    expect(message).toMatch(/expected encrypted safe-storage record/);
-    expect(message).not.toContain(live);
+  it('keeps retired persistent stores as explicit absence sentinels', () => {
+    expect(UX09_TEXT_REFLOW_FILES.retiredProviderStore).toBe(join('credentials', 'generation.json'));
+    expect(UX09_TEXT_REFLOW_FILES.retiredAuthorityStore).toBe(join('credentials', 'mcp-token.json'));
   });
 
   it('labels and binds the exact trusted-renderer mechanism, fit metrics, local axes, canonical edit, and graceful cleanup', async () => {

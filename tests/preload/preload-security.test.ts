@@ -49,20 +49,11 @@ const invokeChannels = {
   acquireHumanLock: IPC.acquireHumanLock,
   releaseHumanLock: IPC.releaseHumanLock,
   getMcpConnectionInfo: IPC.mcpInfo,
-  getMcpCredentials: IPC.mcpCredentials,
-  rotateMcpCredential: IPC.mcpCredentialRotate,
-  revokeMcpAccess: IPC.mcpAccessRevoke,
+  getMcpConnection: IPC.mcpConnection,
   getEngineStatus: IPC.engineStatus,
   setEngineStartAtLogin: IPC.engineStartAtLogin,
-  configureAgentClient: IPC.configureAgentClient,
-  configureCodex: IPC.configureCodex,
+  getAgentClientSetup: IPC.agentClientSetup,
   resolveJob: IPC.resolveJob,
-  setProviderCredential: IPC.setProviderCredential,
-  getProviderStatus: IPC.getProviderStatus,
-  generationStart: IPC.generationStart,
-  generationAccept: IPC.generationAccept,
-  generationReject: IPC.generationReject,
-  jobCancel: IPC.jobCancel,
   importFiles: IPC.importFiles,
   importPalette: IPC.importPalette,
   exportPalette: IPC.exportPalette,
@@ -117,7 +108,7 @@ describe('preload window.aidraw security contract', () => {
 
   it('exposes one frozen, function-only, exact allowlist with no generic primitive', () => {
     const expectedKeys = [...Object.keys(invokeChannels), ...subscriptionMethods].sort();
-    expect(expectedKeys).toHaveLength(65);
+    expect(expectedKeys).toHaveLength(56);
     expect(Object.keys(bridge).sort()).toEqual(expectedKeys);
     expect(Object.getOwnPropertySymbols(bridge)).toEqual([]);
     expect(Object.isFrozen(bridge)).toBe(true);
@@ -150,17 +141,10 @@ describe('preload window.aidraw security contract', () => {
     }
   });
 
-  it('allows provider credential writes and status only, never provider-secret retrieval', async () => {
-    expect(Object.keys(bridge).filter((key) => /provider/i.test(key)).sort()).toEqual(['getProviderStatus', 'setProviderCredential']);
-    expect(Object.hasOwn(bridge, 'getProviderCredential')).toBe(false);
-    expect(Object.hasOwn(bridge, 'listProviderCredentials')).toBe(false);
-
-    await bridge.setProviderCredential('openai', 'renderer-owned-input');
-    expect(electronMock.invoke).toHaveBeenCalledWith(IPC.setProviderCredential, 'openai', 'renderer-owned-input');
-    electronMock.invoke.mockClear();
-    await bridge.getProviderStatus();
-    expect(electronMock.invoke).toHaveBeenCalledWith(IPC.getProviderStatus);
-    expect(electronMock.invoke.mock.calls.flat()).not.toContain('renderer-owned-input');
+  it('exposes only the current process-lifetime MCP connection and no provider or lifecycle surface', async () => {
+    expect(Object.keys(bridge).filter((key) => /provider|generation|credential|rotate|revoke/i.test(key))).toEqual([]);
+    await bridge.getMcpConnection();
+    expect(electronMock.invoke).toHaveBeenCalledWith(IPC.mcpConnection);
   });
 
   it('keeps indexed-selection PNG planning on the existing fixed clipboard channel without exposing image bytes', async () => {

@@ -8,7 +8,6 @@ import {
   redactUx01FailureText,
   UX01_UNSAFE_REPORT_ENVIRONMENTS,
 } from './ux01-packaged-acceptance.mjs';
-import { inspectPackagedMcpCredential } from './packaged-e2e-runtime.mjs';
 
 export const UX09_TEXT_REFLOW_SCENARIO = 'UX-09-TEXT-REFLOW exact package keeps the 200-percent primary pixel workspace reachable';
 export const UX09_TEXT_REFLOW_MECHANISM = 'Playwright trusted-renderer inline documentElement.style.fontSize = 32px after app-shell readiness';
@@ -25,8 +24,8 @@ export const UX09_TEXT_REFLOW_FILES = Object.freeze({
   failure: 'ux09-text-reflow-failure.json',
   cleanup: 'ux09-text-reflow-cleanup.json',
   forbiddenNetwork: 'ux09-text-reflow-forbidden-network.json',
-  providerCredentials: join('credentials', 'generation.json'),
-  tokenCredentials: join('credentials', 'mcp-token.json'),
+  retiredProviderStore: join('credentials', 'generation.json'),
+  retiredAuthorityStore: join('credentials', 'mcp-token.json'),
 });
 export const UX09_TEXT_REFLOW_SCREENSHOTS = Object.freeze([
   'screenshots/minimum-root32-overview.png',
@@ -104,7 +103,7 @@ export function resolveUx09TextReflowAcceptance({ workspacePath = process.cwd(),
 export function assertUx09TextReflowSafeReporterEnvironment(environment = process.env) {
   const configured = UX09_TEXT_REFLOW_UNSAFE_REPORT_ENVIRONMENTS.filter((name) => String(environment[name] ?? '').trim());
   if (configured.length) {
-    throw new Error(`UX-09 text-reflow acceptance rejects credential-capable Playwright report configuration: ${configured.join(', ')}.`);
+    throw new Error(`UX-09 text-reflow acceptance rejects secret-bearing Playwright report configuration: ${configured.join(', ')}.`);
   }
   return true;
 }
@@ -118,14 +117,6 @@ export function buildUx09TextReflowChildEnvironment(environment = process.env) {
   childEnvironment.AIDRAW_E2E_UX09_TEXT_REFLOW_WRAPPER = '1';
   childEnvironment.PLAYWRIGHT_NO_COPY_PROMPT = '1';
   return childEnvironment;
-}
-
-export function inspectUx09EncryptedToken(value, liveToken) {
-  try {
-    return inspectPackagedMcpCredential(value, liveToken);
-  } catch {
-    throw new Error('The UX-09 MCP credential is not the expected encrypted safe-storage record.');
-  }
 }
 
 export function parseUx09OwnedProcesses(processTable, profilePath) {

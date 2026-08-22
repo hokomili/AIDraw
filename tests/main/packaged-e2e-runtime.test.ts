@@ -1,13 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import {
   assertPackagedE2eProfile,
-  inspectPackagedMcpCredential,
   packagedE2ePrimaryModifier,
   packagedE2ePrimaryShortcut,
   packagedE2eSpawnOptions,
   PACKAGED_E2E_RETAINED_CASES,
+  PACKAGED_E2E_RETAINED_PROFILE_ENVS,
   PACKAGED_E2E_RETAINED_TITLE_PATTERN,
   PACKAGED_E2E_SELF_CONTAINED_CASES,
   resolvePackagedE2eArtifact,
@@ -15,57 +14,10 @@ import {
 } from '../../scripts/packaged-e2e-runtime.mjs';
 
 describe('packaged Level 2 platform routing', () => {
-  it('accepts only the current active v2 encrypted credential envelope without leaking either value', () => {
-    const liveToken = 'synthetic-live-token-that-must-not-reach-reporters';
-    const encryptedValue = 'synthetic-encrypted-value-that-must-not-reach-reporters';
-    expect(inspectPackagedMcpCredential({
-      version: 2,
-      status: 'active',
-      encryption: 'electron-safe-storage',
-      value: encryptedValue,
-    }, liveToken)).toEqual({
-      version: 2,
-      status: 'active',
-      encryption: 'electron-safe-storage',
-      encryptedValuePresent: true,
-    });
-
-    for (const invalid of [
-      { version: 1, encryption: 'electron-safe-storage', value: encryptedValue },
-      { version: 2, status: 'revoked' },
-      { version: 2, status: 'active', encryption: 'electron-safe-storage', value: '' },
-      { version: 2, status: 'active', encryption: 'electron-safe-storage', value: liveToken },
-      { version: 2, status: 'active', encryption: 'electron-safe-storage', value: encryptedValue, extra: true },
-    ]) {
-      let message = '';
-      try {
-        inspectPackagedMcpCredential(invalid, liveToken);
-      } catch (error) {
-        message = error instanceof Error ? error.message : String(error);
-      }
-      expect(message).toBe('The packaged MCP credential is not the expected encrypted safe-storage record.');
-      expect(message).not.toContain(liveToken);
-      expect(message).not.toContain(encryptedValue);
-    }
-  });
-
-  it('routes every current-package credential consumer through the shared v2 inspector', async () => {
-    const consumers = [
-      ['tests/e2e/security.spec.ts', 1],
-      ['tests/e2e/mcp-discovery.spec.ts', 1],
-      ['tests/e2e/utility-containment.spec.ts', 7],
-      ['tests/e2e/editor.spec.ts', 1],
-      ['tests/e2e/stale-renderer-recovery.spec.ts', 2],
-      ['scripts/ux01-packaged-acceptance.mjs', 1],
-      ['scripts/ux09-text-reflow-acceptance.mjs', 1],
-      ['scripts/fnd05-packaged-acceptance.mjs', 1],
-    ] as const;
-    for (const [path, expectedCalls] of consumers) {
-      const source = await readFile(resolve(path), 'utf8');
-      expect(source.match(/inspectPackagedMcpCredential\(/g)).toHaveLength(expectedCalls);
-      expect(source).not.toContain("['encryption', 'value', 'version']");
-      expect(source).not.toContain("keys.join(',') !== 'encryption,value,version'");
-    }
+  it('does not route retired native content-generation workflows into packaged acceptance', () => {
+    expect(PACKAGED_E2E_RETAINED_PROFILE_ENVS).not.toContain('AIDRAW_E2E_FND09_GENERATION_RESULT_PROFILE');
+    expect(PACKAGED_E2E_RETAINED_PROFILE_ENVS).not.toContain('AIDRAW_E2E_FND09_NORMALIZATION_PROFILE');
+    expect(PACKAGED_E2E_RETAINED_TITLE_PATTERN.test('FND-09-GENERATION-NORMALIZATION retired workflow')).toBe(false);
   });
 
   it('resolves the native Windows and macOS package layouts without changing the output override contract', () => {
@@ -114,10 +66,10 @@ describe('packaged Level 2 platform routing', () => {
     expect(() => resolvePackagedE2eSelection({ AIDRAW_E2E_SUITE: 'self-contained', AIDRAW_E2E_FND09_UTILITY_PROFILE: 'configured' }, [])).toThrow(/cannot be combined/);
   });
 
-  it('freezes the reviewed split at 27 clean-package cases plus 15 explicit retained cases', () => {
+  it('freezes the reviewed split after retiring two native generation cases', () => {
     expect(PACKAGED_E2E_SELF_CONTAINED_CASES).toBe(27);
-    expect(PACKAGED_E2E_RETAINED_CASES).toBe(15);
-    expect(PACKAGED_E2E_SELF_CONTAINED_CASES + PACKAGED_E2E_RETAINED_CASES).toBe(42);
+    expect(PACKAGED_E2E_RETAINED_CASES).toBe(13);
+    expect(PACKAGED_E2E_SELF_CONTAINED_CASES + PACKAGED_E2E_RETAINED_CASES).toBe(40);
   });
 
   it('keeps spawn behavior and primary shortcuts native on both desktop platforms', () => {

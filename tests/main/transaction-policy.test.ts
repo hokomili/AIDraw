@@ -181,7 +181,7 @@ describe('transaction trust policy', () => {
     }
   });
 
-  it('reserves verified provenance for the engine and normalizes agent asset origin', async () => {
+  it('keeps historical provider provenance read-only and normalizes an agent asset origin', async () => {
     const service = await serviceFixture();
     const document = service.snapshot().activeDocument!;
     const asset = pngAsset('generated-claim', { source: 'generated' });
@@ -195,18 +195,19 @@ describe('transaction trust policy', () => {
     };
     const blocked = await service.apply(transaction);
     expect(blocked).toMatchObject({ status: 'conflict' });
-    expect(blocked.message).toContain('generation engine');
+    expect(blocked.message).toContain('read-only compatibility metadata');
     expect(service.getDocument(document.id)?.assets[asset.id]).toBeUndefined();
 
-    expect((await service.apply(transaction, { trustedProvenance: true })).status).toBe('committed');
+    const assetOnly = { ...transaction, clientOperationId: 'asset-origin-policy', operations: [{ kind: 'asset.add' as const, asset }] };
+    expect((await service.apply(assetOnly)).status).toBe('committed');
     const committed = service.getDocument(document.id)!;
     expect(committed.assets[asset.id].source).toBe('embedded');
-    expect(committed.provenance[0].createdAt).not.toBe('forged');
+    expect(committed.provenance).toEqual([]);
 
     const remove: CanvasTransaction = {
       id: createId('tx'), clientOperationId: createId('op'), documentId: document.id, actor: AGENT,
       label: 'Erase provenance', createdAt: nowIso(), operations: [{ kind: 'provenance.delete', provenanceId: provenance.id }],
     };
-    expect(await service.apply(remove)).toMatchObject({ status: 'conflict', message: expect.stringContaining('generation engine') });
+    expect(await service.apply(remove)).toMatchObject({ status: 'conflict', message: expect.stringContaining('read-only compatibility metadata') });
   });
 });

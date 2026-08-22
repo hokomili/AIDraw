@@ -6,11 +6,11 @@ import { access, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import {
-  inspectPackagedMcpCredential,
   resolvePackagedE2eArtifact,
   spawnPackagedE2e,
   waitForPackagedE2eReady,
 } from '../../scripts/packaged-e2e-runtime.mjs';
+import { readMcpConnectionHandoff } from '../../scripts/mcp-direct-client.mjs';
 
 const scenarioName = 'FND-02-PACKAGED-SECURITY exact package preserves the renderer security boundary';
 const profilePrefix = 'aidraw-e2e-fnd02-packaged-security-';
@@ -22,10 +22,8 @@ const expectedBridgeKeys = [
   'createCheckpoint', 'compareCheckpoint', 'restoreCheckpoint', 'mergeCheckpoint', 'deleteCheckpoint',
   'listDocumentPresets', 'saveDocumentPreset', 'deleteDocumentPreset', 'listInterchangeReports', 'exportInterchangeReport',
   'openDocuments', 'saveDocument', 'saveDocumentAs', 'saveAllDocuments', 'batchExportDocuments', 'closeAllDocuments',
-  'closeDocument', 'stopAgents', 'acquireHumanLock', 'releaseHumanLock', 'getMcpConnectionInfo', 'getMcpCredentials',
-  'rotateMcpCredential', 'revokeMcpAccess',
-  'getEngineStatus', 'setEngineStartAtLogin', 'configureAgentClient', 'configureCodex', 'resolveJob',
-  'setProviderCredential', 'getProviderStatus', 'generationStart', 'generationAccept', 'generationReject', 'jobCancel',
+  'closeDocument', 'stopAgents', 'acquireHumanLock', 'releaseHumanLock', 'getMcpConnectionInfo', 'getMcpConnection',
+  'getEngineStatus', 'setEngineStartAtLogin', 'getAgentClientSetup', 'resolveJob',
   'importFiles', 'importPalette', 'exportPalette', 'managePixelLink', 'selectSpriteSheet', 'importSpriteSheet',
   'exportActiveDocument', 'copySelection', 'pasteClipboard', 'replayTrace', 'updateEditorAdvisory',
   'writePixelSelectionClipboard', 'readPixelSelectionClipboard', 'setOnionSkinPreferences', 'setOrderedDitherPreferences',
@@ -36,7 +34,8 @@ const expectedBridgeKeys = [
 ].sort();
 
 interface McpConnection {
-  version: number;
+  version: 2;
+  authority: 'engine-process';
   url: string;
   token: string;
   activeDocumentId: string;
@@ -81,8 +80,8 @@ async function waitForConnection(path: string, child: ChildProcess): Promise<Mcp
   while (Date.now() < deadline) {
     if (child.exitCode !== null) throw new Error(`The packaged security-audit process exited before startup with code ${child.exitCode}.`);
     try {
-      const value = JSON.parse(await readFile(path, 'utf8')) as Partial<McpConnection>;
-      if (value.version === 1 && value.url && value.token && value.activeDocumentId && Number.isInteger(value.pid)) return value as McpConnection;
+      const value = await readMcpConnectionHandoff(path);
+      if (value.activeDocumentId) return value as McpConnection;
     } catch { /* The isolated package is still starting. */ }
     await new Promise((resolveWait) => setTimeout(resolveWait, 100));
   }
@@ -114,7 +113,7 @@ async function redactConnection(path: string): Promise<'redacted-after-graceful-
   if (!await access(path).then(() => true, () => false)) return 'absent';
   const connection = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
   delete connection.token;
-  await writeFile(path, `${JSON.stringify({ ...connection, credentialStatus: 'redacted-after-graceful-stop' }, null, 2)}\n`, 'utf8');
+  await writeFile(path, `${JSON.stringify({ ...connection, authorityStatus: 'redacted-after-graceful-stop' }, null, 2)}\n`, 'utf8');
   return 'redacted-after-graceful-stop';
 }
 
@@ -143,9 +142,9 @@ test(scenarioName, async () => {
   const evidencePath = join(profile, 'fnd02-packaged-security-evidence.json');
   const tokenPath = join(profile, 'credentials', 'mcp-token.json');
   const trustSettingsPath = join(profile, 'trusted-folders.json');
-  const providerCredentialsPath = join(profile, 'credentials', 'generation.json');
+  const retiredProviderStorePath = join(profile, 'credentials', 'generation.json');
   const forbiddenNetworkPath = join(profile, 'fnd02-forbidden-network.json');
-  for (const path of [connectionPath, evidencePath, tokenPath, trustSettingsPath, providerCredentialsPath, forbiddenNetworkPath]) {
+  for (const path of [connectionPath, evidencePath, tokenPath, trustSettingsPath, retiredProviderStorePath, forbiddenNetworkPath]) {
     expect(await access(path).then(() => true, () => false), `${path} must be absent before launch`).toBe(false);
   }
 
@@ -168,7 +167,7 @@ test(scenarioName, async () => {
   let failure: Error | undefined;
   let runtimeEvidence: Record<string, unknown> | undefined;
   let connection: McpConnection | undefined;
-  let credentialStatus: 'redacted-after-graceful-stop' | 'absent' = 'absent';
+  let authorityStatus: 'redacted-after-graceful-stop' | 'absent' = 'absent';
   try {
     connection = await waitForConnection(connectionPath, child);
     expect(connection.pid).toBe(child.pid);
@@ -178,8 +177,7 @@ test(scenarioName, async () => {
     expect(connectionUrl.hostname).toBe('127.0.0.1');
     expect(connectionUrl.pathname).toBe('/mcp');
 
-    const tokenFile = JSON.parse(await readFile(tokenPath, 'utf8')) as unknown;
-    inspectPackagedMcpCredential(tokenFile, connection.token);
+    expect(await access(tokenPath).then(() => true, () => false)).toBe(false);
 
     const connected = await connectRenderer(debuggingPort, child, stderr);
     browser = connected.browser;
@@ -275,7 +273,7 @@ test(scenarioName, async () => {
     expect(page.url()).toBe(originalUrl);
     expect(browser.contexts()[0]?.pages()).toHaveLength(initialPageCount);
     expect(nonLoopbackRequests).toEqual([]);
-    for (const sentinel of [trustSettingsPath, providerCredentialsPath, forbiddenNetworkPath]) expect(await access(sentinel).then(() => true, () => false)).toBe(false);
+    for (const sentinel of [tokenPath, trustSettingsPath, retiredProviderStorePath, forbiddenNetworkPath]) expect(await access(sentinel).then(() => true, () => false)).toBe(false);
 
     runtimeEvidence = {
       scenario: scenarioName,
@@ -290,8 +288,8 @@ test(scenarioName, async () => {
       process: { pidMatchedConnection: true, devtoolsLoopbackOnly: true },
       renderer,
       denials: { windowOpen: true, navigation: true, notificationPermission: true, webviewPrimitiveAbsent: true },
-      network: { nonLoopbackRequests: 0, providerRequests: 0, paidRequests: 0 },
-      sentinels: { trustAbsent: true, providerCredentialsAbsent: true, forbiddenNetworkAbsent: true },
+      network: { nonLoopbackRequests: 0 },
+      sentinels: { persistentAuthorityAbsent: true, legacyProviderSettingsAbsent: true, trustAbsent: true, forbiddenNetworkAbsent: true },
     };
   } catch (error) {
     failure = error instanceof Error ? error : new Error(String(error));
@@ -300,7 +298,7 @@ test(scenarioName, async () => {
     let cleanupError: Error | undefined;
     try { await quitGracefully(profile, child); }
     catch (error) { cleanupError = error instanceof Error ? error : new Error('The packaged security audit did not stop gracefully.'); }
-    try { credentialStatus = await redactConnection(connectionPath); }
+    try { authorityStatus = await redactConnection(connectionPath); }
     catch (error) { cleanupError ??= error instanceof Error ? error : new Error('The packaged security connection could not be redacted.'); }
 
     const retainedEvidence = {
@@ -310,13 +308,13 @@ test(scenarioName, async () => {
       }),
       result: failure || cleanupError ? 'failed' : 'passed',
       error: failure?.message ?? cleanupError?.message,
-      cleanup: { gracefulOnly: true, exitCode: child.exitCode, credentialStatus },
+      cleanup: { gracefulOnly: true, exitCode: child.exitCode, authorityStatus },
     };
     await writeFile(evidencePath, `${JSON.stringify(retainedEvidence, null, 2)}\n`, 'utf8');
     if (!failure && cleanupError) failure = cleanupError;
   }
 
   expect(child.exitCode).toBe(0);
-  expect(credentialStatus).toBe('redacted-after-graceful-stop');
+  expect(authorityStatus).toBe('redacted-after-graceful-stop');
   if (failure) throw failure;
 });

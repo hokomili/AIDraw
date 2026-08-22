@@ -3,7 +3,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { desktopPlatformInfo } from '../../src/common/platform';
-import { requireSecureStorage, secureStorageStatus } from '@main/secure-storage';
 import { getStartAtLoginStatus, linuxAutostartPath, setStartAtLogin, wasOpenedAtLogin, type StartAtLoginContext } from '@main/start-at-login';
 
 const temporaryDirectories: string[] = [];
@@ -20,22 +19,10 @@ function mockApp(options: { packaged?: boolean; openAtLogin?: boolean; wasOpened
 }
 
 describe('desktop platform services', () => {
-  it('names each supported operating-system credential backend', () => {
-    expect(desktopPlatformInfo('win32').credentialProtection).toBe('Windows DPAPI');
-    expect(desktopPlatformInfo('darwin').credentialProtection).toBe('macOS Keychain');
-    expect(desktopPlatformInfo('linux', 'gnome_libsecret').credentialProtection).toContain('gnome libsecret');
-  });
-
-  it('rejects Linux basic_text while accepting a real secret store', () => {
-    const insecure = { isEncryptionAvailable: () => true, getSelectedStorageBackend: () => 'basic_text' };
-    expect(secureStorageStatus(insecure, 'linux')).toMatchObject({ available: false, backend: 'basic_text' });
-    expect(() => requireSecureStorage(insecure, 'linux')).toThrow(/refuses.*basic_text/i);
-    expect(secureStorageStatus({ isEncryptionAvailable: () => true, getSelectedStorageBackend: () => 'kwallet6' }, 'linux')).toMatchObject({ available: true, backend: 'kwallet6' });
-  });
-
-  it('reports unavailable Keychain/DPAPI without falling back to plaintext', () => {
-    expect(secureStorageStatus({ isEncryptionAvailable: () => false }, 'darwin')).toMatchObject({ available: false, reason: expect.stringContaining('Keychain') });
-    expect(secureStorageStatus({ isEncryptionAvailable: () => false }, 'win32')).toMatchObject({ available: false, reason: expect.stringContaining('DPAPI') });
+  it('reports supported desktop platforms without a protected-secret dependency', () => {
+    expect(desktopPlatformInfo('win32')).toEqual({ id: 'windows', label: 'Windows' });
+    expect(desktopPlatformInfo('darwin')).toEqual({ id: 'macos', label: 'macOS' });
+    expect(desktopPlatformInfo('linux')).toEqual({ id: 'linux', label: 'Linux' });
   });
 
   it('creates and removes a headless XDG autostart entry', async () => {

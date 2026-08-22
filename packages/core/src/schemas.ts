@@ -102,6 +102,7 @@ const LinkedAssetInputSchema = z.object({
   if (link.mode === 'linked' && !link.relativePath) context.addIssue({ code: 'custom', path: ['relativePath'], message: 'External links require a relative path' });
   if (link.mode === 'embedded' && link.relativePath !== undefined) context.addIssue({ code: 'custom', path: ['relativePath'], message: 'Embedded links cannot retain an external path' });
 });
+/** Read compatibility for provenance already present in authored documents and traces. */
 const ProvenanceInputSchema = z.object({
   id: IdSchema,
   assetId: IdSchema,

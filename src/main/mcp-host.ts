@@ -50,7 +50,6 @@ import {
   type AsyncJob,
   type CanvasOperation,
   type CanvasTransaction,
-  type DocumentAsset,
   type IllustrationDocument,
   type IllustrationObject,
   type PixelDocument,
@@ -71,10 +70,9 @@ import { joinPathObjects } from '../common/path-topology';
 import { assignWangTile, deleteWangColor, deleteWangSet, upsertWangColor, upsertWangSet } from '../common/wang-authoring';
 import { planImageCollectionWangMutation, planWangTerrainSelection } from '../common/wang-terrain-authoring';
 import { TILE_VARIANT_SEED_PROPERTY, chooseTileVariant } from '../common/tile-variants';
-import { validateGenerationRequest } from '../common/generation-capabilities';
-import type { GenerationRequest } from '../common/generation';
 import { embedPixelLink, packPixelLinks } from '../common/pixel-links';
 import { appendImageCollectionSource, createImageCollectionTileset, removeUnusedImageCollectionSource, replaceImageCollectionSource } from '../common/image-collection-authoring';
+import { planImageCollectionTileIdMove } from '../common/image-collection-tile-move';
 import { planTileObjectCreation } from '../common/tile-object-authoring';
 import { DocumentService } from './document-service';
 import { BatchManager } from './batch-manager';
@@ -84,12 +82,16 @@ import { quantizeImageToPalette } from './quantize-image';
 import { captureObservation, MAX_OBSERVATION_PIXELS, type CaptureObservation } from './capture-observation';
 import { projectLinkFileExtension, verifiedPixelLinkCache } from './pixel-link-files';
 import { AIDRAW_GUIDE_URI, AIDRAW_HELP_TOPICS, AIDRAW_MCP_GUIDE, AIDRAW_SERVER_INSTRUCTIONS, aidrawHelp } from './mcp-guide';
+import { MCP_BRIDGE_PROVISIONAL_HEADER, MCP_BRIDGE_PROVISIONAL_ID_PATTERN } from './mcp-authority';
 
 const PORT_START = 48200;
 const PORT_END = 48231;
 const MAX_HTTP_BODY = 2 * 1024 * 1024;
 const MAX_MCP_SESSIONS = 32;
 const MAX_MCP_RESOURCE_SUBSCRIPTIONS = 128;
+const DEFAULT_PROVISIONAL_SESSION_TTL_MS = 5_000;
+const MAX_PROVISIONAL_CANCELLATION_TOMBSTONES = MAX_MCP_SESSIONS * 2;
+const MCP_INSTANCE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const AGENT_COLORS = ['#8268dd', '#e65f7d', '#2fa7a0', '#d58a35', '#4d83d1', '#a65dab'];
 
 interface McpSession {
@@ -98,6 +100,14 @@ interface McpSession {
   actor: Actor;
   subscriptions: Set<string>;
   closed: boolean;
+  provisionalId?: string;
+  provisionalRetirement?: ReturnType<typeof setTimeout>;
+  bridgeCorrelationId?: string;
+  bridgeLifetimeResponse?: ServerResponse;
+}
+
+export interface McpHostLifecycleOptions {
+  provisionalSessionTtlMs?: number;
 }
 
 interface PortSettings { version: 1; preferredPort: number }
@@ -107,8 +117,8 @@ type McpTransportDiagnosticCode = 'invalid_token' | 'initialization_required' | 
 
 const MCP_TRANSPORT_DIAGNOSTICS: Record<McpTransportDiagnosticCode, { message: string; next: string }> = {
   invalid_token: {
-    message: 'Authentication failed; the bearer is absent, invalid, rotated, or revoked.',
-    next: "Review Activity's current access state. Leave access revoked if it should remain disabled. Otherwise, if access is revoked, use Rotate and re-enable; then refresh the intended configuration profile through its Connect or Show settings path before initializing a fresh transport and joining again. Never retry a copied or stale bearer.",
+    message: 'Authentication failed; the process-lifetime bearer is absent, invalid, or belongs to another engine run.',
+    next: 'Ordinary clients should reconnect through the unchanged AIDraw stdio bridge. Explicit direct QA callers must obtain a fresh private handoff, initialize a fresh transport, and never retry authority copied from a prior process.',
   },
   initialization_required: {
     message: 'This stateful legacy endpoint requires initialization before other requests.',
@@ -184,10 +194,6 @@ async function writePrivateMcpSettings(filePath: string, value: PortSettings | F
     throw error;
   }
 }
-
-export type GenerationApprovalPreviewRenderer = (
-  asset: DocumentAsset,
-) => Promise<{ width: number; height: number; previewPng: Buffer }>;
 
 const ObservationRegionSchema = z.object({
   x: z.number().int().nonnegative(),
@@ -279,6 +285,14 @@ const PixelImageCollectionSourceRemoveSchema = z.object({
   kind: z.literal('pixel.image-collection.source.remove'),
   tilesetId: z.string().min(1),
   tileId: z.number().int().min(0).max(1_048_575),
+  expectedTilesetRevision: z.number().int().nonnegative(),
+  expectedDocumentRevision: z.number().int().nonnegative(),
+}).strict();
+const PixelImageCollectionTileMoveSchema = z.object({
+  kind: z.literal('pixel.image-collection.tile.move'),
+  tilesetId: z.string().min(1),
+  sourceTileId: z.number().int().min(0).max(1_048_575),
+  destinationTileId: z.number().int().min(0).max(1_048_575),
   expectedTilesetRevision: z.number().int().nonnegative(),
   expectedDocumentRevision: z.number().int().nonnegative(),
 }).strict();
@@ -381,7 +395,7 @@ const ObservationFragmentSchema = z.object({
 }).strict();
 
 const DocumentIdInputSchema = z.string().min(1).describe('Canonical open document ID returned by document_manage action=list, session_manage, or canvas_observe.');
-const JobIdInputSchema = z.string().min(1).describe('Owner-scoped job ID returned by an approval, generation, or batch-starting tool.');
+const JobIdInputSchema = z.string().min(1).describe('Owner-scoped job ID returned by an approval or batch-starting tool.');
 function enforceActionInput(value: unknown, context: z.core.$RefinementCtx, schema: z.ZodType): void {
   const parsed = schema.safeParse(value);
   if (!parsed.success) for (const issue of parsed.error.issues) context.addIssue({ ...issue });
@@ -842,6 +856,15 @@ async function expandAgentCanvasOperation(document: AIDrawDocument, value: Recor
     const plan = removeUnusedImageCollectionSource(document, current.id, operation.tileId);
     return [{ kind: 'pixel.asset.replace', asset: plan.tileset, expectedRevision: operation.expectedTilesetRevision, expectedSpriteDependencies: plan.expectedSpriteDependencies }];
   }
+  if (value.kind === 'pixel.image-collection.tile.move') {
+    const operation = PixelImageCollectionTileMoveSchema.parse(value);
+    if (document.kind !== 'pixel') throw new Error('Image-collection tile-ID movement requires a pixel document.');
+    if (operation.expectedDocumentRevision !== document.revision) throw new Error(`Pixel document revision changed from ${operation.expectedDocumentRevision} to ${document.revision}; observe and retry.`);
+    const current = document.pixelAssets[operation.tilesetId];
+    if (!current || current.type !== 'tileset' || !isImageCollectionTileset(current)) throw new Error(`Image collection ${operation.tilesetId} does not exist.`);
+    if (current.revision !== operation.expectedTilesetRevision) throw new Error(`Image collection ${current.id} revision changed from ${operation.expectedTilesetRevision} to ${current.revision}; observe and retry.`);
+    return planImageCollectionTileIdMove(document, current.id, operation.sourceTileId, operation.destinationTileId).operations;
+  }
   if (value.kind === 'pixel.tile-object.create') {
     const operation = PixelTileObjectCreateSchema.parse(value);
     if (document.kind !== 'pixel') throw new Error('Tile-object creation requires a pixel document.');
@@ -1084,13 +1107,14 @@ function jsonText(value: unknown) {
 }
 
 function exactIntentDocumentRevision(operations: Array<Record<string, unknown>>): number | undefined {
-  const exactIntent = operations.filter((operation) => operation.kind === 'pixel.image-collection.create' || operation.kind === 'pixel.image-collection.append' || operation.kind === 'pixel.image-collection.source.replace' || operation.kind === 'pixel.image-collection.source.remove' || operation.kind === 'pixel.tile-object.create' || (String(operation.kind).startsWith('pixel.wang-') && operation.expectedDocumentRevision !== undefined));
+  const exactIntent = operations.filter((operation) => operation.kind === 'pixel.image-collection.create' || operation.kind === 'pixel.image-collection.append' || operation.kind === 'pixel.image-collection.source.replace' || operation.kind === 'pixel.image-collection.source.remove' || operation.kind === 'pixel.image-collection.tile.move' || operation.kind === 'pixel.tile-object.create' || (String(operation.kind).startsWith('pixel.wang-') && operation.expectedDocumentRevision !== undefined));
   if (!exactIntent.length) return undefined;
   if (operations.length !== 1 || exactIntent.length !== 1) throw new Error('Image-collection lifecycle, collection Wang terrain, and exact tile-object creation requests must be the only request in their transaction so one observed document revision owns the complete change.');
   if (exactIntent[0].kind === 'pixel.image-collection.create') return PixelImageCollectionCreateSchema.parse(exactIntent[0]).expectedDocumentRevision;
   if (exactIntent[0].kind === 'pixel.image-collection.append') return PixelImageCollectionAppendSchema.parse(exactIntent[0]).expectedDocumentRevision;
   if (exactIntent[0].kind === 'pixel.image-collection.source.replace') return PixelImageCollectionSourceReplaceSchema.parse(exactIntent[0]).expectedDocumentRevision;
   if (exactIntent[0].kind === 'pixel.image-collection.source.remove') return PixelImageCollectionSourceRemoveSchema.parse(exactIntent[0]).expectedDocumentRevision;
+  if (exactIntent[0].kind === 'pixel.image-collection.tile.move') return PixelImageCollectionTileMoveSchema.parse(exactIntent[0]).expectedDocumentRevision;
   if (exactIntent[0].kind === 'pixel.tile-object.create') return PixelTileObjectCreateSchema.parse(exactIntent[0]).expectedDocumentRevision;
   if (exactIntent[0].kind === 'pixel.wang-terrain.stroke') return PixelWangTerrainStrokeSchema.parse(exactIntent[0]).expectedDocumentRevision;
   if (exactIntent[0].kind === 'pixel.wang-set.upsert') return PixelWangSetUpsertSchema.parse(exactIntent[0]).expectedDocumentRevision;
@@ -1139,35 +1163,20 @@ function approvalReview(
   trustable: boolean,
 ): NonNullable<NonNullable<AsyncJob['approval']>['review']> {
   const fields: NonNullable<NonNullable<AsyncJob['approval']>['review']>['fields'] = [];
-  const add = (label: string, value: unknown, tone?: 'default' | 'warning' | 'paid') => {
+  const add = (label: string, value: unknown, tone?: 'default' | 'warning') => {
     if (value === undefined || value === '' || value === false) return;
     fields.push({ label, value: Array.isArray(value) ? value.join(', ') || 'None' : String(value), tone });
   };
-  if (kind === 'generation') {
-    add('Provider', request.provider);
-    add('Model / workflow', request.provider === 'openai' ? 'gpt-image-2' : request.provider === 'stability' ? 'Stability generation API' : 'Selected ComfyUI API workflow');
-    add('Mode', request.mode);
-    add('Prompt', request.prompt);
-    add('Negative prompt', request.negativePrompt);
-    add('Source assets', Array.isArray(request.sourceAssetIds) ? request.sourceAssetIds : []);
-    add('Mask asset', request.maskAssetId);
-    add('Requested results', request.resultCount);
-    add('Potential paid requests', request.resultCount, 'paid');
-    add('Size', typeof request.size === 'object' ? JSON.stringify(request.size) : request.size);
-    add('Seed', request.seed);
-    add('Provider options', JSON.stringify(request.providerOptions ?? {}));
-  } else {
-    add('Action', request.action ?? title);
-    add('Format', request.format);
-    add('Presentation scale', request.scale ? `${request.scale}×` : undefined);
-    add('Animation tag', typeof request.animationTagId === 'string' ? request.animationTagId : undefined);
-    add('Palette cycle', typeof request.paletteCycleId === 'string' ? request.paletteCycleId : undefined);
-    add('Palette-cycle source frame', typeof request.paletteCycleFrameId === 'string' ? request.paletteCycleFrameId : undefined);
-    add('Pixel import', request.pixelMode === true ? 'Yes' : undefined);
-    add('Project link', request.projectLinkId);
-    if (overwritePaths.length) add('Will overwrite', overwritePaths.join('\n'), 'warning');
-    else if (target && (kind === 'save' || kind === 'export')) add('Overwrite check', 'No existing target detected');
-  }
+  add('Action', request.action ?? title);
+  add('Format', request.format);
+  add('Presentation scale', request.scale ? `${request.scale}×` : undefined);
+  add('Animation tag', typeof request.animationTagId === 'string' ? request.animationTagId : undefined);
+  add('Palette cycle', typeof request.paletteCycleId === 'string' ? request.paletteCycleId : undefined);
+  add('Palette-cycle source frame', typeof request.paletteCycleFrameId === 'string' ? request.paletteCycleFrameId : undefined);
+  add('Pixel import', request.pixelMode === true ? 'Yes' : undefined);
+  add('Project link', request.projectLinkId);
+  if (overwritePaths.length) add('Will overwrite', overwritePaths.join('\n'), 'warning');
+  else if (target && (kind === 'save' || kind === 'export')) add('Overwrite check', 'No existing target detected');
   return {
     action: title,
     target,
@@ -1177,54 +1186,43 @@ function approvalReview(
   };
 }
 
-async function generationApprovalPreviews(
-  document: AIDrawDocument | undefined,
-  request: Record<string, unknown>,
-  renderPreview: GenerationApprovalPreviewRenderer | undefined,
-): Promise<NonNullable<NonNullable<NonNullable<AsyncJob['approval']>['review']>['previews']>> {
-  if (!document || !renderPreview) return [];
-  const sources = Array.isArray(request.sourceAssetIds) ? request.sourceAssetIds.filter((value): value is string => typeof value === 'string').slice(0, 4).map((assetId) => ({ role: 'source' as const, assetId })) : [];
-  const targets = [...sources, ...(typeof request.maskAssetId === 'string' ? [{ role: 'mask' as const, assetId: request.maskAssetId }] : [])];
-  const previews: NonNullable<NonNullable<NonNullable<AsyncJob['approval']>['review']>['previews']> = [];
-  for (const target of targets) {
-    const asset = document.assets[target.assetId]; if (!asset?.data || !asset.mimeType.startsWith('image/')) continue;
-    try {
-      const preview = await renderPreview(asset);
-      previews.push({ role: target.role, assetId: asset.id, name: asset.name, mimeType: asset.mimeType, width: preview.width, height: preview.height, dataUrl: `data:image/png;base64,${preview.previewPng.toString('base64')}` });
-    } catch { /* The approval fields still report the asset ID; an unavailable advisory preview never grants or blocks approval. */ }
-  }
-  return previews;
-}
-
 export class McpHost {
   readonly scheduler: PlaybackScheduler;
   private readonly batches: BatchManager;
   private readonly activeBatchTransactions = new Map<string, string>();
   private readonly sessions = new Map<string, McpSession>();
+  private readonly provisionalSessions = new Map<string, McpSession>();
+  private readonly provisionalAdmissions = new Set<string>();
+  private readonly cancelledProvisionalSessions = new Map<string, ReturnType<typeof setTimeout>>();
   private initializingSessions = 0;
   private sessionSequence = 0;
   private stopping = false;
   private httpServer?: HttpServer;
   private token = '';
-  private credentialGeneration = 0;
+  private instanceId = '';
   private port?: number;
   private lastRevisions = new Map<string, number>();
   private readonly sessionTrustedFolders = new Map<string, Set<string>>();
   private readonly persistentTrustedFolders = new Set<string>();
   private readonly launchTrustedFolders = new Set<string>();
   private persistentTrustWrite: Promise<void> = Promise.resolve();
+  private readonly provisionalSessionTtlMs: number;
 
   constructor(
     private readonly documents: DocumentService,
     private readonly appVersion: string,
     private readonly preferredPortPath: string,
-    private readonly cancelJob?: (jobId: string) => void,
     private readonly runApprovedJob?: (job: AsyncJob) => void,
     private readonly quantizeImage: QuantizeImage = quantizeImageToPalette,
     private readonly captureCanvasObservation: CaptureObservation = captureObservation,
     private readonly approvalTimeoutMs = 120_000,
-    private readonly renderGenerationApprovalPreview?: GenerationApprovalPreviewRenderer,
+    lifecycleOptions: McpHostLifecycleOptions = {},
   ) {
+    const provisionalSessionTtlMs = lifecycleOptions.provisionalSessionTtlMs ?? DEFAULT_PROVISIONAL_SESSION_TTL_MS;
+    if (!Number.isSafeInteger(provisionalSessionTtlMs) || provisionalSessionTtlMs < 1 || provisionalSessionTtlMs > 60_000) {
+      throw new Error('AIDraw MCP provisional-session retirement bound is invalid.');
+    }
+    this.provisionalSessionTtlMs = provisionalSessionTtlMs;
     this.scheduler = new PlaybackScheduler(documents);
     this.batches = new BatchManager(documents, join(dirname(preferredPortPath), 'batches.json'));
     this.documents.on('event', (event) => {
@@ -1240,12 +1238,14 @@ export class McpHost {
     this.documents.on('approval-resolved', (job: AsyncJob, decision: ApprovalDecision) => { void this.rememberTrust(job, decision); });
   }
 
-  async start(token: string): Promise<{ port: number; url: string; tokenHint: string }> {
+  async start(token: string, instanceId = randomUUID()): Promise<{ port: number; url: string; tokenHint: string }> {
     if (this.httpServer) throw new Error('The AIDraw MCP server is already running.');
-    if (!token) throw new Error('The AIDraw MCP credential is unavailable.');
+    if (!token) throw new Error('The AIDraw MCP authority is unavailable.');
+    if (!MCP_INSTANCE_ID_PATTERN.test(instanceId)) throw new Error('The AIDraw MCP engine instance identity is invalid.');
     this.stopping = false;
     this.port = undefined;
     this.token = '';
+    this.instanceId = '';
     await this.batches.initialize();
     await this.readFolderTrust();
     const preferred = await this.readPreferredPort();
@@ -1267,30 +1267,17 @@ export class McpHost {
       }
       this.port = port;
       this.token = token;
-      this.credentialGeneration += 1;
-      return { port, url: `http://127.0.0.1:${port}/mcp`, tokenHint: 'Credential active' };
+      this.instanceId = instanceId;
+      return { port, url: `http://127.0.0.1:${port}/mcp`, tokenHint: 'Ephemeral authority active' };
     }
     this.port = undefined;
     this.token = '';
+    this.instanceId = '';
     throw lastError ?? new Error('No AIDraw MCP port is available.');
   }
 
-  credentials(): { url?: string; token: string } {
+  connection(): { url?: string; token: string } {
     return { url: this.port ? `http://127.0.0.1:${this.port}/mcp` : undefined, token: this.token };
-  }
-
-  async replaceCredential(token: string): Promise<number> {
-    if (!token) throw new Error('The replacement MCP credential is unavailable.');
-    if (!this.httpServer || !this.port) throw new Error('The AIDraw MCP server is not running.');
-    this.credentialGeneration += 1;
-    this.token = token;
-    return this.closeAuthenticatedSessions();
-  }
-
-  async revokeCredential(): Promise<number> {
-    this.credentialGeneration += 1;
-    this.token = '';
-    return this.closeAuthenticatedSessions();
   }
 
   /**
@@ -1306,10 +1293,17 @@ export class McpHost {
   async stop(): Promise<void> {
     this.stopping = true;
     await this.closeAuthenticatedSessions();
-    if (this.httpServer) await new Promise<void>((resolve) => this.httpServer!.close(() => resolve()));
+    this.clearProvisionalCancellationTombstones();
+    if (this.httpServer) {
+      const server = this.httpServer;
+      const closed = new Promise<void>((resolve) => server.close(() => resolve()));
+      server.closeAllConnections();
+      await closed;
+    }
     this.httpServer = undefined;
     this.port = undefined;
     this.token = '';
+    this.instanceId = '';
     await this.batches.flush();
     await this.persistentTrustWrite;
     await this.documents.flushRecovery();
@@ -1345,16 +1339,12 @@ export class McpHost {
     if (this.httpServer === server) this.httpServer = undefined;
     this.port = undefined;
     this.token = '';
+    this.instanceId = '';
   }
 
   private async handleRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const url = new URL(request.url ?? '/', `http://127.0.0.1:${this.port ?? PORT_START}`);
-    if (url.pathname === '/health' && request.method === 'GET') {
-      response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-      response.end(JSON.stringify({ name: 'AIDraw Engine', version: this.appVersion, status: 'ok', uiRequired: false }));
-      return;
-    }
-    if (url.pathname !== '/mcp') {
+    if (url.pathname !== '/mcp' && url.pathname !== '/mcp/identity' && url.pathname !== '/health') {
       response.writeHead(404, { 'content-type': 'application/json' }); response.end('{"error":"not_found"}'); return;
     }
     const authorization = request.headers.authorization ?? '';
@@ -1362,14 +1352,44 @@ export class McpHost {
       writeMcpTransportDiagnostic(response, 401, 'invalid_token', { 'www-authenticate': 'Bearer realm="AIDraw MCP"' });
       return;
     }
-    const requestCredentialGeneration = this.credentialGeneration;
+    if (url.pathname === '/health') {
+      if (request.method !== 'GET') {
+        response.writeHead(405, { 'content-type': 'application/json', allow: 'GET' }); response.end('{"error":"method_not_allowed"}'); return;
+      }
+      response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+      response.end(JSON.stringify({ name: 'AIDraw Engine', version: this.appVersion, status: 'ok', uiRequired: false }));
+      return;
+    }
+    if (url.pathname === '/mcp/identity') {
+      if (request.method !== 'GET') {
+        response.writeHead(405, { 'content-type': 'application/json', allow: 'GET' }); response.end('{"error":"method_not_allowed"}'); return;
+      }
+      response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+      response.end(JSON.stringify({ version: 1, instanceId: this.instanceId, pid: process.pid }));
+      return;
+    }
     if (request.method === 'OPTIONS') {
       response.writeHead(204, { allow: 'GET, POST, DELETE, OPTIONS' }); response.end(); return;
     }
 
+    const provisionalHeader = request.headers[MCP_BRIDGE_PROVISIONAL_HEADER];
+    const provisionalId = typeof provisionalHeader === 'string' && MCP_BRIDGE_PROVISIONAL_ID_PATTERN.test(provisionalHeader)
+      ? provisionalHeader
+      : undefined;
+    if (provisionalHeader !== undefined && !provisionalId) {
+      response.writeHead(400, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+      response.end('{"error":"invalid_bridge_provisional_id"}');
+      return;
+    }
     const sessionHeader = request.headers['mcp-session-id'];
     const sessionId = Array.isArray(sessionHeader) ? sessionHeader[0] : sessionHeader;
     let session = sessionId ? this.sessions.get(sessionId) : undefined;
+    if (request.method === 'DELETE' && provisionalId && !session) {
+      await this.cancelProvisionalSession(provisionalId);
+      response.writeHead(204, { 'cache-control': 'no-store' });
+      response.end();
+      return;
+    }
     const protocolHeader = request.headers['mcp-protocol-version'];
     const protocolVersion = Array.isArray(protocolHeader) && protocolHeader.length === 1 ? protocolHeader[0] : protocolHeader;
     if (session && protocolVersion !== LATEST_PROTOCOL_VERSION) {
@@ -1396,23 +1416,47 @@ export class McpHost {
         response.end(JSON.stringify({ error: 'session_limit_reached', limit: MAX_MCP_SESSIONS, message: 'Terminate an existing MCP session with authenticated DELETE before retrying.' }));
         return;
       }
+      if (provisionalId && (this.provisionalAdmissions.has(provisionalId)
+        || this.provisionalSessions.has(provisionalId)
+        || this.consumeProvisionalCancellation(provisionalId))) {
+        response.writeHead(409, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+        response.end('{"error":"bridge_provisional_session_cancelled"}');
+        return;
+      }
+      if (provisionalId) this.provisionalAdmissions.add(provisionalId);
       this.initializingSessions += 1;
       let retained = false;
       try {
         session = await this.createSession();
         await session.transport.handleRequest(request, response, body);
         const assignedId = session.transport.sessionId;
-        if (assignedId && !session.closed && !this.stopping && requestCredentialGeneration === this.credentialGeneration) {
+        const cancelled = provisionalId ? this.consumeProvisionalCancellation(provisionalId) : false;
+        if (assignedId && !session.closed && !this.stopping && !cancelled) {
           this.sessions.set(assignedId, session);
+          if (provisionalId) this.registerProvisionalSession(provisionalId, session);
           retained = true;
         }
       } finally {
+        if (provisionalId) this.provisionalAdmissions.delete(provisionalId);
         this.initializingSessions -= 1;
         if (session && !retained) await session.mcp.close().catch(() => undefined);
       }
       return;
     }
 
+    if (session.provisionalId) {
+      if (provisionalId !== session.provisionalId) {
+        response.writeHead(400, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+        response.end('{"error":"bridge_provisional_confirmation_required"}');
+        return;
+      }
+      this.confirmProvisionalSession(session);
+    } else if (session.bridgeCorrelationId && provisionalId !== session.bridgeCorrelationId) {
+      response.writeHead(400, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+      response.end('{"error":"bridge_session_correlation_required"}');
+      return;
+    }
+    if (request.method === 'GET' && session.bridgeCorrelationId) this.bindBridgeLifetime(session, response);
     await session.transport.handleRequest(request, response, body);
   }
 
@@ -1427,6 +1471,88 @@ export class McpHost {
     }
     if (chunks.length === 0) return undefined;
     return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  }
+
+  private registerProvisionalSession(provisionalId: string, session: McpSession): void {
+    session.provisionalId = provisionalId;
+    this.provisionalSessions.set(provisionalId, session);
+    const retirement = setTimeout(() => {
+      if (this.provisionalSessions.get(provisionalId) !== session) return;
+      this.retireSession(session);
+      void session.mcp.close().catch(() => undefined);
+    }, this.provisionalSessionTtlMs);
+    retirement.unref();
+    session.provisionalRetirement = retirement;
+  }
+
+  private confirmProvisionalSession(session: McpSession): void {
+    if (session.provisionalId) session.bridgeCorrelationId = session.provisionalId;
+    this.clearProvisionalSession(session);
+  }
+
+  private clearProvisionalSession(session: McpSession): void {
+    const provisionalId = session.provisionalId;
+    if (provisionalId && this.provisionalSessions.get(provisionalId) === session) {
+      this.provisionalSessions.delete(provisionalId);
+    }
+    if (session.provisionalRetirement) clearTimeout(session.provisionalRetirement);
+    session.provisionalId = undefined;
+    session.provisionalRetirement = undefined;
+  }
+
+  /**
+   * The first-party bridge keeps one authenticated correlated SSE request open
+   * for the lifetime of its stdio process. Loopback disconnect is therefore a
+   * server-observed retirement boundary even when every explicit DELETE
+   * response path is persistently unavailable. A replacement stream supersedes
+   * an older one without letting the older close retire the replacement.
+   */
+  private bindBridgeLifetime(session: McpSession, response: ServerResponse): void {
+    session.bridgeLifetimeResponse = response;
+    response.once('close', () => {
+      if (session.bridgeLifetimeResponse !== response) return;
+      session.bridgeLifetimeResponse = undefined;
+      if (session.closed) return;
+      this.retireSession(session);
+      void session.mcp.close().catch(() => undefined);
+    });
+  }
+
+  private async cancelProvisionalSession(provisionalId: string): Promise<void> {
+    const session = this.provisionalSessions.get(provisionalId);
+    if (session) {
+      this.retireSession(session);
+      await session.mcp.close().catch(() => undefined);
+      return;
+    }
+    const prior = this.cancelledProvisionalSessions.get(provisionalId);
+    if (prior) clearTimeout(prior);
+    const expiry = setTimeout(() => {
+      if (this.cancelledProvisionalSessions.get(provisionalId) === expiry) {
+        this.cancelledProvisionalSessions.delete(provisionalId);
+      }
+    }, this.provisionalSessionTtlMs);
+    expiry.unref();
+    this.cancelledProvisionalSessions.set(provisionalId, expiry);
+    while (this.cancelledProvisionalSessions.size > MAX_PROVISIONAL_CANCELLATION_TOMBSTONES) {
+      const oldest = this.cancelledProvisionalSessions.entries().next().value as [string, ReturnType<typeof setTimeout>] | undefined;
+      if (!oldest) break;
+      clearTimeout(oldest[1]);
+      this.cancelledProvisionalSessions.delete(oldest[0]);
+    }
+  }
+
+  private consumeProvisionalCancellation(provisionalId: string): boolean {
+    const expiry = this.cancelledProvisionalSessions.get(provisionalId);
+    if (!expiry) return false;
+    clearTimeout(expiry);
+    this.cancelledProvisionalSessions.delete(provisionalId);
+    return true;
+  }
+
+  private clearProvisionalCancellationTombstones(): void {
+    for (const expiry of this.cancelledProvisionalSessions.values()) clearTimeout(expiry);
+    this.cancelledProvisionalSessions.clear();
   }
 
   private async createSession(): Promise<McpSession> {
@@ -1447,6 +1573,8 @@ export class McpHost {
   }
 
   private retireSession(session: McpSession): void {
+    this.clearProvisionalSession(session);
+    session.bridgeLifetimeResponse = undefined;
     if (!session.closed) {
       session.closed = true;
       for (const [id, active] of this.sessions) if (active === session) this.sessions.delete(id);
@@ -1489,7 +1617,6 @@ export class McpHost {
       const overwritePaths = (await Promise.all(targetPaths.map(async (target) => await stat(target).then(() => target, () => undefined)))).filter((target): target is string => Boolean(target));
       const request = requestedPath ? { ...rawRequest, path: requestedPath, overwritePaths } : rawRequest;
       const timestamp = nowIso(); const review = approvalReview(kind, title, request, requestedPath, overwritePaths, trustable);
-      if (kind === 'generation') review.previews = await generationApprovalPreviews(document, request, this.renderGenerationApprovalPreview);
       const job: AsyncJob = {
         id: createId('job'), kind, status: 'waiting-for-user', actor: structuredClone(session.actor), createdAt: timestamp, updatedAt: timestamp,
         progress: 0, message: `${title} is waiting for in-app approval.`, result: { documentId, request },
@@ -1839,26 +1966,6 @@ export class McpHost {
       return approvalJob('export', 'Export document', 'Review format, scale, derived animation schedule, destination, and overwrite impact before AIDraw writes it.', documentId, { action: 'export', path, format, scale, animationTagId, paletteCycleId, paletteCycleFrameId });
     });
 
-    server.registerTool('generation_start', {
-      title: 'Generate imagery', description: 'Create a human-only provider approval showing actor, prompt, sources, mask, result count, and possible paid requests. No provider call begins before approval; see aidraw_help topic=jobs or safety.',
-      inputSchema: z.object({
-        documentId: DocumentIdInputSchema,
-        provider: z.enum(['openai', 'stability', 'comfyui']).describe('Configured provider presented to the human; the call may be paid after approval.'),
-        mode: z.enum(['create', 'edit', 'inpaint', 'outpaint', 'variation']).describe('Workflow mode; source and mask requirements remain provider/mode validated.'),
-        prompt: z.string().min(1).describe('Private generation prompt shown in the approval, never included in public job summaries.'),
-        negativePrompt: z.string().optional().describe('Optional private negative prompt.'),
-        sourceAssetIds: z.array(z.string()).default([]).describe('Canonical embedded source asset IDs.'),
-        maskAssetId: z.string().optional().describe('Optional canonical embedded mask asset ID where the mode supports it.'),
-        size: z.union([z.literal('auto'), z.object({ width: z.number().int().positive(), height: z.number().int().positive() })]).default('auto').describe('Requested output size or provider-managed automatic sizing.'),
-        aspectIntent: z.enum(['canvas', 'square', 'portrait', 'landscape']).optional(),
-        resultCount: z.number().int().min(1).max(4).default(1).describe('Potential provider request/output count shown before approval.'),
-        seed: z.number().int().optional().describe('Optional deterministic provider seed where supported.'),
-        providerOptions: z.record(z.string(), z.unknown()).default({}).describe('Provider-specific bounded options validated against the selected contract.'),
-      }).strict(),
-      outputSchema: ApprovalToolOutputSchema,
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
-    }, async (request) => { try { validateGenerationRequest(this.documents.getDocument(request.documentId), request as GenerationRequest); return approvalJob('generation', 'Generate imagery', 'Review provider, prompt, sources, mask, result count, and the potentially paid request count.', request.documentId, request, false); } catch (error) { return jsonText({ error: 'unsupported_generation_request', message: error instanceof Error ? error.message : String(error) }); } });
-
     server.registerTool('job_manage', {
       title: 'Inspect or cancel AIDraw jobs',
       description: 'List owner-private redacted jobs, inspect/wait/cancel one, report a human approval dependency, or start/resume a durable transaction batch. Discovery is flat; the server strictly validates the selected action’s required and forbidden fields. See aidraw_help topic=jobs.',
@@ -1892,10 +1999,7 @@ export class McpHost {
           job = await this.batches.cancel(request.jobId, session.actor.id) ?? job;
           const transactionId = this.activeBatchTransactions.get(request.jobId); if (transactionId) this.scheduler.cancelTransaction(transactionId);
         }
-        else {
-          if (job.kind === 'generation') this.cancelJob?.(request.jobId);
-          job = this.documents.getJob(request.jobId) ?? job;
-        }
+        else job = this.documents.getJob(request.jobId) ?? job;
         if (!['cancelled', 'completed', 'failed'].includes(job.status)) { job = { ...job, status: 'cancelled', updatedAt: nowIso(), message: 'Cancelled by the originating agent.' }; this.documents.upsertJob(job); }
       } else if (request.action === 'wait' && request.timeoutMs > 0) {
         const deadline = Date.now() + request.timeoutMs;

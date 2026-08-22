@@ -7,45 +7,7 @@ import { createServer } from 'node:net';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { createCanvas } from '@napi-rs/canvas';
 import { HUMAN_ACTOR, readPixel, readTileAt, type Actor, type IllustrationDocument, type PixelDocument, type PixelSprite } from '@aidraw/core';
-import { parse } from 'jsonc-parser';
 import UPNG from 'upng-js';
-import {
-  QA06_GENERATION_E2E_AUDIT_FILE,
-  QA06_GENERATION_E2E_CONNECTION_FILE,
-  QA06_GENERATION_E2E_DOCUMENT_NAME,
-  QA06_GENERATION_E2E_MASK_ASSET_ID,
-  QA06_GENERATION_E2E_NETWORK_SENTINEL_FILE,
-  QA06_GENERATION_E2E_OUTPUT_FILE,
-  QA06_GENERATION_E2E_PROFILE_PREFIX,
-  QA06_GENERATION_E2E_REQUEST,
-  QA06_GENERATION_E2E_SOURCE_ASSET_ID,
-} from '../../src/main/generation-e2e';
-import {
-  QA06_PIXEL_PALETTE_E2E_AUDIT_FILE,
-  QA06_PIXEL_PALETTE_E2E_CONNECTION_FILE,
-  QA06_PIXEL_PALETTE_E2E_DOCUMENT_NAME,
-  QA06_PIXEL_PALETTE_E2E_NETWORK_SENTINEL_FILE,
-  QA06_PIXEL_PALETTE_E2E_OUTPUT_FILE,
-  QA06_PIXEL_PALETTE_E2E_PROFILE_PREFIX,
-  QA06_PIXEL_PALETTE_E2E_REQUEST,
-  qa06PixelPaletteExpectedIndex,
-} from '../../src/main/pixel-generation-e2e';
-import {
-  FND09_GENERATION_NORMALIZATION_E2E_AUDIT_FILE,
-  FND09_GENERATION_NORMALIZATION_E2E_CONNECTION_FILE,
-  FND09_GENERATION_NORMALIZATION_E2E_DOCUMENT_NAME,
-  FND09_GENERATION_NORMALIZATION_E2E_NETWORK_SENTINEL_FILE,
-  FND09_GENERATION_NORMALIZATION_E2E_NORMALIZABLE_OUTPUT_FILE,
-  FND09_GENERATION_NORMALIZATION_E2E_NORMALIZABLE_OUTPUT_ID,
-  FND09_GENERATION_NORMALIZATION_E2E_PREVIEW_ONLY_DIMENSIONS,
-  FND09_GENERATION_NORMALIZATION_E2E_PREVIEW_ONLY_OUTPUT_FILE,
-  FND09_GENERATION_NORMALIZATION_E2E_PREVIEW_ONLY_OUTPUT_ID,
-  FND09_GENERATION_NORMALIZATION_E2E_PREVIEW_ONLY_PROBE_FILE,
-  FND09_GENERATION_NORMALIZATION_E2E_PROFILE_PREFIX,
-  FND09_GENERATION_NORMALIZATION_E2E_READY_PROBE_FILE,
-  FND09_GENERATION_NORMALIZATION_E2E_REQUEST,
-} from '../../src/main/generation-normalization-e2e';
-import { MAX_INLINE_ASSET_BYTES } from '../../src/main/transaction-policy';
 import {
   UX11_BATCH_E2E_AUDIT_FILE,
   UX11_BATCH_E2E_CONNECTION_FILE,
@@ -63,13 +25,13 @@ import {
   assertPackagedE2eProfile,
   canonicalPackagedE2ePath,
   createPackagedE2eProfile,
-  inspectPackagedMcpCredential,
   packagedE2ePrimaryModifier,
   packagedE2ePrimaryShortcut,
   resolvePackagedE2eArtifact,
   spawnPackagedE2e,
   waitForPackagedE2eReady,
 } from '../../scripts/packaged-e2e-runtime.mjs';
+import { initializeDirectMcp, readMcpConnectionHandoff } from '../../scripts/mcp-direct-client.mjs';
 
 let applicationProcess: ChildProcess | undefined;
 let applicationStderr: Buffer[] = [];
@@ -79,7 +41,6 @@ let gracefulOnlyCleanup = false;
 let preserveProfileAfterTest = false;
 const packagedArtifact = resolvePackagedE2eArtifact();
 const packagedExecutable = packagedArtifact.executable;
-const packagedAsar = packagedArtifact.asar;
 
 test.afterEach(async () => {
   const child = applicationProcess;
@@ -165,13 +126,13 @@ async function launch(existingProfile?: string, options: LaunchOptions = {}): Pr
   throw new Error(`AIDraw renderer did not open. ${Buffer.concat(applicationStderr).toString('utf8')}`);
 }
 
-async function waitForHealth(profile: string): Promise<string> {
+async function waitForHealth(profile: string, token: string): Promise<string> {
   const deadline = Date.now() + 15_000;
   while (Date.now() < deadline) {
     try {
       const settings = JSON.parse(await readFile(join(profile, 'mcp-port.json'), 'utf8')) as { preferredPort: number };
       const url = `http://127.0.0.1:${settings.preferredPort}/health`;
-      const response = await fetch(url);
+      const response = await fetch(url, { headers: { authorization: `Bearer ${token}` } });
       if (response.ok) return url;
     } catch { /* Engine is still starting. */ }
     await new Promise((resolve) => setTimeout(resolve, 100));
@@ -183,8 +144,8 @@ async function waitForMcpConnection(path: string): Promise<{ url: string; token:
   const deadline = Date.now() + 15_000;
   while (Date.now() < deadline) {
     try {
-      const connection = JSON.parse(await readFile(path, 'utf8')) as { url?: string; token?: string; activeDocumentId?: string; trustedFolders?: string[] };
-      if (connection.url && connection.token && connection.activeDocumentId) return { url: connection.url, token: connection.token, activeDocumentId: connection.activeDocumentId, trustedFolders: connection.trustedFolders ?? [] };
+      const connection = await readMcpConnectionHandoff(path);
+      if (connection.activeDocumentId) return { ...connection, activeDocumentId: connection.activeDocumentId };
     } catch { /* Headless engine is still starting. */ }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
@@ -210,15 +171,7 @@ async function callMcpTool(url: string, headers: Record<string, string>, id: num
 }
 
 async function connectMcpTestClient(url: string, token: string, clientName: string, join: { name: string; color: string; documentId: string }): Promise<{ actor: Actor; headers: Record<string, string> }> {
-  const initialize = await fetch(url, {
-    method: 'POST',
-    headers: { authorization: `Bearer ${token}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2026-07-28', capabilities: {}, clientInfo: { name: clientName, version: '1.0' } } }),
-  });
-  const sessionId = initialize.headers.get('mcp-session-id');
-  if (!initialize.ok || !sessionId) throw new Error(`The isolated ${clientName} MCP session is unavailable.`);
-  const headers = { authorization: `Bearer ${token}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json', 'mcp-session-id': sessionId };
-  await fetch(url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) });
+  const { headers } = await initializeDirectMcp({ url, token }, { clientInfo: { name: clientName, version: '1.0' } });
   const joined = await callMcpTool(url, headers, 2, 'session_manage', { action: 'join', ...join });
   const actor = joined.actor as Actor | undefined;
   if (!actor?.id || actor.kind !== 'agent' || actor.name !== join.name) throw new Error(`The isolated ${clientName} actor identity is invalid.`);
@@ -289,7 +242,7 @@ function visualHash(bytes: Buffer): string {
 async function redactOwnedConnection(path: string): Promise<void> {
   const connection = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
   delete connection.token;
-  await writeFile(path, `${JSON.stringify({ ...connection, credentialStatus: 'redacted-after-graceful-stop' }, null, 2)}\n`, 'utf8');
+  await writeFile(path, `${JSON.stringify({ ...connection, authorityStatus: 'redacted-after-graceful-stop' }, null, 2)}\n`, 'utf8');
 }
 
 test('opens the configurable New Document dialog from the native shortcut without creating first', async () => {
@@ -306,39 +259,26 @@ test('opens the configurable New Document dialog from the native shortcut withou
   expect(await page.evaluate(async () => (await window.aidraw.bootstrap()).documents.length)).toBe(before);
 });
 
-test('writes the stable OpenCode MCP shape through the packaged onboarding UI', async () => {
+test('shows stable OpenCode MCP bridge settings without rewriting client configuration', async () => {
   const isolatedProfile = await createPackagedE2eProfile(process.cwd(), 'opencode');
   const configPath = join(isolatedProfile, 'opencode.jsonc');
-  const connectionPath = join(isolatedProfile, 'mcp-connection.json');
-  await writeFile(configPath, '{\n  // preserve this user setting\n  "theme": "system",\n  "mcp": { "servers": { "aidraw": { "type": "remote", "url": "http://127.0.0.1:1/mcp", "codemode": false } } }\n}\n', 'utf8');
+  const originalConfig = '{\n  // preserve this user setting\n  "theme": "system"\n}\n';
+  await writeFile(configPath, originalConfig, 'utf8');
 
   const page = await launch(isolatedProfile, {
-    environment: {
-      NODE_ENV: 'test',
-      AIDRAW_E2E_AUTO_APPROVE_AGENT_CLIENT: 'opencode',
-      AIDRAW_OPENCODE_CONFIG_PATH: configPath,
-    },
-    extraArguments: [`--write-mcp-connection=${connectionPath}`],
+    environment: { NODE_ENV: 'test' },
   });
   await page.getByTitle('Activity').click();
   await page.getByLabel('Agent client').selectOption('opencode');
-  const credentials = await page.evaluate(async () => window.aidraw.getMcpCredentials());
-  await page.getByRole('button', { name: 'Connect', exact: true }).click();
+  await page.getByRole('button', { name: 'Show setup', exact: true }).click();
 
-  const setup = page.getByRole('dialog', { name: 'Finish OpenCode setup' });
-  await expect(setup.getByText('Connection saved successfully', { exact: true })).toBeVisible();
-  await expect(setup.getByText('Restart OpenCode, then run opencode mcp list to verify AIDraw.', { exact: true })).toBeVisible();
-  await expect(setup.getByText(/Start-at-login was intentionally unchanged by this isolated packaged validation\./)).toBeVisible();
-
-  const text = await readFile(configPath, 'utf8');
-  const config = parse(text) as { theme?: string; mcp?: Record<string, unknown> };
-  const aidraw = config.mcp?.aidraw as { type?: string; url?: string; enabled?: boolean; oauth?: boolean; codemode?: boolean; headers?: { Authorization?: string } } | undefined;
-  expect(text).toContain('// preserve this user setting');
-  expect(config.theme).toBe('system');
-  expect(config.mcp).not.toHaveProperty('servers');
-  expect(aidraw).toMatchObject({ type: 'remote', url: credentials.url, enabled: true, oauth: false });
-  expect(aidraw).not.toHaveProperty('codemode');
-  expect(aidraw?.headers?.Authorization === `Bearer ${credentials.token}`).toBe(true);
+  const setup = page.getByRole('dialog', { name: 'Connect OpenCode' });
+  await expect(setup.getByText('One-time client setup', { exact: true })).toBeVisible();
+  await expect(setup.getByText('Stable stdio configuration', { exact: true })).toBeVisible();
+  await expect(setup.getByText(/no URL, bearer, password, or per-launch value is stored in the client/)).toBeVisible();
+  await expect(setup.locator('code')).toContainText('--mcp-bridge');
+  await expect(setup.locator('code')).not.toContainText('127.0.0.1');
+  expect(await readFile(configPath, 'utf8')).toBe(originalConfig);
   await setup.getByRole('button', { name: 'Got it' }).click();
 });
 
@@ -448,14 +388,10 @@ test('runs packaged agent image quantization in the supervised raster utility', 
     const sprite = document.pixelAssets[document.activeAssetId];
     if (sprite.type !== 'sprite') throw new Error('Sprite unavailable.');
     const cel = Object.values(sprite.cels)[0];
-    return { documentId: document.id, spriteId: sprite.id, celId: cel.id, celRevision: cel.revision, credentials: await window.aidraw.getMcpCredentials() };
+    return { documentId: document.id, spriteId: sprite.id, celId: cel.id, celRevision: cel.revision, credentials: await window.aidraw.getMcpConnection() };
   });
   if (!setup.credentials.url) throw new Error('MCP endpoint unavailable.');
-  const initialize = await fetch(setup.credentials.url, { method: 'POST', headers: { authorization: `Bearer ${setup.credentials.token}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2026-07-28', capabilities: {}, clientInfo: { name: 'utility-e2e', version: '1.0' } } }) });
-  const sessionId = initialize.headers.get('mcp-session-id');
-  if (!sessionId) throw new Error('MCP session unavailable.');
-  const headers = { authorization: `Bearer ${setup.credentials.token}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json', 'mcp-session-id': sessionId };
-  await fetch(setup.credentials.url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) });
+  const { headers } = await initializeDirectMcp(setup.credentials, { clientInfo: { name: 'utility-e2e', version: '1.0' } });
   await callMcpTool(setup.credentials.url, headers, 2, 'session_manage', { action: 'join', name: 'Utility test agent', documentId: setup.documentId });
 
   const source = createCanvas(2, 2);
@@ -489,13 +425,10 @@ test('visibly replays a committed pixel drawing trace', async () => {
     const frameId = sprite.frameIds[0];
     const cel = Object.values(sprite.cels).find((entry) => entry.frameId === frameId);
     if (!cel) throw new Error('Pixel replay cel unavailable.');
-    return { documentId: document.id, spriteId: sprite.id, celId: cel.id, revision: cel.revision, credentials: await window.aidraw.getMcpCredentials() };
+    return { documentId: document.id, spriteId: sprite.id, celId: cel.id, revision: cel.revision, credentials: await window.aidraw.getMcpConnection() };
   });
   if (!setup.credentials.url) throw new Error('Pixel replay MCP endpoint unavailable.');
-  const initialize = await fetch(setup.credentials.url, { method: 'POST', headers: { authorization: `Bearer ${setup.credentials.token}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2026-07-28', capabilities: {}, clientInfo: { name: 'pixel-replay-e2e', version: '1.0' } } }) });
-  const sessionId = initialize.headers.get('mcp-session-id'); if (!sessionId) throw new Error('Pixel replay MCP session missing.');
-  const headers = { authorization: `Bearer ${setup.credentials.token}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json', 'mcp-session-id': sessionId };
-  await fetch(setup.credentials.url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) });
+  const { headers } = await initializeDirectMcp(setup.credentials, { clientInfo: { name: 'pixel-replay-e2e', version: '1.0' } });
   await callMcpTool(setup.credentials.url, headers, 2, 'session_manage', { action: 'join', name: 'Pixel replay agent', color: '#31a6a0', documentId: setup.documentId });
   const changes = Array.from({ length: 144 }, (_, index) => ({ x: 10 + index % 12, y: 10 + Math.floor(index / 12), index: 1 + index % 5 }));
   const response = await callMcpTool(setup.credentials.url, headers, 3, 'canvas_apply', {
@@ -551,18 +484,10 @@ test('keeps many open document tabs reachable', async () => {
 
 test('publishes and clears attached editor advisory state through MCP', async () => {
   const page = await launch();
-  const state = await page.evaluate(async () => ({ snapshot: await window.aidraw.bootstrap(), credentials: await window.aidraw.getMcpCredentials() }));
+  const state = await page.evaluate(async () => ({ snapshot: await window.aidraw.bootstrap(), credentials: await window.aidraw.getMcpConnection() }));
   if (!state.credentials.url || !state.snapshot.activeDocumentId) throw new Error('Editor advisory MCP setup unavailable.');
 
-  const initialize = await fetch(state.credentials.url, {
-    method: 'POST',
-    headers: { authorization: `Bearer ${state.credentials.token}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2026-07-28', capabilities: {}, clientInfo: { name: 'editor-advisory-e2e', version: '1.0' } } }),
-  });
-  const sessionId = initialize.headers.get('mcp-session-id');
-  if (!initialize.ok || !sessionId) throw new Error('Editor advisory MCP session missing.');
-  const headers = { authorization: `Bearer ${state.credentials.token}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json', 'mcp-session-id': sessionId };
-  await fetch(state.credentials.url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) });
+  const { headers } = await initializeDirectMcp(state.credentials, { clientInfo: { name: 'editor-advisory-e2e', version: '1.0' } });
   await callMcpTool(state.credentials.url, headers, 2, 'session_manage', { action: 'join', name: 'Editor advisory observer', documentId: state.snapshot.activeDocumentId });
 
   await page.getByTitle('Pressure pen').click();
@@ -594,10 +519,8 @@ test('contains a sanitized malformed renderer event and reloads canonical engine
   const connectionPath = join(isolatedProfile, 'mcp-connection.json');
   const diagnosticPath = join(isolatedProfile, 'renderer-recovery-diagnostic.json');
   const artworkSentinel = 'UX05_PRIVATE_ARTWORK_7d13';
-  const promptSentinel = 'UX05_PRIVATE_PROMPT_4e22';
-  const negativePromptSentinel = 'UX05_PRIVATE_NEGATIVE_PROMPT_9c81';
+  const exportTargetPath = join(isolatedProfile, 'UX05_PRIVATE_EXPORT_TARGET_4e22.png');
   const taskSentinel = 'UX05_PRIVATE_TASK_f664';
-  const providerSecretSentinel = 'UX05_PRIVATE_PROVIDER_SECRET_2a50';
   let stoppedGracefully = false;
 
   try {
@@ -647,38 +570,25 @@ test('contains a sanitized malformed renderer event and reloads canonical engine
     });
     expect(initial.status).toBe('committed');
 
-    const credentials = await page.evaluate(async () => window.aidraw.getMcpCredentials());
+    const credentials = await page.evaluate(async () => window.aidraw.getMcpConnection());
     if (!credentials.url || !credentials.token) throw new Error('The isolated UX-05 MCP endpoint is unavailable.');
-    const initialize = await fetch(credentials.url, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${credentials.token}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json' },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2026-07-28', capabilities: {}, clientInfo: { name: 'renderer-recovery-e2e', version: '1.0' } } }),
-    });
-    const sessionId = initialize.headers.get('mcp-session-id');
-    if (!initialize.ok || !sessionId) throw new Error('The isolated UX-05 MCP session is unavailable.');
-    const headers = { authorization: `Bearer ${credentials.token}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json', 'mcp-session-id': sessionId };
-    await fetch(credentials.url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) });
+    const { headers } = await initializeDirectMcp(credentials, { clientInfo: { name: 'renderer-recovery-e2e', version: '1.0' } });
     await callMcpTool(credentials.url, headers, 2, 'session_manage', { action: 'join', name: 'Recovery probe agent', documentId: initial.documentId, model: 'e2e-recovery-model', reasoningEffort: 'high', taskId: taskSentinel });
-    const generation = await callMcpTool(credentials.url, headers, 3, 'generation_start', {
+    const exportRequest = await callMcpTool(credentials.url, headers, 3, 'document_export', {
       documentId: initial.documentId,
-      provider: 'stability',
-      mode: 'create',
-      prompt: promptSentinel,
-      negativePrompt: negativePromptSentinel,
-      sourceAssetIds: [],
-      size: 'auto',
-      resultCount: 1,
-      providerOptions: { stylePreset: providerSecretSentinel },
+      path: exportTargetPath,
+      format: 'png',
+      scale: 1,
     });
-    const generationJobId = typeof generation.jobId === 'string' ? generation.jobId : undefined;
-    expect({ status: generation.status, hasJobId: Boolean(generationJobId) }).toEqual({ status: 'waiting-for-user', hasJobId: true });
-    if (!generationJobId) throw new Error('The sanitized generation approval has no job ID.');
+    const approvalJobId = typeof exportRequest.jobId === 'string' ? exportRequest.jobId : undefined;
+    expect({ status: exportRequest.status, hasJobId: Boolean(approvalJobId) }).toEqual({ status: 'waiting-for-user', hasJobId: true });
+    if (!approvalJobId) throw new Error('The sanitized file approval has no job ID.');
 
-    const canonicalBefore = await page.evaluate(async ({ artworkAssetId, artworkSentinel, artworkData, generationJobId, promptSentinel, negativePromptSentinel, taskSentinel, providerSecretSentinel }) => {
+    const canonicalBefore = await page.evaluate(async ({ artworkAssetId, artworkSentinel, artworkData, approvalJobId, exportTargetPath, taskSentinel }) => {
       const snapshot = await window.aidraw.bootstrap();
       const document = snapshot.activeDocument;
       if (!document || document.kind !== 'illustration') throw new Error('The canonical UX-05 document is unavailable.');
-      const job = snapshot.jobs.find((entry) => entry.id === generationJobId);
+      const job = snapshot.jobs.find((entry) => entry.id === approvalJobId);
       const encodedJob = JSON.stringify(job);
       const encodedSessions = JSON.stringify(snapshot.mcp.sessions);
       return {
@@ -691,12 +601,11 @@ test('contains a sanitized malformed renderer event and reloads canonical engine
         assetPresent: document.assets[artworkAssetId]?.name === artworkSentinel,
         artworkDataPresent: document.assets[artworkAssetId]?.data === artworkData,
         jobStatus: job?.status,
-        promptPresent: encodedJob.includes(promptSentinel) && encodedJob.includes(negativePromptSentinel),
-        providerSecretPresent: encodedJob.includes(providerSecretSentinel),
+        exactTargetPresent: encodedJob.includes(exportTargetPath),
         taskPresent: encodedJob.includes(taskSentinel) || encodedSessions.includes(taskSentinel),
       };
-    }, { artworkAssetId, artworkSentinel, artworkData, generationJobId, promptSentinel, negativePromptSentinel, taskSentinel, providerSecretSentinel });
-    expect(canonicalBefore).toMatchObject({ kind: 'illustration', assetPresent: true, artworkDataPresent: true, jobStatus: 'waiting-for-user', promptPresent: true, providerSecretPresent: true, taskPresent: true });
+    }, { artworkAssetId, artworkSentinel, artworkData, approvalJobId, exportTargetPath, taskSentinel });
+    expect(canonicalBefore).toMatchObject({ kind: 'illustration', assetPresent: true, artworkDataPresent: true, jobStatus: 'waiting-for-user', exactTargetPresent: true, taskPresent: true });
 
     const injection = await page.evaluate(async () => window.aidraw.injectRendererRecoveryTestEvent());
     expect(injection.injected).toBe(true);
@@ -710,20 +619,20 @@ test('contains a sanitized malformed renderer event and reloads canonical engine
     await recovery.getByText('Technical detail', { exact: true }).click();
     const technicalDetail = await recovery.locator('code').textContent();
     expect((technicalDetail?.length ?? 0) > 0 && (technicalDetail?.length ?? 0) <= 4_096).toBe(true);
-    expect([artworkSentinel, promptSentinel, negativePromptSentinel, taskSentinel, providerSecretSentinel, credentials.token].some((value) => technicalDetail?.includes(value))).toBe(false);
+    expect([artworkSentinel, exportTargetPath, taskSentinel, credentials.token].some((value) => technicalDetail?.includes(value))).toBe(false);
 
-    const canonicalWhileContained = await page.evaluate(async ({ documentId, artworkAssetId, generationJobId }) => {
+    const canonicalWhileContained = await page.evaluate(async ({ documentId, artworkAssetId, approvalJobId }) => {
       const snapshot = await window.aidraw.bootstrap();
       const document = snapshot.activeDocument;
       const engine = await window.aidraw.getEngineStatus();
       return {
         sameDocument: document?.id === documentId,
         assetPresent: document?.kind === 'illustration' && Boolean(document.assets[artworkAssetId]),
-        jobStatus: snapshot.jobs.find((entry) => entry.id === generationJobId)?.status,
+        jobStatus: snapshot.jobs.find((entry) => entry.id === approvalJobId)?.status,
         running: engine.running,
         attached: engine.uiAttached,
       };
-    }, { documentId: canonicalBefore.documentId, artworkAssetId, generationJobId });
+    }, { documentId: canonicalBefore.documentId, artworkAssetId, approvalJobId });
     expect(canonicalWhileContained).toEqual({ sameDocument: true, assetPresent: true, jobStatus: 'waiting-for-user', running: true, attached: true });
     const inspected = await callMcpTool(credentials.url, headers, 4, 'session_manage', { action: 'inspect', documentId: canonicalBefore.documentId });
     const inspectedWorkspace = inspected.workspace as { activeDocumentId?: string } | undefined;
@@ -752,7 +661,7 @@ test('contains a sanitized malformed renderer event and reloads canonical engine
       mode: diagnostic.engine?.mode,
       activeDocumentId: diagnostic.workspace?.activeDocumentId,
       documentKeys: Object.keys(diagnostic.workspace?.documents?.[0] ?? {}).sort(),
-      jobKeys: Object.keys(diagnostic.workspace?.jobs?.find((job) => job.id === generationJobId) ?? {}).sort(),
+      jobKeys: Object.keys(diagnostic.workspace?.jobs?.find((job) => job.id === approvalJobId) ?? {}).sort(),
       mcpKeys: Object.keys(diagnostic.workspace?.mcp ?? {}).sort(),
       checkpointCount: diagnostic.workspace?.checkpointCount,
     }).toEqual({
@@ -772,10 +681,8 @@ test('contains a sanitized malformed renderer event and reloads canonical engine
     const diagnosticLeaks = [
       artworkSentinel,
       artworkData,
-      promptSentinel,
-      negativePromptSentinel,
+      exportTargetPath,
       taskSentinel,
-      providerSecretSentinel,
       credentials.token,
       connectionPath,
       isolatedProfile,
@@ -792,19 +699,19 @@ test('contains a sanitized malformed renderer event and reloads canonical engine
     await expect(page.getByRole('alert')).toHaveCount(0);
     await expect(page.getByText(canonicalBefore.name, { exact: true }).first()).toBeVisible();
 
-    const canonicalAfterReload = await page.evaluate(async ({ documentId, revision, width, height, artworkAssetId, artworkSentinel, artworkData, generationJobId, promptSentinel, taskSentinel }) => {
+    const canonicalAfterReload = await page.evaluate(async ({ documentId, revision, width, height, artworkAssetId, artworkSentinel, artworkData, approvalJobId, exportTargetPath, taskSentinel }) => {
       const snapshot = await window.aidraw.bootstrap();
       const document = snapshot.activeDocument;
-      const job = snapshot.jobs.find((entry) => entry.id === generationJobId);
+      const job = snapshot.jobs.find((entry) => entry.id === approvalJobId);
       return {
         sameDocument: document?.id === documentId,
         sameRevision: document?.revision === revision,
         sameDimensions: document?.kind === 'illustration' && document.artboard.width === width && document.artboard.height === height,
         assetRestored: document?.kind === 'illustration' && document.assets[artworkAssetId]?.name === artworkSentinel && document.assets[artworkAssetId]?.data === artworkData,
-        jobRestored: job?.status === 'waiting-for-user' && JSON.stringify(job).includes(promptSentinel),
+        jobRestored: job?.status === 'waiting-for-user' && JSON.stringify(job).includes(exportTargetPath),
         taskRestored: JSON.stringify(snapshot.mcp.sessions).includes(taskSentinel),
       };
-    }, { documentId: canonicalBefore.documentId, revision: canonicalBefore.revision, width: canonicalBefore.width, height: canonicalBefore.height, artworkAssetId, artworkSentinel, artworkData, generationJobId, promptSentinel, taskSentinel });
+    }, { documentId: canonicalBefore.documentId, revision: canonicalBefore.revision, width: canonicalBefore.width, height: canonicalBefore.height, artworkAssetId, artworkSentinel, artworkData, approvalJobId, exportTargetPath, taskSentinel });
     expect(canonicalAfterReload).toEqual({ sameDocument: true, sameRevision: true, sameDimensions: true, assetRestored: true, jobRestored: true, taskRestored: true });
     expect(applicationProcess?.pid).toBe(enginePid);
 
@@ -854,17 +761,9 @@ test('keeps held illustration-object and pixel-region gestures ahead of authenti
     expect(illustration.status).toBe('committed');
     await expect(page.getByText('Human held object', { exact: true })).toBeVisible();
 
-    const credentials = await page.evaluate(async () => window.aidraw.getMcpCredentials());
+    const credentials = await page.evaluate(async () => window.aidraw.getMcpConnection());
     if (!credentials.url || !credentials.token) throw new Error('The isolated AGT-07 MCP endpoint is unavailable.');
-    const initialize = await fetch(credentials.url, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${credentials.token}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json' },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2026-07-28', capabilities: {}, clientInfo: { name: 'agt07-lock-e2e', version: '1.0' } } }),
-    });
-    const sessionId = initialize.headers.get('mcp-session-id');
-    if (!initialize.ok || !sessionId) throw new Error('The isolated AGT-07 MCP session is unavailable.');
-    const headers = { authorization: `Bearer ${credentials.token}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json', 'mcp-session-id': sessionId };
-    await fetch(credentials.url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) });
+    const { headers } = await initializeDirectMcp(credentials, { clientInfo: { name: 'agt07-lock-e2e', version: '1.0' } });
     let requestId = 2;
     await callMcpTool(credentials.url, headers, requestId++, 'session_manage', { action: 'join', name: 'AGT-07 conflict agent', documentId: illustration.documentId });
 
@@ -1082,7 +981,7 @@ test('keeps background collaboration visible without stealing foreground human f
         },
       };
     });
-    const credentials = await page.evaluate(async () => window.aidraw.getMcpCredentials());
+    const credentials = await page.evaluate(async () => window.aidraw.getMcpConnection());
     if (!credentials.url || !credentials.token) throw new Error('The isolated AGT-05 MCP endpoint is unavailable.');
     const client = await connectMcpTestClient(credentials.url, credentials.token, 'agt05-background-collaborator', {
       name: 'Background collaborator',
@@ -1349,7 +1248,7 @@ test('keeps four authenticated playback lanes visible and fair while a human dra
         objectIds: Object.keys(document.objects),
       };
     });
-    const credentials = await page.evaluate(async () => window.aidraw.getMcpCredentials());
+    const credentials = await page.evaluate(async () => window.aidraw.getMcpConnection());
     if (!credentials.url || !credentials.token) throw new Error('The isolated AGT-06 MCP endpoint is unavailable.');
 
     const agentSpecs = [
@@ -1763,7 +1662,7 @@ test('isolates rapid tab state and restores an exact mixed workspace after grace
   const isolatedCanvas = page.getByRole('application', { name: `Illustration canvas for ${setup.target.name}` });
   await expect.poll(() => isolatedCanvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL())).toBe(cleanCanvasData);
 
-  const credentials = await page.evaluate(async () => window.aidraw.getMcpCredentials());
+  const credentials = await page.evaluate(async () => window.aidraw.getMcpConnection());
   if (!credentials.url) throw new Error('The tab-identity MCP endpoint is unavailable.');
   const identityClient = await connectMcpTestClient(credentials.url, credentials.token, 'tab-identity-e2e', { name: 'Tab identity observer', color: '#4f73d9', documentId: setup.target.id });
   let identityRequestId = 3;
@@ -1841,7 +1740,7 @@ test('isolates rapid tab state and restores an exact mixed workspace after grace
   await expect(restarted).toHaveTitle(`${setup.target.name} — AIDraw`);
   const restartedCanvas = restarted.getByRole('application', { name: `Illustration canvas for ${setup.target.name}` });
   await expect.poll(() => restartedCanvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL())).toBe(cleanCanvasData);
-  const restartedCredentials = await restarted.evaluate(async () => window.aidraw.getMcpCredentials());
+  const restartedCredentials = await restarted.evaluate(async () => window.aidraw.getMcpConnection());
   if (!restartedCredentials.url) throw new Error('The restarted identity MCP endpoint is unavailable.');
   const restartClient = await connectMcpTestClient(restartedCredentials.url, restartedCredentials.token, 'restart-identity-e2e', { name: 'Restart identity observer', color: '#2f9d8f', documentId: setup.target.id });
   const restartInspect = await callMcpTool(restartedCredentials.url, restartClient.headers, 3, 'session_manage', { action: 'inspect' });
@@ -1851,20 +1750,17 @@ test('isolates rapid tab state and restores an exact mixed workspace after grace
 });
 
 test('keeps human drawing responsive while an MCP agent plays visibly', async () => {
-  const page = await launch(); const state = await page.evaluate(async () => ({ snapshot: await window.aidraw.bootstrap(), credentials: await window.aidraw.getMcpCredentials() })); const document = state.snapshot.activeDocument; if (!document || document.kind !== 'illustration' || !state.credentials.url) throw new Error('Illustration MCP setup unavailable'); const vectorLayer = Object.values(document.layers).find((layer) => layer.type === 'vector'); if (!vectorLayer) throw new Error('Vector layer unavailable');
-  const init = await fetch(state.credentials.url, { method: 'POST', headers: { authorization: `Bearer ${state.credentials.token}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2026-07-28', capabilities: {}, clientInfo: { name: 'Playwright agent', version: '1.0' } } }) }); const sessionId = init.headers.get('mcp-session-id'); if (!sessionId) throw new Error('MCP session missing'); const headers = { authorization: `Bearer ${state.credentials.token}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json', 'mcp-session-id': sessionId }; await fetch(state.credentials.url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) }); await fetch(state.credentials.url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'session_manage', arguments: { action: 'join', name: 'Playwright agent', color: '#2fa7a0', documentId: document.id } } }) });
+  const page = await launch(); const state = await page.evaluate(async () => ({ snapshot: await window.aidraw.bootstrap(), credentials: await window.aidraw.getMcpConnection() })); const document = state.snapshot.activeDocument; if (!document || document.kind !== 'illustration' || !state.credentials.url) throw new Error('Illustration MCP setup unavailable'); const vectorLayer = Object.values(document.layers).find((layer) => layer.type === 'vector'); if (!vectorLayer) throw new Error('Vector layer unavailable');
+  const { headers } = await initializeDirectMcp(state.credentials, { clientInfo: { name: 'Playwright agent', version: '1.0' } }); await fetch(state.credentials.url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'session_manage', arguments: { action: 'join', name: 'Playwright agent', color: '#2fa7a0', documentId: document.id } } }) });
   const timestamp = new Date().toISOString(); const points = Array.from({ length: 120 }, (_, index) => ({ x: 180 + index * 4, y: 230 + Math.sin(index / 8) * 70, pressure: 0.5 })); const agentRequest = fetch(state.credentials.url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'canvas_apply', arguments: { documentId: document.id, clientOperationId: 'playwright-agent-stroke', label: 'Agent ribbon', operations: [{ kind: 'illustration.object.add', object: { id: 'playwright-ribbon', revision: 0, name: 'Agent ribbon', createdAt: timestamp, updatedAt: timestamp, createdBy: 'playwright-agent', layerId: vectorLayer.id, visible: true, locked: false, opacity: 1, blendMode: 'normal', transform: { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, skewX: 0, skewY: 0 }, type: 'vector-stroke', points, brush: { size: 18, thinning: 0.5, smoothing: 0.5, streamline: 0.5, simulatePressure: false, color: '#2fa7a0' } } }], playback: { mode: 'animated', speed: 1 } } } }) });
   await page.waitForTimeout(150); const canvas = page.getByRole('application', { name: /Illustration canvas/ }); await page.getByTitle('Pressure pen').click(); const bounds = await canvas.boundingBox(); if (!bounds) throw new Error('Illustration canvas has no bounds'); await page.mouse.move(bounds.x + bounds.width * 0.45, bounds.y + bounds.height * 0.45); await page.mouse.down(); await page.mouse.move(bounds.x + bounds.width * 0.58, bounds.y + bounds.height * 0.54, { steps: 8 }); await page.mouse.up(); await page.getByRole('button', { name: 'Stop All Agents' }).click(); expect((await agentRequest).ok).toBe(true); await page.getByTitle('Activity').click(); const activity = page.locator('.activity-row').filter({ hasText: 'Agent ribbon' }).first(); await expect(activity).toBeVisible(); await expect(activity.locator('.activity-state')).toHaveText('partial'); await expect(page.getByText(/Playwright agent/).last()).toBeVisible(); const undoAgent = page.getByTitle('Undo the latest transaction by Playwright agent'); await undoAgent.click(); await expect.poll(async () => page.evaluate(async () => { const document = (await window.aidraw.bootstrap()).activeDocument; return document?.kind === 'illustration' && Boolean(document.objects['playwright-ribbon']); })).toBe(false); const redoAgent = page.getByTitle('Redo the latest undone transaction by Playwright agent'); await redoAgent.click(); await expect.poll(async () => page.evaluate(async () => { const document = (await window.aidraw.bootstrap()).activeDocument; return document?.kind === 'illustration' && Boolean(document.objects['playwright-ribbon']); })).toBe(true); const replay = page.getByTitle('Replay durable agent trace').first(); await replay.click(); await expect(replay).toHaveText(/Replaying/); await expect(replay).toHaveText('Replay', { timeout: 4_000 });
 });
 
 test('shows structured file approval and applies session trust without bypassing overwrites', async () => {
   const page = await launch();
-  const state = await page.evaluate(async () => ({ snapshot: await window.aidraw.bootstrap(), credentials: await window.aidraw.getMcpCredentials() }));
+  const state = await page.evaluate(async () => ({ snapshot: await window.aidraw.bootstrap(), credentials: await window.aidraw.getMcpConnection() }));
   if (!state.credentials.url || !state.snapshot.activeDocumentId || !profilePath) throw new Error('MCP approval setup unavailable.');
-  const initialize = await fetch(state.credentials.url, { method: 'POST', headers: { authorization: `Bearer ${state.credentials.token}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2026-07-28', capabilities: {}, clientInfo: { name: 'approval-e2e', version: '1.0' } } }) });
-  const sessionId = initialize.headers.get('mcp-session-id'); if (!sessionId) throw new Error('Approval MCP session missing.');
-  const headers = { authorization: `Bearer ${state.credentials.token}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json', 'mcp-session-id': sessionId };
-  await fetch(state.credentials.url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) });
+  const { headers } = await initializeDirectMcp(state.credentials, { clientInfo: { name: 'approval-e2e', version: '1.0' } });
   await callMcpTool(state.credentials.url, headers, 2, 'session_manage', { action: 'join', name: 'Approval agent', documentId: state.snapshot.activeDocumentId });
   const outputFolder = join(profilePath, 'approved-output');
   const firstPath = join(outputFolder, 'first.png');
@@ -2078,7 +1974,6 @@ test('QA-06 denies and allow-once saves exact paths without granting file trust'
       { id: allowedJobId, kind: 'save', status: 'completed' },
       { id: trustProbeJobId, kind: 'save', status: 'cancelled' },
     ]);
-    expect(jobSummaries.some((job) => job.kind === 'generation')).toBe(false);
     expect(applicationProcess?.pid).toBe(enginePid);
 
     await quitIsolatedEngineGracefully();
@@ -2108,7 +2003,7 @@ test('QA-06 denies and allow-once saves exact paths without granting file trust'
       filesystem: { files: await readdir(targetRoot), persistentTrustFile: false },
       canonicalAgreement: { denialUnchanged: true, rendererMatchedMcp: true },
       paidOrProviderRequests: 0,
-      cleanup: { graceful: true, exitCode: applicationProcess?.exitCode, credentialStatus: redactedConnection.credentialStatus },
+      cleanup: { graceful: true, exitCode: applicationProcess?.exitCode, authorityStatus: redactedConnection.authorityStatus },
     }, null, 2)}\n`, 'utf8');
     stoppedGracefully = true;
   } catch (error) {
@@ -2148,7 +2043,7 @@ test('QA-06-ANIM closes an exact packaged animated-sprite lifecycle', async () =
   const exportRoot = join(isolatedProfile, 'animation-export');
   const exportPath = join(exportRoot, 'qa06-bounce-loop.apng');
   const trustSettingsPath = join(isolatedProfile, 'trusted-folders.json');
-  const providerCredentialsPath = join(isolatedProfile, 'credentials', 'generation.json');
+  const retiredProviderStorePath = join(isolatedProfile, 'credentials', 'generation.json');
   const evidencePath = join(isolatedProfile, 'qa06-animation-evidence.json');
   const timelineScreenshotPath = join(isolatedProfile, 'qa06-animation-timeline.png');
   const onionScreenshotPath = join(isolatedProfile, 'qa06-animation-onion.png');
@@ -2168,7 +2063,7 @@ test('QA-06-ANIM closes an exact packaged animated-sprite lifecycle', async () =
     expect(await readdir(exportRoot)).toEqual([]);
     expect(await access(exportPath).then(() => true, () => false)).toBe(false);
     expect(await access(trustSettingsPath).then(() => true, () => false)).toBe(false);
-    expect(await access(providerCredentialsPath).then(() => true, () => false)).toBe(false);
+    expect(await access(retiredProviderStorePath).then(() => true, () => false)).toBe(false);
 
     await page.getByTitle('New document').click();
     const newDocumentDialog = page.getByRole('dialog', { name: 'New document' });
@@ -2392,7 +2287,7 @@ test('QA-06-ANIM closes an exact packaged animated-sprite lifecycle', async () =
     });
     expect(await readdir(exportRoot)).toEqual(['qa06-bounce-loop.apng']);
     expect(await access(trustSettingsPath).then(() => true, () => false)).toBe(false);
-    expect(await access(providerCredentialsPath).then(() => true, () => false)).toBe(false);
+    expect(await access(retiredProviderStorePath).then(() => true, () => false)).toBe(false);
 
     const exportedBytes = await readFile(exportPath);
     const decodedExport = UPNG.decode(Uint8Array.from(exportedBytes).buffer);
@@ -2417,7 +2312,6 @@ test('QA-06-ANIM closes an exact packaged animated-sprite lifecycle', async () =
     expect(jobSummaries.map((job) => ({ id: job.id, kind: job.kind, status: job.status }))).toEqual([
       { id: exportJobId, kind: 'export', status: 'completed' },
     ]);
-    expect(jobSummaries.some((job) => job.kind === 'generation')).toBe(false);
     expect(applicationProcess?.pid).toBe(enginePid);
 
     await call('session_manage', { action: 'leave' });
@@ -2426,7 +2320,7 @@ test('QA-06-ANIM closes an exact packaged animated-sprite lifecycle', async () =
     await redactOwnedConnection(connectionPath);
     const redactedConnection = JSON.parse(await readFile(connectionPath, 'utf8')) as Record<string, unknown>;
     expect(Object.prototype.hasOwnProperty.call(redactedConnection, 'token')).toBe(false);
-    expect(redactedConnection.credentialStatus).toBe('redacted-after-graceful-stop');
+    expect(redactedConnection.authorityStatus).toBe('redacted-after-graceful-stop');
     expect(JSON.stringify(redactedConnection)).not.toMatch(/Bearer\s|Authorization|"token"\s*:/i);
 
     const evidence = {
@@ -2445,7 +2339,7 @@ test('QA-06-ANIM closes an exact packaged animated-sprite lifecycle', async () =
       canonicalAgreement: { rendererMatchedMcp: true, exportSequenceMatchedMcp: true },
       export: { path: exportPath, format: 'apng', scale: 2, width: 32, height: 32, frameCount: 6, delaysMs: decodedExport.frames.map((frame) => frame.delay), byteLength: exportedBytes.byteLength, onlyTarget: true },
       paidOrProviderRequests: 0,
-      cleanup: { graceful: true, exitCode: applicationProcess?.exitCode, credentialStatus: redactedConnection.credentialStatus },
+      cleanup: { graceful: true, exitCode: applicationProcess?.exitCode, authorityStatus: redactedConnection.authorityStatus },
     };
     const evidenceText = `${JSON.stringify(evidence, null, 2)}\n`;
     expect(evidenceText).not.toMatch(/Bearer\s|Authorization|"token"\s*:/i);
@@ -2495,7 +2389,7 @@ test('QA-06-WANG closes an exact packaged finite-map Wang-terrain lifecycle', as
   const finalScreenshotPath = join(isolatedProfile, 'qa06-wang-finite-final.png');
   const approvalScreenshotPath = join(isolatedProfile, 'qa06-wang-export-approval.png');
   const trustSettingsPath = join(isolatedProfile, 'trusted-folders.json');
-  const providerCredentialsPath = join(isolatedProfile, 'credentials', 'generation.json');
+  const retiredProviderStorePath = join(isolatedProfile, 'credentials', 'generation.json');
   const transitionWangIds = [
     [0, 0, 0, 0, 0, 0, 0, 0],
     [1, 1, 1, 1, 1, 1, 1, 1],
@@ -2531,7 +2425,7 @@ test('QA-06-WANG closes an exact packaged finite-map Wang-terrain lifecycle', as
     await mkdir(exportRoot, { recursive: true });
     expect(await readdir(exportRoot)).toEqual([]);
     expect(await access(trustSettingsPath).then(() => true, () => false)).toBe(false);
-    expect(await access(providerCredentialsPath).then(() => true, () => false)).toBe(false);
+    expect(await access(retiredProviderStorePath).then(() => true, () => false)).toBe(false);
 
     await page.getByTitle('New document').click();
     const newDocumentDialog = page.getByRole('dialog', { name: 'New document' });
@@ -2828,7 +2722,7 @@ test('QA-06-WANG closes an exact packaged finite-map Wang-terrain lifecycle', as
     });
     expect((await readdir(exportRoot)).sort()).toEqual(['Tileset 1.png', 'qa06-finite-meadow.tmj'].sort());
     expect(await access(trustSettingsPath).then(() => true, () => false)).toBe(false);
-    expect(await access(providerCredentialsPath).then(() => true, () => false)).toBe(false);
+    expect(await access(retiredProviderStorePath).then(() => true, () => false)).toBe(false);
 
     const exportedBytes = await readFile(exportPath);
     const companionBytes = await readFile(companionPath);
@@ -2886,7 +2780,6 @@ test('QA-06-WANG closes an exact packaged finite-map Wang-terrain lifecycle', as
     const finalJobs = await call('job_manage', { action: 'list' });
     const jobSummaries = finalJobs.jobs as Array<{ id: string; kind: string; status: string }>;
     expect(jobSummaries.map((job) => ({ id: job.id, kind: job.kind, status: job.status }))).toEqual([{ id: exportJobId, kind: 'export', status: 'completed' }]);
-    expect(jobSummaries.some((job) => job.kind === 'generation')).toBe(false);
     expect(applicationProcess?.pid).toBe(enginePid);
 
     await call('session_manage', { action: 'leave' });
@@ -2895,7 +2788,7 @@ test('QA-06-WANG closes an exact packaged finite-map Wang-terrain lifecycle', as
     await redactOwnedConnection(connectionPath);
     const redactedConnection = JSON.parse(await readFile(connectionPath, 'utf8')) as Record<string, unknown>;
     expect(Object.prototype.hasOwnProperty.call(redactedConnection, 'token')).toBe(false);
-    expect(redactedConnection.credentialStatus).toBe('redacted-after-graceful-stop');
+    expect(redactedConnection.authorityStatus).toBe('redacted-after-graceful-stop');
     expect(JSON.stringify(redactedConnection)).not.toMatch(/Bearer\s|Authorization|"token"\s*:/i);
 
     const evidence = {
@@ -2944,7 +2837,7 @@ test('QA-06-WANG closes an exact packaged finite-map Wang-terrain lifecycle', as
         infiniteMapExercised: false,
       },
       paidOrProviderRequests: 0,
-      cleanup: { graceful: true, exitCode: applicationProcess?.exitCode, credentialStatus: redactedConnection.credentialStatus },
+      cleanup: { graceful: true, exitCode: applicationProcess?.exitCode, authorityStatus: redactedConnection.authorityStatus },
     };
     const evidenceText = JSON.stringify(evidence, null, 2) + '\n';
     expect(evidenceText).not.toMatch(/Bearer\s|Authorization|"token"\s*:/i);
@@ -2993,7 +2886,7 @@ test('QA-06-INFINITE closes an exact packaged orthogonal sparse-chunk lifecycle'
   const positiveScreenshotPath = join(isolatedProfile, 'qa06-infinite-positive-chunks.png');
   const approvalScreenshotPath = join(isolatedProfile, 'qa06-infinite-export-approval.png');
   const trustSettingsPath = join(isolatedProfile, 'trusted-folders.json');
-  const providerCredentialsPath = join(isolatedProfile, 'credentials', 'generation.json');
+  const retiredProviderStorePath = join(isolatedProfile, 'credentials', 'generation.json');
   const forbiddenNetworkPath = join(isolatedProfile, 'qa06-infinite-forbidden-network.json');
   const paintedCells = [
     { x: -33, y: -1, gid: 1 },
@@ -3039,7 +2932,7 @@ test('QA-06-INFINITE closes an exact packaged orthogonal sparse-chunk lifecycle'
     if (!enginePid) throw new Error('The isolated QA-06 infinite-map package has no engine PID.');
     await mkdir(exportRoot, { recursive: true });
     expect(await readdir(exportRoot)).toEqual([]);
-    for (const sentinel of [trustSettingsPath, providerCredentialsPath, forbiddenNetworkPath]) expect(await access(sentinel).then(() => true, () => false)).toBe(false);
+    for (const sentinel of [trustSettingsPath, retiredProviderStorePath, forbiddenNetworkPath]) expect(await access(sentinel).then(() => true, () => false)).toBe(false);
 
     await page.getByTitle('New document').click();
     const newDocumentDialog = page.getByRole('dialog', { name: 'New document' });
@@ -3248,8 +3141,7 @@ test('QA-06-INFINITE closes an exact packaged orthogonal sparse-chunk lifecycle'
     const finalJobs = await call('job_manage', { action: 'list' });
     const jobSummaries = finalJobs.jobs as Array<{ id: string; kind: string; status: string }>;
     expect(jobSummaries.map((job) => ({ id: job.id, kind: job.kind, status: job.status }))).toEqual([{ id: exportJobId, kind: 'export', status: 'completed' }]);
-    expect(jobSummaries.some((job) => job.kind === 'generation')).toBe(false);
-    for (const sentinel of [trustSettingsPath, providerCredentialsPath, forbiddenNetworkPath]) expect(await access(sentinel).then(() => true, () => false)).toBe(false);
+    for (const sentinel of [trustSettingsPath, retiredProviderStorePath, forbiddenNetworkPath]) expect(await access(sentinel).then(() => true, () => false)).toBe(false);
     expect(applicationProcess?.pid).toBe(enginePid);
 
     await call('session_manage', { action: 'leave' });
@@ -3258,7 +3150,7 @@ test('QA-06-INFINITE closes an exact packaged orthogonal sparse-chunk lifecycle'
     await redactOwnedConnection(connectionPath);
     const redactedConnection = JSON.parse(await readFile(connectionPath, 'utf8')) as Record<string, unknown>;
     expect(Object.prototype.hasOwnProperty.call(redactedConnection, 'token')).toBe(false);
-    expect(redactedConnection.credentialStatus).toBe('redacted-after-graceful-stop');
+    expect(redactedConnection.authorityStatus).toBe('redacted-after-graceful-stop');
     expect(JSON.stringify(redactedConnection)).not.toMatch(/Bearer\s|Authorization|"token"\s*:/i);
 
     const evidence = {
@@ -3304,7 +3196,7 @@ test('QA-06-INFINITE closes an exact packaged orthogonal sparse-chunk lifecycle'
         isometricInfiniteMapExercised: false,
       },
       paidOrProviderRequests: 0,
-      cleanup: { graceful: true, exitCode: applicationProcess?.exitCode, credentialStatus: redactedConnection.credentialStatus },
+      cleanup: { graceful: true, exitCode: applicationProcess?.exitCode, authorityStatus: redactedConnection.authorityStatus },
     };
     const evidenceText = JSON.stringify(evidence, null, 2) + '\n';
     expect(evidenceText).not.toMatch(/Bearer\s|Authorization|"token"\s*:/i);
@@ -3359,7 +3251,7 @@ test('QA-06-TILED-RT closes an exact packaged supported orthogonal TMJ companion
   const secondApprovalScreenshotPath = join(isolatedProfile, 'qa06-tiled-second-export-approval.png');
   const reexportScreenshotPath = join(isolatedProfile, 'qa06-tiled-reexport-result.png');
   const trustSettingsPath = join(isolatedProfile, 'trusted-folders.json');
-  const providerCredentialsPath = join(isolatedProfile, 'credentials', 'generation.json');
+  const retiredProviderStorePath = join(isolatedProfile, 'credentials', 'generation.json');
   const forbiddenNetworkPath = join(isolatedProfile, 'qa06-tiled-roundtrip-forbidden-network.json');
   const paintedCells = [
     { x: -33, y: -1, gid: 1 }, { x: -32, y: -1, gid: 2 }, { x: -31, y: -1, gid: 1 },
@@ -3500,7 +3392,7 @@ test('QA-06-TILED-RT closes an exact packaged supported orthogonal TMJ companion
     expect(await readdir(firstExportRoot)).toEqual([]);
     expect(await readdir(secondExportRoot)).toEqual([]);
     for (const path of [evidencePath, authoredScreenshotPath, firstApprovalScreenshotPath, importApprovalScreenshotPath, importedScreenshotPath, secondApprovalScreenshotPath, reexportScreenshotPath]) expect(await access(path).then(() => true, () => false)).toBe(false);
-    for (const sentinel of [trustSettingsPath, providerCredentialsPath, forbiddenNetworkPath]) expect(await access(sentinel).then(() => true, () => false)).toBe(false);
+    for (const sentinel of [trustSettingsPath, retiredProviderStorePath, forbiddenNetworkPath]) expect(await access(sentinel).then(() => true, () => false)).toBe(false);
 
     await page.getByTitle('New document').click();
     const newDocumentDialog = page.getByRole('dialog', { name: 'New document' });
@@ -3744,8 +3636,7 @@ test('QA-06-TILED-RT closes an exact packaged supported orthogonal TMJ companion
     expect(jobSummaries.every((job) => !Object.prototype.hasOwnProperty.call(job, 'result') && !Object.prototype.hasOwnProperty.call(job, 'approval'))).toBe(true);
     expect(JSON.stringify(finalJobs)).not.toContain(firstExportPath);
     expect(JSON.stringify(finalJobs)).not.toContain(secondExportPath);
-    expect(jobSummaries.some((job) => job.kind === 'generation')).toBe(false);
-    for (const sentinel of [trustSettingsPath, providerCredentialsPath, forbiddenNetworkPath]) expect(await access(sentinel).then(() => true, () => false)).toBe(false);
+    for (const sentinel of [trustSettingsPath, retiredProviderStorePath, forbiddenNetworkPath]) expect(await access(sentinel).then(() => true, () => false)).toBe(false);
     for (const screenshotPath of [authoredScreenshotPath, firstApprovalScreenshotPath, importApprovalScreenshotPath, importedScreenshotPath, secondApprovalScreenshotPath, reexportScreenshotPath]) expect(await access(screenshotPath).then(() => true, () => false)).toBe(true);
     expect(applicationProcess?.pid).toBe(enginePid);
 
@@ -3755,7 +3646,7 @@ test('QA-06-TILED-RT closes an exact packaged supported orthogonal TMJ companion
     await redactOwnedConnection(connectionPath);
     const redactedConnection = JSON.parse(await readFile(connectionPath, 'utf8')) as Record<string, unknown>;
     expect(Object.prototype.hasOwnProperty.call(redactedConnection, 'token')).toBe(false);
-    expect(redactedConnection.credentialStatus).toBe('redacted-after-graceful-stop');
+    expect(redactedConnection.authorityStatus).toBe('redacted-after-graceful-stop');
     expect(JSON.stringify(redactedConnection)).not.toMatch(/Bearer\s|Authorization|"token"\s*:/i);
 
     const evidence = {
@@ -3788,9 +3679,9 @@ test('QA-06-TILED-RT closes an exact packaged supported orthogonal TMJ companion
         isometricExercised: false,
         unsupportedModernFieldsExercised: false,
       },
-      privacy: { publicJobSummariesRedacted: true, generationJobs: 0 },
+      privacy: { publicJobSummariesRedacted: true, unexpectedJobs: 0 },
       paidOrProviderRequests: 0,
-      cleanup: { graceful: true, exitCode: applicationProcess?.exitCode, credentialStatus: redactedConnection.credentialStatus },
+      cleanup: { graceful: true, exitCode: applicationProcess?.exitCode, authorityStatus: redactedConnection.authorityStatus },
     };
     const evidenceText = JSON.stringify(evidence, null, 2) + '\n';
     expect(evidenceText).not.toMatch(/Bearer\s|Authorization|"token"\s*:/i);
@@ -3808,643 +3699,6 @@ test('QA-06-TILED-RT closes an exact packaged supported orthogonal TMJ companion
         const cleanupFailure = error instanceof Error ? error : new Error(String(error));
         regressionFailure = regressionFailure
           ? new Error(regressionFailure.message + '\nGraceful cleanup also failed: ' + cleanupFailure.message)
-          : cleanupFailure;
-      }
-    }
-  }
-  if (regressionFailure) throw regressionFailure;
-});
-
-test('QA-06-GEN closes an exact packaged deterministic generated-fill lifecycle', async () => {
-  test.setTimeout(90_000);
-  const retainedRoot = resolve(process.cwd(), 'test-results', 'retained');
-  await mkdir(retainedRoot, { recursive: true });
-  const configuredProfile = process.env.AIDRAW_E2E_QA06_GENERATION_PROFILE?.trim();
-  let isolatedProfile: string;
-  if (configuredProfile) {
-    isolatedProfile = resolve(configuredProfile);
-    const retainedRelative = relative(retainedRoot, isolatedProfile);
-    if (!retainedRelative || retainedRelative.startsWith('..') || isAbsolute(retainedRelative) || !basename(isolatedProfile).startsWith(QA06_GENERATION_E2E_PROFILE_PREFIX)) {
-      throw new Error(`AIDRAW_E2E_QA06_GENERATION_PROFILE must name a new ${QA06_GENERATION_E2E_PROFILE_PREFIX}* directory inside test-results/retained.`);
-    }
-    if (await access(isolatedProfile).then(() => true, () => false)) throw new Error(`The exact QA-06 generated-fill profile already exists: ${isolatedProfile}`);
-  } else isolatedProfile = await mkdtemp(join(retainedRoot, QA06_GENERATION_E2E_PROFILE_PREFIX));
-
-  const connectionPath = join(isolatedProfile, QA06_GENERATION_E2E_CONNECTION_FILE);
-  const mockOutputPath = join(isolatedProfile, QA06_GENERATION_E2E_OUTPUT_FILE);
-  const mockAuditPath = join(isolatedProfile, QA06_GENERATION_E2E_AUDIT_FILE);
-  const networkSentinelPath = join(isolatedProfile, QA06_GENERATION_E2E_NETWORK_SENTINEL_FILE);
-  const evidencePath = join(isolatedProfile, 'qa06-generated-fill-evidence.json');
-  const denialScreenshotPath = join(isolatedProfile, 'qa06-generation-denial-approval.png');
-  const timeoutScreenshotPath = join(isolatedProfile, 'qa06-generation-timeout-approval.png');
-  const allowScreenshotPath = join(isolatedProfile, 'qa06-generation-allow-once-approval.png');
-  const previewScreenshotPath = join(isolatedProfile, 'qa06-generation-preview.png');
-  const acceptedScreenshotPath = join(isolatedProfile, 'qa06-generation-accepted.png');
-  const trustSettingsPath = join(isolatedProfile, 'trusted-folders.json');
-  const providerCredentialsPath = join(isolatedProfile, 'credentials', 'generation.json');
-  gracefulOnlyCleanup = true;
-  preserveProfileAfterTest = true;
-  let stoppedGracefully = false;
-  let regressionFailure: Error | undefined;
-
-  try {
-    for (const path of [mockOutputPath, mockAuditPath, networkSentinelPath, evidencePath, denialScreenshotPath, timeoutScreenshotPath, allowScreenshotPath, previewScreenshotPath, acceptedScreenshotPath]) {
-      expect(await access(path).then(() => true, () => false)).toBe(false);
-    }
-    const page = await launch(isolatedProfile, {
-      environment: {
-        NODE_ENV: 'test',
-        AIDRAW_E2E_QA06_GENERATION_MOCK: '1',
-        AIDRAW_E2E_QA06_GENERATION_PROFILE: isolatedProfile,
-        AIDRAW_E2E_QA06_GENERATION_MOCK_OUTPUT_PATH: mockOutputPath,
-        AIDRAW_E2E_QA06_GENERATION_MOCK_AUDIT_PATH: mockAuditPath,
-        AIDRAW_E2E_QA06_GENERATION_NETWORK_SENTINEL_PATH: networkSentinelPath,
-      },
-      extraArguments: [`--write-mcp-connection=${connectionPath}`],
-    });
-    const enginePid = applicationProcess?.pid;
-    if (!enginePid) throw new Error('The isolated QA-06 generated-fill package has no engine PID.');
-    expect(await access(trustSettingsPath).then(() => true, () => false)).toBe(false);
-    expect(await access(providerCredentialsPath).then(() => true, () => false)).toBe(false);
-    expect(await access(networkSentinelPath).then(() => true, () => false)).toBe(false);
-
-    await page.getByTitle('New document').click();
-    const newDocumentDialog = page.getByRole('dialog', { name: 'New document' });
-    await newDocumentDialog.getByRole('radio', { name: /Illustration/ }).click();
-    await newDocumentDialog.getByLabel('Document name').fill(QA06_GENERATION_E2E_DOCUMENT_NAME);
-    await newDocumentDialog.getByLabel('Document width').fill('320');
-    await newDocumentDialog.getByLabel('Document height').fill('240');
-    await newDocumentDialog.getByRole('button', { name: 'Create Illustration' }).click();
-    const initial = await page.evaluate(async () => {
-      const document = (await window.aidraw.bootstrap()).activeDocument;
-      if (!document || document.kind !== 'illustration') throw new Error('The QA-06 generated-fill illustration is unavailable.');
-      const layer = Object.values(document.layers).find((entry) => entry.type === 'vector' && entry.visible && !entry.locked);
-      if (!layer || layer.type !== 'vector') throw new Error('The QA-06 generated-fill vector layer is unavailable.');
-      return { documentId: document.id, layerId: layer.id, revision: document.revision, name: document.name, width: document.artboard.width, height: document.artboard.height };
-    });
-    expect(initial).toMatchObject({ name: QA06_GENERATION_E2E_DOCUMENT_NAME, width: 320, height: 240 });
-
-    const credentials = await waitForMcpConnection(connectionPath);
-    expect(credentials.trustedFolders).toEqual([]);
-    const client = await connectMcpTestClient(credentials.url, credentials.token, 'qa06-generated-fill', {
-      name: 'QA-06 generated fill agent',
-      color: '#d26682',
-      documentId: initial.documentId,
-    });
-    let requestId = 3;
-    const call = (name: string, args: Record<string, unknown>) => callMcpTool(credentials.url, client.headers, requestId++, name, args);
-
-    const sourceCanvas = createCanvas(192, 128); const sourceContext = sourceCanvas.getContext('2d'); sourceContext.fillStyle = '#26324a'; sourceContext.fillRect(0, 0, 192, 128); sourceContext.fillStyle = '#6f86bd'; sourceContext.fillRect(20, 20, 152, 88); sourceContext.fillStyle = '#d26682'; sourceContext.fillRect(64, 40, 64, 48); const sourceBytes = sourceCanvas.toBuffer('image/png');
-    const maskCanvas = createCanvas(192, 128); const maskContext = maskCanvas.getContext('2d'); maskContext.clearRect(0, 0, 192, 128); maskContext.fillStyle = '#ffffff'; maskContext.fillRect(48, 32, 96, 64); const maskBytes = maskCanvas.toBuffer('image/png');
-    const asset = (id: string, name: string, bytes: Buffer) => ({ id, name, mimeType: 'image/png', byteLength: bytes.byteLength, sha256: visualHash(bytes), source: 'imported', data: bytes.toString('base64') });
-    const timestamp = new Date().toISOString();
-    const seeded = await call('canvas_apply', {
-      documentId: initial.documentId,
-      clientOperationId: 'qa06-generated-fill-fixture',
-      label: 'QA-06 install generated-fill source and mask',
-      playback: { mode: 'instant', speed: 1 },
-      operations: [
-        { kind: 'asset.add', asset: asset(QA06_GENERATION_E2E_SOURCE_ASSET_ID, 'QA-06 fill source', sourceBytes) },
-        { kind: 'asset.add', asset: asset(QA06_GENERATION_E2E_MASK_ASSET_ID, 'QA-06 fill mask', maskBytes) },
-        {
-          kind: 'illustration.object.add',
-          object: {
-            id: 'qa06-generation-source-object', revision: 0, name: 'QA-06 source artwork', createdAt: timestamp, updatedAt: timestamp,
-            createdBy: client.actor.id, layerId: initial.layerId, visible: true, locked: false, opacity: 1, blendMode: 'normal',
-            transform: { x: 64, y: 56, scaleX: 1, scaleY: 1, rotation: 0, skewX: 0, skewY: 0 },
-            type: 'image', assetId: QA06_GENERATION_E2E_SOURCE_ASSET_ID, width: 192, height: 128, sourceWidth: 192, sourceHeight: 128, filters: [],
-          },
-        },
-      ],
-    });
-    expect(seeded).toMatchObject({ status: 'committed', revision: initial.revision + 1 });
-    const beforeObserved = await call('canvas_observe', { documentId: initial.documentId, includePng: true, scale: 1, background: 'document' });
-    const beforeDocument = beforeObserved.document as IllustrationDocument;
-    const beforePng = beforeObserved.png as { available: boolean; data: string; width: number; height: number };
-    expect(beforePng).toMatchObject({ available: true, width: 320, height: 240 });
-    expect(beforeDocument).toMatchObject({ id: initial.documentId, revision: initial.revision + 1, name: QA06_GENERATION_E2E_DOCUMENT_NAME, kind: 'illustration' });
-    expect(beforeDocument.objects['qa06-generation-source-object']).toMatchObject({ createdBy: client.actor.id, assetId: QA06_GENERATION_E2E_SOURCE_ASSET_ID });
-    expect(await page.evaluate(async () => (await window.aidraw.bootstrap()).activeDocument)).toEqual(beforeDocument);
-    const beforeCanonicalSha256 = visualHash(Buffer.from(JSON.stringify(beforeDocument), 'utf8'));
-    const beforeCanvasSha256 = visualHash(Buffer.from(beforePng.data, 'base64'));
-
-    const generationArguments = { documentId: initial.documentId, ...structuredClone(QA06_GENERATION_E2E_REQUEST) };
-    const startGeneration = () => call('generation_start', generationArguments);
-    const assertFullApproval = async (jobId: string, returnedExpiresAt: string, screenshotPath?: string) => {
-      await page.getByRole('tab', { name: 'Activity', exact: true }).click();
-      const card = page.locator('.approval-card').filter({ hasText: 'Generate imagery' });
-      await expect(card).toBeVisible();
-      await expect(card.locator('.approval-heading strong')).toHaveText('Generate imagery');
-      await expect(card.locator('.approval-heading small')).toHaveText('QA-06 generated fill agent requests approval');
-      await expect(card.locator('p')).toHaveText('Review provider, prompt, sources, mask, result count, and the potentially paid request count.');
-      const fields = await card.locator('.approval-review > div').evaluateAll((rows) => rows.map((row) => [row.querySelector('dt')?.textContent?.trim(), row.querySelector('dd')?.textContent?.trim()]));
-      expect(fields).toEqual([
-        ['Provider', 'stability'],
-        ['Model / workflow', 'Stability generation API'],
-        ['Mode', 'inpaint'],
-        ['Prompt', QA06_GENERATION_E2E_REQUEST.prompt],
-        ['Negative prompt', QA06_GENERATION_E2E_REQUEST.negativePrompt],
-        ['Source assets', QA06_GENERATION_E2E_SOURCE_ASSET_ID],
-        ['Mask asset', QA06_GENERATION_E2E_MASK_ASSET_ID],
-        ['Requested results', '1'],
-        ['Potential paid requests', '1'],
-        ['Size', JSON.stringify(QA06_GENERATION_E2E_REQUEST.size)],
-        ['Seed', String(QA06_GENERATION_E2E_REQUEST.seed)],
-        ['Provider options', JSON.stringify(QA06_GENERATION_E2E_REQUEST.providerOptions)],
-      ]);
-      await expect(card.getByRole('img', { name: 'Source: QA-06 fill source' })).toBeVisible();
-      await expect(card.getByRole('img', { name: 'Mask: QA-06 fill mask' })).toBeVisible();
-      await expect(card.locator('.approval-previews figcaption')).toContainText(['192 × 128px · image/png', '192 × 128px · image/png']);
-      await expect(card.locator('.generation-trust-note')).toHaveText('This approval authorizes this exact provider request once. It does not trust future prompts, providers, source assets, or paid requests.');
-      expect((await card.locator('.approval-actions button').allTextContents()).map((value) => value.trim())).toEqual(['Deny', 'Allow once']);
-      const canonical = await page.evaluate(async (id) => (await window.aidraw.bootstrap()).jobs.find((job) => job.id === id), jobId);
-      expect(canonical).toMatchObject({
-        id: jobId,
-        kind: 'generation',
-        status: 'waiting-for-user',
-        actor: client.actor,
-        approval: { options: ['allow-once', 'deny'], review: { fields: expect.any(Array), previews: expect.any(Array) } },
-        result: { documentId: initial.documentId, request: generationArguments },
-      });
-      const expiresAt = canonical?.approval?.expiresAt;
-      expect(expiresAt).toBe(returnedExpiresAt);
-      const expiryDuration = new Date(String(expiresAt)).getTime() - new Date(String(canonical?.createdAt)).getTime();
-      expect(expiryDuration).toBeGreaterThanOrEqual(19_900);
-      expect(expiryDuration).toBeLessThanOrEqual(20_100);
-      if (screenshotPath) await card.screenshot({ path: screenshotPath });
-      return card;
-    };
-    const assertCanonicalUnchanged = async () => {
-      const observed = await call('canvas_observe', { documentId: initial.documentId });
-      expect(observed.document).toEqual(beforeDocument);
-      expect(await page.evaluate(async () => (await window.aidraw.bootstrap()).activeDocument)).toEqual(beforeDocument);
-      expect(visualHash(Buffer.from(JSON.stringify(observed.document), 'utf8'))).toBe(beforeCanonicalSha256);
-    };
-    const assertFixtureNotRun = async () => {
-      expect(await access(mockOutputPath).then(() => true, () => false)).toBe(false);
-      expect(await access(mockAuditPath).then(() => true, () => false)).toBe(false);
-      expect(await access(networkSentinelPath).then(() => true, () => false)).toBe(false);
-      expect(await access(providerCredentialsPath).then(() => true, () => false)).toBe(false);
-    };
-
-    const denied = await startGeneration();
-    expect(denied).toMatchObject({ status: 'waiting-for-user', expiresAt: expect.any(String) });
-    const deniedJobId = String(denied.jobId);
-    const deniedCard = await assertFullApproval(deniedJobId, String(denied.expiresAt), denialScreenshotPath);
-    const deniedPublic = await call('job_manage', { action: 'inspect', jobId: deniedJobId });
-    expect(deniedPublic).toMatchObject({ id: deniedJobId, actor: client.actor, status: 'waiting-for-user', dependency: { kind: 'user-approval', permittedDecisions: ['allow-once', 'deny'] } });
-    expect(deniedPublic).not.toHaveProperty('approval'); expect(deniedPublic).not.toHaveProperty('result'); expect(JSON.stringify(deniedPublic)).not.toContain(QA06_GENERATION_E2E_REQUEST.prompt);
-    await deniedCard.getByRole('button', { name: 'Deny', exact: true }).click();
-    const deniedResult = await call('job_manage', { action: 'wait', jobId: deniedJobId, timeoutMs: 5_000 });
-    expect(deniedResult).toMatchObject({ id: deniedJobId, status: 'cancelled', message: 'Denied in AIDraw.' });
-    await assertCanonicalUnchanged(); await assertFixtureNotRun();
-
-    const timeoutStartedAt = Date.now();
-    const timed = await startGeneration();
-    const timedJobId = String(timed.jobId);
-    const timedCard = await assertFullApproval(timedJobId, String(timed.expiresAt), timeoutScreenshotPath);
-    const timedResult = await call('job_manage', { action: 'wait', jobId: timedJobId, timeoutMs: 30_000 });
-    const timeoutElapsedMs = Date.now() - timeoutStartedAt;
-    expect(timedResult).toMatchObject({ id: timedJobId, status: 'cancelled', message: 'Approval timed out after 20 seconds.', error: { code: 'approval_timeout', message: 'The in-app approval expired.', retryable: true } });
-    expect(timeoutElapsedMs).toBeGreaterThanOrEqual(18_000); expect(timeoutElapsedMs).toBeLessThan(30_000);
-    await expect(timedCard).toHaveCount(0);
-    await assertCanonicalUnchanged(); await assertFixtureNotRun();
-
-    const cancelled = await startGeneration();
-    const cancelledJobId = String(cancelled.jobId);
-    await page.getByRole('tab', { name: 'Activity', exact: true }).click();
-    const cancelledCard = page.locator('.approval-card').filter({ hasText: 'Generate imagery' });
-    await expect(cancelledCard).toBeVisible();
-    const boundedWaitStartedAt = Date.now();
-    const waiting = await call('job_manage', { action: 'wait', jobId: cancelledJobId, timeoutMs: 250 });
-    const boundedWaitElapsedMs = Date.now() - boundedWaitStartedAt;
-    expect(waiting).toMatchObject({ id: cancelledJobId, status: 'waiting-for-user', dependency: { kind: 'user-approval' } });
-    expect(boundedWaitElapsedMs).toBeLessThan(2_000);
-    const cancelledResult = await call('job_manage', { action: 'cancel', jobId: cancelledJobId });
-    expect(cancelledResult).toMatchObject({ id: cancelledJobId, status: 'cancelled', message: 'Generation cancelled.' });
-    await expect(cancelledCard).toHaveCount(0);
-    await assertCanonicalUnchanged(); await assertFixtureNotRun();
-
-    const allowed = await startGeneration();
-    const allowedJobId = String(allowed.jobId);
-    const allowedCard = await assertFullApproval(allowedJobId, String(allowed.expiresAt), allowScreenshotPath);
-    await allowedCard.getByRole('button', { name: 'Allow once', exact: true }).click();
-    const allowedResult = await call('job_manage', { action: 'wait', jobId: allowedJobId, timeoutMs: 10_000 });
-    expect(allowedResult).toMatchObject({ id: allowedJobId, kind: 'generation', status: 'completed', actor: client.actor, progress: 1 });
-    expect(allowedResult).not.toHaveProperty('result');
-    expect(JSON.stringify(allowedResult)).not.toContain(QA06_GENERATION_E2E_REQUEST.prompt);
-    expect(JSON.stringify(allowedResult)).not.toContain(QA06_GENERATION_E2E_OUTPUT_FILE);
-    expect(await access(mockOutputPath).then(() => true, () => false)).toBe(true);
-    expect(await access(mockAuditPath).then(() => true, () => false)).toBe(true);
-    expect(await access(networkSentinelPath).then(() => true, () => false)).toBe(false);
-    const mockOutputBytes = await readFile(mockOutputPath);
-    const mockAuditText = await readFile(mockAuditPath, 'utf8');
-    const mockAudit = JSON.parse(mockAuditText) as { invocationCount: number; transport: string; output: { byteLength: number; sha256: string; width: number; height: number }; hostedKeyReceived: boolean; externalProviderRequests: number; paidRequests: number };
-    expect(mockAudit).toMatchObject({ invocationCount: 1, transport: 'in-process-deterministic-runner', output: { byteLength: mockOutputBytes.byteLength, sha256: visualHash(mockOutputBytes), width: 192, height: 128 }, hostedKeyReceived: false, externalProviderRequests: 0, paidRequests: 0 });
-    expect(mockAuditText).not.toMatch(/Bearer\s|Authorization|"token"\s*:/i);
-
-    const canonicalCompleted = await page.evaluate(async (jobId) => (await window.aidraw.bootstrap()).jobs.find((job) => job.id === jobId), allowedJobId);
-    expect(canonicalCompleted).toMatchObject({
-      id: allowedJobId,
-      status: 'completed',
-      actor: client.actor,
-      result: {
-        request: generationArguments,
-        outputs: [{ id: 'qa06-generated-fill-result', mimeType: 'image/png', width: 192, height: 128, seed: QA06_GENERATION_E2E_REQUEST.seed, providerMetadata: { fixture: 'qa06-generated-fill', transport: 'deterministic-local', externalProviderRequests: 0, paidRequests: 0 } }],
-      },
-    });
-    const completedOutput = (canonicalCompleted?.result as { outputs?: Array<{ data: string }> } | undefined)?.outputs?.[0];
-    if (!completedOutput) throw new Error('The canonical generated output is unavailable in the isolated renderer/service snapshot.');
-    expect(Buffer.from(completedOutput.data, 'base64')).toEqual(mockOutputBytes);
-
-    await page.getByRole('tab', { name: 'Generate', exact: true }).click();
-    const resultCard = page.locator('.result-card').filter({ has: page.getByRole('img', { name: 'Generated result' }) });
-    await expect(resultCard).toBeVisible();
-    await resultCard.getByRole('button', { name: 'Compare', exact: true }).click();
-    const compareDialog = page.getByRole('dialog', { name: 'Compare generated result' });
-    await expect(compareDialog.getByRole('img', { name: 'Source before generation' })).toBeVisible();
-    await expect(compareDialog.getByRole('img', { name: 'Generated result' })).toBeVisible();
-    await compareDialog.screenshot({ path: previewScreenshotPath });
-    await compareDialog.getByRole('button', { name: 'Accept as new layer/cel', exact: true }).click();
-    await expect(compareDialog).toHaveCount(0);
-    await expect(resultCard.getByRole('button', { name: 'Accepted', exact: true })).toBeDisabled();
-
-    const afterObserved = await call('canvas_observe', { documentId: initial.documentId, includePng: true, scale: 1, background: 'document' });
-    const afterDocument = afterObserved.document as IllustrationDocument;
-    const afterPng = afterObserved.png as { available: boolean; data: string; width: number; height: number };
-    expect(await page.evaluate(async () => (await window.aidraw.bootstrap()).activeDocument)).toEqual(afterDocument);
-    expect(afterDocument.revision).toBe(beforeDocument.revision + 1);
-    expect(afterDocument.objects['qa06-generation-source-object']).toEqual(beforeDocument.objects['qa06-generation-source-object']);
-    expect(afterDocument.assets[QA06_GENERATION_E2E_SOURCE_ASSET_ID]).toEqual(beforeDocument.assets[QA06_GENERATION_E2E_SOURCE_ASSET_ID]);
-    expect(afterDocument.assets[QA06_GENERATION_E2E_MASK_ASSET_ID]).toEqual(beforeDocument.assets[QA06_GENERATION_E2E_MASK_ASSET_ID]);
-    expect(Object.keys(afterDocument.layers)).toHaveLength(Object.keys(beforeDocument.layers).length + 1);
-    expect(Object.keys(afterDocument.objects)).toHaveLength(Object.keys(beforeDocument.objects).length + 1);
-    expect(Object.keys(afterDocument.assets)).toHaveLength(Object.keys(beforeDocument.assets).length + 1);
-    const generatedAsset = Object.values(afterDocument.assets).find((entry) => entry.source === 'generated');
-    if (!generatedAsset) throw new Error('The accepted generated asset is absent from canonical state.');
-    expect(generatedAsset).toMatchObject({ mimeType: 'image/png', byteLength: mockOutputBytes.byteLength, sha256: visualHash(mockOutputBytes) });
-    const generatedObject = Object.values(afterDocument.objects).find((entry) => entry.type === 'image' && entry.assetId === generatedAsset.id);
-    if (!generatedObject) throw new Error('The accepted generated image object is absent from canonical state.');
-    const generatedLayer = afterDocument.layers[generatedObject.layerId];
-    if (!generatedLayer) throw new Error('The accepted generated layer is absent from canonical state.');
-    const acceptanceActivity = afterDocument.activity.at(-1);
-    expect(generatedObject).toMatchObject({ name: 'Generated image', createdBy: HUMAN_ACTOR.id, width: 192, height: 128, transform: { x: 64, y: 56, scaleX: 1, scaleY: 1 } });
-    expect(generatedLayer).toMatchObject({ name: 'Generated result', createdBy: HUMAN_ACTOR.id });
-    expect(acceptanceActivity).toMatchObject({ actor: HUMAN_ACTOR, label: 'Accept generated image', status: 'committed' });
-    expect(afterDocument.provenance).toHaveLength(1);
-    const generatedProvenance = afterDocument.provenance[0];
-    expect(generatedProvenance).toMatchObject({ assetId: generatedAsset.id, provider: 'stability', modelOrWorkflow: 'stable-image-core', seed: QA06_GENERATION_E2E_REQUEST.seed, sourceAssetIds: [QA06_GENERATION_E2E_SOURCE_ASSET_ID], maskAssetId: QA06_GENERATION_E2E_MASK_ASSET_ID });
-    expect(afterPng).toMatchObject({ available: true, width: 320, height: 240 });
-    const afterCanvasSha256 = visualHash(Buffer.from(afterPng.data, 'base64'));
-    expect(afterCanvasSha256).not.toBe(beforeCanvasSha256);
-    await page.getByRole('application', { name: /Illustration canvas/ }).screenshot({ path: acceptedScreenshotPath });
-    const canonicalAcceptedJob = await page.evaluate(async (jobId) => (await window.aidraw.bootstrap()).jobs.find((job) => job.id === jobId), allowedJobId);
-    expect(canonicalAcceptedJob).toMatchObject({ actor: client.actor, result: { acceptedOutputId: 'qa06-generated-fill-result' } });
-
-    const finalJobs = await call('job_manage', { action: 'list' });
-    const jobSummaries = finalJobs.jobs as Array<{ id: string; kind: string; status: string }>;
-    expect(jobSummaries.map(({ id, kind, status }) => ({ id, kind, status }))).toEqual([
-      { id: deniedJobId, kind: 'generation', status: 'cancelled' },
-      { id: timedJobId, kind: 'generation', status: 'cancelled' },
-      { id: cancelledJobId, kind: 'generation', status: 'cancelled' },
-      { id: allowedJobId, kind: 'generation', status: 'completed' },
-    ]);
-    expect(JSON.stringify(finalJobs)).not.toContain(QA06_GENERATION_E2E_REQUEST.prompt);
-    expect(JSON.stringify(finalJobs)).not.toContain('qa06-generated-fill-result');
-    expect(await access(providerCredentialsPath).then(() => true, () => false)).toBe(false);
-    expect(await access(trustSettingsPath).then(() => true, () => false)).toBe(false);
-    expect(await access(networkSentinelPath).then(() => true, () => false)).toBe(false);
-    for (const screenshotPath of [denialScreenshotPath, timeoutScreenshotPath, allowScreenshotPath, previewScreenshotPath, acceptedScreenshotPath]) expect(await access(screenshotPath).then(() => true, () => false)).toBe(true);
-    expect(applicationProcess?.pid).toBe(enginePid);
-
-    await call('session_manage', { action: 'leave' });
-    await quitIsolatedEngineGracefully();
-    expect(applicationProcess?.exitCode).toBe(0);
-    await redactOwnedConnection(connectionPath);
-    const redactedConnection = JSON.parse(await readFile(connectionPath, 'utf8')) as Record<string, unknown>;
-    expect(Object.prototype.hasOwnProperty.call(redactedConnection, 'token')).toBe(false);
-    expect(redactedConnection.credentialStatus).toBe('redacted-after-graceful-stop');
-    expect(JSON.stringify(redactedConnection)).not.toMatch(/Bearer\s|Authorization|"token"\s*:/i);
-
-    const evidence = {
-      package: { executable: packagedExecutable, enginePid },
-      actor: { id: client.actor.id, name: client.actor.name, color: client.actor.color },
-      attribution: {
-        requestingAgent: { id: client.actor.id, name: client.actor.name, color: client.actor.color },
-        acceptingHuman: { id: HUMAN_ACTOR.id, name: HUMAN_ACTOR.name, color: HUMAN_ACTOR.color },
-        generatedObjectCreatedBy: generatedObject.createdBy,
-        generatedLayerCreatedBy: generatedLayer.createdBy,
-        acceptanceTransactionId: acceptanceActivity?.transactionId,
-      },
-      approval: {
-        completeFields: ['Provider', 'Model / workflow', 'Mode', 'Prompt', 'Negative prompt', 'Source assets', 'Mask asset', 'Requested results', 'Potential paid requests', 'Size', 'Seed', 'Provider options'],
-        choices: ['deny', 'allow-once'],
-        expiryMs: 20_000,
-        denied: { jobId: deniedJobId, status: deniedResult.status, canonicalUnchanged: true },
-        timedOut: { jobId: timedJobId, status: timedResult.status, elapsedMs: timeoutElapsedMs, error: timedResult.error, canonicalUnchanged: true },
-        cancelled: { jobId: cancelledJobId, status: cancelledResult.status, boundedWaitMs: boundedWaitElapsedMs, canonicalUnchanged: true },
-        allowOnce: { jobId: allowedJobId, status: allowedResult.status },
-      },
-      document: {
-        id: afterDocument.id,
-        revisionBefore: beforeDocument.revision,
-        revisionAfter: afterDocument.revision,
-        beforeCanonicalSha256,
-        existingSourceObjectPreserved: true,
-        acceptedNonDestructively: true,
-        generatedAsset: { id: generatedAsset.id, byteLength: generatedAsset.byteLength, sha256: generatedAsset.sha256 },
-        provenance: { count: afterDocument.provenance.length, provider: generatedProvenance.provider, modelOrWorkflow: generatedProvenance.modelOrWorkflow, seed: generatedProvenance.seed },
-      },
-      visible: { beforeCanvasSha256, afterCanvasSha256, generatedPreviewShown: true, comparisonShown: true },
-      canonicalAgreement: { rendererMatchedMcp: true, acceptedOutputMatchedMock: true, publicJobSummariesRedacted: true },
-      mockProvider: { outputPath: mockOutputPath, auditPath: mockAuditPath, outputByteLength: mockOutputBytes.byteLength, outputSha256: visualHash(mockOutputBytes), invocationCount: mockAudit.invocationCount, transport: mockAudit.transport },
-      networkAndCost: { externalProviderRequests: mockAudit.externalProviderRequests, paidRequests: mockAudit.paidRequests, hostedKeyReceived: mockAudit.hostedKeyReceived, forbiddenRequestSentinelAbsent: true, providerCredentialFileAbsent: true },
-      cleanup: { graceful: true, exitCode: applicationProcess?.exitCode, credentialStatus: redactedConnection.credentialStatus },
-    };
-    const evidenceText = `${JSON.stringify(evidence, null, 2)}\n`;
-    expect(evidenceText).not.toMatch(/Bearer\s|Authorization|"token"\s*:/i);
-    await writeFile(evidencePath, evidenceText, 'utf8');
-    stoppedGracefully = true;
-  } catch (error) {
-    const diagnostic = Buffer.concat(applicationStderr).toString('utf8').trim();
-    regressionFailure = new Error(`QA-06 generated-fill packaged regression failed: ${error instanceof Error ? error.message : String(error)}${diagnostic ? `\n${diagnostic}` : ''}`);
-  } finally {
-    if (!stoppedGracefully && applicationProcess?.exitCode === null) {
-      try {
-        await quitIsolatedEngineGracefully();
-        await redactOwnedConnection(connectionPath);
-      } catch (error) {
-        const cleanupFailure = error instanceof Error ? error : new Error(String(error));
-        regressionFailure = regressionFailure
-          ? new Error(`${regressionFailure.message}\nGraceful cleanup also failed: ${cleanupFailure.message}`)
-          : cleanupFailure;
-      }
-    }
-  }
-  if (regressionFailure) throw regressionFailure;
-});
-
-test('QA-06-PALETTE closes an exact packaged generated-image indexed conversion lifecycle', async () => {
-  test.setTimeout(90_000);
-  const retainedRoot = resolve(process.cwd(), 'test-results', 'retained');
-  await mkdir(retainedRoot, { recursive: true });
-  const configuredProfile = process.env.AIDRAW_E2E_QA06_PIXEL_PALETTE_PROFILE?.trim();
-  let isolatedProfile: string;
-  if (configuredProfile) {
-    isolatedProfile = resolve(configuredProfile);
-    const retainedRelative = relative(retainedRoot, isolatedProfile);
-    if (!retainedRelative || retainedRelative.startsWith('..') || isAbsolute(retainedRelative) || !basename(isolatedProfile).startsWith(QA06_PIXEL_PALETTE_E2E_PROFILE_PREFIX)) {
-      throw new Error(`AIDRAW_E2E_QA06_PIXEL_PALETTE_PROFILE must name a new ${QA06_PIXEL_PALETTE_E2E_PROFILE_PREFIX}* directory inside test-results/retained.`);
-    }
-    if (await access(isolatedProfile).then(() => true, () => false)) throw new Error(`The exact QA-06 pixel-palette profile already exists: ${isolatedProfile}`);
-  } else isolatedProfile = await mkdtemp(join(retainedRoot, QA06_PIXEL_PALETTE_E2E_PROFILE_PREFIX));
-
-  const connectionPath = join(isolatedProfile, QA06_PIXEL_PALETTE_E2E_CONNECTION_FILE);
-  const mockOutputPath = join(isolatedProfile, QA06_PIXEL_PALETTE_E2E_OUTPUT_FILE);
-  const mockAuditPath = join(isolatedProfile, QA06_PIXEL_PALETTE_E2E_AUDIT_FILE);
-  const networkSentinelPath = join(isolatedProfile, QA06_PIXEL_PALETTE_E2E_NETWORK_SENTINEL_FILE);
-  const evidencePath = join(isolatedProfile, 'qa06-pixel-palette-evidence.json');
-  const settingsScreenshotPath = join(isolatedProfile, 'qa06-pixel-palette-settings.png');
-  const approvalScreenshotPath = join(isolatedProfile, 'qa06-pixel-palette-approval.png');
-  const previewScreenshotPath = join(isolatedProfile, 'qa06-pixel-palette-preview.png');
-  const acceptedScreenshotPath = join(isolatedProfile, 'qa06-pixel-palette-accepted.png');
-  const trustSettingsPath = join(isolatedProfile, 'trusted-folders.json');
-  const providerCredentialsPath = join(isolatedProfile, 'credentials', 'generation.json');
-  gracefulOnlyCleanup = true;
-  preserveProfileAfterTest = true;
-  let stoppedGracefully = false;
-  let regressionFailure: Error | undefined;
-
-  try {
-    for (const path of [connectionPath, mockOutputPath, mockAuditPath, networkSentinelPath, evidencePath, settingsScreenshotPath, approvalScreenshotPath, previewScreenshotPath, acceptedScreenshotPath, trustSettingsPath, providerCredentialsPath]) {
-      expect(await access(path).then(() => true, () => false)).toBe(false);
-    }
-    const page = await launch(isolatedProfile, {
-      environment: {
-        NODE_ENV: 'test',
-        AIDRAW_E2E_QA06_PIXEL_PALETTE_MOCK: '1',
-        AIDRAW_E2E_QA06_PIXEL_PALETTE_PROFILE: isolatedProfile,
-        AIDRAW_E2E_QA06_PIXEL_PALETTE_MOCK_OUTPUT_PATH: mockOutputPath,
-        AIDRAW_E2E_QA06_PIXEL_PALETTE_MOCK_AUDIT_PATH: mockAuditPath,
-        AIDRAW_E2E_QA06_PIXEL_PALETTE_NETWORK_SENTINEL_PATH: networkSentinelPath,
-      },
-      extraArguments: [`--write-mcp-connection=${connectionPath}`],
-    });
-    const enginePid = applicationProcess?.pid;
-    if (!enginePid) throw new Error('The isolated QA-06 pixel-palette package has no engine PID.');
-    expect(page.url()).toMatch(/^aidraw:\/\/app\//);
-    expect(await access(networkSentinelPath).then(() => true, () => false)).toBe(false);
-    expect(await access(providerCredentialsPath).then(() => true, () => false)).toBe(false);
-
-    await page.getByTitle('New document').click();
-    const newDocumentDialog = page.getByRole('dialog', { name: 'New document' });
-    await newDocumentDialog.getByRole('radio', { name: /Pixel Sprite/ }).click();
-    await newDocumentDialog.getByLabel('Document name').fill(QA06_PIXEL_PALETTE_E2E_DOCUMENT_NAME);
-    await newDocumentDialog.getByLabel('Document width').fill('16');
-    await newDocumentDialog.getByLabel('Document height').fill('16');
-    await newDocumentDialog.getByRole('button', { name: 'Create Pixel Sprite' }).click();
-    await expect(page.locator('.status-mode').filter({ hasText: /^Pixel Art$/ })).toBeVisible();
-
-    const conversionEditor = page.locator('.conversion-editor');
-    await expect(conversionEditor.getByText('Generated-image conversion', { exact: true })).toBeVisible();
-    await conversionEditor.getByLabel('Dithering').selectOption('bayer-4x4');
-    const alphaThreshold = conversionEditor.getByRole('slider', { name: /Alpha threshold/ });
-    await alphaThreshold.fill('60');
-    await expect(conversionEditor.getByLabel('Dithering')).toHaveValue('bayer-4x4');
-    await expect(alphaThreshold).toHaveValue('60');
-    await conversionEditor.screenshot({ path: settingsScreenshotPath });
-
-    const initialDocument = await page.evaluate(async () => (await window.aidraw.bootstrap()).activeDocument);
-    if (!initialDocument || initialDocument.kind !== 'pixel') throw new Error('The QA-06 pixel-palette document is unavailable.');
-    const initialSprite = initialDocument.pixelAssets[initialDocument.activeAssetId];
-    if (initialSprite.type !== 'sprite' || initialSprite.width !== 16 || initialSprite.height !== 16 || initialSprite.frameIds.length !== 1) throw new Error('The QA-06 one-frame 16×16 sprite is unavailable.');
-    expect(initialDocument).toMatchObject({ name: QA06_PIXEL_PALETTE_E2E_DOCUMENT_NAME, standaloneType: 'sprite', conversionDefaults: { resample: 'area', paletteMetric: 'oklab', dithering: 'bayer-4x4', alphaThreshold: 0.6 } });
-
-    const credentials = await waitForMcpConnection(connectionPath);
-    expect(credentials.trustedFolders).toEqual([]);
-    const client = await connectMcpTestClient(credentials.url, credentials.token, 'qa06-pixel-palette', {
-      name: 'QA-06 pixel palette agent',
-      color: '#3978b8',
-      documentId: initialDocument.id,
-    });
-    let requestId = 3;
-    const call = (name: string, args: Record<string, unknown>) => callMcpTool(credentials.url, client.headers, requestId++, name, args);
-    const beforeObserved = await call('canvas_observe', { documentId: initialDocument.id, includePng: true, scale: 8, background: 'transparent' });
-    const beforeDocument = beforeObserved.document as PixelDocument;
-    const beforePng = beforeObserved.png as { available: boolean; data: string; width: number; height: number };
-    expect(await page.evaluate(async () => (await window.aidraw.bootstrap()).activeDocument)).toEqual(beforeDocument);
-    expect(beforePng).toMatchObject({ available: true, width: 128, height: 128 });
-    const beforeSprite = beforeDocument.pixelAssets[beforeDocument.activeAssetId];
-    if (beforeSprite.type !== 'sprite') throw new Error('The canonical pre-conversion sprite is unavailable.');
-    const beforeLayerIds = [...beforeSprite.layerIds];
-    const beforeCels = structuredClone(beforeSprite.cels);
-    const beforePalette = structuredClone(beforeDocument.palette);
-    const beforeCanvasSha256 = visualHash(Buffer.from(beforePng.data, 'base64'));
-
-    const generationArguments = { documentId: initialDocument.id, ...structuredClone(QA06_PIXEL_PALETTE_E2E_REQUEST) };
-    const started = await call('generation_start', generationArguments);
-    expect(started).toMatchObject({ status: 'waiting-for-user', expiresAt: expect.any(String) });
-    const jobId = String(started.jobId);
-    await page.getByRole('tab', { name: 'Activity', exact: true }).click();
-    const approvalCard = page.locator('.approval-card').filter({ hasText: 'Generate imagery' });
-    await expect(approvalCard).toBeVisible();
-    await expect(approvalCard.locator('.approval-heading small')).toHaveText('QA-06 pixel palette agent requests approval');
-    const approvalFields = await approvalCard.locator('.approval-review > div').evaluateAll((rows) => rows.map((row) => [row.querySelector('dt')?.textContent?.trim(), row.querySelector('dd')?.textContent?.trim()]));
-    expect(approvalFields).toEqual([
-      ['Provider', 'stability'],
-      ['Model / workflow', 'Stability generation API'],
-      ['Mode', 'create'],
-      ['Prompt', QA06_PIXEL_PALETTE_E2E_REQUEST.prompt],
-      ['Negative prompt', QA06_PIXEL_PALETTE_E2E_REQUEST.negativePrompt],
-      ['Source assets', 'None'],
-      ['Requested results', '1'],
-      ['Potential paid requests', '1'],
-      ['Size', JSON.stringify(QA06_PIXEL_PALETTE_E2E_REQUEST.size)],
-      ['Seed', String(QA06_PIXEL_PALETTE_E2E_REQUEST.seed)],
-      ['Provider options', JSON.stringify(QA06_PIXEL_PALETTE_E2E_REQUEST.providerOptions)],
-    ]);
-    await expect(approvalCard.locator('.generation-trust-note')).toHaveText('This approval authorizes this exact provider request once. It does not trust future prompts, providers, source assets, or paid requests.');
-    expect((await approvalCard.locator('.approval-actions button').allTextContents()).map((value) => value.trim())).toEqual(['Deny', 'Allow once']);
-    await approvalCard.screenshot({ path: approvalScreenshotPath });
-    const publicWaiting = await call('job_manage', { action: 'inspect', jobId });
-    expect(publicWaiting).toMatchObject({ id: jobId, actor: client.actor, status: 'waiting-for-user', dependency: { kind: 'user-approval', permittedDecisions: ['allow-once', 'deny'] } });
-    expect(publicWaiting).not.toHaveProperty('approval'); expect(publicWaiting).not.toHaveProperty('result');
-    expect(JSON.stringify(publicWaiting)).not.toContain(QA06_PIXEL_PALETTE_E2E_REQUEST.prompt);
-
-    await approvalCard.getByRole('button', { name: 'Allow once', exact: true }).click();
-    const completed = await call('job_manage', { action: 'wait', jobId, timeoutMs: 10_000 });
-    expect(completed).toMatchObject({ id: jobId, kind: 'generation', status: 'completed', actor: client.actor, progress: 1 });
-    expect(completed).not.toHaveProperty('result');
-    expect(await access(mockOutputPath).then(() => true, () => false)).toBe(true);
-    expect(await access(mockAuditPath).then(() => true, () => false)).toBe(true);
-    expect(await access(networkSentinelPath).then(() => true, () => false)).toBe(false);
-    const mockOutputBytes = await readFile(mockOutputPath);
-    const mockAuditText = await readFile(mockAuditPath, 'utf8');
-    const mockAudit = JSON.parse(mockAuditText) as { invocationCount: number; transport: string; output: { byteLength: number; sha256: string; width: number; height: number }; hostedKeyReceived: boolean; externalProviderRequests: number; paidRequests: number };
-    expect(mockAudit).toMatchObject({ invocationCount: 1, transport: 'in-process-deterministic-runner', output: { byteLength: mockOutputBytes.byteLength, sha256: visualHash(mockOutputBytes), width: 32, height: 32 }, hostedKeyReceived: false, externalProviderRequests: 0, paidRequests: 0 });
-    expect(mockAuditText).not.toMatch(/Bearer\s|Authorization|"token"\s*:/i);
-
-    const canonicalCompleted = await page.evaluate(async (id) => (await window.aidraw.bootstrap()).jobs.find((job) => job.id === id), jobId);
-    expect(canonicalCompleted).toMatchObject({ id: jobId, status: 'completed', actor: client.actor, result: { request: generationArguments, outputs: [{ id: 'qa06-pixel-palette-result', width: 32, height: 32, seed: QA06_PIXEL_PALETTE_E2E_REQUEST.seed }] } });
-    const completedOutput = (canonicalCompleted?.result as { outputs?: Array<{ data: string }> } | undefined)?.outputs?.[0];
-    if (!completedOutput) throw new Error('The canonical pixel-palette output is unavailable in the isolated renderer/service snapshot.');
-    expect(Buffer.from(completedOutput.data, 'base64')).toEqual(mockOutputBytes);
-
-    await page.getByRole('tab', { name: 'Generate', exact: true }).click();
-    await expect(page.locator('.pixel-conversion-note')).toContainText(/Pixel conversion enabled\s*Area downsample · OKLab match · bayer-4x4/);
-    const resultCard = page.locator('.result-card').filter({ has: page.getByRole('img', { name: 'Generated result' }) });
-    await expect(resultCard).toBeVisible();
-    await resultCard.getByRole('button', { name: 'Compare', exact: true }).click();
-    const compareDialog = page.getByRole('dialog', { name: 'Compare generated result' });
-    await expect(compareDialog.getByRole('img', { name: 'Source before generation' })).toBeVisible();
-    await expect(compareDialog.getByRole('img', { name: 'Generated result' })).toBeVisible();
-    await compareDialog.screenshot({ path: previewScreenshotPath });
-    await compareDialog.getByRole('button', { name: 'Accept as new layer/cel', exact: true }).click();
-    await expect(compareDialog).toHaveCount(0);
-
-    const afterObserved = await call('canvas_observe', { documentId: initialDocument.id, includePng: true, scale: 8, background: 'transparent' });
-    const afterDocument = afterObserved.document as PixelDocument;
-    const afterPng = afterObserved.png as { available: boolean; data: string; width: number; height: number };
-    expect(await page.evaluate(async () => (await window.aidraw.bootstrap()).activeDocument)).toEqual(afterDocument);
-    expect(afterDocument.revision).toBe(beforeDocument.revision + 1);
-    expect(afterDocument.palette).toEqual(beforePalette);
-    expect(afterDocument.conversionDefaults).toEqual({ resample: 'area', paletteMetric: 'oklab', dithering: 'bayer-4x4', alphaThreshold: 0.6 });
-    expect(afterDocument.activeAssetId).toBe(beforeDocument.activeAssetId);
-    const afterSprite = afterDocument.pixelAssets[afterDocument.activeAssetId];
-    if (afterSprite.type !== 'sprite') throw new Error('The canonical converted sprite is unavailable.');
-    expect(afterSprite.frameIds).toEqual(beforeSprite.frameIds);
-    expect(afterSprite.layerIds).toHaveLength(beforeLayerIds.length + 1);
-    for (const [celId, cel] of Object.entries(beforeCels)) expect(afterSprite.cels[celId]).toEqual(cel);
-    const generatedLayerId = afterSprite.layerIds.find((id) => !beforeLayerIds.includes(id));
-    if (!generatedLayerId) throw new Error('The generated indexed layer is unavailable.');
-    const generatedLayer = afterSprite.layers[generatedLayerId];
-    const generatedCels = Object.values(afterSprite.cels).filter((cel) => cel.layerId === generatedLayerId);
-    expect(generatedLayer).toMatchObject({ name: 'Generated result', createdBy: HUMAN_ACTOR.id, type: 'pixel' });
-    expect(generatedCels).toHaveLength(1);
-    expect(generatedCels[0]).toMatchObject({ frameId: afterSprite.frameIds[0], createdBy: HUMAN_ACTOR.id });
-    const actualIndices: number[] = [];
-    const expectedIndices: number[] = [];
-    for (let y = 0; y < 16; y += 1) for (let x = 0; x < 16; x += 1) {
-      actualIndices.push(readPixel(generatedCels[0], x, y));
-      expectedIndices.push(qa06PixelPaletteExpectedIndex(x, y));
-    }
-    expect(actualIndices).toEqual(expectedIndices);
-    const indexCounts = actualIndices.reduce<Record<number, number>>((counts, index) => ({ ...counts, [index]: (counts[index] ?? 0) + 1 }), {});
-    expect(Object.values(indexCounts).reduce((total, count) => total + count, 0)).toBe(256);
-    expect(Object.keys(indexCounts).map(Number).sort((left, right) => left - right)).toEqual([0, 1, 4, 7, 9, 15]);
-    const generatedAsset = Object.values(afterDocument.assets).find((asset) => asset.source === 'generated');
-    if (!generatedAsset) throw new Error('The retained generated source asset is unavailable.');
-    expect(generatedAsset).toMatchObject({ mimeType: 'image/png', byteLength: mockOutputBytes.byteLength, sha256: visualHash(mockOutputBytes) });
-    expect(afterDocument.provenance).toEqual([expect.objectContaining({ assetId: generatedAsset.id, provider: 'stability', modelOrWorkflow: 'stable-image-core', seed: QA06_PIXEL_PALETTE_E2E_REQUEST.seed, sourceAssetIds: [], conversion: { resample: 'area', paletteMetric: 'oklab', dithering: 'bayer-4x4', alphaThreshold: 0.6, width: 16, height: 16 } })]);
-    const acceptanceActivity = afterDocument.activity.at(-1);
-    expect(acceptanceActivity).toMatchObject({ actor: HUMAN_ACTOR, label: 'Accept generated image into palette', status: 'committed' });
-    expect(afterPng).toMatchObject({ available: true, width: 128, height: 128 });
-    const afterCanvasSha256 = visualHash(Buffer.from(afterPng.data, 'base64'));
-    expect(afterCanvasSha256).not.toBe(beforeCanvasSha256);
-    await page.getByRole('application', { name: /Pixel-art canvas/ }).screenshot({ path: acceptedScreenshotPath });
-    const canonicalAcceptedJob = await page.evaluate(async (id) => (await window.aidraw.bootstrap()).jobs.find((job) => job.id === id), jobId);
-    expect(canonicalAcceptedJob).toMatchObject({ actor: client.actor, result: { acceptedOutputId: 'qa06-pixel-palette-result' } });
-    const publicFinal = await call('job_manage', { action: 'list' });
-    expect(publicFinal.jobs).toEqual([expect.objectContaining({ id: jobId, kind: 'generation', status: 'completed', actor: client.actor })]);
-    expect(JSON.stringify(publicFinal)).not.toContain(QA06_PIXEL_PALETTE_E2E_REQUEST.prompt);
-    expect(JSON.stringify(publicFinal)).not.toContain('qa06-pixel-palette-result');
-    expect(await access(providerCredentialsPath).then(() => true, () => false)).toBe(false);
-    expect(await access(trustSettingsPath).then(() => true, () => false)).toBe(false);
-    expect(await access(networkSentinelPath).then(() => true, () => false)).toBe(false);
-    for (const screenshotPath of [settingsScreenshotPath, approvalScreenshotPath, previewScreenshotPath, acceptedScreenshotPath]) expect(await access(screenshotPath).then(() => true, () => false)).toBe(true);
-    expect(applicationProcess?.pid).toBe(enginePid);
-
-    await call('session_manage', { action: 'leave' });
-    await quitIsolatedEngineGracefully();
-    expect(applicationProcess?.exitCode).toBe(0);
-    await redactOwnedConnection(connectionPath);
-    const redactedConnection = JSON.parse(await readFile(connectionPath, 'utf8')) as Record<string, unknown>;
-    expect(Object.prototype.hasOwnProperty.call(redactedConnection, 'token')).toBe(false);
-    expect(redactedConnection.credentialStatus).toBe('redacted-after-graceful-stop');
-    expect(JSON.stringify(redactedConnection)).not.toMatch(/Bearer\s|Authorization|"token"\s*:/i);
-
-    const evidence = {
-      package: { executable: packagedExecutable, enginePid },
-      actor: { id: client.actor.id, name: client.actor.name, color: client.actor.color },
-      approval: { actor: client.actor.name, completePayload: true, choices: ['deny', 'allow-once'], allowedOnce: true },
-      document: {
-        id: afterDocument.id,
-        revisionBefore: beforeDocument.revision,
-        revisionAfter: afterDocument.revision,
-        activeSpriteId: afterSprite.id,
-        frameCount: afterSprite.frameIds.length,
-        originalLayersPreserved: true,
-        generatedLayerId,
-        generatedCelId: generatedCels[0].id,
-        palettePreserved: true,
-        indexCounts,
-        conversion: afterDocument.provenance[0].conversion,
-        generatedSource: { byteLength: generatedAsset.byteLength, sha256: generatedAsset.sha256 },
-      },
-      attribution: { requestingAgent: client.actor, acceptingHuman: HUMAN_ACTOR, generatedLayerCreatedBy: generatedLayer.createdBy, generatedCelCreatedBy: generatedCels[0].createdBy, acceptanceTransactionId: acceptanceActivity?.transactionId },
-      canonicalAgreement: { rendererMatchedMcp: true, convertedIndicesMatchedFixture: true, acceptedOutputMatchedMock: true, publicJobSummariesRedacted: true },
-      visible: { settingsShown: true, approvalShown: true, comparisonShown: true, acceptedCanvasShown: true, beforeCanvasSha256, afterCanvasSha256 },
-      mockProvider: { outputPath: mockOutputPath, auditPath: mockAuditPath, outputByteLength: mockOutputBytes.byteLength, outputSha256: visualHash(mockOutputBytes), invocationCount: mockAudit.invocationCount, transport: mockAudit.transport },
-      networkAndCost: { externalProviderRequests: mockAudit.externalProviderRequests, paidRequests: mockAudit.paidRequests, hostedKeyReceived: mockAudit.hostedKeyReceived, forbiddenRequestSentinelAbsent: true, providerCredentialFileAbsent: true },
-      scope: { singleFramePolicyOnly: true, multiFrameAcceptanceExercised: false, paletteFileInterchangeExercised: false },
-      cleanup: { graceful: true, exitCode: applicationProcess?.exitCode, credentialStatus: redactedConnection.credentialStatus },
-    };
-    const evidenceText = `${JSON.stringify(evidence, null, 2)}\n`;
-    expect(evidenceText).not.toMatch(/Bearer\s|Authorization|"token"\s*:/i);
-    await writeFile(evidencePath, evidenceText, 'utf8');
-    stoppedGracefully = true;
-  } catch (error) {
-    const diagnostic = Buffer.concat(applicationStderr).toString('utf8').trim();
-    regressionFailure = new Error(`QA-06 pixel-palette packaged regression failed: ${error instanceof Error ? error.message : String(error)}${diagnostic ? `\n${diagnostic}` : ''}`);
-  } finally {
-    if (!stoppedGracefully && applicationProcess?.exitCode === null) {
-      try {
-        await quitIsolatedEngineGracefully();
-        await redactOwnedConnection(connectionPath);
-      } catch (error) {
-        const cleanupFailure = error instanceof Error ? error : new Error(String(error));
-        regressionFailure = regressionFailure
-          ? new Error(`${regressionFailure.message}\nGraceful cleanup also failed: ${cleanupFailure.message}`)
           : cleanupFailure;
       }
     }
@@ -4474,7 +3728,7 @@ test('UX-11-BATCH closes an exact packaged multi-document Save All, export, and 
   const exportDirectory = join(isolatedProfile, UX11_BATCH_E2E_EXPORT_DIRECTORY);
   const networkSentinelPath = join(isolatedProfile, UX11_BATCH_E2E_NETWORK_SENTINEL_FILE);
   const trustSettingsPath = join(isolatedProfile, 'trusted-folders.json');
-  const providerCredentialsPath = join(isolatedProfile, 'credentials', 'generation.json');
+  const retiredProviderStorePath = join(isolatedProfile, 'credentials', 'generation.json');
   const screenshotPaths = UX11_BATCH_E2E_SCREENSHOTS.map((name) => join(isolatedProfile, name));
   gracefulOnlyCleanup = true;
   preserveProfileAfterTest = true;
@@ -4482,7 +3736,7 @@ test('UX-11-BATCH closes an exact packaged multi-document Save All, export, and 
   let regressionFailure: Error | undefined;
 
   try {
-    for (const path of [connectionPath, auditPath, evidencePath, saveDirectory, exportDirectory, networkSentinelPath, trustSettingsPath, providerCredentialsPath, ...screenshotPaths]) {
+    for (const path of [connectionPath, auditPath, evidencePath, saveDirectory, exportDirectory, networkSentinelPath, trustSettingsPath, retiredProviderStorePath, ...screenshotPaths]) {
       expect(await access(path).then(() => true, () => false)).toBe(false);
     }
     const page = await launch(isolatedProfile, {
@@ -4495,11 +3749,11 @@ test('UX-11-BATCH closes an exact packaged multi-document Save All, export, and 
     });
     const enginePid = applicationProcess?.pid;
     if (!enginePid) throw new Error('The isolated UX-11 package has no engine PID.');
-    const rawConnection = JSON.parse(await readFile(connectionPath, 'utf8')) as { pid?: number };
+    const rawConnection = await readMcpConnectionHandoff(connectionPath);
     expect(rawConnection.pid).toBe(enginePid);
     expect(await access(networkSentinelPath).then(() => true, () => false)).toBe(false);
     expect(await access(trustSettingsPath).then(() => true, () => false)).toBe(false);
-    expect(await access(providerCredentialsPath).then(() => true, () => false)).toBe(false);
+    expect(await access(retiredProviderStorePath).then(() => true, () => false)).toBe(false);
 
     const setup = await page.evaluate(async ({ sharedName, failureName }) => {
       const initial = await window.aidraw.bootstrap();
@@ -4703,7 +3957,7 @@ test('UX-11-BATCH closes an exact packaged multi-document Save All, export, and 
     }
 
     const auditText = await readFile(auditPath, 'utf8');
-    const audit = JSON.parse(auditText) as { events: Array<{ kind: string; decision: string; title: string; message?: string; buttons?: string[] }>; externalRequests: number; providerRequests: number; paidRequests: number };
+    const audit = JSON.parse(auditText) as { events: Array<{ kind: string; decision: string; title: string; message?: string; buttons?: string[] }>; externalRequests: number };
     expect(audit.events.map((event) => [event.kind, event.decision])).toEqual([
       ['save-all-directory', 'cancel'],
       ['save-all-directory', 'choose-directory'],
@@ -4713,10 +3967,10 @@ test('UX-11-BATCH closes an exact packaged multi-document Save All, export, and 
       ['close-all-confirmation', 'save-all-and-close'],
     ]);
     expect(audit.events.slice(-2).every((event) => event.title === 'Close all drawings' && event.message === '3 drawings have unsaved changes.' && JSON.stringify(event.buttons) === JSON.stringify(['Save all and close', 'Cancel', 'Discard all']))).toBe(true);
-    expect(audit).toMatchObject({ externalRequests: 0, providerRequests: 0, paidRequests: 0 });
+    expect(audit).toMatchObject({ externalRequests: 0 });
     expect(auditText).not.toMatch(/Bearer\s|Authorization|"token"\s*:/i);
     expect(await access(networkSentinelPath).then(() => true, () => false)).toBe(false);
-    expect(await access(providerCredentialsPath).then(() => true, () => false)).toBe(false);
+    expect(await access(retiredProviderStorePath).then(() => true, () => false)).toBe(false);
     expect(await access(trustSettingsPath).then(() => true, () => false)).toBe(false);
     expect(await page.evaluate(async () => (await window.aidraw.bootstrap()).jobs)).toEqual([]);
     for (const screenshotPath of screenshotPaths) expect(await access(screenshotPath).then(() => true, () => false)).toBe(true);
@@ -4728,7 +3982,7 @@ test('UX-11-BATCH closes an exact packaged multi-document Save All, export, and 
     await redactOwnedConnection(connectionPath);
     const redactedConnection = JSON.parse(await readFile(connectionPath, 'utf8')) as Record<string, unknown>;
     expect(Object.prototype.hasOwnProperty.call(redactedConnection, 'token')).toBe(false);
-    expect(redactedConnection.credentialStatus).toBe('redacted-after-graceful-stop');
+    expect(redactedConnection.authorityStatus).toBe('redacted-after-graceful-stop');
     const packageSize = (await stat(packagedExecutable)).size;
     const evidence = {
       version: 1,
@@ -4747,8 +4001,8 @@ test('UX-11-BATCH closes an exact packaged multi-document Save All, export, and 
       closeAll: { choices: ['Save all and close', 'Cancel', 'Discard all'], cancelledOnce: true, statuses: ['closed', 'closed', 'closed'], replacementDocumentId: afterClose.activeDocumentId },
       canonicalAgreement: { rendererMatchedAuthenticatedMcpBeforeSave: true, afterSave: true, beforeExport: true, afterCloseList: true, savedFilesMatchedCanonicalRevisions: true },
       filesystem: { saveDirectory, exportDirectory, onlyDeclaredSaveTargets: true, onlyDeclaredExportTargets: true },
-      networkAndCost: { externalRequests: 0, providerRequests: 0, paidRequests: 0, forbiddenRequestSentinelAbsent: true, providerCredentialFileAbsent: true },
-      cleanup: { graceful: true, exitCode: applicationProcess?.exitCode, credentialStatus: redactedConnection.credentialStatus },
+      network: { externalRequests: 0, forbiddenRequestSentinelAbsent: true, retiredProviderStoreAbsent: true },
+      cleanup: { graceful: true, exitCode: applicationProcess?.exitCode, authorityStatus: redactedConnection.authorityStatus },
     };
     const evidenceText = `${JSON.stringify(evidence, null, 2)}\n`;
     expect(evidenceText).not.toMatch(/Bearer\s|Authorization|"token"\s*:/i);
@@ -4798,18 +4052,15 @@ test('keeps the authenticated engine working with no editor window and replays i
       catch { return undefined; }
     },
   });
-  const healthUrl = await waitForHealth(profilePath);
   const credentials = await waitForMcpConnection(connectionPath);
+  const healthUrl = await waitForHealth(profilePath, credentials.token);
   expect(credentials.trustedFolders).toContain(await canonicalPackagedE2ePath(agentOutputPath));
-  expect(await (await fetch(healthUrl)).json()).toMatchObject({ status: 'ok', uiRequired: false });
+  expect(await (await fetch(healthUrl, { headers: { authorization: `Bearer ${credentials.token}` } })).json()).toMatchObject({ status: 'ok', uiRequired: false });
   expect(browser.contexts()[0]?.pages().some((page) => page.url().startsWith('aidraw://app/'))).toBe(false);
   await expect.poll(() => applicationProcess?.exitCode).toBe(null);
-  expect((await fetch(healthUrl)).ok).toBe(true);
+  expect((await fetch(healthUrl, { headers: { authorization: `Bearer ${credentials.token}` } })).ok).toBe(true);
 
-  const initialize = await fetch(credentials.url, { method: 'POST', headers: { authorization: `Bearer ${credentials.token}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2026-07-28', capabilities: {}, clientInfo: { name: 'headless-e2e', version: '1.0' } } }) });
-  const sessionId = initialize.headers.get('mcp-session-id'); if (!sessionId) throw new Error('Headless MCP session missing.');
-  const headers = { authorization: `Bearer ${credentials.token}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json', 'mcp-session-id': sessionId };
-  await fetch(credentials.url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) });
+  const { headers } = await initializeDirectMcp(credentials, { clientInfo: { name: 'headless-e2e', version: '1.0' } });
   await fetch(credentials.url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'session_manage', arguments: { action: 'join', name: 'Headless test agent', documentId: credentials.activeDocumentId } } }) });
   const applied = await fetch(credentials.url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'canvas_apply', arguments: { documentId: credentials.activeDocumentId, clientOperationId: 'closed-window-rename', label: 'Closed-window agent edit', operations: [{ kind: 'document.rename', name: 'Headless result' }], playback: { mode: 'animated', speed: 1 } } } }) });
   expect(applied.ok).toBe(true);
@@ -4839,359 +4090,10 @@ test('keeps the authenticated engine working with no editor window and replays i
   await expect(reopened.getByTitle('Replay durable agent trace')).toBeVisible();
   await reopened.close();
   await expect.poll(() => browser?.contexts()[0]?.pages().some((page) => page.url().startsWith('aidraw://app/'))).toBe(false);
-  expect((await fetch(healthUrl)).ok).toBe(true);
+  expect((await fetch(healthUrl, { headers: { authorization: `Bearer ${credentials.token}` } })).ok).toBe(true);
   await signalExistingEngine('--show');
   const reattached = await waitForRendererPage();
   await expect(reattached.getByText('Headless result', { exact: true }).first()).toBeVisible();
   await signalExistingEngine('--quit-engine');
   await expect.poll(() => applicationProcess?.exitCode, { timeout: 8_000 }).not.toBe(null);
-});
-
-test('FND-09-GENERATION-NORMALIZATION exact package preserves previews and accepts only a bounded derivative', async () => {
-  test.setTimeout(90_000);
-  const retainedRoot = resolve(process.cwd(), 'test-results', 'retained');
-  const configuredProfile = process.env.AIDRAW_E2E_FND09_NORMALIZATION_PROFILE?.trim();
-  if (!configuredProfile) throw new Error('AIDRAW_E2E_FND09_NORMALIZATION_PROFILE must name the fresh retained profile authorized for this exact run.');
-  const isolatedProfile = resolve(configuredProfile);
-  const retainedRelative = relative(retainedRoot, isolatedProfile);
-  if (!retainedRelative || retainedRelative.startsWith('..') || isAbsolute(retainedRelative) || dirname(isolatedProfile) !== retainedRoot || !basename(isolatedProfile).startsWith(FND09_GENERATION_NORMALIZATION_E2E_PROFILE_PREFIX)) {
-    throw new Error(`AIDRAW_E2E_FND09_NORMALIZATION_PROFILE must be a new ${FND09_GENERATION_NORMALIZATION_E2E_PROFILE_PREFIX}* direct child of test-results/retained.`);
-  }
-  if (await access(isolatedProfile).then(() => true, () => false)) throw new Error(`The exact FND-09 normalization profile already exists: ${isolatedProfile}`);
-
-  const expectedExecutableHash = process.env.AIDRAW_E2E_FND09_NORMALIZATION_EXE_SHA256?.toUpperCase();
-  const expectedAsarHash = process.env.AIDRAW_E2E_FND09_NORMALIZATION_ASAR_SHA256?.toUpperCase();
-  if (!expectedExecutableHash || !expectedAsarHash) throw new Error('Exact FND-09 normalization executable and ASAR SHA-256 declarations are required.');
-  const executableHash = visualHash(await readFile(packagedExecutable)).toUpperCase();
-  const asarHash = visualHash(await readFile(packagedAsar)).toUpperCase();
-  expect(executableHash).toBe(expectedExecutableHash);
-  expect(asarHash).toBe(expectedAsarHash);
-
-  const connectionPath = join(isolatedProfile, FND09_GENERATION_NORMALIZATION_E2E_CONNECTION_FILE);
-  const normalizableOutputPath = join(isolatedProfile, FND09_GENERATION_NORMALIZATION_E2E_NORMALIZABLE_OUTPUT_FILE);
-  const previewOnlyOutputPath = join(isolatedProfile, FND09_GENERATION_NORMALIZATION_E2E_PREVIEW_ONLY_OUTPUT_FILE);
-  const auditPath = join(isolatedProfile, FND09_GENERATION_NORMALIZATION_E2E_AUDIT_FILE);
-  const readyProbePath = join(isolatedProfile, FND09_GENERATION_NORMALIZATION_E2E_READY_PROBE_FILE);
-  const previewOnlyProbePath = join(isolatedProfile, FND09_GENERATION_NORMALIZATION_E2E_PREVIEW_ONLY_PROBE_FILE);
-  const networkSentinelPath = join(isolatedProfile, FND09_GENERATION_NORMALIZATION_E2E_NETWORK_SENTINEL_FILE);
-  const evidencePath = join(isolatedProfile, 'fnd09-generation-normalization-evidence.json');
-  const approvalScreenshotPath = join(isolatedProfile, 'fnd09-generation-normalization-approval.png');
-  const previewsScreenshotPath = join(isolatedProfile, 'fnd09-generation-normalization-previews.png');
-  const previewOnlyScreenshotPath = join(isolatedProfile, 'fnd09-generation-normalization-preview-only.png');
-  const successScreenshotPath = join(isolatedProfile, 'fnd09-generation-normalization-success.png');
-  const acceptedScreenshotPath = join(isolatedProfile, 'fnd09-generation-normalization-accepted.png');
-  const tokenPath = join(isolatedProfile, 'credentials', 'mcp-token.json');
-  const trustSettingsPath = join(isolatedProfile, 'trusted-folders.json');
-  const providerCredentialsPath = join(isolatedProfile, 'credentials', 'generation.json');
-  const declaredArtifacts = [
-    connectionPath, normalizableOutputPath, previewOnlyOutputPath, auditPath, readyProbePath, previewOnlyProbePath,
-    evidencePath, approvalScreenshotPath, previewsScreenshotPath, previewOnlyScreenshotPath, successScreenshotPath,
-    acceptedScreenshotPath, tokenPath, trustSettingsPath, providerCredentialsPath, networkSentinelPath,
-  ];
-  for (const path of declaredArtifacts) expect(await access(path).then(() => true, () => false), `${path} must be absent before launch`).toBe(false);
-
-  gracefulOnlyCleanup = true;
-  preserveProfileAfterTest = true;
-  let stoppedGracefully = false;
-  let regressionFailure: Error | undefined;
-
-  try {
-    const page = await launch(isolatedProfile, {
-      environment: {
-        NODE_ENV: 'test',
-        AIDRAW_E2E_GENERATION_NORMALIZATION: '1',
-        AIDRAW_E2E_FND09_NORMALIZATION_PROFILE: isolatedProfile,
-        AIDRAW_E2E_FND09_NORMALIZATION_CONNECTION_PATH: connectionPath,
-        AIDRAW_E2E_FND09_NORMALIZATION_NORMALIZABLE_OUTPUT_PATH: normalizableOutputPath,
-        AIDRAW_E2E_FND09_NORMALIZATION_PREVIEW_ONLY_OUTPUT_PATH: previewOnlyOutputPath,
-        AIDRAW_E2E_FND09_NORMALIZATION_AUDIT_PATH: auditPath,
-        AIDRAW_E2E_FND09_NORMALIZATION_READY_PROBE_PATH: readyProbePath,
-        AIDRAW_E2E_FND09_NORMALIZATION_PREVIEW_ONLY_PROBE_PATH: previewOnlyProbePath,
-        AIDRAW_E2E_FND09_NORMALIZATION_NETWORK_SENTINEL_PATH: networkSentinelPath,
-      },
-      extraArguments: [
-        '--disable-background-networking', '--disable-component-update', '--disable-domain-reliability', '--disable-sync', '--no-pings',
-        `--write-mcp-connection=${connectionPath}`,
-      ],
-    });
-    const enginePid = applicationProcess?.pid;
-    if (!enginePid) throw new Error('The isolated FND-09 normalization package has no engine PID.');
-
-    await page.getByTitle('New document').click();
-    const newDocumentDialog = page.getByRole('dialog', { name: 'New document' });
-    await newDocumentDialog.getByRole('radio', { name: /Illustration/ }).click();
-    await newDocumentDialog.getByLabel('Document name').fill(FND09_GENERATION_NORMALIZATION_E2E_DOCUMENT_NAME);
-    await newDocumentDialog.getByLabel('Document width').fill('320');
-    await newDocumentDialog.getByLabel('Document height').fill('240');
-    await newDocumentDialog.getByRole('button', { name: 'Create Illustration' }).click();
-    const initialDocument = await page.evaluate(async () => (await window.aidraw.bootstrap()).activeDocument);
-    if (!initialDocument || initialDocument.kind !== 'illustration') throw new Error('The FND-09 normalization illustration is unavailable.');
-    expect(initialDocument).toMatchObject({ name: FND09_GENERATION_NORMALIZATION_E2E_DOCUMENT_NAME, artboard: { width: 320, height: 240 } });
-
-    const credentials = await waitForMcpConnection(connectionPath);
-    expect(credentials.trustedFolders).toEqual([]);
-    const client = await connectMcpTestClient(credentials.url, credentials.token, 'fnd09-generation-normalization', {
-      name: 'FND-09 normalization agent', color: '#7a4fbe', documentId: initialDocument.id,
-    });
-    let requestId = 3;
-    const call = (name: string, args: Record<string, unknown>) => callMcpTool(credentials.url, client.headers, requestId++, name, args);
-    const request = { documentId: initialDocument.id, ...structuredClone(FND09_GENERATION_NORMALIZATION_E2E_REQUEST) };
-    const started = await call('generation_start', request);
-    expect(started).toMatchObject({ status: 'waiting-for-user', jobId: expect.any(String), expiresAt: expect.any(String) });
-    const jobId = String(started.jobId);
-
-    await page.getByRole('tab', { name: 'Activity', exact: true }).click();
-    const approval = page.locator('.approval-card').filter({ hasText: 'Generate imagery' });
-    await expect(approval).toBeVisible();
-    await expect(approval.locator('.approval-heading small')).toHaveText('FND-09 normalization agent requests approval');
-    const approvalFields = await approval.locator('.approval-review > div').evaluateAll((rows) => rows.map((row) => [row.querySelector('dt')?.textContent?.trim(), row.querySelector('dd')?.textContent?.trim()]));
-    expect(approvalFields).toEqual([
-      ['Provider', 'stability'],
-      ['Model / workflow', 'Stability generation API'],
-      ['Mode', 'create'],
-      ['Prompt', FND09_GENERATION_NORMALIZATION_E2E_REQUEST.prompt],
-      ['Negative prompt', FND09_GENERATION_NORMALIZATION_E2E_REQUEST.negativePrompt],
-      ['Source assets', 'None'],
-      ['Requested results', '2'],
-      ['Potential paid requests', '2'],
-      ['Size', 'auto'],
-      ['Seed', String(FND09_GENERATION_NORMALIZATION_E2E_REQUEST.seed)],
-      ['Provider options', JSON.stringify(FND09_GENERATION_NORMALIZATION_E2E_REQUEST.providerOptions)],
-    ]);
-    expect((await approval.locator('.approval-actions button').allTextContents()).map((value) => value.trim())).toEqual(['Deny', 'Allow once']);
-    await approval.screenshot({ path: approvalScreenshotPath });
-    await approval.getByRole('button', { name: 'Allow once', exact: true }).click();
-    const completed = await call('job_manage', { action: 'wait', jobId, timeoutMs: 20_000 });
-    expect(completed).toMatchObject({ id: jobId, kind: 'generation', status: 'completed', actor: client.actor, progress: 1 });
-    expect(completed).not.toHaveProperty('result');
-    expect(JSON.stringify(completed)).not.toContain(FND09_GENERATION_NORMALIZATION_E2E_REQUEST.prompt);
-
-    const normalizableBytes = await readFile(normalizableOutputPath);
-    const previewOnlyBytes = await readFile(previewOnlyOutputPath);
-    const auditText = await readFile(auditPath, 'utf8');
-    const audit = JSON.parse(auditText) as {
-      invocationCount: number;
-      transport: string;
-      outputs: Array<{ id: string; byteLength: number; sha256: string; width: number; height: number }>;
-      hostedKeyReceived: boolean;
-      nonLoopbackRequests: number;
-      externalProviderRequests: number;
-      paidRequests: number;
-    };
-    expect(normalizableBytes.byteLength).toBeGreaterThan(MAX_INLINE_ASSET_BYTES);
-    expect(audit).toMatchObject({
-      invocationCount: 1,
-      transport: 'in-process-deterministic-runner',
-      outputs: [
-        { id: FND09_GENERATION_NORMALIZATION_E2E_NORMALIZABLE_OUTPUT_ID, byteLength: normalizableBytes.byteLength, sha256: visualHash(normalizableBytes), width: 64, height: 48 },
-        { id: FND09_GENERATION_NORMALIZATION_E2E_PREVIEW_ONLY_OUTPUT_ID, byteLength: previewOnlyBytes.byteLength, sha256: visualHash(previewOnlyBytes), ...FND09_GENERATION_NORMALIZATION_E2E_PREVIEW_ONLY_DIMENSIONS },
-      ],
-      hostedKeyReceived: false, nonLoopbackRequests: 0, externalProviderRequests: 0, paidRequests: 0,
-    });
-    expect(auditText).not.toMatch(/Bearer\s|Authorization|"token"\s*:/i);
-
-    const completedPrivateJob = await page.evaluate(async (id) => (await window.aidraw.bootstrap()).jobs.find((job) => job.id === id), jobId);
-    expect(completedPrivateJob).toMatchObject({
-      id: jobId,
-      actor: client.actor,
-      result: {
-        request,
-        outputs: [
-          { id: FND09_GENERATION_NORMALIZATION_E2E_NORMALIZABLE_OUTPUT_ID, mimeType: 'image/png', width: 64, height: 48, seed: FND09_GENERATION_NORMALIZATION_E2E_REQUEST.seed },
-          { id: FND09_GENERATION_NORMALIZATION_E2E_PREVIEW_ONLY_OUTPUT_ID, mimeType: 'image/png', ...FND09_GENERATION_NORMALIZATION_E2E_PREVIEW_ONLY_DIMENSIONS, seed: FND09_GENERATION_NORMALIZATION_E2E_REQUEST.seed + 1 },
-        ],
-      },
-    });
-    const privateOutputs = (completedPrivateJob?.result as { outputs?: Array<{ id: string; data: string }> } | undefined)?.outputs;
-    expect(Buffer.from(privateOutputs?.[0].data ?? '', 'base64')).toEqual(normalizableBytes);
-    expect(Buffer.from(privateOutputs?.[1].data ?? '', 'base64')).toEqual(previewOnlyBytes);
-
-    const beforeFailure = await call('canvas_observe', { documentId: initialDocument.id });
-    expect(beforeFailure.document).toEqual(await page.evaluate(async () => (await window.aidraw.bootstrap()).activeDocument));
-    const beforeFailureSha256 = visualHash(Buffer.from(JSON.stringify(beforeFailure.document), 'utf8'));
-    const revisionBefore = Number(beforeFailure.revision);
-
-    await page.getByRole('tab', { name: 'Generate', exact: true }).click();
-    const resultCards = page.locator('.result-card');
-    await expect(resultCards).toHaveCount(2);
-    await page.locator('.generation-results').screenshot({ path: previewsScreenshotPath });
-    await resultCards.nth(1).getByRole('button', { name: 'Accept as layer', exact: true }).click();
-    const previewOnlyToast = page.getByRole('status').filter({ hasText: 'outside the 8192px / 16777216-pixel editable-asset limit' });
-    await expect(previewOnlyToast).toContainText('outside the 8192px / 16777216-pixel editable-asset limit');
-    await expect(previewOnlyToast).toContainText('keeps this provider output available for preview and does not change the document');
-    await page.screenshot({ path: previewOnlyScreenshotPath });
-    await expect.poll(() => access(previewOnlyProbePath).then(() => true, () => false)).toBe(true);
-    const previewOnlyProbe = JSON.parse(await readFile(previewOnlyProbePath, 'utf8')) as {
-      version: number;
-      scenario: string;
-      process: { role: string; pid: number };
-      requestKind: string;
-      source: { outputId: string; byteLength: number; sha256: string; width: number; height: number };
-      result: { status: string; reason: string; message: string; guidance: string };
-    };
-    expect(previewOnlyProbe).toMatchObject({
-      version: 1,
-      scenario: 'FND-09 packaged generated-preview acceptance normalization',
-      process: { role: 'electron-utility-process', pid: expect.any(Number) },
-      requestKind: 'normalize-generation-acceptance',
-      source: { outputId: FND09_GENERATION_NORMALIZATION_E2E_PREVIEW_ONLY_OUTPUT_ID, byteLength: previewOnlyBytes.byteLength, sha256: visualHash(previewOnlyBytes), ...FND09_GENERATION_NORMALIZATION_E2E_PREVIEW_ONLY_DIMENSIONS },
-      result: { status: 'preview-only', reason: 'inline-geometry-limit' },
-    });
-    expect(previewOnlyProbe.process.pid).not.toBe(enginePid);
-    const afterFailure = await call('canvas_observe', { documentId: initialDocument.id });
-    expect(afterFailure.document).toEqual(beforeFailure.document);
-    expect(afterFailure.revision).toBe(revisionBefore);
-    expect(visualHash(Buffer.from(JSON.stringify(afterFailure.document), 'utf8'))).toBe(beforeFailureSha256);
-    expect(await page.evaluate(async () => (await window.aidraw.bootstrap()).activeDocument)).toEqual(afterFailure.document);
-    const jobAfterFailure = await page.evaluate(async (id) => (await window.aidraw.bootstrap()).jobs.find((job) => job.id === id), jobId);
-    expect(jobAfterFailure?.message).toContain('Generate a smaller result');
-    expect((jobAfterFailure?.result as { acceptedOutputId?: string } | undefined)?.acceptedOutputId).toBeUndefined();
-    const retainedAfterFailure = (jobAfterFailure?.result as { outputs?: Array<{ data: string }> } | undefined)?.outputs;
-    expect(Buffer.from(retainedAfterFailure?.[0].data ?? '', 'base64')).toEqual(normalizableBytes);
-    expect(Buffer.from(retainedAfterFailure?.[1].data ?? '', 'base64')).toEqual(previewOnlyBytes);
-
-    const normalizableCard = resultCards.nth(0);
-    await normalizableCard.getByRole('button', { name: 'Compare', exact: true }).click();
-    const compareDialog = page.getByRole('dialog', { name: 'Compare generated result' });
-    await expect(compareDialog.getByRole('img', { name: 'Generated result' })).toBeVisible();
-    await compareDialog.getByRole('button', { name: 'Accept as new layer/cel', exact: true }).click();
-    const successToast = page.getByRole('status').filter({ hasText: 'Generated result accepted as a new editable layer/cel' });
-    await expect(successToast).toContainText('Generated result accepted as a new editable layer/cel');
-    await expect(successToast).toContainText('original preview is retained unchanged');
-    await expect.poll(() => access(readyProbePath).then(() => true, () => false)).toBe(true);
-    const readyProbe = JSON.parse(await readFile(readyProbePath, 'utf8')) as {
-      version: number;
-      scenario: string;
-      process: { role: string; pid: number };
-      requestKind: string;
-      source: { outputId: string; byteLength: number; sha256: string; width: number; height: number };
-      result: {
-        status: string;
-        mimeType: string;
-        width: number;
-        height: number;
-        normalization: { method: string; sourceOutputId: string; sourceByteLength: number; acceptedByteLength: number; sourceSha256: string; acceptedSha256: string; acceptedMimeType: string };
-      };
-    };
-    expect(readyProbe).toMatchObject({
-      version: 1,
-      scenario: 'FND-09 packaged generated-preview acceptance normalization',
-      process: { role: 'electron-utility-process', pid: expect.any(Number) },
-      requestKind: 'normalize-generation-acceptance',
-      source: { outputId: FND09_GENERATION_NORMALIZATION_E2E_NORMALIZABLE_OUTPUT_ID, byteLength: normalizableBytes.byteLength, sha256: visualHash(normalizableBytes), width: 64, height: 48 },
-      result: { status: 'ready', mimeType: 'image/png', width: 64, height: 48, normalization: { method: 'png-reencode', sourceOutputId: FND09_GENERATION_NORMALIZATION_E2E_NORMALIZABLE_OUTPUT_ID } },
-    });
-    expect(readyProbe.process.pid).toBe(previewOnlyProbe.process.pid);
-    expect(readyProbe.process.pid).not.toBe(enginePid);
-    expect(readyProbe.result.normalization.sourceByteLength).toBe(normalizableBytes.byteLength);
-    expect(readyProbe.result.normalization.acceptedByteLength).toBeLessThanOrEqual(MAX_INLINE_ASSET_BYTES);
-    await expect(successToast).toContainText(`from ${normalizableBytes.byteLength} to ${readyProbe.result.normalization.acceptedByteLength} bytes as image/png`);
-    await page.screenshot({ path: successScreenshotPath });
-    await expect(normalizableCard.getByRole('button', { name: 'Accepted', exact: true })).toBeDisabled();
-
-    const afterSuccess = await call('canvas_observe', { documentId: initialDocument.id, includePng: true, scale: 1, background: 'document' });
-    const afterDocument = afterSuccess.document as IllustrationDocument;
-    expect(afterDocument).toEqual(await page.evaluate(async () => (await window.aidraw.bootstrap()).activeDocument));
-    expect(afterDocument.revision).toBe(revisionBefore + 1);
-    const generatedAsset = Object.values(afterDocument.assets).find((asset) => asset.source === 'generated');
-    if (!generatedAsset?.data) throw new Error('The normalized accepted asset is absent from canonical state.');
-    expect(generatedAsset).toMatchObject({
-      name: expect.stringContaining('normalized for acceptance'),
-      mimeType: 'image/png',
-      byteLength: readyProbe.result.normalization.acceptedByteLength,
-      sha256: readyProbe.result.normalization.acceptedSha256,
-    });
-    expect(visualHash(Buffer.from(generatedAsset.data, 'base64'))).toBe(readyProbe.result.normalization.acceptedSha256);
-    expect(generatedAsset.data).not.toBe(privateOutputs?.[0].data);
-    expect(afterDocument.provenance).toEqual([expect.objectContaining({
-      assetId: generatedAsset.id,
-      provider: 'stability',
-      modelOrWorkflow: 'stable-image-core',
-      prompt: FND09_GENERATION_NORMALIZATION_E2E_REQUEST.prompt,
-      seed: FND09_GENERATION_NORMALIZATION_E2E_REQUEST.seed,
-      conversion: { acceptanceNormalization: readyProbe.result.normalization },
-    })]);
-    expect(afterDocument.activity.at(-1)).toMatchObject({ actor: HUMAN_ACTOR, label: 'Accept generated image', status: 'committed' });
-    const generatedObject = Object.values(afterDocument.objects).find((object) => object.type === 'image' && object.assetId === generatedAsset.id);
-    if (!generatedObject) throw new Error('The normalized generated object is absent from canonical state.');
-    expect(afterDocument.layers[generatedObject.layerId]).toMatchObject({ createdBy: HUMAN_ACTOR.id, name: 'Generated result' });
-    expect(generatedObject).toMatchObject({ createdBy: HUMAN_ACTOR.id, width: 64, height: 48 });
-    await page.getByRole('application', { name: /Illustration canvas/ }).screenshot({ path: acceptedScreenshotPath });
-
-    const acceptedPrivateJob = await page.evaluate(async (id) => (await window.aidraw.bootstrap()).jobs.find((job) => job.id === id), jobId);
-    expect(acceptedPrivateJob).toMatchObject({ actor: client.actor, result: { acceptedOutputId: FND09_GENERATION_NORMALIZATION_E2E_NORMALIZABLE_OUTPUT_ID, acceptedNormalization: readyProbe.result.normalization } });
-    const retainedAfterSuccess = (acceptedPrivateJob?.result as { outputs?: Array<{ data: string }> } | undefined)?.outputs;
-    expect(Buffer.from(retainedAfterSuccess?.[0].data ?? '', 'base64')).toEqual(normalizableBytes);
-    expect(Buffer.from(retainedAfterSuccess?.[1].data ?? '', 'base64')).toEqual(previewOnlyBytes);
-
-    const publicJobs = await call('job_manage', { action: 'list' });
-    expect(publicJobs.jobs).toEqual([expect.objectContaining({ id: jobId, kind: 'generation', status: 'completed', actor: client.actor })]);
-    expect(JSON.stringify(publicJobs)).not.toMatch(/acceptedNormalization|sourceSha256|acceptedSha256|fnd09-normalizable-preview|fnd09-preview-only-preview/i);
-    expect(JSON.stringify(publicJobs)).not.toContain(FND09_GENERATION_NORMALIZATION_E2E_REQUEST.prompt);
-    const tokenFile = JSON.parse(await readFile(tokenPath, 'utf8')) as unknown;
-    inspectPackagedMcpCredential(tokenFile, credentials.token);
-    for (const sentinel of [trustSettingsPath, providerCredentialsPath, networkSentinelPath]) expect(await access(sentinel).then(() => true, () => false)).toBe(false);
-    for (const screenshot of [approvalScreenshotPath, previewsScreenshotPath, previewOnlyScreenshotPath, successScreenshotPath, acceptedScreenshotPath]) expect(await access(screenshot).then(() => true, () => false)).toBe(true);
-
-    await call('session_manage', { action: 'leave' });
-    await quitIsolatedEngineGracefully();
-    expect(applicationProcess?.exitCode).toBe(0);
-    await redactOwnedConnection(connectionPath);
-    const redactedConnectionText = await readFile(connectionPath, 'utf8');
-    const redactedConnection = JSON.parse(redactedConnectionText) as Record<string, unknown>;
-    expect(redactedConnection.credentialStatus).toBe('redacted-after-graceful-stop');
-    expect(redactedConnectionText).not.toMatch(/Bearer\s|Authorization|"token"\s*:/i);
-
-    const evidence = {
-      version: 1,
-      scenario: 'FND-09 packaged generated-preview acceptance normalization',
-      package: {
-        executable: packagedExecutable,
-        executableBytes: (await stat(packagedExecutable)).size,
-        executableSha256: executableHash,
-        asar: packagedAsar,
-        asarBytes: (await stat(packagedAsar)).size,
-        asarSha256: asarHash,
-      },
-      actor: { requestingAgent: client.actor, acceptingHuman: HUMAN_ACTOR },
-      utility: { workerPid: readyProbe.process.pid, distinctFromMain: readyProbe.process.pid !== enginePid, sameWorkerForBothResults: readyProbe.process.pid === previewOnlyProbe.process.pid },
-      retainedOriginals: {
-        normalizable: { byteLength: normalizableBytes.byteLength, sha256: visualHash(normalizableBytes), privateJobByteExact: true },
-        previewOnly: { byteLength: previewOnlyBytes.byteLength, sha256: visualHash(previewOnlyBytes), privateJobByteExact: true },
-      },
-      previewOnly: { reason: previewOnlyProbe.result.reason, revisionBefore, revisionAfter: afterFailure.revision, canonicalUnchanged: true, guidanceVisible: true },
-      acceptedDerivative: {
-        normalization: readyProbe.result.normalization,
-        canonicalAssetId: generatedAsset.id,
-        canonicalAssetMatchedProbe: true,
-        rendererMatchedAuthenticatedMcp: true,
-        humanAcceptanceTransaction: true,
-      },
-      privacy: { publicJobSummaryRedacted: true, originalOutputsPrivate: true },
-      fixture: { invocationCount: audit.invocationCount, transport: audit.transport },
-      networkAndCost: { nonLoopbackRequests: audit.nonLoopbackRequests, externalProviderRequests: audit.externalProviderRequests, paidRequests: audit.paidRequests, hostedKeyReceived: audit.hostedKeyReceived },
-      sentinels: { trustAbsent: true, providerCredentialAbsent: true, forbiddenNetworkAbsent: true },
-      cleanup: { gracefulOnly: true, exitCode: applicationProcess?.exitCode, credentialStatus: redactedConnection.credentialStatus },
-    };
-    const evidenceText = `${JSON.stringify(evidence, null, 2)}\n`;
-    expect(evidenceText).not.toMatch(/Bearer\s|Authorization|"token"\s*:/i);
-    await writeFile(evidencePath, evidenceText, { encoding: 'utf8', flag: 'wx' });
-    stoppedGracefully = true;
-  } catch (error) {
-    const diagnostic = Buffer.concat(applicationStderr).toString('utf8').trim();
-    regressionFailure = new Error(`FND-09 generated-preview normalization packaged regression failed: ${error instanceof Error ? error.message : String(error)}${diagnostic ? `\n${diagnostic}` : ''}`);
-  } finally {
-    if (!stoppedGracefully && applicationProcess?.exitCode === null) {
-      try {
-        await quitIsolatedEngineGracefully();
-        await redactOwnedConnection(connectionPath);
-      } catch (error) {
-        const cleanupFailure = error instanceof Error ? error : new Error(String(error));
-        regressionFailure = regressionFailure
-          ? new Error(`${regressionFailure.message}\nGraceful cleanup also failed: ${cleanupFailure.message}`)
-          : cleanupFailure;
-      }
-    }
-  }
-  if (regressionFailure) throw regressionFailure;
 });

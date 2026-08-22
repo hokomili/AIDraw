@@ -43,7 +43,6 @@ export interface InspectedDocumentImageAssetEntry extends InspectedDocumentImage
 export type ImageDecodeValidator = (bytes: Buffer, expected: ExpectedDecodedImage) => Promise<void>;
 
 export interface TransactionPolicyOptions {
-  trustedProvenance?: boolean;
   imageDecoder?: ImageDecodeValidator;
 }
 
@@ -289,8 +288,8 @@ export async function prepareTransactionForCommit(
   timestamp: string,
   options: TransactionPolicyOptions = {},
 ): Promise<CanvasTransaction> {
-  if (!options.trustedProvenance && transaction.operations.some((operation) => operation.kind === 'provenance.add' || operation.kind === 'provenance.delete')) {
-    throw new Error('Verified provenance can only be created or removed by AIDraw’s generation engine.');
+  if (transaction.operations.some((operation) => operation.kind === 'provenance.add' || operation.kind === 'provenance.delete')) {
+    throw new Error('Historical provider provenance is read-only compatibility metadata.');
   }
 
   const operations: CanvasOperation[] = [];
@@ -302,8 +301,6 @@ export async function prepareTransactionForCommit(
         ...operation,
         asset: transaction.actor.kind === 'agent' ? { ...operation.asset, source: 'embedded' } : operation.asset,
       });
-    } else if (operation.kind === 'provenance.add') {
-      operations.push({ ...operation, provenance: { ...operation.provenance, createdAt: timestamp } });
     } else operations.push(operation);
   }
 

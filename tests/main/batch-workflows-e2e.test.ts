@@ -80,7 +80,7 @@ describe('UX-11 packaged workflow boundary', () => {
     expect(await access(join(configuration.profilePath, UX11_BATCH_E2E_SAVE_DIRECTORY)).then(() => true, () => false)).toBe(true);
     expect(await access(join(configuration.profilePath, UX11_BATCH_E2E_EXPORT_DIRECTORY)).then(() => true, () => false)).toBe(true);
     const auditText = await readFile(configuration.auditPath, 'utf8');
-    const audit = JSON.parse(auditText) as { events: Array<{ kind: string; decision: string }>; externalRequests: number; providerRequests: number; paidRequests: number };
+    const audit = JSON.parse(auditText) as { events: Array<{ kind: string; decision: string }>; externalRequests: number };
     expect(audit.events.map((event) => [event.kind, event.decision])).toEqual([
       ['save-all-directory', 'cancel'],
       ['save-all-directory', 'choose-directory'],
@@ -89,7 +89,7 @@ describe('UX-11 packaged workflow boundary', () => {
       ['close-all-confirmation', 'cancel'],
       ['close-all-confirmation', 'save-all-and-close'],
     ]);
-    expect(audit).toMatchObject({ externalRequests: 0, providerRequests: 0, paidRequests: 0 });
+    expect(audit).toMatchObject({ externalRequests: 0 });
     expect(auditText).not.toMatch(/Bearer\s|Authorization|"token"\s*:/i);
     expect(controller.shouldFailExport(createIllustrationDocument(UX11_BATCH_E2E_FAILURE_DOCUMENT_NAME), 'png')).toBe(true);
     expect(controller.shouldFailExport(createIllustrationDocument(UX11_BATCH_E2E_SHARED_DOCUMENT_NAME), 'png')).toBe(false);
@@ -100,9 +100,9 @@ describe('UX-11 packaged workflow boundary', () => {
     const { configuration } = await fixture();
     const restore = installUx11BatchE2eNetworkBoundary(configuration);
     try {
-      await expect(fetch('https://provider.invalid/generate')).rejects.toThrow(/blocked an external request/);
+      await expect(fetch('https://example.invalid/resource')).rejects.toThrow(/blocked an external request/);
       const sentinel = JSON.parse(await readFile(configuration.networkSentinelPath, 'utf8')) as Record<string, unknown>;
-      expect(sentinel).toMatchObject({ fixture: 'ux11-batch-workflows', blocked: true, hostname: 'provider.invalid', externalRequests: 1, paidRequests: 0 });
+      expect(sentinel).toMatchObject({ fixture: 'ux11-batch-workflows', blocked: true, hostname: 'example.invalid', externalRequests: 1 });
       expect(JSON.stringify(sentinel)).not.toMatch(/Bearer\s|Authorization|"token"\s*:/i);
     } finally {
       restore();

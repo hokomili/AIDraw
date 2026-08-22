@@ -3,17 +3,8 @@ import type { ChildProcess, SpawnOptions } from 'node:child_process';
 export const PACKAGED_E2E_SUITE_ENV: 'AIDRAW_E2E_SUITE';
 export const PACKAGED_E2E_RETAINED_TITLE_PATTERN: RegExp;
 export const PACKAGED_E2E_SELF_CONTAINED_CASES: 27;
-export const PACKAGED_E2E_RETAINED_CASES: 15;
+export const PACKAGED_E2E_RETAINED_CASES: 13;
 export const PACKAGED_E2E_RETAINED_PROFILE_ENVS: readonly string[];
-
-export interface PackagedMcpCredentialInspection {
-  version: 2;
-  status: 'active';
-  encryption: 'electron-safe-storage';
-  encryptedValuePresent: true;
-}
-
-export function inspectPackagedMcpCredential(value: unknown, liveToken: string): PackagedMcpCredentialInspection;
 
 export interface PackagedE2eArtifact {
   workspace: string;

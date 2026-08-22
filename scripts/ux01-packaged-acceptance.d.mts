@@ -13,8 +13,8 @@ export const UX01_PACKAGED_FILES: Readonly<{
   failure: string;
   cleanup: string;
   forbiddenNetwork: string;
-  providerCredentials: string;
-  tokenCredentials: string;
+  retiredProviderStore: string;
+  retiredAuthorityStore: string;
 }>;
 
 export interface Ux01PackagedAcceptance {
@@ -33,7 +33,6 @@ export interface Ux01PackagedAcceptance {
 
 export function resolveUx01PackagedAcceptance(options?: { workspacePath?: string; environment?: NodeJS.ProcessEnv }): Ux01PackagedAcceptance;
 export function assertUx01SafeReporterEnvironment(environment?: NodeJS.ProcessEnv): true;
-export function inspectUx01EncryptedToken(value: unknown, liveToken: string): { version: 2; status: 'active'; encryption: 'electron-safe-storage'; encryptedValuePresent: true };
 export function parseUx01WindowMeasurement(value: unknown): {
   location: string;
   content: { width: number; height: number; devicePixelRatio: number };

@@ -107,17 +107,6 @@ import {
   resolveRasterBrushPreset,
   textStyleAt,
 } from "@aidraw/core";
-import {
-  MAX_PROVIDER_CREDENTIAL_BYTES,
-  type GeneratedOutput,
-  type GenerationComparisonSource,
-  type GenerationJobResult,
-  type GenerationMode,
-  type GenerationProvider,
-  type GenerationProviderStatus,
-  type GenerationRequest,
-} from "../common/generation";
-import { GENERATION_PROVIDER_MODES, generationRequestError } from "../common/generation-capabilities";
 import { packPixelLinks, pixelLinkHealth } from "../common/pixel-links";
 import type { PaletteImportMode } from "../common/palette-interchange";
 import {
@@ -170,6 +159,7 @@ import {
   replaceImageCollectionTileMetadata,
   type ImageCollectionTileMetadataPatch,
 } from "../common/image-collection-authoring";
+import { planImageCollectionTileIdMove } from "../common/image-collection-tile-move";
 import { resolveTilesetTileSource } from "../common/tile-animation";
 import type {
   BatchDocumentResult,
@@ -178,7 +168,6 @@ import type {
   DocumentPreset,
   EngineStatus,
   InterchangeReport,
-  McpCredentialLifecycleResult,
   NewDocumentKind,
   NewDocumentOptions,
   PixelLinkAction,
@@ -201,11 +190,20 @@ import { WangTerrainSetEditor, WangTerrainSetList } from "./components/WangTerra
 import { withWangSignatureSlot, type WangSignatureSlotIndex } from "./wang-signature";
 import { TileMapObjectInspector } from "./components/TileMapObjectInspector";
 import { ImageCollectionSourceDialog } from "./components/ImageCollectionSourceDialog";
+import { ImageCollectionTileMoveDialog } from "./components/ImageCollectionTileMoveDialog";
 import {
   createImageCollectionSourceOpening,
   imageCollectionSourceOpeningGuardError,
   type ImageCollectionSourceOpening,
 } from "./image-collection-source-opening";
+import {
+  createImageCollectionTileMoveOpening,
+  imageCollectionTileMoveOpeningGuardError,
+  imageCollectionTileMoveReviewsMatch,
+  reviewImageCollectionTileMove,
+  type ImageCollectionTileMoveOpening,
+  type ImageCollectionTileMoveReview,
+} from "./image-collection-tile-move-opening";
 import { ShortcutReferenceDialog } from "./components/ShortcutReferenceDialog";
 import { InspectorLayoutControls } from "./components/InspectorLayoutControls";
 import { documentTabFocusIndex } from "./document-tabs";
@@ -3960,6 +3958,7 @@ function TilesetPanel({
   const [selectedWangSetId, setSelectedWangSetId] = useState<string>();
   const [drawingOffsetDraft, setDrawingOffsetDraft] = useState<{ tilesetId: string; revision: number; x: string; y: string }>();
   const [sourceOpening, setSourceOpening] = useState<ImageCollectionSourceOpening>();
+  const [tileMoveOpening, setTileMoveOpening] = useState<ImageCollectionTileMoveOpening>();
   const imageCollection = !tileset.spriteAssetId;
   const collectionTileIds = imageCollection ? imageCollectionTileIds(tileset) : undefined;
   const effectiveSelectedTileId = imageCollection && collectionTileIds && !collectionTileIds.includes(selectedTileId)
@@ -4219,6 +4218,58 @@ function TilesetPanel({
       notify(error instanceof Error ? error.message : "The selected source could not be proven unused.", "warning");
     }
   };
+  const openTileMove = () => {
+    try {
+      setTileMoveOpening(createImageCollectionTileMoveOpening(document, tileset, effectiveSelectedTileId));
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "The selected sparse tile cannot move into an existing gap.", "warning");
+    }
+  };
+  const reviewTileMove = (opening: ImageCollectionTileMoveOpening, destinationTileId: number) => {
+    const active = useEditorStore.getState().snapshot?.activeDocument;
+    if (active?.kind !== "pixel") throw new Error("The active document changed. Close this move review and reopen it.");
+    const openingError = imageCollectionTileMoveOpeningGuardError(opening, document, tileset.id)
+      ?? imageCollectionTileMoveOpeningGuardError(opening, active, tileset.id);
+    if (openingError) throw new Error(openingError);
+    return reviewImageCollectionTileMove(opening, active, destinationTileId);
+  };
+  const applyTileMove = async (opening: ImageCollectionTileMoveOpening, review: ImageCollectionTileMoveReview) => {
+    const active = useEditorStore.getState().snapshot?.activeDocument;
+    if (active?.kind !== "pixel") {
+      notify("The active document changed. Close this move review and reopen it.", "warning");
+      return false;
+    }
+    const openingError = imageCollectionTileMoveOpeningGuardError(opening, document, tileset.id)
+      ?? imageCollectionTileMoveOpeningGuardError(opening, active, tileset.id);
+    if (openingError) {
+      notify(openingError, "warning");
+      return false;
+    }
+    try {
+      const currentReview = reviewImageCollectionTileMove(opening, active, review.destinationTileId);
+      if (!imageCollectionTileMoveReviewsMatch(review, currentReview)) {
+        throw new Error("The reviewed tile-move impact changed. Close this review, reopen it, and review the exact references again.");
+      }
+      const plan = planImageCollectionTileIdMove(active, opening.target.id, opening.target.sourceTileId, review.destinationTileId);
+      if (JSON.stringify(plan.impact) !== JSON.stringify(review.impact)) {
+        throw new Error("The canonical tile-move plan no longer matches the frozen review. Close this review and reopen it.");
+      }
+      const applied = await apply(
+        "Move image-collection tile ID",
+        plan.operations,
+        active.id,
+        opening.documentRevision,
+      );
+      if (applied) {
+        setSelectedTileId(review.destinationTileId);
+        setSelectedCollisionIds([]);
+      }
+      return applied;
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "The reviewed image-collection tile move could not be applied.", "warning");
+      return false;
+    }
+  };
   const addTerrain = () => {
     const terrainId = tileset.wangSets.length + 1;
     const wangSet: WangSet = {
@@ -4312,7 +4363,7 @@ function TilesetPanel({
           </small>
         </span>
       </div>
-      {imageCollection && <><p className="tileset-slice-summary">Choose an exact sparse local ID to preview its own source and edit metadata. Append references one eligible project sprite above the authored span. Replace keeps the selected ID while changing its artwork everywhere. Remove detaches only a selected tile proven unused and leaves a sparse gap without deleting its sprite or rewriting references.</p><div className="tileset-actions"><button type="button" onClick={() => setSourceOpening(createImageCollectionSourceOpening(document, "append", { tileset }))}>Append sprite source</button><button type="button" onClick={openSourceReplacement}>Replace tile {effectiveSelectedTileId} source</button><button type="button" onClick={openSourceRemoval}>Remove unused tile {effectiveSelectedTileId}</button></div></>}
+      {imageCollection && <><p className="tileset-slice-summary">Choose an exact sparse local ID to preview its own source and edit metadata. Append references one eligible project sprite above the authored span. Replace keeps the selected ID while changing its artwork everywhere. Move deliberately rewrites one non-highest tile and every proven direct reference into an existing gap without changing the span. Remove detaches only a selected tile proven unused.</p><div className="tileset-actions"><button type="button" onClick={() => setSourceOpening(createImageCollectionSourceOpening(document, "append", { tileset }))}>Append sprite source</button><button type="button" onClick={openSourceReplacement}>Replace tile {effectiveSelectedTileId} source</button><button type="button" onClick={openTileMove}>Move tile {effectiveSelectedTileId} into gap</button><button type="button" onClick={openSourceRemoval}>Remove unused tile {effectiveSelectedTileId}</button></div></>}
       {!imageCollection && <TilesetSliceEditor key={`${tileset.id}:${tileset.revision}`} palette={document.palette} tileset={tileset} sourceSprite={sourceSprite?.type === "sprite" ? sourceSprite : undefined} selectedTileId={selectedTileId} onCommit={(next, nextSelectedTileId, impact) => {
         const droppedEntries = impact.droppedAnimationFrames + impact.droppedCollisionShapes + impact.droppedCustomProperties + impact.droppedWangColors + impact.droppedWangTiles;
         if (impact.droppedMetadataTiles > 0 || droppedEntries > 0) notify(`Re-sliced after explicit review; ${impact.droppedMetadataTiles} metadata-addressed tile${impact.droppedMetadataTiles === 1 ? "" : "s"} and ${droppedEntries} metadata entr${droppedEntries === 1 ? "y" : "ies"} no longer fit.`, "warning");
@@ -4468,13 +4519,21 @@ function TilesetPanel({
         animation, drawing offset, properties, and collision data export through Tiled.
       </p>
       </>}
-      {imageCollection && <p className="fine-print">Probability, ordered animation, typed properties, collision metadata, drawing offset, append, exact-ID replacement, and proven-unused exact-ID removal use the existing complete tileset transaction and supported Tiled export. Removal never cascades, compacts IDs, rewrites GIDs, or deletes a source sprite.</p>}
+      {imageCollection && <p className="fine-print">Probability, ordered animation, typed properties, collision metadata, drawing offset, append, exact-ID source replacement, reviewed gap movement, and proven-unused exact-ID removal use guarded canonical transactions and supported Tiled export. Moving preserves the span while rewriting only proven direct references; removal never cascades, compacts IDs, rewrites GIDs, or deletes a source sprite.</p>}
       {imageCollection && sourceOpening && <ImageCollectionSourceDialog
         opening={sourceOpening}
         currentDocument={document}
         currentTilesetId={tileset.id}
         onSubmit={sourceOpening.mode === "replace" ? replaceSource : sourceOpening.mode === "remove" ? removeSource : appendSource}
         onClose={() => setSourceOpening(undefined)}
+      />}
+      {imageCollection && tileMoveOpening && <ImageCollectionTileMoveDialog
+        opening={tileMoveOpening}
+        currentDocument={document}
+        currentTilesetId={tileset.id}
+        onReview={reviewTileMove}
+        onSubmit={applyTileMove}
+        onClose={() => setTileMoveOpening(undefined)}
       />}
     </div>
   );
@@ -4593,7 +4652,7 @@ function PalettePanel({ document }: { document: PixelDocument }) {
       </div>
       <div className="conversion-editor">
         <div className="section-heading">
-          <span>Generated-image conversion</span>
+          <span>Image conversion</span>
         </div>
         <label className="field">
           <span>Dithering</span>
@@ -4642,7 +4701,7 @@ function PalettePanel({ document }: { document: PixelDocument }) {
         </label>
         <small>
           Area resize · nearest palette in OKLab · source retained for
-          provenance.
+          reproducible conversion.
         </small>
       </div>
     </section>
@@ -4671,57 +4730,33 @@ function AgentSetupResultDialog({
   result: AgentClientSetupResult;
   onClose: () => void;
 }) {
-  const configured = result.status === "configured";
-  const hasManualSettings = Boolean(result.setupSnippet);
   return (
     <ModalShell
-      title={
-        configured
-          ? `Finish ${result.clientName} setup`
-          : hasManualSettings
-            ? `Connect ${result.clientName}`
-            : `${result.clientName} connection needs attention`
-      }
-      description={
-        configured
-          ? "AIDraw is configured. Complete the client-side step before starting agent work."
-          : hasManualSettings
-            ? "Use these generic Streamable HTTP settings in the client’s MCP configuration."
-            : "AIDraw could not complete the automatic connection."
-      }
+      title={`Connect ${result.clientName}`}
+      description="Add this no-secret stdio bridge once. AIDraw does not edit client configuration files."
       onClose={onClose}
       className="codex-setup-dialog"
     >
       <div className="codex-setup-body">
         <div
-          className={`codex-setup-emblem ${configured ? "is-ready" : "needs-attention"}`}
+          className="codex-setup-emblem is-ready"
         >
           <Bot size={27} />
         </div>
         <div className="codex-setup-copy">
           <strong>
-            {configured
-              ? "Connection saved successfully"
-              : hasManualSettings
-                ? "Authenticated connection settings"
-                : "Automatic setup did not finish"}
+            One-time client setup
           </strong>
           <p>{result.message}</p>
         </div>
         {result.setupSnippet && (
           <div className="agent-setup-snippet">
-            <span>Private MCP configuration</span>
+            <span>Stable stdio configuration</span>
             <code>{result.setupSnippet}</code>
             <button type="button" onClick={() => void navigator.clipboard.writeText(result.setupSnippet!)}>Copy configuration</button>
           </div>
         )}
-        {configured && result.restartRequired && (
-          <div className="restart-required">
-            <span>Required next step</span>
-            <strong>{result.restartInstruction}</strong>
-            <p>After reconnecting, new local agent sessions can discover AIDraw’s MCP tools. The AIDraw engine may continue running headlessly.</p>
-          </div>
-        )}
+        <div className="restart-required"><span>Automatic reconnect</span><strong>Keep this configuration across AIDraw restarts.</strong><p>The bridge resolves each live engine internally; no URL, bearer, password, or per-launch value is stored in the client.</p></div>
       </div>
       <footer className="modal-footer">
         <button
@@ -4730,7 +4765,7 @@ function AgentSetupResultDialog({
           autoFocus
           onClick={onClose}
         >
-          {configured ? "Got it" : "Close"}
+          Got it
         </button>
       </footer>
     </ModalShell>
@@ -4835,15 +4870,9 @@ function ActivityPanel() {
   const reportPulse = useEditorStore((state) => state.reportPulse);
   const document = snapshot?.activeDocument;
   const sessions = snapshot?.mcp.sessions ?? [];
-  const [credentials, setCredentials] = useState<{
-    url?: string;
-    token: string;
-  }>();
   const [selectedClient, setSelectedClient] = useState<AgentClientId>("codex");
   const [setupResult, setSetupResult] = useState<AgentClientSetupResult>();
   const [configuring, setConfiguring] = useState(false);
-  const [credentialChanging, setCredentialChanging] = useState(false);
-  const [credentialResult, setCredentialResult] = useState<McpCredentialLifecycleResult>();
   const [engine, setEngine] = useState<EngineStatus>();
   const [checkpointName, setCheckpointName] = useState("");
   const [checkpointComparison, setCheckpointComparison] = useState<CheckpointComparisonResult>();
@@ -4858,33 +4887,7 @@ function ActivityPanel() {
     void window.aidraw.listInterchangeReports(document.id).then((reports) => { if (active) setInterchangeReports(reports); });
     return () => { active = false; };
   }, [document?.id, reportPulse]);
-  const changeMcpCredential = async (action: "rotate" | "revoke") => {
-    setCredentialChanging(true);
-    try {
-      const result = action === "rotate"
-        ? await window.aidraw.rotateMcpCredential()
-        : await window.aidraw.revokeMcpAccess();
-      if (result.status === "completed") {
-        setCredentials(undefined);
-        setSetupResult(undefined);
-        setCredentialResult(result);
-        setEngine(await window.aidraw.getEngineStatus());
-        notify(result.message, result.warning ? "warning" : "success");
-      } else {
-        notify(result.message, "info");
-      }
-    } catch (error) {
-      setCredentials(undefined);
-      setSetupResult(undefined);
-      setCredentialResult(undefined);
-      await window.aidraw.getEngineStatus().then(setEngine).catch(() => undefined);
-      notify(error instanceof Error ? error.message : "The MCP credential change failed.", "error");
-    } finally {
-      setCredentialChanging(false);
-    }
-  };
   if (!document) return null;
-  const mcpAccessRevoked = snapshot?.mcp.access === "revoked";
   const latestAgentActivity = new Map<string, string>();
   for (const entry of [...document.activity].reverse()) {
     if (entry.actor.kind === "agent" && !latestAgentActivity.has(entry.actor.id))
@@ -4907,9 +4910,7 @@ function ActivityPanel() {
           <small>
             {snapshot?.mcp.running
               ? `Listening at ${snapshot.mcp.url}`
-              : snapshot?.mcp.access === "revoked"
-                ? "Agent access is revoked; the editor and canonical engine remain available."
-                : "Starting local MCP…"}
+              : "Starting local MCP…"}
           </small>
         </div>
       </div>
@@ -4936,66 +4937,21 @@ function ActivityPanel() {
           {AGENT_CLIENTS.map((client) => <option key={client.id} value={client.id}>{client.name}</option>)}
         </select>
         <button
-          disabled={configuring || snapshot?.mcp.access === "revoked"}
+          disabled={configuring}
           onClick={async () => {
             setConfiguring(true);
             try {
-              const result = await window.aidraw.configureAgentClient(selectedClient);
-              if (result.status === "cancelled") notify(result.message, "info");
-              else setSetupResult(result);
+              const result = await window.aidraw.getAgentClientSetup(selectedClient);
+              setSetupResult(result);
               setEngine(await window.aidraw.getEngineStatus());
             } finally {
               setConfiguring(false);
             }
           }}
         >
-          <Bot size={13} /> {configuring ? "Connecting…" : selectedClient === "generic" ? "Show settings" : "Connect"}
-        </button>
-        <button
-          disabled={!snapshot?.mcp.running}
-          onClick={async () =>
-            setCredentials(
-              credentials ? undefined : await window.aidraw.getMcpCredentials(),
-            )
-          }
-        >
-          Connection
+          <Bot size={13} /> {configuring ? "Preparing…" : "Show setup"}
         </button>
       </div>
-      {credentials && (
-        <div className="credential-card">
-          <label>
-            <span>Streamable HTTP URL</span>
-            <code>{credentials.url}</code>
-          </label>
-          <label>
-            <span>Authorization header</span>
-            <code>Bearer {credentials.token}</code>
-          </label>
-          <button
-            onClick={() =>
-              void navigator.clipboard.writeText(
-                `${credentials.url}\nAuthorization: Bearer ${credentials.token}`,
-              )
-            }
-          >
-            Copy settings
-          </button>
-        </div>
-      )}
-      <section className="credential-lifecycle" aria-label="MCP credential security">
-        <div>
-          <strong>Credential security</strong>
-          <small>{mcpAccessRevoked
-            ? "Rotating now re-enables the local endpoint and agent access with a new credential. Persistent folder approvals and already admitted or pending approval work remain; client configurations stay unchanged."
-            : "Rotation invalidates every configured bearer and ends active sessions. Persistent folder approvals and already admitted or pending approval work remain. Revocation also stops MCP access; neither action edits client configuration files."}</small>
-        </div>
-        <div className="credential-lifecycle-actions">
-          <button disabled={credentialChanging} onClick={() => void changeMcpCredential("rotate")}>{mcpAccessRevoked ? "Rotate and re-enable" : "Rotate credential"}</button>
-          <button disabled={credentialChanging || snapshot?.mcp.access === "revoked"} onClick={() => void changeMcpCredential("revoke")}>Revoke access</button>
-        </div>
-        {credentialResult && <p role="status">{credentialResult.message}</p>}
-      </section>
       {(snapshot?.jobs ?? [])
         .filter((job) => job.status === "waiting-for-user")
         .map((job) => (
@@ -5032,8 +4988,6 @@ function ActivityPanel() {
                 ))}
               </dl>
             )}
-            {(job.approval?.review?.previews?.length ?? 0) > 0 && <div className="approval-previews" aria-label="Generation source and mask previews">{job.approval!.review!.previews!.map((preview) => <figure key={`${preview.role}-${preview.assetId}`}><div className={preview.role === "mask" ? "is-mask" : undefined}><img src={preview.dataUrl} alt={`${preview.role === "mask" ? "Mask" : "Source"}: ${preview.name}`} /></div><figcaption><strong>{preview.role === "mask" ? "Mask" : "Source"} · {preview.name}</strong><small>{preview.width} × {preview.height}px · {preview.mimeType}</small></figcaption></figure>)}</div>}
-            {job.kind === "generation" && <div className="approval-trust-note generation-trust-note">This approval authorizes this exact provider request once. It does not trust future prompts, providers, source assets, or paid requests.</div>}
             <div className="approval-expiry">
               This request expires at{" "}
               {new Date(job.approval?.expiresAt ?? 0).toLocaleTimeString([], {
@@ -5304,451 +5258,6 @@ function ActivityPanel() {
   );
 }
 
-function GenerationComparisonDialog({
-  source,
-  output,
-  onClose,
-  onAccept,
-  onReject,
-}: {
-  source: GenerationComparisonSource;
-  output: GeneratedOutput;
-  onClose: () => void;
-  onAccept: () => Promise<void>;
-  onReject: () => Promise<void>;
-}) {
-  const [mode, setMode] = useState<"side-by-side" | "overlay">("side-by-side");
-  const [opacity, setOpacity] = useState(50);
-  const [zoom, setZoom] = useState(100);
-  const [busy, setBusy] = useState<"accept" | "reject">();
-  const sourceUrl = `data:${source.mimeType};base64,${source.data}`;
-  const outputUrl = `data:${output.mimeType};base64,${output.data}`;
-  return <ModalShell title="Compare generated result" description="The before image was frozen before the provider request. Zoom and scrolling are shared so alignment stays inspectable." className="generation-comparison-dialog" onClose={onClose}>
-    <div className="generation-compare-toolbar">
-      <span className="segmented-buttons"><button className={mode === "side-by-side" ? "is-active" : ""} onClick={() => setMode("side-by-side")}>Side by side</button><button className={mode === "overlay" ? "is-active" : ""} onClick={() => setMode("overlay")}>Overlay</button></span>
-      <label><span>Zoom {zoom}%</span><input type="range" min="25" max="400" step="25" value={zoom} onChange={(event) => setZoom(Number(event.target.value))} /></label>
-      {mode === "overlay" && <label><span>Result {opacity}%</span><input type="range" min="0" max="100" value={opacity} onChange={(event) => setOpacity(Number(event.target.value))} /></label>}
-    </div>
-    <div className={`generation-compare-stage is-${mode}`}>
-      {mode === "side-by-side" ? <div className="generation-compare-strip" style={{ width: `${zoom}%` }}><figure><figcaption>Before</figcaption><img src={sourceUrl} alt="Source before generation" /></figure><figure><figcaption>Result</figcaption><img src={outputUrl} alt="Generated result" /></figure></div> : <div className="generation-overlay-frame" style={{ width: `${zoom}%`, aspectRatio: `${output.width} / ${output.height}` }}><img src={sourceUrl} alt="Source before generation" /><img src={outputUrl} alt="Generated result overlay" style={{ opacity: opacity / 100 }} /></div>}
-    </div>
-    <footer className="modal-footer generation-compare-footer"><span>Reject removes this unaccepted result from the in-memory job.</span><button disabled={Boolean(busy)} onClick={async () => { setBusy("reject"); try { await onReject(); } finally { setBusy(undefined); } }}>{busy === "reject" ? "Rejecting…" : "Reject result"}</button><button className="primary" disabled={Boolean(busy)} onClick={async () => { setBusy("accept"); try { await onAccept(); } finally { setBusy(undefined); } }}>{busy === "accept" ? "Accepting…" : "Accept as new layer/cel"}</button></footer>
-  </ModalShell>;
-}
-
-function GenerationPanel({ document }: { document: AIDrawDocument }) {
-  const snapshot = useEditorStore((state) => state.snapshot);
-  const notify = useEditorStore((state) => state.notify);
-  const [provider, setProvider] = useState<GenerationProvider>("openai");
-  const [mode, setMode] = useState<GenerationMode>("create");
-  const [prompt, setPrompt] = useState("");
-  const [negativePrompt, setNegativePrompt] = useState("");
-  const [resultCount, setResultCount] = useState(1);
-  const [aspectIntent, setAspectIntent] = useState<
-    "canvas" | "square" | "portrait" | "landscape"
-  >("canvas");
-  const [sourceAssetIds, setSourceAssetIds] = useState<string[]>([]);
-  const [maskAssetId, setMaskAssetId] = useState<string>();
-  const [credential, setCredential] = useState("");
-  const [showCredential, setShowCredential] = useState(false);
-  const [credentialRemovalPending, setCredentialRemovalPending] = useState(false);
-  const [providerStatus, setProviderStatus] = useState<GenerationProviderStatus>();
-  const [comfyEndpoint, setComfyEndpoint] = useState("http://127.0.0.1:8188");
-  const [comfyWorkflow, setComfyWorkflow] = useState<Record<string, unknown>>();
-  const [comfyMappings, setComfyMappings] = useState<Record<string, string>>({});
-  const [outpaint, setOutpaint] = useState({ left: 256, right: 256, up: 256, down: 256, creativity: 0.5 });
-  const [generationComparison, setGenerationComparison] = useState<{ jobId: string; source: GenerationComparisonSource; output: GeneratedOutput }>();
-  const generationJobs = (snapshot?.jobs ?? []).filter(
-    (job) =>
-      job.kind === "generation" &&
-      (job.result as { request?: { documentId?: string } } | undefined)?.request
-        ?.documentId === document.id,
-  );
-  const imageAssets = Object.values(document.assets).filter(
-    (asset) => asset.data && asset.mimeType.startsWith("image/"),
-  );
-  const requestedSize = aspectIntent === "square" ? { width: 1024, height: 1024 } : aspectIntent === "portrait" ? { width: 1024, height: 1536 } : aspectIntent === "landscape" ? { width: 1536, height: 1024 } : document.kind === "illustration" ? { width: document.artboard.width, height: document.artboard.height } : { width: 1024, height: 1024 };
-  const generationDraft = { documentId: document.id, provider, mode, prompt, negativePrompt: negativePrompt || undefined, sourceAssetIds, maskAssetId, size: requestedSize, aspectIntent, resultCount, providerOptions: provider === "comfyui" ? { endpoint: comfyEndpoint, workflow: comfyWorkflow, mappings: Object.fromEntries(Object.entries(comfyMappings).filter(([, value]) => value.trim()).map(([key, value]) => [key, value.trim()])) } : provider === "stability" && mode === "outpaint" ? outpaint : {} } satisfies GenerationRequest;
-  const generationError = generationRequestError(document, generationDraft);
-  const selectedProviderStatus = providerStatus?.[provider];
-
-  useEffect(() => {
-    void window.aidraw.getProviderStatus().then(setProviderStatus);
-  }, []);
-
-  const startGeneration = async () => {
-    try {
-      await window.aidraw.generationStart(generationDraft);
-      notify("Generation started.", "success");
-    } catch (error) {
-      notify(error instanceof Error ? error.message : String(error), "error");
-    }
-  };
-
-  return (
-    <div className="generation-panel">
-      <div className="generation-hero">
-        <span>
-          <Sparkles size={21} />
-        </span>
-        <strong>Generate into your canvas</strong>
-        <small>
-          Provider-neutral, non-destructive results with provenance.
-        </small>
-      </div>
-      <label className="field">
-        <span>Provider</span>
-        <select
-          value={provider}
-          onChange={(event) => { const next = event.target.value as GenerationProvider; setProvider(next); setCredential(""); setShowCredential(false); setCredentialRemovalPending(false); if (!GENERATION_PROVIDER_MODES[next].includes(mode)) setMode(GENERATION_PROVIDER_MODES[next][0]); }}
-        >
-          <option value="openai">
-            OpenAI · gpt-image-2 {providerStatus?.openai.configured ? "✓" : ""}
-          </option>
-          <option value="stability">
-            Stability AI {providerStatus?.stability.configured ? "✓" : ""}
-          </option>
-          <option value="comfyui">Local ComfyUI</option>
-        </select>
-      </label>
-      <label className="field">
-        <span>Mode</span>
-        <select
-          value={mode}
-          onChange={(event) => { const next = event.target.value as GenerationMode; setMode(next); if (next === "create") setSourceAssetIds([]); if (next !== "inpaint") setMaskAssetId(undefined); }}
-        >
-          {GENERATION_PROVIDER_MODES[provider].map((entry) => <option key={entry} value={entry}>{entry === "create" ? "Create new" : entry === "edit" ? "Edit selection" : entry[0].toUpperCase() + entry.slice(1)}</option>)}
-        </select>
-      </label>
-      <label className="field">
-        <span>Prompt</span>
-        <textarea
-          rows={5}
-          value={prompt}
-          onChange={(event) => setPrompt(event.target.value)}
-          placeholder={
-            document.kind === "pixel"
-              ? "A cozy tiny potion shop, 16-bit game sprite…"
-              : "A luminous botanical poster with curling leaves…"
-          }
-        />
-      </label>
-      {provider !== "openai" && !(provider === "stability" && mode === "outpaint") && (
-        <label className="field">
-          <span>Negative prompt</span>
-          <textarea
-            rows={2}
-            value={negativePrompt}
-            onChange={(event) => setNegativePrompt(event.target.value)}
-            placeholder="Elements to avoid…"
-          />
-        </label>
-      )}
-      <div className="two-fields">
-        <label className="field">
-          <span>Results</span>
-          <input
-            type="number"
-            min="1"
-            max="4"
-            value={resultCount}
-            onChange={(event) =>
-              setResultCount(
-                Math.max(1, Math.min(4, Number(event.target.value))),
-              )
-            }
-          />
-        </label>
-        <label className="field">
-          <span>Aspect</span>
-          <select
-            value={aspectIntent}
-            onChange={(event) =>
-              setAspectIntent(event.target.value as typeof aspectIntent)
-            }
-          >
-            <option value="canvas">Canvas</option>
-            <option value="square">Square</option>
-            <option value="portrait">Portrait</option>
-            <option value="landscape">Landscape</option>
-          </select>
-        </label>
-      </div>
-      {mode !== "create" && (
-        <div className="generation-sources">
-          <div className="section-heading">
-            <span>Source images</span>
-            <small>{sourceAssetIds.length} selected</small>
-          </div>
-          {imageAssets.length ? (
-            imageAssets.map((asset) => (
-              <label className="generation-source" key={asset.id}>
-                <input
-                  type="checkbox"
-                  checked={sourceAssetIds.includes(asset.id)}
-                  onChange={(event) =>
-                    setSourceAssetIds((current) =>
-                      event.target.checked
-                        ? [...current, asset.id]
-                        : current.filter((id) => id !== asset.id),
-                    )
-                  }
-                />
-                <img
-                  src={`data:${asset.mimeType};base64,${asset.data}`}
-                  alt=""
-                />
-                <span>{asset.name}</span>
-              </label>
-            ))
-          ) : (
-            <div className="empty-panel">
-              Import an image asset before using edit modes.
-            </div>
-          )}
-          {mode === "inpaint" && (
-            <label className="field">
-              <span>Mask image</span>
-              <select
-                value={maskAssetId ?? ""}
-                onChange={(event) =>
-                  setMaskAssetId(event.target.value || undefined)
-                }
-              >
-                <option value="">Choose a mask</option>
-                {imageAssets.map((asset) => (
-                  <option key={asset.id} value={asset.id}>
-                    {asset.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
-        </div>
-      )}
-      {provider === "stability" && mode === "outpaint" && (
-        <div className="generation-sources">
-          <div className="section-heading"><span>Directional expansion</span><small>0–2,000 px per side</small></div>
-          <div className="two-fields">
-            {(["left", "right", "up", "down"] as const).map((direction) => <label className="field" key={direction}><span>{direction[0].toUpperCase() + direction.slice(1)}</span><input type="number" min="0" max="2000" step="1" value={outpaint[direction]} onChange={(event) => setOutpaint((current) => ({ ...current, [direction]: Math.max(0, Math.min(2_000, Math.round(Number(event.target.value) || 0))) }))} /></label>)}
-          </div>
-          <label className="field"><span>Creativity {outpaint.creativity.toFixed(2)}</span><input type="range" min="0" max="1" step="0.05" value={outpaint.creativity} onChange={(event) => setOutpaint((current) => ({ ...current, creativity: Number(event.target.value) }))} /></label>
-          <small>Stability requires at least one non-zero side. The accepted result remains non-destructive.</small>
-        </div>
-      )}
-      {provider === "comfyui" && (
-        <>
-          <label className="field">
-            <span>ComfyUI endpoint</span>
-            <input
-              value={comfyEndpoint}
-              onChange={(event) => setComfyEndpoint(event.target.value)}
-            />
-          </label>
-          <label className="field workflow-picker">
-            <span>API-format workflow</span>
-            <input
-              type="file"
-              accept="application/json,.json"
-              onChange={(event) => {
-                const file = event.target.files?.[0];
-                if (file)
-                  void file
-                    .text()
-                    .then((text) => setComfyWorkflow(JSON.parse(text)));
-              }}
-            />
-            <small>
-              {comfyWorkflow
-                ? "Workflow loaded"
-                : "Choose JSON exported with Save (API Format)"}
-            </small>
-          </label>
-          <details className="comfy-mapping-editor">
-            <summary>Workflow input mapping</summary>
-            <small>Optional. Leave blank to auto-detect common nodes; enter a node ID and input name for custom workflows.</small>
-            {([
-              ["Prompt", "promptNodeId", "promptNodeIdInput"],
-              ["Negative prompt", "negativePromptNodeId", "negativePromptNodeIdInput"],
-              ["Source image", "sourceNodeId", "sourceNodeIdInput"],
-              ["Mask image", "maskNodeId", "maskNodeIdInput"],
-              ["Seed", "seedNodeId", "seedNodeIdInput"],
-              ["Width", "widthNodeId", "widthNodeIdInput"],
-              ["Height", "heightNodeId", "heightNodeIdInput"],
-              ["Batch size", "batchSizeNodeId", "batchSizeNodeIdInput"],
-            ] as const).map(([label, nodeKey, inputKey]) => <div className="two-fields comfy-mapping-row" key={nodeKey}><label className="field"><span>{label} node ID</span><input value={comfyMappings[nodeKey] ?? ""} onChange={(event) => setComfyMappings((current) => ({ ...current, [nodeKey]: event.target.value }))} placeholder="Auto" /></label><label className="field"><span>Input name</span><input value={comfyMappings[inputKey] ?? ""} onChange={(event) => setComfyMappings((current) => ({ ...current, [inputKey]: event.target.value }))} placeholder="Auto" /></label></div>)}
-          </details>
-        </>
-      )}
-      {provider !== "comfyui" && (
-        <div className="provider-key-row">
-          <span>
-            {!selectedProviderStatus
-              ? "Checking credential storage…"
-              : !selectedProviderStatus.available
-              ? `${selectedProviderStatus?.stored ? "Encrypted credential stored but unavailable. " : ""}${selectedProviderStatus?.reason ?? "Operating-system credential protection is unavailable."}`
-              : selectedProviderStatus.configured
-                ? "Encrypted credential configured"
-                : "API key required"}
-          </span>
-          <div className="provider-key-actions">
-            <button disabled={!selectedProviderStatus?.available} onClick={() => { setShowCredential((value) => !value); setCredentialRemovalPending(false); }}>
-              {showCredential ? "Hide" : selectedProviderStatus?.configured ? "Replace key" : "Set key"}
-            </button>
-            {selectedProviderStatus?.stored && <button className="remove-provider-key" onClick={async () => {
-              if (!credentialRemovalPending) { setCredentialRemovalPending(true); setShowCredential(false); return; }
-              try {
-                await window.aidraw.setProviderCredential(provider, "");
-                setCredential("");
-                setCredentialRemovalPending(false);
-                setProviderStatus(await window.aidraw.getProviderStatus());
-                notify("Encrypted provider credential removed.", "success");
-              } catch (error) {
-                notify(error instanceof Error ? error.message : String(error), "error");
-              }
-            }}>{credentialRemovalPending ? "Confirm remove" : "Remove"}</button>}
-          </div>
-        </div>
-      )}
-      {showCredential && provider !== "comfyui" && selectedProviderStatus?.available && (
-        <div className="credential-editor">
-          <input
-            type="password"
-            maxLength={MAX_PROVIDER_CREDENTIAL_BYTES}
-            value={credential}
-            onChange={(event) => setCredential(event.target.value)}
-            placeholder={`${provider} API key`}
-          />
-          <button
-            disabled={!credential.trim()}
-            onClick={async () => {
-              try {
-                await window.aidraw.setProviderCredential(provider, credential);
-                setCredential("");
-                setShowCredential(false);
-                setCredentialRemovalPending(false);
-                setProviderStatus(await window.aidraw.getProviderStatus());
-                notify("Credential encrypted with operating-system protected storage.", "success");
-              } catch (error) {
-                notify(error instanceof Error ? error.message : String(error), "error");
-              }
-            }}
-          >
-            {selectedProviderStatus.configured ? "Replace encrypted" : "Save encrypted"}
-          </button>
-        </div>
-      )}
-      {document.kind === "pixel" && (
-        <div className="pixel-conversion-note">
-          <Grid3X3 size={15} />
-          <span>
-            <strong>Pixel conversion enabled</strong>
-            <small>
-              Area downsample · OKLab match ·{" "}
-              {document.conversionDefaults.dithering}
-            </small>
-          </span>
-        </div>
-      )}
-      <button
-        className="primary-button"
-        disabled={Boolean(generationError)}
-        onClick={() => void startGeneration()}
-      >
-        <Sparkles size={16} /> Generate
-      </button>
-      {generationError && <p className="entry-dialog-error" role="alert">{generationError}</p>}
-      <p className="fine-print">
-        Human requests start immediately. Agent requests always wait for your
-        in-app approval.
-      </p>
-      {generationJobs.length > 0 && (
-        <div className="generation-results">
-          <div className="section-heading">
-            <span>Generation jobs</span>
-            <small>{generationJobs.length}</small>
-          </div>
-          {[...generationJobs].reverse().map((job) => {
-            const result = job.result as GenerationJobResult | undefined;
-            return (
-              <div className="generation-job" key={job.id}>
-                <div className="generation-job-head">
-                  <span>
-                    <strong>{job.status}</strong>
-                    <small>{job.message}</small>
-                  </span>
-                  {job.status === "running" && (
-                    <button
-                      onClick={() => void window.aidraw.jobCancel(job.id)}
-                    >
-                      Cancel
-                    </button>
-                  )}
-                </div>
-                {["queued", "running"].includes(job.status) && (
-                  <div className="job-progress">
-                    <span
-                      style={{ width: `${Math.round(job.progress * 100)}%` }}
-                    />
-                  </div>
-                )}
-                {job.error && (
-                  <div className="job-error">{job.error.message}</div>
-                )}
-                <div className="result-grid">
-                  {result?.outputs?.map((output) => (
-                    <div className="result-card" key={output.id}>
-                      <img
-                        src={`data:${output.mimeType};base64,${output.data}`}
-                        alt="Generated result"
-                      />
-                      <div className="result-card-actions">
-                      {result.comparisonSource && <button onClick={() => setGenerationComparison({ jobId: job.id, source: result.comparisonSource!, output })}>Compare</button>}
-                      <button disabled={result.acceptedOutputId === output.id} onClick={async () => {
-                          const accepted = await window.aidraw.generationAccept(
-                            job.id,
-                            output.id,
-                          );
-                          notify(
-                            accepted.accepted
-                              ? (accepted.message ?? "Result added to the document.")
-                              : (accepted.message ??
-                                  "Could not accept result."),
-                            accepted.accepted ? "success" : "error",
-                          );
-                        }}
-                      >
-                        {result.acceptedOutputId === output.id ? "Accepted" : `Accept as ${document.kind === "pixel" ? "cel" : "layer"}`}
-                      </button>
-                      <button className="reject-generation-result" disabled={result.acceptedOutputId === output.id} onClick={async () => { const rejected = await window.aidraw.generationReject(job.id, output.id); if (!rejected.rejected) notify(rejected.message ?? "Could not reject result.", "warning"); }}>Reject</button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
-      {generationComparison && <GenerationComparisonDialog
-        source={generationComparison.source}
-        output={generationComparison.output}
-        onClose={() => setGenerationComparison(undefined)}
-        onAccept={async () => {
-          const accepted = await window.aidraw.generationAccept(generationComparison.jobId, generationComparison.output.id);
-          notify(accepted.accepted ? accepted.message ?? "Result added to the document." : accepted.message ?? "Could not accept result.", accepted.accepted ? "success" : "error");
-          if (accepted.accepted) setGenerationComparison(undefined);
-        }}
-        onReject={async () => {
-          const rejected = await window.aidraw.generationReject(generationComparison.jobId, generationComparison.output.id);
-          if (rejected.rejected) setGenerationComparison(undefined);
-          else notify(rejected.message ?? "Could not reject result.", "warning");
-        }}
-      />}
-    </div>
-  );
-}
-
 function AssetsPanel({ document }: { document: AIDrawDocument }) {
   const apply = useEditorStore((state) => state.apply);
   const notify = useEditorStore((state) => state.notify);
@@ -5764,7 +5273,7 @@ function AssetsPanel({ document }: { document: AIDrawDocument }) {
         {assets.length === 0 ? (
           <div className="empty-panel">
             <Image size={28} />
-            <span>Drop images, fonts, or generated results here.</span>
+            <span>Drop images or fonts here.</span>
           </div>
         ) : (
           <div className="asset-grid">
@@ -6012,7 +5521,7 @@ function RightSidebar({
   const visiblePanel = panel === "animation" && document.kind !== "illustration" ? "layers" : panel;
   const setPanel = useEditorStore((state) => state.setRightPanel);
   const apply = useEditorStore((state) => state.apply);
-  const panelOrder: Array<"layers" | "assets" | "animation" | "activity" | "generation"> = document.kind === "illustration" ? ["layers", "assets", "animation", "activity", "generation"] : ["layers", "assets", "activity", "generation"];
+  const panelOrder: Array<"layers" | "assets" | "animation" | "activity"> = document.kind === "illustration" ? ["layers", "assets", "animation", "activity"] : ["layers", "assets", "activity"];
   const handlePanelKeys = (event: React.KeyboardEvent<HTMLElement>) => {
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
     event.preventDefault();
@@ -6169,19 +5678,6 @@ function RightSidebar({
           <ListTree size={17} />
           <span>Activity</span>
         </button>
-        <button
-          id="inspector-tab-generation"
-          role="tab"
-          aria-selected={visiblePanel === "generation"}
-          aria-controls="inspector-panel"
-          tabIndex={visiblePanel === "generation" ? 0 : -1}
-          className={visiblePanel === "generation" ? "is-active" : ""}
-          onClick={() => setPanel("generation")}
-          title="Generate"
-        >
-          <Sparkles size={17} />
-          <span>Generate</span>
-        </button>
       </nav>
       <div id="inspector-panel" className="panel-content" role="tabpanel" aria-labelledby={`inspector-tab-${visiblePanel}`} tabIndex={0}>
         {visiblePanel === "layers" && (
@@ -6267,7 +5763,6 @@ function RightSidebar({
         {visiblePanel === "assets" && <AssetsPanel key={document.id} document={document} />}
         {visiblePanel === "animation" && document.kind === "illustration" && <IllustrationAnimationPanel document={document} />}
         {visiblePanel === "activity" && <ActivityPanel />}
-        {visiblePanel === "generation" && <GenerationPanel document={document} />}
       </div>
     </aside>
   );

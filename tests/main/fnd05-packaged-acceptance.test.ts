@@ -39,7 +39,6 @@ import {
   FND05_UNRESPONSIVE_STALL_EXPRESSION,
   FND05_UNRESPONSIVE_STALL_MS,
   FND05_UNRESPONSIVE_UNSAFE_REPORT_ENVIRONMENTS,
-  inspectFnd05EncryptedToken,
   observeFnd05DeliberatePageCrash,
   parseFnd05OwnedProcesses,
   redactFnd05FailureText,
@@ -106,13 +105,13 @@ describe('FND-05 retained exact-package acceptance boundary', () => {
     ]);
   });
 
-  it('redacts live values and rejects credential-shaped retained evidence', () => {
+  it('redacts live values and rejects secret-bearing retained evidence', () => {
     const secret = 'fnd05-private-token-value';
     const failure = redactFnd05FailureText(`Authorization: Bearer ${secret}; token=${secret}`, [secret]);
     expect(failure).not.toContain(secret);
     expect(assertFnd05EvidenceRedacted(JSON.stringify({ status: 'failed', failure }), [secret])).toBe(true);
-    expect(() => assertFnd05EvidenceRedacted(JSON.stringify({ token: secret }), [secret])).toThrow(/credential-shaped/);
-    expect(() => assertFnd05EvidenceRedacted(JSON.stringify({ detail: `Bearer ${secret}` }), [secret])).toThrow(/credential-shaped/);
+    expect(() => assertFnd05EvidenceRedacted(JSON.stringify({ token: secret }), [secret])).toThrow(/secret-bearing/);
+    expect(() => assertFnd05EvidenceRedacted(JSON.stringify({ detail: `Bearer ${secret}` }), [secret])).toThrow(/secret-bearing/);
   });
 
   it('accepts only a positively observed deliberate crash and its expected command settlement', async () => {
@@ -332,23 +331,9 @@ describe('FND-05 retained exact-package acceptance boundary', () => {
     expect(classifyFnd05UnresponsiveFailureStage({ inputAdmission: 'ack-pending', allDebuggerAttachmentsDetached: true, productUnresponsiveConfirmationObserved: true, replacementProcessAdmitted: true, debuggerTransportReconnected: true, replacementAdmitted: true })).toBe('post-replacement-assertion');
   });
 
-  it('keeps token/ciphertext values out of reporter surfaces and rejects credential-capable reporters', () => {
-    const liveToken = 'synthetic-live-token-that-must-not-reach-playwright';
-    expect(inspectFnd05EncryptedToken({ version: 2, status: 'active', encryption: 'electron-safe-storage', value: 'encrypted-ciphertext' }, liveToken)).toEqual({
-      version: 2,
-      status: 'active',
-      encryption: 'electron-safe-storage',
-      encryptedValuePresent: true,
-    });
-    let message = '';
-    try {
-      inspectFnd05EncryptedToken({ version: 2, status: 'active', encryption: 'electron-safe-storage', value: liveToken }, liveToken);
-    } catch (error) {
-      message = error instanceof Error ? error.message : String(error);
-    }
-    expect(message).toMatch(/expected encrypted safe-storage record/);
-    expect(message).not.toContain(liveToken);
-    expect(() => inspectFnd05EncryptedToken({ version: 1, encryption: 'electron-safe-storage', value: 'legacy-ciphertext' }, liveToken)).toThrow(/expected encrypted safe-storage record/);
+  it('keeps retired persistent stores absent and rejects evidence-capable reporters', () => {
+    expect(FND05_PACKAGED_FILES.retiredProviderStore).toBe(join('credentials', 'generation.json'));
+    expect(FND05_PACKAGED_FILES.retiredAuthorityStore).toBe(join('credentials', 'mcp-token.json'));
     expect(assertFnd05UnresponsiveSafeReporterEnvironment({})).toBe(true);
     for (const name of ['PLAYWRIGHT_HTML_OUTPUT_DIR', 'PLAYWRIGHT_JSON_OUTPUT_FILE', 'PLAYWRIGHT_JUNIT_OUTPUT_FILE', 'PLAYWRIGHT_BLOB_OUTPUT_DIR']) {
       expect(() => assertFnd05UnresponsiveSafeReporterEnvironment({ [name]: '/tmp/unsafe' })).toThrow(new RegExp(name));
@@ -413,7 +398,8 @@ describe('FND-05 retained exact-package acceptance boundary', () => {
     expect(acceptance).toContain("testInfo.project.metadata.suite !== 'retained-fnd05-unresponsive-renderer'");
     expect(acceptance).toContain('stopOwner(owner, configured.profile, secrets)');
     expect(source).toContain("signalOwner(profile, '--quit-engine')");
-    expect(acceptance).toContain('inspectFnd05EncryptedToken(encryptedCredential, ownerConnection.token)');
+    expect(acceptance).toContain('configured.paths.retiredAuthorityStore');
+    expect(acceptance).not.toMatch(/safe-storage|EncryptedToken|tokenCredentials/);
     expect(acceptance).not.toContain('Page.crash');
     expect(acceptance).not.toContain('injectRendererRecoveryTestEvent');
     expect(acceptance).not.toContain('renderer-recovery:test-event');
@@ -522,35 +508,19 @@ describe('FND-05 retained exact-package acceptance boundary', () => {
     expect(fnd05).toMatchObject({ status: '🟢 Working', priority: 'P0' });
     const truth = fnd05?.truth ?? '';
     for (const claim of [
+      'canonical engine survives editor close',
+      'fresh engine-process MCP authority after a true owner restart',
+      'absent legacy persistent stores',
+      'no unexpected renderer network',
+      'customer update behavior remain open',
+    ]) expect(truth).toContain(claim);
+    for (const retainedIdentity of [
       '20260814t023118z-eab3063-r1',
-      'failed before launch during Playwright callback discovery',
       '20260814t030554z-d082ab7-r2',
       '20260814t040447z-b111d9b-r3',
-      '1/1 failed in 40.7 seconds',
       '20260814t051235z-6d7a896-r4',
-      '1/1 failed in 7.7 seconds',
-      '3,030.6915 ms',
-      '5,000 ms',
-      '2,000 ms',
-      '65,000 ms',
-      'F24',
-      'DevToolsAgentHost',
-      'closeAndWait',
-      'pending-after-debugger-detach',
-      '**10,000 ms** no-replacement floor',
       '20260814t062017z-41a3b0c-r5',
-      'passed **1/1 in 31.2 seconds**',
-      '3,030.199709 ms',
-      '28,176.619584 ms',
-      'owner/MCP PID 91335',
-      'renderer PID 91345',
-      'PID 91362',
-      'Zero external renderer requests were directly observed only during attached intervals',
-      'not directly observed',
-      'Renderer-local work never submitted to the canonical engine is not promised',
-    ]) expect(truth).toContain(claim);
-    expect(truth).toContain('The initiating renderer-loss trigger');
-    expect(truth).toContain('customer updater/restart semantics');
+    ]) expect(testing).toContain(retainedIdentity);
     expect(truth).not.toContain('alive-hang route has no PASS');
     expect(tracker).toContain('synchronized through base `0f42b227e6fe88c27e7bd1cdaccf3f4456f62984`');
     expect(tracker).toContain('This bounded **ten-path** source/headless UX-01 correction');
@@ -581,7 +551,7 @@ describe('FND-05 retained exact-package acceptance boundary', () => {
     expect(changelog).toContain('The separate immutable r5 result above supplies narrow macOS/arm64 current-package input-ACK-hang acceptance');
     expect(changelog).not.toContain('still needs native packaged acceptance');
     expect(tracker).not.toContain('still lacks native packaged acceptance');
-    expect(testing).toContain('Fourteen exact-checkpoint cases');
+    expect(testing).toContain('Thirteen exact-checkpoint cases');
     expect(testing).toContain('### FND-05 alive-but-unresponsive controller, consumed r1/r2/r3/r4 failures, and narrow r5 PASS');
     expect(testing).toContain('exited 1 before any application/helper launch, stall, or product assertion');
     expect(testing).toContain('object-destructures the built-in `browserName` fixture');

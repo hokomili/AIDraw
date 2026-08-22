@@ -39,13 +39,13 @@ export interface ForceStopIdentityEvidence {
 }
 
 export interface RedactedConnection {
-  version: number;
+  version: 2;
   url: string;
   activeDocumentId?: string;
   pid: number | string;
   trustedFolders: string[];
   stoppedAt: string;
-  credentialsRedacted: true;
+  authorityRedacted: true;
 }
 
 export function requiresUnsandboxedGuiLaunch(platform?: NodeJS.Platform): boolean;

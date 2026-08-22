@@ -263,8 +263,8 @@ async function inspectEvidence(cwd, evidence, context) {
   const stable = evidence.stableV1;
   if (!isRecord(stable)) issues.push(issue(3, 'stable_evidence_missing', 'Stable-v1 evidence must explicitly cover the remaining stable checklist.', 'stable-v1'));
   else {
-    requirePass(issues, stable.releaseGatesResult, 'stable_release_gates_not_pass', 'Utility/corrupt-input/provider-mock/performance/accessibility/complete E2E gates', 'stable-v1', 3);
-    requirePass(issues, stable.macosNativePackageResult, 'stable_macos_package_not_pass', 'macOS native package/Keychain/fuse/login/DMG/ZIP lifecycle', 'stable-v1', 3);
+    requirePass(issues, stable.releaseGatesResult, 'stable_release_gates_not_pass', 'Utility/corrupt-input/performance/accessibility/complete E2E gates', 'stable-v1', 3);
+    requirePass(issues, stable.macosNativePackageResult, 'stable_macos_package_not_pass', 'macOS native package/fuse/login/DMG/ZIP lifecycle', 'stable-v1', 3);
     issues.push(...await inspectReproducibilityReports(cwd, stable.reproducibilityReports, context));
     requirePass(issues, stable.dependencyLicenseReviewResult, 'stable_dependency_license_review_not_pass', 'Dependency/license review', 'stable-v1', 3);
     requirePass(issues, stable.repositoryPrerequisitesResult, 'stable_repository_prerequisites_not_pass', 'Repository/owner/remote/CI/signing/publication prerequisites', 'stable-v1', 3);

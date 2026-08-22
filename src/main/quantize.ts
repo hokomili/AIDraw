@@ -30,7 +30,7 @@ export function quantizeToPalette(
   dithering: 'none' | 'bayer-4x4' | 'floyd-steinberg' = 'none',
 ): Array<{ x: number; y: number; index: number }> {
   const resized = nativeImage.createFromBuffer(encoded).resize({ width, height, quality: 'best' });
-  if (resized.isEmpty()) throw new Error('The generated image could not be decoded.');
+  if (resized.isEmpty()) throw new Error('The source image could not be decoded.');
   const bitmap = resized.toBitmap();
   const paletteLabs = palette.map((entry) => {
     const rgba = hexToRgba(entry.color);

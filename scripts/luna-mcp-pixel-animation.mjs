@@ -6,6 +6,7 @@ import process from 'node:process';
 import { setTimeout } from 'node:timers';
 import UPNG from 'upng-js';
 import gifenc from 'gifenc';
+import { initializeDirectMcp, readMcpConnectionHandoff } from './mcp-direct-client.mjs';
 
 const { GIFEncoder, applyPalette } = gifenc;
 
@@ -29,14 +30,14 @@ async function signalPrimary(...args) {
   });
 }
 
-async function waitForHealth() {
+async function waitForHealth(connectionPath) {
   const deadline = Date.now() + 20_000;
   while (Date.now() < deadline) {
     try {
-      const settings = JSON.parse(await readFile(join(profileDir, 'mcp-port.json'), 'utf8'));
-      const url = `http://127.0.0.1:${settings.preferredPort}/health`;
-      const response = await globalThis.fetch(url);
-      if (response.ok) return { url, body: await response.json() };
+      const connection = await readMcpConnectionHandoff(connectionPath);
+      const url = new globalThis.URL(connection.url); url.pathname = '/health';
+      const response = await globalThis.fetch(url, { headers: { authorization: `Bearer ${connection.token}` } });
+      if (response.ok) return { url: url.toString(), body: await response.json() };
     } catch { /* Engine is still starting. */ }
     await sleep(100);
   }
@@ -162,32 +163,26 @@ async function run() {
   const stderr = [];
   primary.stderr?.on('data', (chunk) => stderr.push(chunk));
 
-  const health = await waitForHealth();
+  const health = await waitForHealth(connectionPath);
   const connectionDeadline = Date.now() + 20_000;
   let connection;
   while (!connection && Date.now() < connectionDeadline) {
-    try { connection = JSON.parse(await readFile(connectionPath, 'utf8')); } catch { await sleep(100); }
+    try { connection = await readMcpConnectionHandoff(connectionPath); } catch { await sleep(100); }
   }
   if (!connection?.url || !connection?.token) throw new Error(`Headless MCP connection file did not appear. ${Buffer.concat(stderr).toString('utf8')}`);
   const credentials = { url: connection.url, token: connection.token };
   const initialRendererPages = 0;
   const rendererPagesBeforeMutations = 0;
   if (rendererPagesBeforeMutations !== 0) throw new Error('Renderer remained open before MCP mutations.');
-  const healthWhileRendererClosed = await (await globalThis.fetch(health.url)).json();
+  const healthWhileRendererClosed = await (await globalThis.fetch(health.url, { headers: { authorization: `Bearer ${connection.token}` } })).json();
   if (healthWhileRendererClosed.uiRequired !== false) throw new Error(`Engine unexpectedly requires UI: ${JSON.stringify(healthWhileRendererClosed)}`);
 
-  const initResponse = await globalThis.fetch(credentials.url, {
-    method: 'POST',
-    headers: { authorization: `Bearer ${credentials.token}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id: ++rpcId, method: 'initialize', params: { protocolVersion: '2026-07-28', capabilities: {}, clientInfo: { name: 'Luna black-box acceptance', version: '1.0' } } }),
+  const initialized = await initializeDirectMcp(connection, {
+    requestId: ++rpcId,
+    clientInfo: { name: 'Luna black-box acceptance', version: '1.0' },
   });
-  const initBody = parseRpcPayload(await initResponse.text());
-  calls.push({ id: rpcId, method: 'initialize', status: initResponse.status, ok: initResponse.ok });
-  if (!initResponse.ok || initBody.error) throw new Error(`MCP initialize failed: ${JSON.stringify(initBody)}`);
-  const mcpSessionId = initResponse.headers.get('mcp-session-id');
-  if (!mcpSessionId) throw new Error('MCP session ID missing.');
-  const headers = { authorization: `Bearer ${credentials.token}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json', 'mcp-session-id': mcpSessionId };
-  await globalThis.fetch(credentials.url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) });
+  calls.push({ id: rpcId, method: 'initialize', status: 200, ok: true, protocolVersion: initialized.protocolVersion });
+  const headers = initialized.headers;
   calls.push({ method: 'notifications/initialized' });
 
   const listedTools = (await rpc(credentials.url, headers, 'tools/list')).body.result.tools.map((entry) => entry.name);

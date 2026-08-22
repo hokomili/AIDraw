@@ -70,7 +70,6 @@ interface ApplyOptions {
   recordHistory?: boolean;
   actorMayBypassLocks?: boolean;
   activityStatus?: 'committed' | 'partial';
-  trustedProvenance?: boolean;
 }
 
 interface HumanLock extends HumanLockRequest {
@@ -111,7 +110,7 @@ export class DocumentService extends EventEmitter {
   private activeDocumentId?: Id;
   private workspaceRevision = 0;
   private recoveryWarnings: string[] = [];
-  private mcpInfo: Pick<McpConnectionInfo, 'running' | 'access' | 'url' | 'port' | 'tokenHint'> = { running: false, access: 'unavailable' };
+  private mcpInfo: Pick<McpConnectionInfo, 'running' | 'authority' | 'url' | 'port' | 'tokenHint'> = { running: false, authority: 'unavailable' };
 
   constructor(
     private readonly journal: RecoveryJournal,
@@ -181,7 +180,7 @@ export class DocumentService extends EventEmitter {
     await this.journal.flush();
   }
 
-  setMcpInfo(info: Pick<McpConnectionInfo, 'running' | 'access' | 'url' | 'port' | 'tokenHint'>): void {
+  setMcpInfo(info: Pick<McpConnectionInfo, 'running' | 'authority' | 'url' | 'port' | 'tokenHint'>): void {
     this.mcpInfo = info;
     this.publish();
   }
@@ -404,7 +403,6 @@ export class DocumentService extends EventEmitter {
 
     try {
       transaction = await prepareTransactionForCommit(current, transaction, nowIso(), {
-        trustedProvenance: options.trustedProvenance,
         imageDecoder: this.imageDecoder,
       });
       if (this.documents.get(current.id) !== current || this.documentIncarnations.get(current.id) !== incarnation) {

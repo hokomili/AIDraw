@@ -48,7 +48,6 @@ export interface Fnd09ObservationCodecEngine {
     getDocument(documentId: string): AIDrawDocument | undefined;
   };
   rasterUtilities: ObservationCodecLane;
-  generationUtilities: { status(): { running: boolean } };
 }
 
 function normalizedPath(value: string): string {
@@ -164,8 +163,6 @@ export async function runFnd09ObservationCodecScenario(
     if (!current) throw new Error('The canonical document disappeared during observation codec containment.');
     const after = { documentId, revision: current.revision, sha256: documentSha256(current) };
     if (JSON.stringify(after) !== JSON.stringify(before)) throw new Error('Observation codec containment changed canonical document state.');
-    if (engine.generationUtilities.status().running) throw new Error('The provider/generation utility lane was unexpectedly started.');
-
     retained = {
       version: 1,
       scenario: 'FND-09 packaged observation codec result containment',
@@ -185,9 +182,8 @@ export async function runFnd09ObservationCodecScenario(
         fixedCorruptResponseHoldMs: FND09_OBSERVATION_CODEC_E2E_HOLD_MS,
         observation: recovery,
       },
-      generationLaneUntouched: true,
       privacy: { rendererCreated: false, corruptPayloadPublished: false, publicJobCreated: false },
-      network: { nonLoopbackRequests: 0, externalProviderRequests: 0, paidRequests: 0 },
+      network: { nonLoopbackRequests: 0 },
     };
   } catch (error) {
     const value = error instanceof Error ? error : new Error(String(error));
@@ -197,7 +193,7 @@ export async function runFnd09ObservationCodecScenario(
       result: 'failed',
       error: { name: value.name, message: value.message.slice(0, 500) },
       canonical: { before },
-      network: { nonLoopbackRequests: 0, externalProviderRequests: 0, paidRequests: 0 },
+      network: { nonLoopbackRequests: 0 },
     };
   }
   await writeFile(configuration.probePath, `${JSON.stringify(retained, null, 2)}\n`, { flag: 'wx', mode: 0o600 });

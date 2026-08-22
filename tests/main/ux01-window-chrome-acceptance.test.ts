@@ -447,7 +447,7 @@ describe('UX-01 exact-package native window-chrome preparation', () => {
       [UX01_WINDOW_CHROME_FAILURE_ROOT_ENV]: '/workspace/test-results/retained-failures/ux01-window-chrome-native-run-id',
       [UX01_WINDOW_CHROME_EXE_HASH_ENV]: digest,
       [UX01_WINDOW_CHROME_ASAR_HASH_ENV]: digest,
-      OPENAI_API_KEY: 'must-not-pass',
+      UNRELATED_SECRET: 'must-not-pass',
       ANTHROPIC_API_KEY: 'must-not-pass',
       SSH_AUTH_SOCK: '/must/not/pass',
       NODE_OPTIONS: '--inspect',
@@ -459,7 +459,7 @@ describe('UX-01 exact-package native window-chrome preparation', () => {
       AIDRAW_E2E_UX01_WINDOW_CHROME_WRAPPER: '1',
       PLAYWRIGHT_NO_COPY_PROMPT: '1',
     });
-    for (const name of ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'SSH_AUTH_SOCK', 'NODE_OPTIONS', 'PLAYWRIGHT_JSON_OUTPUT_FILE']) {
+    for (const name of ['UNRELATED_SECRET', 'ANTHROPIC_API_KEY', 'SSH_AUTH_SOCK', 'NODE_OPTIONS', 'PLAYWRIGHT_JSON_OUTPUT_FILE']) {
       expect(child).not.toHaveProperty(name);
     }
   });

@@ -119,7 +119,7 @@ export function assertExportResultObserverNoForceSource(observerSource) {
     'exportTargetWritten: false',
     'invalidUtilityPayloadsNotPublished: true',
     'await quitGracefully(profile, child)',
-    "credentialStatus).toBe('redacted-after-graceful-stop')",
+    "authorityStatus).toBe('redacted-after-graceful-stop')",
   ]) {
     if (!scenario.includes(marker)) throw new Error(`Export-result scenario is missing ${marker}.`);
   }

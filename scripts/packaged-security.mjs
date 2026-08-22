@@ -39,20 +39,11 @@ export const PACKAGED_PRELOAD_CHANNELS = [
   'aidraw:locks:acquire',
   'aidraw:locks:release',
   'aidraw:mcp:info',
-  'aidraw:mcp:credentials',
-  'aidraw:mcp:credential:rotate',
-  'aidraw:mcp:access:revoke',
+  'aidraw:mcp:connection',
   'aidraw:engine:status',
   'aidraw:engine:start-at-login',
-  'aidraw:mcp:configure-agent-client',
-  'aidraw:mcp:configure-codex',
+  'aidraw:mcp:agent-client-setup',
   'aidraw:jobs:resolve',
-  'aidraw:generation:set-credential',
-  'aidraw:generation:provider-status',
-  'aidraw:generation:start',
-  'aidraw:generation:accept',
-  'aidraw:generation:reject',
-  'aidraw:jobs:cancel',
   'aidraw:documents:import',
   'aidraw:palette:import',
   'aidraw:palette:export',
@@ -89,6 +80,29 @@ export const PACKAGED_FUSE_EXPECTATIONS = [
   ['WasmTrapHandlers', FuseV1Options.WasmTrapHandlers, FuseState.ENABLE],
 ];
 
+export const RETIRED_PRODUCT_ARCHIVE_ROOTS = [
+  '/node_modules/openai/',
+  '/node_modules/jsonc-parser/',
+];
+
+const RETIRED_PRODUCT_CHUNK_MARKERS = [
+  ['generation provider runner', /generation-provider-runner/i],
+  ['generation utility run', /generation-run/i],
+  ['generation approval preview', /approval-preview/i],
+  ['generation acceptance normalization', /(?:acceptance-normalization|normalize-generation-acceptance)/i],
+];
+
+const RETIRED_PRODUCT_SOURCE_MARKERS = [
+  ['Electron protected-secret API', /\bsafeStorage\b/],
+  ['provider environment configuration', /\b(?:OPENAI_API_KEY|STABILITY_API_KEY|COMFYUI_URL)\b/],
+  ['provider or generation IPC', /\baidraw:(?:generation:(?:start|accept|reject|set-credential|provider-status)|mcp:(?:credentials|credential:rotate))\b/],
+  ['generation MCP tool', /\bgeneration_(?:start|cancel|result)\b/],
+  ['provider runtime class', /\b(?:GenerationManager|GenerationProviderRunner|ProviderCredentialStore|ProviderCredentials)\b/],
+  ['retired protected-storage format', /\b(?:electron-safe-storage|windows-dpapi)\b/],
+  ['retired persistent-secret path', /["'](?:generation|mcp-token)\.json["']/],
+  ['retired per-launch MCP setup', /(?:fresh connection after every AIDraw restart|Refresh these settings after AIDraw restarts|Current-run connection settings|Use these settings only for the current AIDraw engine run)/i],
+];
+
 function invariant(condition, message) {
   if (!condition) throw new Error(message);
 }
@@ -105,6 +119,47 @@ function markerWindow(source, marker, radius = 240) {
 
 function archivePath(path) {
   return path.slice(1).split('/').join(sep);
+}
+
+export function findFirstPartyPackagedJavaScriptEntries(archiveFiles) {
+  const entries = archiveFiles.filter((entry) => /^\/\.vite\/.+\.(?:c|m)?js$/u.test(entry));
+  invariant(entries.length > 0, 'Packaged runtime contains no first-party JavaScript chunks.');
+  return entries;
+}
+
+export function assertRetiredProductSurfacesAbsent({ archiveFiles, firstPartyJavaScriptChunks }) {
+  const leakedArchiveEntry = archiveFiles.find((entry) => RETIRED_PRODUCT_ARCHIVE_ROOTS.some((root) => entry.startsWith(root)));
+  invariant(!leakedArchiveEntry, `Retired or orphaned runtime dependency leaked into the package: ${leakedArchiveEntry}.`);
+
+  const expectedEntries = findFirstPartyPackagedJavaScriptEntries(archiveFiles);
+  invariant(Array.isArray(firstPartyJavaScriptChunks), 'Packaged first-party JavaScript chunks must be an array.');
+  const chunksByPath = new Map();
+  for (const chunk of firstPartyJavaScriptChunks) {
+    invariant(chunk && typeof chunk === 'object', 'Packaged first-party JavaScript chunk metadata must be an object.');
+    invariant(typeof chunk.path === 'string' && typeof chunk.source === 'string', 'Packaged first-party JavaScript chunk path and source must be text.');
+    invariant(!chunksByPath.has(chunk.path), `Packaged first-party JavaScript chunk is duplicated: ${chunk.path}.`);
+    chunksByPath.set(chunk.path, chunk.source);
+  }
+  invariant(chunksByPath.size === expectedEntries.length, `Packaged first-party JavaScript scan covers ${chunksByPath.size} chunks; expected ${expectedEntries.length}.`);
+
+  for (const entry of expectedEntries) {
+    invariant(chunksByPath.has(entry), `Packaged first-party JavaScript chunk was not scanned: ${entry}.`);
+    for (const [label, pattern] of RETIRED_PRODUCT_CHUNK_MARKERS) {
+      invariant(!pattern.test(entry), `Packaged runtime contains retired ${label} chunk: ${entry}.`);
+    }
+    const source = chunksByPath.get(entry);
+    for (const [label, pattern] of [...RETIRED_PRODUCT_SOURCE_MARKERS, ...RETIRED_PRODUCT_CHUNK_MARKERS]) {
+      invariant(!pattern.test(source), `Packaged first-party JavaScript chunk ${entry} contains retired ${label}.`);
+    }
+  }
+
+  return {
+    archiveDependencyRootsChecked: RETIRED_PRODUCT_ARCHIVE_ROOTS.length,
+    firstPartyJavaScriptChunksChecked: expectedEntries.length,
+    providerRuntimeAbsent: true,
+    generationWorkflowAbsent: true,
+    protectedSecretStorageAbsent: true,
+  };
 }
 
 export function assertHardenedFuseWire(wire) {
@@ -137,6 +192,13 @@ export function assertPackagedSecuritySources({ mainSource, preloadSource, rende
   invariant(markerWindow(mainSource, 'will-attach-webview').includes('preventDefault'), 'Packaged webview boundary does not prevent attachment.');
   invariant(mainSource.includes('Rejected IPC from an untrusted renderer.'), 'Packaged main bundle is missing the exact sender-identity rejection.');
   invariant(mainSource.includes('Rejected IPC from an unexpected origin.'), 'Packaged main bundle is missing the exact renderer-origin rejection.');
+  invariant(mainSource.includes('--mcp-bridge'), 'Packaged main bundle is missing the stable MCP stdio launcher mode.');
+  invariant(/bridge-launcher\.(?:cmd|sh)/u.test(mainSource), 'Packaged main bundle is missing the stable product-owned MCP wrapper.');
+  invariant(mainSource.includes('mcp-current.json'), 'Packaged main bundle is missing private current-engine discovery.');
+  invariant(mainSource.includes('/mcp/identity'), 'Packaged main bundle is missing authenticated engine-instance validation.');
+  invariant(mainSource.includes('no-startup-window') && /setActivationPolicy\(["']accessory["']\)/u.test(mainSource)
+    && /\.dock\?\.hide\(\)/u.test(mainSource), 'Packaged main bundle is missing pre-ready macOS bridge UI suppression.');
+  invariant(!mainSource.includes('fresh connection after every AIDraw restart'), 'Packaged main bundle still requires per-launch MCP client reconfiguration.');
 
   const cspMatch = rendererHtml.match(/http-equiv="Content-Security-Policy"\s+content="([^"]+)"/);
   invariant(cspMatch?.[1] === PACKAGED_SECURITY_CSP, 'Packaged renderer CSP differs from the hardened exact policy.');
@@ -149,7 +211,7 @@ export function assertPackagedSecuritySources({ mainSource, preloadSource, rende
   const invokeBindings = (preloadSource.match(/\.ipcRenderer\.invoke\(/g) ?? []).length;
   const eventBindings = (preloadSource.match(/\.ipcRenderer\.on\(/g) ?? []).length;
   const removeBindings = (preloadSource.match(/\.ipcRenderer\.removeListener\(/g) ?? []).length;
-  invariant(invokeBindings === 63, `Packaged preload exposes ${invokeBindings} invoke bindings; expected 63.`);
+  invariant(invokeBindings === 54, `Packaged preload exposes ${invokeBindings} invoke bindings; expected 54.`);
   invariant(eventBindings === 2 && removeBindings === 2, `Packaged preload exposes ${eventBindings} subscriptions/${removeBindings} removals; expected 2/2.`);
   invariant(!/\.ipcRenderer\.(?:send|sendSync|sendTo|sendToHost|postMessage)\(/.test(preloadSource), 'Packaged preload exposes a forbidden generic IPC primitive.');
   const channelMatches = [...preloadSource.matchAll(/["'](aidraw:[^"']+)["']/g)].map((match) => match[1]);
@@ -174,6 +236,13 @@ export function assertPackagedSecuritySources({ mainSource, preloadSource, rende
       webviewAttach: true,
       senderIdentity: true,
       rendererOrigin: true,
+    },
+    mcpBridge: {
+      stableLauncher: true,
+      privateDiscovery: true,
+      authenticatedIdentity: true,
+      preReadyUiSuppression: true,
+      perLaunchClientRewriteAbsent: true,
     },
     csp: PACKAGED_SECURITY_CSP,
     preload: {

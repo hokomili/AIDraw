@@ -103,7 +103,6 @@ describe('isolated FND-09 utility pressure hook', () => {
     const evidence = await runFnd09UtilityPressureScenario({
       service: { getActiveDocumentId: () => document.id, getDocument: (documentId) => documentId === document.id ? structuredClone(document) : undefined },
       rasterUtilities: supervisor,
-      generationUtilities: { status: () => ({ running: false }) },
     }, configuration);
 
     expect(evidence).toMatchObject({
@@ -114,7 +113,6 @@ describe('isolated FND-09 utility pressure hook', () => {
       cancellation: { label: 'queued-10', error: { name: 'AbortError' }, queuedAfterCancellation: 31 },
       refill: { label: 'replacement', queuedAfterRefill: 32 },
       drain: { sameWorker: true, workerPid: 707, queuedAfterDrain: 0 },
-      generationLaneUntouched: true,
       privacy: { rawUtilityPayloadsPublished: false, publicJobCreated: false },
     });
     expect((evidence.drain as { expectedOrder: string[]; completionOrder: string[] }).completionOrder)

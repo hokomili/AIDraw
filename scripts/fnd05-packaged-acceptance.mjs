@@ -1,6 +1,5 @@
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import process from 'node:process';
-import { inspectPackagedMcpCredential } from './packaged-e2e-runtime.mjs';
 
 export const FND05_PACKAGED_SCENARIO = 'FND-05-STALE-RENDERER exact package replaces one lost renderer without replacing its engine';
 export const FND05_PACKAGED_PROFILE_ENV = 'AIDRAW_E2E_FND05_STALE_RENDERER_PROFILE';
@@ -14,8 +13,8 @@ export const FND05_PACKAGED_FILES = Object.freeze({
   failure: 'fnd05-stale-renderer-failure.json',
   cleanup: 'fnd05-stale-renderer-cleanup.json',
   forbiddenNetwork: 'fnd05-forbidden-network.json',
-  providerCredentials: join('credentials', 'generation.json'),
-  tokenCredentials: join('credentials', 'mcp-token.json'),
+  retiredProviderStore: join('credentials', 'generation.json'),
+  retiredAuthorityStore: join('credentials', 'mcp-token.json'),
 });
 
 export const FND05_UNRESPONSIVE_PACKAGED_SCENARIO = 'FND-05-UNRESPONSIVE-RENDERER exact package replaces one persistently unresponsive renderer without replacing its engine';
@@ -86,8 +85,8 @@ export const FND05_UNRESPONSIVE_FILES = Object.freeze({
   failure: 'fnd05-unresponsive-renderer-failure.json',
   cleanup: 'fnd05-unresponsive-renderer-cleanup.json',
   forbiddenNetwork: 'fnd05-unresponsive-renderer-forbidden-network.json',
-  providerCredentials: join('credentials', 'generation.json'),
-  tokenCredentials: join('credentials', 'mcp-token.json'),
+  retiredProviderStore: join('credentials', 'generation.json'),
+  retiredAuthorityStore: join('credentials', 'mcp-token.json'),
 });
 
 function required(environment, name) {
@@ -174,17 +173,9 @@ export function resolveFnd05UnresponsiveAcceptance({ workspacePath = process.cwd
 export function assertFnd05UnresponsiveSafeReporterEnvironment(environment = process.env) {
   const configured = FND05_UNRESPONSIVE_UNSAFE_REPORT_ENVIRONMENTS.filter((name) => String(environment[name] ?? '').trim());
   if (configured.length) {
-    throw new Error(`FND-05 unresponsive-renderer acceptance rejects credential-capable Playwright report configuration: ${configured.join(', ')}.`);
+    throw new Error(`FND-05 unresponsive-renderer acceptance rejects secret-bearing Playwright report configuration: ${configured.join(', ')}.`);
   }
   return true;
-}
-
-export function inspectFnd05EncryptedToken(value, liveToken) {
-  try {
-    return inspectPackagedMcpCredential(value, liveToken);
-  } catch {
-    throw new Error('The FND-05 MCP credential is not the expected encrypted safe-storage record.');
-  }
 }
 
 export function parseFnd05OwnedProcesses(processTable, profilePath) {
@@ -228,7 +219,7 @@ export function redactFnd05FailureText(value, secrets = []) {
 export function assertFnd05EvidenceRedacted(serialized, forbiddenValues = []) {
   const text = String(serialized);
   if (/"(?:token|authorization)"\s*:/i.test(text) || /Bearer\s+(?!\[redacted\])[^\s"']+/i.test(text)) {
-    throw new Error('FND-05 retained evidence contains a credential-shaped field or bearer value.');
+    throw new Error('FND-05 retained evidence contains a secret-bearing field or bearer value.');
   }
   const leaked = forbiddenValues.filter((value) => value && text.includes(value));
   if (leaked.length) throw new Error('FND-05 retained evidence contains a declared secret value.');

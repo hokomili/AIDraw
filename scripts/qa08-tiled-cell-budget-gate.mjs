@@ -45,6 +45,7 @@ export function qa08CellBudgetChildArgs(scenario) {
     '--expose-gc',
     resolve(repositoryRoot, 'node_modules', 'vitest', 'vitest.mjs'),
     'run',
+    '--cache=false',
     '--config', resolve(repositoryRoot, 'scripts', 'vitest.qa08-tiled-cell-budget.config.mjs'),
     '--reporter=basic',
   ];
@@ -123,7 +124,7 @@ export function runQa08CellBudgetSelfTest() {
   }
   if (rejected.length !== 6) throw new Error('QA-08 preflight self-test did not fail closed for every unsafe case.');
   const args = qa08CellBudgetChildArgs('accept');
-  if (!args.includes('--max-old-space-size=1024') || !args.includes('--expose-gc')) throw new Error('QA-08 child resource bounds are missing.');
+  if (!args.includes('--max-old-space-size=1024') || !args.includes('--expose-gc') || !args.includes('--cache=false')) throw new Error('QA-08 child resource bounds are missing.');
   return { childSpawned: false, rootCreated: false, acceptedRoot: accepted.root, rejected, timeoutMs: QA08_TILED_CELL_BUDGET_CONTRACT.childTimeoutMs };
 }
 

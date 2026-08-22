@@ -39,46 +39,24 @@ describe('editor accessibility baseline', () => {
     }
   });
 
-  it('keeps MCP rotation and revocation explicit, named, and free of returned credential values', async () => {
-    const [app, main, styles] = await Promise.all([
+  it('keeps MCP onboarding stable, no-secret, and free of credential controls', async () => {
+    const [app, main, runtime, styles] = await Promise.all([
       readFile(new URL('../../src/renderer/App.tsx', import.meta.url), 'utf8'),
       readFile(new URL('../../src/main/main.ts', import.meta.url), 'utf8'),
+      readFile(new URL('../../src/main/engine-runtime.ts', import.meta.url), 'utf8'),
       readFile(new URL('../../src/renderer/styles.css', import.meta.url), 'utf8'),
     ]);
-    expect(app).toContain('aria-label="MCP credential security"');
-    expect(app).toContain('mcpAccessRevoked ? "Rotate and re-enable" : "Rotate credential"');
-    expect(app).toContain('>Revoke access</button>');
-    expect(app).toContain('setCredentials(undefined)');
-    expect(app).toContain('setSetupResult(undefined)');
-    expect(app).toContain('setCredentialResult(undefined)');
-    expect(app).toContain('result.warning ? "warning" : "success"');
-    expect(app).toContain('Rotating now re-enables the local endpoint and agent access with a new credential.');
-    expect(app).toContain('Persistent folder approvals and already admitted or pending approval work remain');
-    expect(app).toContain('neither action edits client configuration files');
-    expect(styles).toContain('.credential-lifecycle strong { font-size: var(--ui-type-label); }');
-    expect(styles).toContain('.credential-lifecycle small { margin-top: 3px; font-size: var(--ui-type-caption);');
-    expect(styles).toContain('.credential-lifecycle-actions button { min-height: var(--ui-hit-secondary);');
-    expect(styles).toContain('.credential-lifecycle p { margin: 7px 0 0; font-size: var(--ui-type-caption);');
-    const changeStart = app.indexOf('const changeMcpCredential');
-    const changeEnd = app.indexOf('\n  if (!document)', changeStart);
-    const change = app.slice(changeStart, changeEnd);
-    const failedChange = change.slice(change.indexOf('} catch (error) {'), change.indexOf('} finally {'));
-    expect(failedChange).toContain('setCredentials(undefined)');
-    expect(failedChange).toContain('setSetupResult(undefined)');
-    expect(failedChange).toContain('setCredentialResult(undefined)');
-    expect(failedChange).toContain('getEngineStatus().then(setEngine).catch(() => undefined)');
-    const lifecycleStart = main.indexOf('async function confirmMcpCredentialChange');
-    const lifecycleEnd = main.indexOf('\nfunction registerIpc', lifecycleStart);
-    const lifecycle = main.slice(lifecycleStart, lifecycleEnd);
-    expect(lifecycle).toContain("await engineRuntime.rotateMcpCredential()");
-    expect(lifecycle).toContain("await engineRuntime.revokeMcpAccess()");
-    expect(lifecycle).toContain('Create a new credential and re-enable the local MCP endpoint?');
-    expect(lifecycle).toContain('Persistent folder approvals and already admitted or pending approval work remain');
-    expect(lifecycle).toContain('approval jobs are not rolled back or silently cancelled');
-    expect(lifecycle).toContain('transition.cleanupWarning');
-    expect(lifecycle).toContain('Existing client configuration files are not edited');
-    expect(lifecycle).not.toMatch(/\btoken\s*:/i);
-    expect(lifecycle).not.toContain('mcpHost.credentials()');
-    expect(lifecycle).not.toContain('clipboard');
+    expect(app).toContain('Stable stdio configuration');
+    expect(app).toContain('Keep this configuration across AIDraw restarts.');
+    expect(app).toContain('no URL, bearer, password, or per-launch value is stored in the client');
+    expect(app).not.toContain('await window.aidraw.getMcpConnection()');
+    expect(app).not.toContain('className="connection-card"');
+    expect(app).not.toMatch(/Rotate credential|Revoke access|credential-lifecycle/);
+    expect(styles).not.toContain('.credential-lifecycle');
+    expect(main).toContain("handle(IPC.mcpConnection");
+    expect(main).toContain("lifetime: 'engine-process'");
+    expect(runtime).toContain('const token = createEphemeralMcpAuthority()');
+    expect(runtime).toContain('await publishMcpEngineRunState');
+    expect(runtime).not.toMatch(/rotateMcpCredential|revokeMcpAccess|secureStorage/);
   });
 });

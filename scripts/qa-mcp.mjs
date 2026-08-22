@@ -1,6 +1,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import process from 'node:process';
+import { directMcpHeaders, initializeDirectMcp, parseMcpResponse, readMcpConnectionHandoff } from './mcp-direct-client.mjs';
 
 const HELP = `AIDraw QA MCP client
 
@@ -35,18 +36,6 @@ function required(values, key) {
   return value;
 }
 
-function parseRpcPayload(text) {
-  const trimmed = text.trim();
-  if (trimmed.startsWith('{')) return JSON.parse(trimmed);
-  const events = trimmed
-    .split(/\r?\n/)
-    .filter((line) => line.startsWith('data:'))
-    .map((line) => line.slice(5).trim())
-    .filter(Boolean);
-  if (!events.length) throw new Error(`MCP returned an unrecognized response: ${trimmed.slice(0, 240)}`);
-  return JSON.parse(events.at(-1));
-}
-
 async function request(url, headers, body) {
   const response = await globalThis.fetch(url, {
     method: 'POST',
@@ -54,17 +43,9 @@ async function request(url, headers, body) {
     body: JSON.stringify(body),
     signal: globalThis.AbortSignal.timeout(30_000),
   });
-  const payload = parseRpcPayload(await response.text());
+  const payload = parseMcpResponse(await response.text());
   if (!response.ok || payload.error) throw new Error(JSON.stringify(payload.error ?? payload));
   return { response, payload };
-}
-
-function baseHeaders(token) {
-  return {
-    authorization: `Bearer ${token}`,
-    accept: 'application/json, text/event-stream',
-    'content-type': 'application/json',
-  };
 }
 
 async function writeState(path, state) {
@@ -74,7 +55,7 @@ async function writeState(path, state) {
 async function loadState(values) {
   const statePath = resolve(required(values, 'state'));
   const state = JSON.parse(await readFile(statePath, 'utf8'));
-  if (state.version !== 1 || !state.url || !state.token || !state.sessionId || !Number.isInteger(state.nextRequestId)) {
+  if (state.version !== 2 || !state.url || !state.token || !state.sessionId || !state.protocolVersion || !Number.isInteger(state.nextRequestId)) {
     throw new Error(`Invalid or closed QA MCP state: ${statePath}`);
   }
   return { statePath, state };
@@ -82,7 +63,7 @@ async function loadState(values) {
 
 async function rpc(statePath, state, method, params = {}) {
   const id = state.nextRequestId;
-  const headers = { ...baseHeaders(state.token), 'mcp-session-id': state.sessionId };
+  const headers = directMcpHeaders(state, state.sessionId, state.protocolVersion);
   const result = await request(state.url, headers, { jsonrpc: '2.0', id, method, params });
   state.nextRequestId += 1;
   state.lastRequestAt = new Date().toISOString();
@@ -102,25 +83,18 @@ async function init(values) {
   const statePath = resolve(required(values, 'state'));
   const actorName = required(values, 'actor-name');
   const actorColor = required(values, 'actor-color');
-  const connection = JSON.parse(await readFile(connectionPath, 'utf8'));
-  if (!connection.url || !connection.token || !connection.pid) throw new Error('The QA connection file is incomplete.');
-  const initialized = await request(connection.url, baseHeaders(connection.token), {
-    jsonrpc: '2.0',
-    id: 1,
-    method: 'initialize',
-    params: {
-      protocolVersion: '2026-07-28',
-      capabilities: { resources: { subscribe: true } },
-      clientInfo: { name: 'AIDraw isolated Luna QA', version: '1.0' },
-    },
+  const connection = await readMcpConnectionHandoff(connectionPath);
+  const initialized = await initializeDirectMcp(connection, {
+    capabilities: { resources: { subscribe: true } },
+    clientInfo: { name: 'AIDraw isolated Luna QA', version: '1.0' },
+    signal: globalThis.AbortSignal.timeout(30_000),
   });
-  const sessionId = initialized.response.headers.get('mcp-session-id');
-  if (!sessionId) throw new Error('AIDraw did not return an MCP session ID.');
   const state = {
-    version: 1,
+    version: 2,
     url: connection.url,
     token: connection.token,
-    sessionId,
+    sessionId: initialized.sessionId,
+    protocolVersion: initialized.protocolVersion,
     nextRequestId: 2,
     connectionPath,
     connectionPid: connection.pid,
@@ -128,12 +102,6 @@ async function init(values) {
     actorColor,
     initializedAt: new Date().toISOString(),
   };
-  await globalThis.fetch(state.url, {
-    method: 'POST',
-    headers: { ...baseHeaders(state.token), 'mcp-session-id': state.sessionId },
-    body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
-    signal: globalThis.AbortSignal.timeout(10_000),
-  });
   await writeState(statePath, state);
   const joined = structuredToolResult(await rpc(statePath, state, 'tools/call', {
     name: 'session_manage',
@@ -173,10 +141,10 @@ async function close(values) {
       arguments: { action: 'leave' },
     }), 'session_manage');
   } finally {
-    const headers = { ...baseHeaders(state.token), 'mcp-session-id': state.sessionId };
+    const headers = directMcpHeaders(state, state.sessionId, state.protocolVersion);
     await globalThis.fetch(state.url, { method: 'DELETE', headers, signal: globalThis.AbortSignal.timeout(10_000) }).catch(() => undefined);
     const closed = {
-      version: 1,
+      version: 2,
       url: state.url,
       connectionPath: state.connectionPath,
       connectionPid: state.connectionPid,
@@ -184,7 +152,7 @@ async function close(values) {
       actorColor: state.actorColor,
       initializedAt: state.initializedAt,
       closedAt: new Date().toISOString(),
-      credentialsRedacted: true,
+      authorityRedacted: true,
     };
     await writeState(statePath, closed);
   }

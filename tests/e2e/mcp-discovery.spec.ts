@@ -3,7 +3,8 @@ import type { ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { access, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
-import { inspectPackagedMcpCredential, resolvePackagedE2eArtifact, spawnPackagedE2e } from '../../scripts/packaged-e2e-runtime.mjs';
+import { initializeDirectMcp, readMcpConnectionHandoff } from '../../scripts/mcp-direct-client.mjs';
+import { resolvePackagedE2eArtifact, spawnPackagedE2e } from '../../scripts/packaged-e2e-runtime.mjs';
 
 const scenarioName = 'MCP-COLD-DISCOVERY exact package teaches a tools-only client without repository context';
 const profilePrefix = 'aidraw-e2e-mcp-discovery-';
@@ -17,9 +18,10 @@ interface McpMessage {
 }
 
 interface McpConnection {
-  version: number;
+  version: 2;
   url: string;
   token: string;
+  authority: 'engine-process';
   activeDocumentId: string;
   pid: number;
   trustedFolders: string[];
@@ -63,17 +65,8 @@ async function callTool(url: string, headers: Record<string, string>, id: number
 }
 
 async function connectColdClient(connection: McpConnection, name: string): Promise<{ initialize: Record<string, unknown>; headers: Record<string, string> }> {
-  const initializeResponse = await fetch(connection.url, {
-    method: 'POST',
-    headers: { authorization: `Bearer ${connection.token}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2026-07-28', capabilities: {}, clientInfo: { name, version: '1.0.0' } } }),
-  });
-  const sessionId = initializeResponse.headers.get('mcp-session-id');
-  const initialized = parseMcp(await initializeResponse.text());
-  if (!initializeResponse.ok || !sessionId || !initialized.result) throw new Error('The cold packaged MCP client could not initialize.');
-  const headers = { authorization: `Bearer ${connection.token}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json', 'mcp-session-id': sessionId };
-  await fetch(connection.url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) });
-  return { initialize: initialized.result, headers };
+  const initialized = await initializeDirectMcp(connection, { clientInfo: { name, version: '1.0.0' } });
+  return { initialize: initialized.initialize, headers: initialized.headers };
 }
 
 async function waitForConnection(path: string, child: ChildProcess): Promise<McpConnection> {
@@ -81,8 +74,8 @@ async function waitForConnection(path: string, child: ChildProcess): Promise<Mcp
   while (Date.now() < deadline) {
     if (child.exitCode !== null) throw new Error(`The nominated packaged engine exited before MCP startup with code ${child.exitCode}.`);
     try {
-      const value = JSON.parse(await readFile(path, 'utf8')) as Partial<McpConnection>;
-      if (value.version === 1 && value.url && value.token && value.activeDocumentId && Number.isInteger(value.pid)) return value as McpConnection;
+      const value = await readMcpConnectionHandoff(path);
+      if (value.activeDocumentId) return value as McpConnection;
     } catch { /* The isolated engine is still starting. */ }
     await new Promise((resolveWait) => setTimeout(resolveWait, 100));
   }
@@ -108,7 +101,7 @@ async function quitGracefully(profile: string, child: ChildProcess): Promise<voi
 async function redactConnection(path: string): Promise<void> {
   const connection = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
   delete connection.token;
-  await writeFile(path, `${JSON.stringify({ ...connection, credentialStatus: 'redacted-after-graceful-stop' }, null, 2)}\n`, 'utf8');
+  await writeFile(path, `${JSON.stringify({ ...connection, authorityStatus: 'redacted-after-graceful-stop' }, null, 2)}\n`, 'utf8');
 }
 
 async function sha256(path: string): Promise<string> {
@@ -145,10 +138,10 @@ test(scenarioName, async () => {
   const evidencePath = join(profile, 'mcp-discovery-evidence.json');
   const forbiddenTargetPath = join(profile, 'artifacts', 'cold-client-never-approved.png');
   const trustSettingsPath = join(profile, 'trusted-folders.json');
-  const providerCredentialsPath = join(profile, 'credentials', 'generation.json');
+  const retiredProviderStorePath = join(profile, 'credentials', 'generation.json');
   const forbiddenNetworkPath = join(profile, 'mcp-discovery-forbidden-network.json');
   const tokenPath = join(profile, 'credentials', 'mcp-token.json');
-  for (const path of [connectionPath, evidencePath, forbiddenTargetPath, trustSettingsPath, providerCredentialsPath, forbiddenNetworkPath, tokenPath]) {
+  for (const path of [connectionPath, evidencePath, forbiddenTargetPath, trustSettingsPath, retiredProviderStorePath, forbiddenNetworkPath, tokenPath]) {
     expect(await access(path).then(() => true, () => false), `${path} must be absent before launch`).toBe(false);
   }
 
@@ -176,8 +169,11 @@ test(scenarioName, async () => {
     const listedToolsMessage = await postMcp(connection.url, owner.headers, 2, 'tools/list', {});
     const tools = (listedToolsMessage.result?.tools ?? []) as Array<{ name: string; inputSchema?: DiscoverySchema; outputSchema?: DiscoverySchema }>;
     const toolNames = tools.map((tool) => tool.name);
-    expect(toolNames).toEqual(expect.arrayContaining(['aidraw_help', 'session_manage', 'document_manage', 'canvas_observe', 'canvas_apply', 'document_export', 'job_manage']));
-    expect(toolNames).toHaveLength(10);
+    expect(toolNames).toEqual([
+      'aidraw_help', 'session_manage', 'canvas_observe', 'canvas_apply', 'history_manage',
+      'document_manage', 'asset_import', 'document_export', 'job_manage',
+    ]);
+    expect(new Set(toolNames).size).toBe(9);
     expect(actionBranch(tools.find((tool) => tool.name === 'document_manage')?.inputSchema, 'save-as')).toMatchObject({ required: ['action', 'documentId', 'path'], additionalProperties: false });
     expect(actionBranch(tools.find((tool) => tool.name === 'job_manage')?.inputSchema, 'wait')).toMatchObject({ required: ['action', 'jobId'], additionalProperties: false });
     expect(tools.find((tool) => tool.name === 'aidraw_help')?.outputSchema?.properties?.guideUri?.const).toBe('aidraw://guide');
@@ -236,9 +232,7 @@ test(scenarioName, async () => {
     expect(guideText).toContain('Conditional action contracts');
     expect(guideText).toContain('Only a human can approve');
 
-    for (const sentinel of [trustSettingsPath, providerCredentialsPath, forbiddenNetworkPath]) expect(await access(sentinel).then(() => true, () => false)).toBe(false);
-    const tokenFile = JSON.parse(await readFile(tokenPath, 'utf8')) as unknown;
-    inspectPackagedMcpCredential(tokenFile, connection.token);
+    for (const sentinel of [trustSettingsPath, retiredProviderStorePath, forbiddenNetworkPath, tokenPath]) expect(await access(sentinel).then(() => true, () => false)).toBe(false);
 
     evidence = {
       scenario: scenarioName,
@@ -257,11 +251,9 @@ test(scenarioName, async () => {
       approval: { status: 'cancelled', humanOnlyDependencyObserved: true, nextWaitObserved: true, targetWritten: false, outsiderListEmpty: true, outsiderInspectNotFound: true },
       privacy: { pathAbsentFromPublicSummary: true, rawResultAbsent: true, rawRequestAbsent: true, promptAbsent: true, publicJobOwnerScoped: true },
       guide: { discoveredAfterCoreWorkflow: true, readAfterCoreWorkflow: true },
-      externalProviderRequests: 0,
-      paidRequests: 0,
       nonLoopbackRequestsAttempted: 0,
       sentinelsAbsent: true,
-      credentialStorage: 'electron-safe-storage',
+      mcpAuthority: 'ephemeral-engine-process',
     };
   } finally {
     try { await quitGracefully(profile, child); }
@@ -273,7 +265,7 @@ test(scenarioName, async () => {
   const redactedConnection = await readFile(connectionPath, 'utf8');
   expect(redactedConnection).toContain('redacted-after-graceful-stop');
   expect(redactedConnection).not.toMatch(/"token"|Authorization|Bearer/i);
-  await writeFile(evidencePath, `${JSON.stringify({ ...evidence, graceful: true, exitCode: child.exitCode, credentialStatus: 'redacted-after-graceful-stop' }, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
+  await writeFile(evidencePath, `${JSON.stringify({ ...evidence, graceful: true, exitCode: child.exitCode, authorityStatus: 'redacted-after-graceful-stop' }, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
   const sanitizedEvidence = await readFile(evidencePath, 'utf8');
   expect(sanitizedEvidence).not.toMatch(/"token"|Authorization|Bearer|cold-client-never-approved\.png/i);
 });

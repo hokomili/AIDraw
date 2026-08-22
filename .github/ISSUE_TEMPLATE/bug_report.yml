@@ -5,7 +5,7 @@ labels: [bug]
 body:
   - type: markdown
     attributes:
-      value: Do not include API keys, MCP bearer tokens, private prompts, or sensitive file paths.
+      value: Do not include secrets, MCP bearer values, private task content, or sensitive file paths.
   - type: input
     id: version
     attributes:
@@ -17,7 +17,7 @@ body:
     id: mode
     attributes:
       label: Document mode
-      options: [Illustration, Pixel Sprite, Pixel Tilemap, Pixel Project, MCP or file handling, Generation]
+      options: [Illustration, Pixel Sprite, Pixel Tilemap, Pixel Project, MCP or file handling]
     validations:
       required: true
   - type: textarea
@@ -37,5 +37,5 @@ body:
     attributes:
       label: Safety check
       options:
-        - label: I removed credentials, tokens, personal files, and paid-provider data.
+        - label: I removed secrets, bearer values, personal files, and private task data.
           required: true

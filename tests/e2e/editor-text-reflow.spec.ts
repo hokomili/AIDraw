@@ -13,7 +13,6 @@ import {
   classifyUx09RendererRequest,
   exerciseUx09ScrollBoundaries,
   hasExactUx09ProcessShape,
-  inspectUx09EncryptedToken,
   isUx09ExactTextFit,
   isUx09RectContained,
   parseUx09OwnedProcesses,
@@ -30,6 +29,7 @@ import {
   spawnPackagedE2e,
   waitForPackagedE2eReady,
 } from '../../scripts/packaged-e2e-runtime.mjs';
+import { readMcpConnectionHandoff } from '../../scripts/mcp-direct-client.mjs';
 
 const execute = promisify(execFile);
 const artifact = resolvePackagedE2eArtifact();
@@ -44,9 +44,10 @@ const networkDisabledArguments = [
 ];
 
 interface McpConnection {
-  version: number;
+  version: 2;
   url: string;
   token: string;
+  authority: 'engine-process';
   activeDocumentId: string;
   pid: number;
   trustedFolders: string[];
@@ -63,7 +64,7 @@ interface CleanupRecord {
   ownerExitCode?: number | null;
   signalPid?: number;
   signalExitCode?: number | null;
-  connectionCredentials: 'redacted-after-graceful-stop' | 'absent' | 'live-owner-not-stopped';
+  connectionAuthority: 'redacted-after-graceful-stop' | 'absent' | 'live-owner-not-stopped';
   ownedSurvivors: OwnedProcess[];
   graceful: boolean;
   error?: string;
@@ -169,13 +170,8 @@ async function waitForConnection(path: string, child: ChildProcess): Promise<Mcp
     timeoutMs: 20_000,
     attempt: async () => {
       try {
-        const value = JSON.parse(await readFile(path, 'utf8')) as Partial<McpConnection>;
-        if (value.version !== 1 || !value.url || !value.token || !value.activeDocumentId || !Number.isInteger(value.pid)) return undefined;
-        const url = new URL(value.url);
-        if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || url.pathname !== '/mcp') {
-          throw new Error('The UX-09 MCP endpoint is not an exact loopback /mcp URL.');
-        }
-        return { ...value, trustedFolders: value.trustedFolders ?? [] } as McpConnection;
+        const value = await readMcpConnectionHandoff(path);
+        return value.activeDocumentId ? value as McpConnection : undefined;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT' || error instanceof SyntaxError) return undefined;
         throw error;
@@ -230,7 +226,7 @@ async function redactConnection(path: string): Promise<{ status: 'redacted-after
   const connection = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
   const secret = typeof connection.token === 'string' ? connection.token : undefined;
   delete connection.token;
-  await writeFile(path, `${JSON.stringify({ ...connection, credentialStatus: 'redacted-after-graceful-stop' }, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+  await writeFile(path, `${JSON.stringify({ ...connection, authorityStatus: 'redacted-after-graceful-stop' }, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
   return { status: 'redacted-after-graceful-stop', secret };
 }
 
@@ -278,7 +274,7 @@ async function stopOwner(
     ownerExitCode: child?.exitCode,
     signalPid,
     signalExitCode,
-    connectionCredentials: redacted.status,
+    connectionAuthority: redacted.status,
     ownedSurvivors,
     graceful,
     ...(cleanupError ? { error: cleanupError.message } : {}),
@@ -508,7 +504,7 @@ test(UX09_TEXT_REFLOW_SCENARIO, async () => {
     if (!child.pid || connection.pid !== child.pid) throw new Error('The UX-09 connection PID does not match the exact spawned owner.');
     expect(connection.trustedFolders).toEqual([]);
     secrets.push(connection.token);
-    inspectUx09EncryptedToken(JSON.parse(await readFile(configured.paths.tokenCredentials, 'utf8')), connection.token);
+    expect(await access(configured.paths.retiredAuthorityStore).then(() => true, () => false)).toBe(false);
     browser = await waitForPackagedE2eReady({
       child,
       label: 'The retained UX-09 DevTools endpoint',
@@ -760,7 +756,7 @@ test(UX09_TEXT_REFLOW_SCENARIO, async () => {
 
     failureDiagnostics = { ...failureDiagnostics, stage: 'renderer-request-census' };
     expect(unexpectedRendererRequests).toEqual([]);
-    for (const path of [configured.paths.providerCredentials, configured.paths.forbiddenNetwork]) {
+    for (const path of [configured.paths.retiredProviderStore, configured.paths.retiredAuthorityStore, configured.paths.forbiddenNetwork]) {
       expect(await access(path).then(() => true, () => false), `${path} must remain absent`).toBe(false);
     }
     expect(screenshots).toHaveLength(3);
@@ -827,9 +823,9 @@ test(UX09_TEXT_REFLOW_SCENARIO, async () => {
         rendererRequestObservation,
         observedRendererRequests,
         unexpectedRendererRequests: 0,
-        providerCredentialsAbsent: true,
+        retiredPersistentStoresAbsent: true,
         forbiddenNetworkSentinelAbsent: true,
-        credentialStorage: 'electron-safe-storage',
+        mcpAuthority: 'ephemeral-engine-process',
       },
       nonClaims: [
         'operating-system-accessibility-setting-activation',

@@ -5,15 +5,21 @@ import { join, resolve, sep } from 'node:path';
 import process from 'node:process';
 import { promisify } from 'node:util';
 import { extractFile, listPackage } from '@electron/asar';
-import { inspectPackagedSecurity } from './packaged-security.mjs';
-import { assertPackagedUtilityContainmentSources, findPackagedUtilityWorkerBundle } from './packaged-utility-containment.mjs';
+import {
+  assertRetiredProductSurfacesAbsent,
+  findFirstPartyPackagedJavaScriptEntries,
+  inspectPackagedSecurity,
+} from './packaged-security.mjs';
+import {
+  assertPackagedUtilityContainmentAdversarialControls,
+  assertPackagedUtilityContainmentSources,
+  findPackagedUtilityWorkerBundle,
+} from './packaged-utility-containment.mjs';
 import { assertPackagedUtilityPressureSources } from './packaged-utility-pressure.mjs';
-import { assertPackagedGenerationNormalizationSources } from './packaged-generation-normalization.mjs';
 import { assertPackagedUtilityObservationCodecSources } from './packaged-utility-observation-codec.mjs';
 import { assertPackagedUtilityQuantizationResultSources } from './packaged-utility-quantization-result.mjs';
 import { assertPackagedUtilityExportResultSources } from './packaged-utility-export-result.mjs';
 import { assertPackagedUtilityImportResultSources } from './packaged-utility-import-result.mjs';
-import { assertPackagedUtilityGenerationResultSources } from './packaged-utility-generation-result.mjs';
 import { inspectPackagedFontLicense } from './packaged-font-license.mjs';
 import { assertPackagedElectronVersion, inspectDependencySecurityPolicy } from './dependency-security.mjs';
 import { readPackageGeneration, resolvePackageOutputRoot } from './package-output-policy.mjs';
@@ -114,13 +120,27 @@ try {
   const rendererSource = rendererBundles
     .map((entry) => extractFile(archive, entry.slice(1).split('/').join(sep)).toString('utf8'))
     .join('\n');
-  const packagedUtilityContainment = assertPackagedUtilityContainmentSources({ mainSource, workerSource: utilityWorkerSource });
+  const firstPartyJavaScriptEntries = findFirstPartyPackagedJavaScriptEntries(archiveFiles);
+  const firstPartyJavaScriptChunks = firstPartyJavaScriptEntries.map((entry) => ({
+    path: entry,
+    source: extractFile(archive, entry.slice(1).split('/').join(sep)).toString('utf8'),
+  }));
+  const retiredProductSurfaces = assertRetiredProductSurfacesAbsent({
+    archiveFiles,
+    firstPartyJavaScriptChunks,
+  });
+  const utilityContainmentSubject = 'reviewed-main-worker-pair-20260822';
+  const packagedUtilityContainment = assertPackagedUtilityContainmentSources({
+    mainSource,
+    workerSource: utilityWorkerSource,
+    expectedSubject: utilityContainmentSubject,
+  });
+  const packagedUtilityContainmentAdversarialControls = assertPackagedUtilityContainmentAdversarialControls({
+    mainSource,
+    workerSource: utilityWorkerSource,
+    expectedSubject: utilityContainmentSubject,
+  });
   const packagedUtilityPressure = assertPackagedUtilityPressureSources({ mainSource, workerSource: utilityWorkerSource });
-  const buildSource = archiveFiles
-    .filter((entry) => /^\/\.vite\/build\/[^/]+\.js$/.test(entry))
-    .map((entry) => extractFile(archive, entry.slice(1).split('/').join(sep)).toString('utf8'))
-    .join('\n');
-  const packagedGenerationNormalization = assertPackagedGenerationNormalizationSources({ mainSource, workerSource: utilityWorkerSource, buildSource });
   const packagedUtilityObservationCodec = assertPackagedUtilityObservationCodecSources({
     mainSource,
     workerSource: utilityWorkerSource,
@@ -140,12 +160,6 @@ try {
     rendererSource,
   });
   const packagedUtilityImportResult = assertPackagedUtilityImportResultSources({
-    mainSource,
-    workerSource: utilityWorkerSource,
-    preloadSource,
-    rendererSource,
-  });
-  const packagedUtilityGenerationResult = assertPackagedUtilityGenerationResultSources({
     mainSource,
     workerSource: utilityWorkerSource,
     preloadSource,
@@ -181,13 +195,13 @@ try {
     rasterUtilityImporterNativeImageFree: true,
     mcpSelfDocumentation: true,
     packagedUtilityContainment,
+    packagedUtilityContainmentAdversarialControls,
     packagedUtilityPressure,
-    packagedGenerationNormalization,
     packagedUtilityObservationCodec,
     packagedUtilityQuantizationResult,
     packagedUtilityExportResult,
     packagedUtilityImportResult,
-    packagedUtilityGenerationResult,
+    retiredProductSurfaces,
     packagedFontLicense,
     packagedSecurity,
   }, null, 2)}\n`);

@@ -115,7 +115,6 @@ describe('isolated FND-09 quantization-result hook', () => {
         getDocument: (documentId) => documentId === document.id ? structuredClone(document) : undefined,
       },
       rasterUtilities: supervisor,
-      generationUtilities: { status: () => ({ running: false }) },
     }, configuration);
 
     expect(evidence).toMatchObject({
@@ -143,9 +142,8 @@ describe('isolated FND-09 quantization-result hook', () => {
       },
       fixedInvalidResponseHoldMs: 150,
       workerPidsDistinct: true,
-      generationLaneUntouched: true,
       privacy: { rendererCreated: false, invalidPayloadPublished: false, publicJobCreated: false },
-      network: { nonLoopbackRequests: 0, externalProviderRequests: 0, paidRequests: 0 },
+      network: { nonLoopbackRequests: 0 },
     });
     expect(workers[0].killed).toBe(true);
     expect(workers[1].killed).toBe(true);

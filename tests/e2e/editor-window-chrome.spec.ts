@@ -1119,7 +1119,7 @@ test(UX01_WINDOW_CHROME_SCENARIO, async ({ browserName }, testInfo) => {
     failureDiagnostics = { ...failureDiagnostics, reopenedRelation };
     await expect(page.getByRole('button', { name: 'All open documents' })).toBeVisible();
     expect(externalRendererRequests).toEqual([]);
-    for (const path of [configured.paths.providerCredentials, configured.paths.forbiddenNetwork]) {
+    for (const path of [configured.paths.retiredProviderStore, configured.paths.forbiddenNetwork]) {
       expect(await access(path).then(() => true, () => false), `${path} must remain absent`).toBe(false);
     }
 
@@ -1248,7 +1248,7 @@ test(UX01_WINDOW_CHROME_SCENARIO, async ({ browserName }, testInfo) => {
       },
       privacy: {
         directlyObservedExternalRendererRequests: 0,
-        providerCredentialsAbsent: true,
+        retiredProviderStoreAbsent: true,
         forbiddenNetworkSentinelAbsent: true,
         controllerCredentialValuesAccessed: false,
       },

@@ -206,7 +206,7 @@ export class BatchManager {
   async prepare(metadata: BatchChunkMetadata, documentId: string, clientOperationId: string, actor: Actor): Promise<BatchPreparation> {
     return this.exclusive(async () => {
       const state = this.states.get(metadata.jobId);
-      if (!state || !tokenMatches(metadata.resumeToken, state.tokenHash)) return { accepted: false, response: { status: 'conflict', message: 'Batch credentials are invalid.' } };
+      if (!state || !tokenMatches(metadata.resumeToken, state.tokenHash)) return { accepted: false, response: { status: 'conflict', message: 'Batch resume authority is invalid.' } };
       if (state.documentId !== documentId) return { accepted: false, response: { status: 'conflict', message: 'This batch belongs to a different document.' } };
       if (state.status === 'cancelled') return { accepted: false, response: { status: 'cancelled', message: 'The durable batch was cancelled.' } };
       if (state.status === 'completed') {

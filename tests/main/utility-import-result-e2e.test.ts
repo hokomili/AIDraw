@@ -123,7 +123,6 @@ describe('isolated FND-09 import-result hook', () => {
         getDocument: (documentId) => documentId === canonical.id ? structuredClone(canonical) : undefined,
       },
       rasterUtilities: supervisor,
-      generationUtilities: { status: () => ({ running: false }) },
     }, configuration);
 
     expect(evidence).toMatchObject({
@@ -149,10 +148,9 @@ describe('isolated FND-09 import-result hook', () => {
         queuedRecovery: { workerPid: 3333, workerReplaced: true, queued: true, documentCount: 1, kind: 'illustration', schemaVersion: 2, width: 4, height: 3, warnings: [], semanticSha256: expect.stringMatching(/^[A-F0-9]{64}$/) },
       },
       workerPidsDistinct: true,
-      generationLaneUntouched: true,
       privacy: { rendererCreated: false, invalidPayloadPublished: false, publicJobCreated: false },
       filesystem: { importInputsCreated: 1, outputTargetsCreated: 0 },
-      network: { nonLoopbackRequests: 0, externalProviderRequests: 0, paidRequests: 0 },
+      network: { nonLoopbackRequests: 0 },
     });
     expect(workers[0].killed).toBe(true);
     expect(workers[1].killed).toBe(true);

@@ -19,7 +19,7 @@ export const UX01_WINDOW_CHROME_FILES: Readonly<{
   failure: string;
   cleanup: string;
   forbiddenNetwork: string;
-  providerCredentials: string;
+  retiredProviderStore: string;
 }>;
 
 export interface Ux01WindowChromeAcceptance {

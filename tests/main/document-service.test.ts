@@ -3,9 +3,10 @@ import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { HUMAN_ACTOR, IDENTITY_TRANSFORM, applyTransaction, createId, createIllustrationDocument, createPixelDocument, createPixelSprite, createPixelTilemap, createPixelTileset, encodeTiledGid, nowIso, readTileAt, type Actor, type CanvasTransaction, type ShapeObject } from '@aidraw/core';
+import { HUMAN_ACTOR, IDENTITY_TRANSFORM, applyTransaction, createId, createIllustrationDocument, createPixelDocument, createPixelSprite, createPixelTilemap, createPixelTileset, encodeTiledGid, nowIso, readTileAt, writeTiles, type Actor, type CanvasTransaction, type ShapeObject } from '@aidraw/core';
 import type { TransactionTraceEntry } from '@common/contracts';
 import { appendImageCollectionSource, createImageCollectionTileset, imageCollectionSourceDependencyGuards, removeUnusedImageCollectionSource, replaceImageCollectionSource, replaceImageCollectionTileMetadata } from '@common/image-collection-authoring';
+import { planImageCollectionTileIdMove } from '@common/image-collection-tile-move';
 import { planTileObjectCreation } from '@common/tile-object-authoring';
 import { planMapTileAuthoringSelection } from '@common/map-tile-authoring';
 import { planWangTerrainSelection } from '@common/wang-terrain-authoring';
@@ -902,6 +903,81 @@ describe('document service collaboration semantics', () => {
     if (undoneTileset.type !== 'tileset' || undoneMap.type !== 'tilemap') throw new Error('Expected tileset and map');
     expect(undoneTileset.tiles[3].imageAssetId).toBe(source3.id);
     expect(undoneMap.layers[layer.id].objects).toEqual([]);
+  });
+
+  it('atomically refuses a reviewed tile-ID move after an earlier tileset-only change, then admits a fresh retry and undo', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-service-collection-tile-move-guard-'));
+    temporaryPaths.push(root);
+    const service = new DocumentService(new RecoveryJournal(root), '1.0.0');
+    services.push(service);
+    const document = createPixelDocument('project', 'Queued collection tile move');
+    const source0 = createPixelSprite('Tile zero', 8, 12);
+    const source3 = createPixelSprite('Tile three', 17, 6);
+    const source7 = createPixelSprite('Tile seven', 5, 14);
+    const collection = createPixelTileset('Move collection', source0.id, 17, 14, 1, 1);
+    collection.spriteAssetId = undefined; collection.firstGid = 20; collection.columns = 0; collection.rows = 0;
+    collection.tiles = {
+      0: { id: 0, sourceX: 0, sourceY: 0, imageAssetId: source0.id, probability: 1, animation: [{ tileId: 3, durationMs: 80 }], collisions: [], properties: {} },
+      3: { id: 3, sourceX: 0, sourceY: 0, imageAssetId: source3.id, probability: 0.5, animation: [{ tileId: 3, durationMs: 120 }], collisions: [], properties: { retained: true } },
+      7: { id: 7, sourceX: 0, sourceY: 0, imageAssetId: source7.id, probability: 1, animation: [], collisions: [], properties: {} },
+    };
+    collection.wangSets = [];
+    const map = createPixelTilemap('Move reference map'); map.orientation = 'isometric'; map.infinite = true; map.tilesetIds = [collection.id];
+    const layer = map.layers[map.layerIds[0]]; if (layer.type !== 'tile' || !layer.chunks) throw new Error('Expected tile layer');
+    const oldRaw = encodeTiledGid(23, { hFlip: true, diagonal: true });
+    writeTiles(layer.chunks, [{ x: -34, y: 35, gid: oldRaw }]);
+    document.assetIds = [source0.id, source3.id, source7.id, collection.id, map.id];
+    document.pixelAssets = { [source0.id]: source0, [source3.id]: source3, [source7.id]: source7, [collection.id]: collection, [map.id]: map };
+    document.activeAssetId = collection.id;
+    service.addDocument(document);
+
+    const stalePlan = planImageCollectionTileIdMove(document, collection.id, 3, 2);
+    const changedMetadata = structuredClone(collection); changedMetadata.tiles[3].probability = 0.75;
+    const metadataWrite = service.apply({
+      id: createId('tx'), clientOperationId: createId('human-op'), documentId: document.id, actor: HUMAN_ACTOR,
+      label: 'Change collection metadata first', createdAt: nowIso(),
+      operations: [{ kind: 'pixel.asset.replace', asset: changedMetadata, expectedRevision: collection.revision }],
+    });
+    const staleMove = service.apply({
+      id: createId('tx'), clientOperationId: createId('human-op'), documentId: document.id,
+      expectedDocumentRevision: stalePlan.expectedDocumentRevision, actor: HUMAN_ACTOR,
+      label: 'Move stale collection tile ID', createdAt: nowIso(), operations: stalePlan.operations,
+    });
+    const [metadataResponse, staleResponse] = await Promise.all([metadataWrite, staleMove]);
+    expect(metadataResponse).toMatchObject({ status: 'committed', revision: document.revision + 1 });
+    expect(staleResponse).toMatchObject({ status: 'conflict', conflict: { entityId: document.id, expectedRevision: document.revision, actualRevision: document.revision + 1, retryable: true } });
+    const afterConflict = service.getDocument(document.id); if (!afterConflict || afterConflict.kind !== 'pixel') throw new Error('Expected pixel document');
+    const afterTileset = afterConflict.pixelAssets[collection.id]; const afterMap = afterConflict.pixelAssets[map.id];
+    if (afterTileset.type !== 'tileset' || afterMap.type !== 'tilemap') throw new Error('Expected collection and map');
+    const afterLayer = afterMap.layers[layer.id]; if (afterLayer.type !== 'tile' || !afterLayer.chunks) throw new Error('Expected tile layer');
+    expect(Object.keys(afterTileset.tiles)).toEqual(['0', '3', '7']);
+    expect(afterTileset.tiles[3]).toMatchObject({ imageAssetId: source3.id, probability: 0.75, properties: { retained: true } });
+    expect(readTileAt(afterLayer.chunks, -34, 35)).toBe(oldRaw);
+    expect(afterConflict.activity.map(({ label }) => label)).toEqual(['Change collection metadata first']);
+    expect(service.getChanges(document.id, document.revision)).toHaveLength(1);
+
+    const freshPlan = planImageCollectionTileIdMove(afterConflict, collection.id, 3, 2);
+    expect(await service.apply({
+      id: createId('tx'), clientOperationId: createId('human-op'), documentId: document.id,
+      expectedDocumentRevision: freshPlan.expectedDocumentRevision, actor: HUMAN_ACTOR,
+      label: 'Move current collection tile ID', createdAt: nowIso(), operations: freshPlan.operations,
+    })).toMatchObject({ status: 'committed', revision: document.revision + 2 });
+    const moved = service.getDocument(document.id); if (!moved || moved.kind !== 'pixel') throw new Error('Expected pixel document');
+    const movedTileset = moved.pixelAssets[collection.id]; const movedMap = moved.pixelAssets[map.id];
+    if (movedTileset.type !== 'tileset' || movedMap.type !== 'tilemap') throw new Error('Expected collection and map');
+    const movedLayer = movedMap.layers[layer.id]; if (movedLayer.type !== 'tile' || !movedLayer.chunks) throw new Error('Expected tile layer');
+    expect(Object.keys(movedTileset.tiles)).toEqual(['0', '2', '7']);
+    expect(movedTileset.tiles[2]).toMatchObject({ imageAssetId: source3.id, probability: 0.75, properties: { retained: true } });
+    expect(readTileAt(movedLayer.chunks, -34, 35)).toBe(encodeTiledGid(22, { hFlip: true, diagonal: true }));
+    expect(await service.undo(document.id)).toMatchObject({ status: 'committed', revision: document.revision + 3 });
+    const undone = service.getDocument(document.id); if (!undone || undone.kind !== 'pixel') throw new Error('Expected pixel document');
+    const undoneTileset = undone.pixelAssets[collection.id]; const undoneMap = undone.pixelAssets[map.id];
+    if (undoneTileset.type !== 'tileset' || undoneMap.type !== 'tilemap') throw new Error('Expected collection and map');
+    const undoneLayer = undoneMap.layers[layer.id]; if (undoneLayer.type !== 'tile' || !undoneLayer.chunks) throw new Error('Expected tile layer');
+    expect(Object.keys(undoneTileset.tiles)).toEqual(['0', '3', '7']);
+    expect(undoneTileset.tiles[3]).toMatchObject({ imageAssetId: source3.id, probability: 0.75, properties: { retained: true } });
+    expect(readTileAt(undoneLayer.chunks, -34, 35)).toBe(oldRaw);
+    expect(undone.pixelAssets[source3.id]).toEqual(source3);
   });
 
   it('refuses a queued lifecycle append planned before a source change, then admits a fresh retry and exact undo', async () => {

@@ -5,6 +5,14 @@ import process from 'node:process';
 
 export const EXPECTED_ELECTRON_VERSION = '43.4.0';
 export const COMPLETE_AUDIT_COMMAND = 'npm audit --include=prod --include=dev --include=optional --include=peer --audit-level=high';
+export const EXPECTED_DIRECT_DEPENDENCY_COUNTS = Object.freeze({
+  runtime: 24,
+  development: 28,
+  optional: 0,
+  peer: 0,
+  total: 52,
+});
+export const EXPECTED_EXTERNAL_REGISTRY_PACKAGES = 699;
 
 export const REPOSITORY_WORKSPACE_PATHS = Object.freeze([
   'packages/canvas',
@@ -36,6 +44,18 @@ const FORBIDDEN_BUILD_PACKAGES = Object.freeze([
   'image-size',
 ]);
 
+const RETIRED_PRODUCT_DEPENDENCIES = Object.freeze([
+  'openai',
+  'jsonc-parser',
+]);
+
+const DEPENDENCY_SECTIONS = Object.freeze([
+  ['runtime', 'dependencies'],
+  ['development', 'devDependencies'],
+  ['optional', 'optionalDependencies'],
+  ['peer', 'peerDependencies'],
+]);
+
 function requireRecord(value, label) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label} must be an object.`);
   return value;
@@ -48,6 +68,48 @@ function requireExact(value, expected, label) {
 function requireExactStringArray(value, expected, label) {
   if (!Array.isArray(value) || value.length !== expected.length || value.some((item, index) => item !== expected[index])) {
     throw new Error(`${label} must be exactly ${JSON.stringify(expected)}.`);
+  }
+}
+
+function dependencySection(record, field, label) {
+  const value = record[field];
+  return value === undefined ? {} : requireRecord(value, `${label} ${field}`);
+}
+
+function inspectDirectDependencyCounts(record, label) {
+  const counts = {};
+  let total = 0;
+  for (const [countName, field] of DEPENDENCY_SECTIONS) {
+    const count = Object.keys(dependencySection(record, field, label)).length;
+    counts[countName] = count;
+    total += count;
+  }
+  counts.total = total;
+  return counts;
+}
+
+function requireExpectedDirectDependencyCounts(actual, label) {
+  for (const [name, expected] of Object.entries(EXPECTED_DIRECT_DEPENDENCY_COUNTS)) {
+    requireExact(actual[name], expected, `${label} ${name} dependency count`);
+  }
+}
+
+function requireMatchingDependencySections(manifest, root) {
+  for (const [, field] of DEPENDENCY_SECTIONS) {
+    const manifestEntries = Object.entries(dependencySection(manifest, field, 'package.json')).sort(([left], [right]) => left.localeCompare(right));
+    const rootEntries = Object.entries(dependencySection(root, field, 'package-lock.json root')).sort(([left], [right]) => left.localeCompare(right));
+    if (JSON.stringify(rootEntries) !== JSON.stringify(manifestEntries)) {
+      throw new Error(`package-lock.json root ${field} must exactly match package.json ${field}.`);
+    }
+  }
+}
+
+function requireRetiredProductDependenciesAbsent(record, label) {
+  for (const [, field] of DEPENDENCY_SECTIONS) {
+    const section = dependencySection(record, field, label);
+    for (const dependency of RETIRED_PRODUCT_DEPENDENCIES) {
+      if (Object.hasOwn(section, dependency)) throw new Error(`${label} must not declare retired dependency ${dependency}.`);
+    }
   }
 }
 
@@ -119,6 +181,9 @@ export function inspectDependencySecurityPolicy({ packageJson, lockJson }) {
   const manifest = requireRecord(packageJson, 'package.json');
   const lock = requireRecord(lockJson, 'package-lock.json');
   requireExact(lock.lockfileVersion, 3, 'package-lock.json lockfileVersion');
+  requireRetiredProductDependenciesAbsent(manifest, 'package.json');
+  const manifestDependencyCounts = inspectDirectDependencyCounts(manifest, 'package.json');
+  requireExpectedDirectDependencyCounts(manifestDependencyCounts, 'package.json');
 
   const devDependencies = requireRecord(manifest.devDependencies, 'package.json devDependencies');
   const overrides = requireRecord(manifest.overrides, 'package.json overrides');
@@ -136,7 +201,17 @@ export function inspectDependencySecurityPolicy({ packageJson, lockJson }) {
 
   const packages = requireRecord(lock.packages, 'package-lock.json packages');
   const root = requireRecord(packages[''], 'package-lock.json root package');
+  requireRetiredProductDependenciesAbsent(root, 'package-lock.json root');
+  const lockRootDependencyCounts = inspectDirectDependencyCounts(root, 'package-lock.json root');
+  requireExpectedDirectDependencyCounts(lockRootDependencyCounts, 'package-lock.json root');
+  requireMatchingDependencySections(manifest, root);
   requireExactStringArray(root.workspaces, REPOSITORY_WORKSPACE_PATTERNS, 'package-lock.json root workspaces');
+  for (const lockPath of Object.keys(packages)) {
+    const packageName = packageNameFromLockPath(lockPath);
+    if (packageName && RETIRED_PRODUCT_DEPENDENCIES.includes(packageName)) {
+      throw new Error(`package-lock.json must not contain retired dependency ${packageName}: ${lockPath}.`);
+    }
+  }
   const provenance = inspectLockProvenance(packages);
   const lockedDevDependencies = requireRecord(root.devDependencies, 'package-lock.json root devDependencies');
   requireExact(lockedDevDependencies.electron, EXPECTED_ELECTRON_VERSION, 'package-lock.json root Electron version');
@@ -168,12 +243,19 @@ export function inspectDependencySecurityPolicy({ packageJson, lockJson }) {
     ) forbidden.push(lockPath);
   }
   if (forbidden.length) throw new Error(`Vulnerable or superseded build packages remain locked: ${forbidden.join(', ')}.`);
+  requireExact(
+    provenance.externalRegistryPackages,
+    EXPECTED_EXTERNAL_REGISTRY_PACKAGES,
+    'package-lock.json external non-link package count',
+  );
 
   return {
     electron: EXPECTED_ELECTRON_VERSION,
     forge: '7.11.2',
     packager: '18.4.4',
     extractor: '@electron-internal/extract-zip@1.0.5',
+    manifestDependencyCounts,
+    lockRootDependencyCounts,
     ...provenance,
     overrides: { ...REQUIRED_SECURITY_OVERRIDES },
     removedBuildPackages: [...FORBIDDEN_BUILD_PACKAGES],

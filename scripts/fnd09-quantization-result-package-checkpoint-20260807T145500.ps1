@@ -274,9 +274,6 @@ $immutableBefore = @($immutableTrees | ForEach-Object { Assert-TreeIdentity $_ '
 $baseline = Get-SubjectProcesses
 Assert-ProcessBoundary $baseline 'preflight'
 
-$env:OPENAI_API_KEY = ''
-$env:STABILITY_API_KEY = ''
-$env:COMFYUI_API_KEY = ''
 $env:ANTHROPIC_API_KEY = ''
 $env:AIDRAW_NODE24_EXE = $node
 $env:AIDRAW_FORGE_OUT_DIR = $outName

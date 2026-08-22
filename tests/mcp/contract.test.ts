@@ -5,11 +5,12 @@ import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { DocumentService } from '@main/document-service';
 import { RecoveryJournal } from '@main/journal';
-import { McpHost, parseFolderTrustSettings, parsePreferredPortSettings, type GenerationApprovalPreviewRenderer } from '@main/mcp-host';
+import { McpHost, parseFolderTrustSettings, parsePreferredPortSettings } from '@main/mcp-host';
 import { TransactionTraceStore } from '@main/trace-store';
 import { createCanvas, loadImage } from '@napi-rs/canvas';
 import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createId, createPixelDocument, createPixelSprite, createPixelTilemap, createPixelTileset, decodeTiledGid, encodeTiledGid, nowIso, readPixel, readTileAt } from '@aidraw/core';
 import { LATEST_PROTOCOL_VERSION } from '@modelcontextprotocol/server';
+import { MCP_BRIDGE_PROVISIONAL_HEADER } from '@main/mcp-authority';
 
 const temporaryPaths: string[] = [];
 const hosts: McpHost[] = [];
@@ -23,13 +24,20 @@ function parseMcp(text: string): { result?: Record<string, unknown>; error?: unk
   return JSON.parse(data);
 }
 
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve = (): void => undefined;
+  const promise = new Promise<void>((settled) => { resolve = settled; });
+  return { promise, resolve };
+}
+
 async function initializeClient(url: string, token: string, name: string) {
   const initialize = await fetch(url, { method: 'POST', headers: { authorization: `Bearer ${token}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: LATEST_PROTOCOL_VERSION, capabilities: {}, clientInfo: { name, version: '1.0.0' } } }) });
   const initialized = parseMcp(await initialize.text());
-  if (initialize.status !== 200 || initialized.result?.protocolVersion !== LATEST_PROTOCOL_VERSION) throw new Error(`MCP initialize did not negotiate ${LATEST_PROTOCOL_VERSION}.`);
+  const protocolVersion = initialized.result?.protocolVersion;
+  if (initialize.status !== 200 || protocolVersion !== LATEST_PROTOCOL_VERSION) throw new Error(`MCP initialize did not negotiate ${LATEST_PROTOCOL_VERSION}.`);
   const sessionId = initialize.headers.get('mcp-session-id');
   if (!sessionId) throw new Error('MCP session ID missing');
-  const headers = { authorization: `Bearer ${token}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json', 'mcp-session-id': sessionId, 'mcp-protocol-version': LATEST_PROTOCOL_VERSION };
+  const headers = { authorization: `Bearer ${token}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json', 'mcp-session-id': sessionId, 'mcp-protocol-version': protocolVersion };
   await fetch(url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) });
   return { sessionId, headers };
 }
@@ -83,10 +91,9 @@ function expectTransportDiagnostic(
     next: expect.stringContaining(next),
   });
   if (error === 'invalid_token') {
-    expect(value).toMatchObject({ next: expect.stringContaining('Leave access revoked if it should remain disabled') });
-    expect(value).toMatchObject({ next: expect.stringContaining('Otherwise, if access is revoked') });
-    expect(value).toMatchObject({ next: expect.stringContaining('Rotate and re-enable') });
-    expect(value).toMatchObject({ next: expect.stringContaining('Connect or Show settings') });
+    expect(value).toMatchObject({ next: expect.stringContaining('unchanged AIDraw stdio bridge') });
+    expect(value).toMatchObject({ next: expect.stringContaining('fresh private handoff') });
+    expect(value).toMatchObject({ next: expect.stringContaining('fresh transport') });
   }
 }
 
@@ -103,6 +110,137 @@ async function readSseUntil(response: Response, pattern: RegExp, timeoutMs = 4_0
 }
 
 describe('authenticated stateful MCP contract', () => {
+  it('atomically rejects a duplicate provisional correlation while its owner is still initializing', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-mcp-provisional-admission-'));
+    temporaryPaths.push(root);
+    const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0');
+    documents.initialize();
+    const host = new McpHost(
+      documents,
+      '1.0.0',
+      join(root, 'port.json'),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { provisionalSessionTtlMs: 50 },
+    );
+    hosts.push(host);
+    const started = await host.start('provisional-admission-token');
+    const internals = host as unknown as {
+      createSession: () => Promise<unknown>;
+      sessions: Map<string, unknown>;
+      provisionalSessions: Map<string, unknown>;
+      provisionalAdmissions: Set<string>;
+    };
+    const createSession = internals.createSession.bind(host);
+    const entered = deferred();
+    const release = deferred();
+    internals.createSession = async () => {
+      entered.resolve();
+      await release.promise;
+      return createSession();
+    };
+    const provisionalId = '4b2680cb-3e27-47ae-b67f-c081c64d99bc';
+    const headers = {
+      authorization: 'Bearer provisional-admission-token',
+      accept: 'application/json, text/event-stream',
+      'content-type': 'application/json',
+      [MCP_BRIDGE_PROVISIONAL_HEADER]: provisionalId,
+    };
+    const body = JSON.stringify({
+      jsonrpc: '2.0', id: 'provisional-owner', method: 'initialize',
+      params: { protocolVersion: LATEST_PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: 'provisional-owner', version: '1.0.0' } },
+    });
+    const owner = fetch(started.url, { method: 'POST', headers, body });
+    await entered.promise;
+    expect(internals.provisionalAdmissions).toEqual(new Set([provisionalId]));
+    const duplicate = await fetch(started.url, { method: 'POST', headers, body });
+    expect(duplicate.status).toBe(409);
+    await expect(duplicate.json()).resolves.toEqual({ error: 'bridge_provisional_session_cancelled' });
+    expect(internals.sessions.size).toBe(0);
+
+    release.resolve();
+    const initialized = await owner;
+    expect(initialized.status).toBe(200);
+    await initialized.text();
+    expect(internals.provisionalAdmissions.size).toBe(0);
+    expect(internals.sessions.size).toBe(1);
+    expect(internals.provisionalSessions.size).toBe(1);
+    await expect.poll(() => internals.sessions.size, { timeout: 1_000 }).toBe(0);
+    expect(internals.provisionalSessions.size).toBe(0);
+  });
+
+  it('honors provisional cleanup tombstones before and during asynchronous initialization', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-mcp-provisional-cleanup-race-'));
+    temporaryPaths.push(root);
+    const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0');
+    documents.initialize();
+    const host = new McpHost(documents, '1.0.0', join(root, 'port.json'));
+    hosts.push(host);
+    const started = await host.start('provisional-cleanup-token');
+    const internals = host as unknown as {
+      createSession: () => Promise<unknown>;
+      sessions: Map<string, unknown>;
+      provisionalSessions: Map<string, unknown>;
+      provisionalAdmissions: Set<string>;
+      cancelledProvisionalSessions: Map<string, unknown>;
+    };
+    const baseHeaders = {
+      authorization: 'Bearer provisional-cleanup-token',
+      accept: 'application/json, text/event-stream',
+      'content-type': 'application/json',
+    };
+    const initializeBody = JSON.stringify({
+      jsonrpc: '2.0', id: 'cleanup-owner', method: 'initialize',
+      params: { protocolVersion: LATEST_PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: 'cleanup-owner', version: '1.0.0' } },
+    });
+    const beforeId = 'facf16fd-abd0-4f8a-9ef5-8fb0e92230ea';
+    const beforeDelete = await fetch(started.url, {
+      method: 'DELETE',
+      headers: { ...baseHeaders, [MCP_BRIDGE_PROVISIONAL_HEADER]: beforeId },
+    });
+    expect(beforeDelete.status).toBe(204);
+    const beforeInitialize = await fetch(started.url, {
+      method: 'POST',
+      headers: { ...baseHeaders, [MCP_BRIDGE_PROVISIONAL_HEADER]: beforeId },
+      body: initializeBody,
+    });
+    expect(beforeInitialize.status).toBe(409);
+    expect(internals.sessions.size).toBe(0);
+    expect(internals.cancelledProvisionalSessions.size).toBe(0);
+
+    const createSession = internals.createSession.bind(host);
+    const entered = deferred();
+    const release = deferred();
+    internals.createSession = async () => {
+      entered.resolve();
+      await release.promise;
+      return createSession();
+    };
+    const duringId = '5d6880f9-d6bd-4601-a0c3-70967d36b729';
+    const duringInitialize = fetch(started.url, {
+      method: 'POST',
+      headers: { ...baseHeaders, [MCP_BRIDGE_PROVISIONAL_HEADER]: duringId },
+      body: initializeBody,
+    });
+    await entered.promise;
+    expect(internals.provisionalAdmissions).toEqual(new Set([duringId]));
+    const duringDelete = await fetch(started.url, {
+      method: 'DELETE',
+      headers: { ...baseHeaders, [MCP_BRIDGE_PROVISIONAL_HEADER]: duringId },
+    });
+    expect(duringDelete.status).toBe(204);
+    release.resolve();
+    const ownerResponse = await duringInitialize;
+    expect(ownerResponse.status).toBe(200);
+    await ownerResponse.text();
+    expect(internals.provisionalAdmissions.size).toBe(0);
+    expect(internals.provisionalSessions.size).toBe(0);
+    expect(internals.cancelledProvisionalSessions.size).toBe(0);
+    expect(internals.sessions.size).toBe(0);
+  });
+
   it('rejects missing auth, creates a session, and exposes the planned tools', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aidraw-mcp-'));
     temporaryPaths.push(root);
@@ -117,8 +255,19 @@ describe('authenticated stateful MCP contract', () => {
     expect(unauthenticated.headers.get('cache-control')).toBe('no-store');
     expect(unauthenticated.headers.get('www-authenticate')).toBe('Bearer realm="AIDraw MCP"');
     const unauthenticatedDiagnostic = await unauthenticated.json();
-    expectTransportDiagnostic(unauthenticatedDiagnostic, 'invalid_token', 'bearer is absent, invalid, rotated, or revoked', 'configuration profile');
+    expectTransportDiagnostic(unauthenticatedDiagnostic, 'invalid_token', 'process-lifetime bearer', 'unchanged AIDraw stdio bridge');
+    const unauthenticatedProvisionalDelete = await fetch(started.url, {
+      method: 'DELETE',
+      headers: { [MCP_BRIDGE_PROVISIONAL_HEADER]: '3f389a8e-e6d7-4f26-93d5-72233592bc83' },
+    });
+    expect(unauthenticatedProvisionalDelete.status).toBe(401);
+    await expect(unauthenticatedProvisionalDelete.json()).resolves.toMatchObject({ error: 'invalid_token' });
     expect(JSON.stringify(unauthenticatedDiagnostic)).not.toContain('test-secret-token');
+    const healthUrl = new URL(started.url); healthUrl.pathname = '/health';
+    expect((await fetch(healthUrl)).status).toBe(401);
+    const health = await fetch(healthUrl, { headers: { authorization: 'Bearer test-secret-token' } });
+    expect(health.status).toBe(200);
+    await expect(health.json()).resolves.toMatchObject({ status: 'ok', uiRequired: false });
     const initialize = await fetch(started.url, {
       method: 'POST',
       headers: { authorization: 'Bearer test-secret-token', accept: 'application/json, text/event-stream', 'content-type': 'application/json' },
@@ -135,13 +284,20 @@ describe('authenticated stateful MCP contract', () => {
     const sessionId = initialize.headers.get('mcp-session-id');
     expect(sessionId).toBeTruthy();
 
-    const headers = { authorization: 'Bearer test-secret-token', accept: 'application/json, text/event-stream', 'content-type': 'application/json', 'mcp-session-id': sessionId!, 'mcp-protocol-version': LATEST_PROTOCOL_VERSION };
+    const negotiatedProtocolVersion = initialized.result?.protocolVersion;
+    expect(typeof negotiatedProtocolVersion).toBe('string');
+    const headers = { authorization: 'Bearer test-secret-token', accept: 'application/json, text/event-stream', 'content-type': 'application/json', 'mcp-session-id': sessionId!, 'mcp-protocol-version': String(negotiatedProtocolVersion) };
     await fetch(started.url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) });
     const listed = await fetch(started.url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }) });
     const message = parseMcp(await listed.text());
     const tools = (message.result?.tools ?? []) as Array<{ name: string; description?: string; inputSchema?: DiscoverySchema; outputSchema?: DiscoverySchema }>;
     const names = tools.map((tool) => tool.name);
-    expect(names).toEqual(expect.arrayContaining(['aidraw_help', 'session_manage', 'canvas_observe', 'canvas_apply', 'history_manage', 'document_manage', 'asset_import', 'document_export', 'generation_start', 'job_manage']));
+    const expectedPublicTools = [
+      'aidraw_help', 'session_manage', 'canvas_observe', 'canvas_apply', 'history_manage',
+      'document_manage', 'asset_import', 'document_export', 'job_manage',
+    ];
+    expect(names).toEqual(expectedPublicTools);
+    expect(new Set(names).size).toBe(9);
     expect(tools.find((tool) => tool.name === 'document_export')?.inputSchema?.properties?.scale).toMatchObject({ default: 1, maximum: 64 });
     expect(tools.find((tool) => tool.name === 'asset_import')?.inputSchema?.properties).toEqual(expect.objectContaining({ spriteSheet: expect.any(Object), paletteMode: expect.any(Object), projectLinkId: expect.any(Object) }));
     expect(tools.find((tool) => tool.name === 'document_export')?.inputSchema?.properties).toEqual(expect.objectContaining({ paletteCycleId: expect.any(Object), paletteCycleFrameId: expect.any(Object), projectLinkId: expect.any(Object) }));
@@ -267,56 +423,6 @@ describe('authenticated stateful MCP contract', () => {
     expect(await readFile(companionPath, 'utf8')).toBe('approval must disclose this predecessor');
   });
 
-  it('invalidates the prior bearer, retires active transports, and fails closed after revocation', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'aidraw-mcp-credential-lifecycle-'));
-    temporaryPaths.push(root);
-    const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0');
-    documents.initialize();
-    const host = new McpHost(documents, '1.0.0', join(root, 'port.json'));
-    hosts.push(host);
-    const firstToken = Buffer.alloc(32, 0x11).toString('base64url');
-    const secondToken = Buffer.alloc(32, 0x22).toString('base64url');
-    const started = await host.start(firstToken);
-    expect(started.tokenHint).toBe('Credential active');
-    expect(started.tokenHint).not.toContain(firstToken.slice(-6));
-    const firstClient = await initializeClient(started.url, firstToken, 'credential-lifecycle-first');
-    await callTool(started.url, firstClient.headers, 2, 'session_manage', { action: 'join', name: 'First lifecycle agent', color: '#345678' });
-    const revision = documents.snapshot().activeDocument?.revision;
-    expect(documents.getMcpInfo().sessions).toHaveLength(1);
-
-    await expect(host.replaceCredential(secondToken)).resolves.toBe(1);
-    expect(documents.getMcpInfo().sessions).toEqual([]);
-    const rejectedOld = await fetch(started.url, {
-      method: 'POST',
-      headers: firstClient.headers,
-      body: JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/list', params: {} }),
-    });
-    expect(rejectedOld.status).toBe(401);
-    const rejectedOldDiagnostic = await rejectedOld.json();
-    expectTransportDiagnostic(rejectedOldDiagnostic, 'invalid_token', 'bearer is absent, invalid, rotated, or revoked', 'configuration profile');
-    expect(JSON.stringify(rejectedOldDiagnostic)).not.toContain(firstToken);
-
-    const replacementClient = await initializeClient(started.url, secondToken, 'credential-lifecycle-second');
-    await callTool(started.url, replacementClient.headers, 4, 'session_manage', { action: 'join', name: 'Replacement lifecycle agent', color: '#456789' });
-    expect(documents.getMcpInfo().sessions).toHaveLength(1);
-    await expect(host.revokeCredential()).resolves.toBe(1);
-    expect(documents.getMcpInfo().sessions).toEqual([]);
-    for (const authorization of [`Bearer ${firstToken}`, `Bearer ${secondToken}`, 'Bearer ']) {
-      const rejected = await fetch(started.url, {
-        method: 'POST',
-        headers: { authorization, accept: 'application/json, text/event-stream', 'content-type': 'application/json' },
-        body: JSON.stringify({ jsonrpc: '2.0', id: 5, method: 'initialize', params: { protocolVersion: LATEST_PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: 'revoked-client', version: '1.0.0' } } }),
-      });
-      expect(rejected.status).toBe(401);
-      const rejectedDiagnostic = await rejected.json();
-      expectTransportDiagnostic(rejectedDiagnostic, 'invalid_token', 'bearer is absent, invalid, rotated, or revoked', 'configuration profile');
-      expect(JSON.stringify(rejectedDiagnostic)).not.toContain(firstToken);
-      expect(JSON.stringify(rejectedDiagnostic)).not.toContain(secondToken);
-    }
-    expect((await fetch(`http://127.0.0.1:${started.port}/health`)).status).toBe(200);
-    expect(documents.snapshot().activeDocument?.revision).toBe(revision);
-  });
-
   it('closes a bound listener when private port publication fails and remains retryable', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aidraw-mcp-start-publication-failure-'));
     temporaryPaths.push(root);
@@ -324,23 +430,32 @@ describe('authenticated stateful MCP contract', () => {
     documents.initialize();
     const host = new McpHost(documents, '1.0.0', join(root, 'port.json'));
     hosts.push(host);
-    const internals = host as unknown as { writePreferredPort(port: number): Promise<void> };
+    const internals = host as unknown as {
+      httpServer?: { listening: boolean };
+      writePreferredPort(port: number): Promise<void>;
+    };
     let failedPort: number | undefined;
+    let failedListener: { listening: boolean } | undefined;
     const writePreferredPort = vi.spyOn(internals, 'writePreferredPort').mockImplementationOnce(async (port) => {
       failedPort = port;
+      failedListener = internals.httpServer;
       throw new Error('injected private publication detail');
     });
     const rejectedToken = Buffer.alloc(32, 0x33).toString('base64url');
 
     await expect(host.start(rejectedToken)).rejects.toThrow('The listener was closed and runtime authority was not enabled.');
-    expect(host.credentials()).toEqual({ url: undefined, token: '' });
+    expect(host.connection()).toEqual({ url: undefined, token: '' });
     expect(failedPort).toBeTypeOf('number');
+    expect(failedListener).toBeTruthy();
+    expect(failedListener?.listening).toBe(false);
+    expect(internals.httpServer).toBeUndefined();
     writePreferredPort.mockRestore();
 
     const replacementToken = Buffer.alloc(32, 0x44).toString('base64url');
     const started = await host.start(replacementToken);
-    expect(started.port).toBe(failedPort);
-    expect(host.credentials()).toEqual({ url: started.url, token: replacementToken });
+    expect(started.port).toBeGreaterThanOrEqual(48_200);
+    expect(started.port).toBeLessThanOrEqual(48_231);
+    expect(host.connection()).toEqual({ url: started.url, token: replacementToken });
     const rejected = await fetch(started.url, {
       method: 'POST',
       headers: { authorization: `Bearer ${rejectedToken}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json' },
@@ -446,10 +561,9 @@ describe('authenticated stateful MCP contract', () => {
     expect(guide).toContain('Strict server validation rejects fields from other actions');
     expect(guide).toContain('Only a human can approve');
     expect(guide).toContain('Transport and tool failures');
-    expect(guide).toContain('HTTP 401 invalid_token');
-    expect(guide).toContain('Leave access revoked if it should remain disabled');
-    expect(guide).toContain('Rotate and re-enable');
-    expect(guide).toContain('applicable **Connect** or **Show settings** path');
+    expect(guide).toContain('Direct HTTP 401 invalid_token');
+    expect(guide).toContain('unchanged stdio client configuration');
+    expect(guide).toContain('Ordinary clients use the product stdio bridge');
     expect(guide).toContain('HTTP 404 unknown_session');
     expect(guide).toContain('Tool-level Invalid arguments');
     expect(guide).toContain('Configuration-profile availability remains separate from installed-client acceptance');
@@ -458,14 +572,13 @@ describe('authenticated stateful MCP contract', () => {
     expect(guide).toContain('pixel.image-collection.append');
     expect(guide).toContain('pixel.image-collection.source.replace');
     expect(guide).toContain('pixel.image-collection.source.remove');
+    expect(guide).toContain('pixel.image-collection.tile.move');
     expect(guide).toContain('pixel.tile-object.create');
     expect(guide).toContain('intent-derived deterministic stream');
     const safetyHelp = await callTool(started.url, client.headers, 13, 'aidraw_help', { topic: 'safety' });
     expect(safetyHelp.steps).toEqual(expect.arrayContaining([
-      expect.stringContaining('HTTP 401 is authentication'),
-      expect.stringContaining('leave access revoked if it should remain disabled'),
-      expect.stringContaining('rotate and re-enable if revoked'),
-      expect.stringContaining('Connect or Show settings'),
+      expect.stringContaining('direct HTTP 401 means an explicit QA bearer'),
+      expect.stringContaining('unchanged AIDraw stdio bridge'),
       expect.stringContaining('HTTP 404 unknown_session is a stale process-lifetime session'),
       expect.stringContaining('tool Invalid arguments'),
     ]));
@@ -478,6 +591,7 @@ describe('authenticated stateful MCP contract', () => {
     expect(JSON.stringify(operationsHelp.examples)).toContain('pixel.image-collection.create');
     expect(JSON.stringify(operationsHelp.examples)).toContain('pixel.image-collection.source.replace');
     expect(JSON.stringify(operationsHelp.examples)).toContain('pixel.image-collection.source.remove');
+    expect(JSON.stringify(operationsHelp.examples)).toContain('pixel.image-collection.tile.move');
     expect(JSON.stringify(operationsHelp.examples)).toContain('pixel.tile-object.create');
   });
 
@@ -503,7 +617,11 @@ describe('authenticated stateful MCP contract', () => {
     const accepted = attempts.filter((attempt) => attempt.status === 200); const refused = attempts.filter((attempt) => attempt.status === 429);
     expect(accepted).toHaveLength(32); expect(new Set(accepted.map((attempt) => attempt.sessionId)).size).toBe(32); expect(accepted.every((attempt) => parseMcp(attempt.body).result?.protocolVersion === LATEST_PROTOCOL_VERSION)).toBe(true);
     expect(refused).toHaveLength(1); expect(refused[0]).toMatchObject({ sessionId: null, cacheControl: 'no-store' }); expect(JSON.parse(refused[0].body)).toEqual({ error: 'session_limit_reached', limit: 32, message: 'Terminate an existing MCP session with authenticated DELETE before retrying.' });
-    const clients = accepted.map((attempt) => ({ sessionId: attempt.sessionId!, headers: { authorization: 'Bearer parallel-token', accept: 'application/json, text/event-stream', 'content-type': 'application/json', 'mcp-session-id': attempt.sessionId!, 'mcp-protocol-version': LATEST_PROTOCOL_VERSION } }));
+    const clients = accepted.map((attempt) => {
+      const protocolVersion = parseMcp(attempt.body).result?.protocolVersion;
+      if (typeof protocolVersion !== 'string') throw new Error('Parallel MCP initialize did not return a negotiated protocol version.');
+      return { sessionId: attempt.sessionId!, headers: { authorization: 'Bearer parallel-token', accept: 'application/json, text/event-stream', 'content-type': 'application/json', 'mcp-session-id': attempt.sessionId!, 'mcp-protocol-version': protocolVersion } };
+    });
     await Promise.all(clients.map((client) => fetch(started.url, { method: 'POST', headers: client.headers, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) })));
     const first = clients[0]; const resource = await fetch(started.url, { method: 'POST', headers: first.headers, body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'resources/read', params: { uri: 'aidraw://documents' } }) }); expect(parseMcp(await resource.text()).result).toBeTruthy();
     const document = documents.snapshot().activeDocument!; const params = { name: 'canvas_apply', arguments: { documentId: document.id, clientOperationId: 'mcp-idempotent-op', label: 'MCP rename', operations: [{ kind: 'document.rename', name: 'Shared drawing' }], playback: { mode: 'instant', speed: 1 } } };
@@ -1175,24 +1293,47 @@ describe('authenticated stateful MCP contract', () => {
     expect(removed).toMatchObject({ firstGid: collection.firstGid, tiles: { 0: { id: 0, imageAssetId: fourth.id }, 2: { id: 2, imageAssetId: second.id } } });
     expect(JSON.stringify([afterRemoval.pixelAssets[first.id], afterRemoval.pixelAssets[second.id], afterRemoval.pixelAssets[third.id], afterRemoval.pixelAssets[fourth.id]])).toBe(sourceBytes);
 
-    const stale = await callToolMessage(started.url, client.headers, 9, 'canvas_apply', {
+    const mixedMove = await callToolMessage(started.url, client.headers, 9, 'canvas_apply', {
+      documentId: document.id, clientOperationId: 'semantic-collection-move-mixed', label: 'Reject mixed collection tile move', playback: { mode: 'instant', speed: 1 },
+      operations: [{ kind: 'pixel.image-collection.tile.move', tilesetId: collection.id, sourceTileId: 0, destinationTileId: 1, expectedTilesetRevision: removed.revision, expectedDocumentRevision: afterRemoval.revision }, { kind: 'document.rename', name: 'Must remain unchanged' }],
+    });
+    expect(mixedMove.result?.isError).toBe(true);
+    expect(JSON.stringify(mixedMove)).toContain('must be the only request');
+    expect(documents.getDocument(document.id)).toEqual(afterRemoval);
+
+    expect(await callTool(started.url, client.headers, 10, 'canvas_apply', {
+      documentId: document.id, clientOperationId: 'semantic-collection-tile-move', label: 'Move semantic collection tile ID', playback: { mode: 'instant', speed: 1 },
+      operations: [{ kind: 'pixel.image-collection.tile.move', tilesetId: collection.id, sourceTileId: 0, destinationTileId: 1, expectedTilesetRevision: removed.revision, expectedDocumentRevision: afterRemoval.revision }],
+    })).toMatchObject({ status: 'committed' });
+    const afterMove = documents.getDocument(document.id); if (!afterMove || afterMove.kind !== 'pixel') throw new Error('Expected pixel project');
+    const moved = afterMove.pixelAssets[collection.id]; if (moved.type !== 'tileset') throw new Error('Expected image collection');
+    expect(Object.keys(moved.tiles)).toEqual(['1', '2']);
+    expect(moved).toMatchObject({ firstGid: collection.firstGid, tiles: { 1: { id: 1, imageAssetId: fourth.id }, 2: { id: 2, imageAssetId: second.id } } });
+    expect(JSON.stringify([afterMove.pixelAssets[first.id], afterMove.pixelAssets[second.id], afterMove.pixelAssets[third.id], afterMove.pixelAssets[fourth.id]])).toBe(sourceBytes);
+
+    const stale = await callToolMessage(started.url, client.headers, 11, 'canvas_apply', {
       documentId: document.id, clientOperationId: 'semantic-collection-stale', label: 'Reject stale collection append', playback: { mode: 'instant', speed: 1 },
       operations: [{ kind: 'pixel.image-collection.append', tilesetId: collection.id, sourceSpriteId: second.id, expectedTilesetRevision: appended.revision, expectedDocumentRevision: afterCreate.revision }],
     });
     expect(stale.result?.isError).toBe(true);
     expect(JSON.stringify(stale)).toContain('document revision changed');
-    expect(documents.getDocument(document.id)).toEqual(afterRemoval);
-    expect(await callTool(started.url, client.headers, 10, 'history_manage', { action: 'undo', documentId: document.id })).toMatchObject({ status: 'committed' });
+    expect(documents.getDocument(document.id)).toEqual(afterMove);
+    expect(await callTool(started.url, client.headers, 12, 'history_manage', { action: 'undo', documentId: document.id })).toMatchObject({ status: 'committed' });
+    const moveUndone = documents.getDocument(document.id); if (!moveUndone || moveUndone.kind !== 'pixel') throw new Error('Expected pixel project');
+    const moveUndoneCollection = moveUndone.pixelAssets[collection.id]; if (moveUndoneCollection.type !== 'tileset') throw new Error('Expected image collection');
+    expect(Object.keys(moveUndoneCollection.tiles)).toEqual(['0', '2']);
+    expect(moveUndoneCollection.tiles[0].imageAssetId).toBe(fourth.id);
+    expect(await callTool(started.url, client.headers, 13, 'history_manage', { action: 'undo', documentId: document.id })).toMatchObject({ status: 'committed' });
     const removalUndone = documents.getDocument(document.id); if (!removalUndone || removalUndone.kind !== 'pixel') throw new Error('Expected pixel project');
     const removalUndoneCollection = removalUndone.pixelAssets[collection.id]; if (removalUndoneCollection.type !== 'tileset') throw new Error('Expected image collection');
     expect(removalUndoneCollection.tiles[1].imageAssetId).toBe(first.id);
     expect(removalUndoneCollection.tiles[0].imageAssetId).toBe(fourth.id);
-    expect(await callTool(started.url, client.headers, 11, 'history_manage', { action: 'undo', documentId: document.id })).toMatchObject({ status: 'committed' });
+    expect(await callTool(started.url, client.headers, 14, 'history_manage', { action: 'undo', documentId: document.id })).toMatchObject({ status: 'committed' });
     const replacementUndone = documents.getDocument(document.id); if (!replacementUndone || replacementUndone.kind !== 'pixel') throw new Error('Expected pixel project');
     const replacementUndoneCollection = replacementUndone.pixelAssets[collection.id]; if (replacementUndoneCollection.type !== 'tileset') throw new Error('Expected image collection');
     expect(replacementUndoneCollection.tiles[0].imageAssetId).toBe(third.id);
     expect(replacementUndoneCollection.tiles[2].imageAssetId).toBe(second.id);
-    expect(await callTool(started.url, client.headers, 12, 'history_manage', { action: 'undo', documentId: document.id })).toMatchObject({ status: 'committed' });
+    expect(await callTool(started.url, client.headers, 15, 'history_manage', { action: 'undo', documentId: document.id })).toMatchObject({ status: 'committed' });
     const undone = documents.getDocument(document.id); if (!undone || undone.kind !== 'pixel') throw new Error('Expected pixel project');
     const undoneCollection = undone.pixelAssets[collection.id]; if (undoneCollection.type !== 'tileset') throw new Error('Expected image collection');
     expect(Object.keys(undoneCollection.tiles)).toEqual(['0', '1']);
@@ -1420,11 +1561,12 @@ describe('authenticated stateful MCP contract', () => {
     const host = new McpHost(documents, '1.0.0', join(root, 'port.json')); hosts.push(host); const started = await host.start('job-token');
     const owner = await initializeClient(started.url, 'job-token', 'job-owner'); const stranger = await initializeClient(started.url, 'job-token', 'job-stranger');
     const documentId = documents.snapshot().activeDocument!.id;
-    const startedJob = await callTool(started.url, owner.headers, 2, 'generation_start', { documentId, provider: 'openai', mode: 'create', prompt: 'private dragon prompt', sourceAssetIds: [], resultCount: 1 });
+    const privatePath = join(root, 'private-owner-output.png');
+    const startedJob = await callTool(started.url, owner.headers, 2, 'document_export', { documentId, path: privatePath, format: 'png', scale: 1 });
     const jobId = String(startedJob.jobId);
     const ownerList = await callTool(started.url, owner.headers, 3, 'job_manage', { action: 'list' });
     expect(ownerList.jobs).toEqual([expect.objectContaining({ id: jobId, status: 'waiting-for-user', dependency: expect.objectContaining({ kind: 'user-approval' }) })]);
-    expect(JSON.stringify(ownerList)).not.toContain('private dragon prompt');
+    expect(JSON.stringify(ownerList)).not.toContain(privatePath);
     expect((ownerList.jobs as Array<Record<string, unknown>>)[0]).not.toHaveProperty('approval');
     expect((ownerList.jobs as Array<Record<string, unknown>>)[0]).not.toHaveProperty('result');
     expect(await callTool(started.url, stranger.headers, 4, 'job_manage', { action: 'list' })).toEqual({ jobs: [] });
@@ -1547,7 +1689,7 @@ describe('authenticated stateful MCP contract', () => {
         provenance: { id: 'forged-provenance', assetId: 'missing', provider: 'openai', modelOrWorkflow: 'forged', sourceAssetIds: [], createdAt: 'forged' },
       }],
     });
-    expect(forged).toMatchObject({ status: 'conflict', message: expect.stringContaining('generation engine') });
+    expect(forged).toMatchObject({ status: 'conflict', message: expect.stringContaining('read-only compatibility metadata') });
   });
 
   it('provides structured approval details and honors scoped folder trust without bypassing overwrites', async () => {
@@ -1555,25 +1697,7 @@ describe('authenticated stateful MCP contract', () => {
     temporaryPaths.push(root);
     const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0');
     documents.initialize();
-    let generationCancellationJobId: string | undefined;
-    const previewedAssetIds: string[] = [];
-    let rejectApprovalPreview = false;
-    const renderApprovalPreview: GenerationApprovalPreviewRenderer = async (asset) => {
-      previewedAssetIds.push(asset.id);
-      if (rejectApprovalPreview) throw new Error('Simulated advisory preview failure.');
-      return { width: 2, height: 1, previewPng: Buffer.from(asset.data!, 'base64') };
-    };
-    const host = new McpHost(
-      documents,
-      '1.0.0',
-      join(root, 'port.json'),
-      (jobId) => { generationCancellationJobId = jobId; },
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      renderApprovalPreview,
-    );
+    const host = new McpHost(documents, '1.0.0', join(root, 'port.json'));
     hosts.push(host);
     const started = await host.start('approval-token');
     const client = await initializeClient(started.url, 'approval-token', 'approval-client');
@@ -1645,8 +1769,6 @@ describe('authenticated stateful MCP contract', () => {
     expect(await call(35, 'job_manage', { action: 'cancel', jobId: importThroughEscape.jobId })).toMatchObject({
       status: 'cancelled', message: 'Cancelled by the originating agent.',
     });
-    expect(generationCancellationJobId).toBeUndefined();
-
     documents.upsertJob({
       ...firstJob,
       status: 'failed',
@@ -1660,45 +1782,6 @@ describe('authenticated stateful MCP contract', () => {
       error: { code: 'import_failed', message: 'Malformed representative input.', retryable: false },
     });
 
-    const sourceCanvas = createCanvas(2, 1); sourceCanvas.getContext('2d').fillStyle = '#ff6b7a'; sourceCanvas.getContext('2d').fillRect(0, 0, 2, 1); const sourceBytes = sourceCanvas.toBuffer('image/png'); const sourceAssetId = 'approval-source';
-    expect((await documents.apply({ id: createId('tx'), clientOperationId: 'approval-source-add', documentId, actor: HUMAN_ACTOR, label: 'Add approval source', createdAt: nowIso(), playback: { mode: 'instant', speed: 1 }, operations: [{ kind: 'asset.add', asset: { id: sourceAssetId, name: 'Coral source', mimeType: 'image/png', byteLength: sourceBytes.byteLength, sha256: createHash('sha256').update(sourceBytes).digest('hex'), source: 'imported', data: sourceBytes.toString('base64') } }] })).status).toBe('committed');
-    const generation = await call(6, 'generation_start', {
-      documentId, provider: 'openai', mode: 'edit', prompt: 'Structured prompt review', sourceAssetIds: [sourceAssetId], size: { width: 1024, height: 1024 }, resultCount: 2, providerOptions: { quality: 'high' },
-    });
-    const generationJob = documents.getJob(String(generation.jobId))!;
-    expect(generationJob.approval?.options).toEqual(['allow-once', 'deny']);
-    expect(generationJob.approval?.review?.fields).toEqual(expect.arrayContaining([
-      expect.objectContaining({ label: 'Prompt', value: 'Structured prompt review' }),
-      expect.objectContaining({ label: 'Potential paid requests', value: '2', tone: 'paid' }),
-      expect.objectContaining({ label: 'Provider options', value: '{"quality":"high"}' }),
-    ]));
-    expect(generationJob.approval?.review?.previews).toEqual([expect.objectContaining({ role: 'source', assetId: sourceAssetId, name: 'Coral source', width: 2, height: 1, dataUrl: expect.stringMatching(/^data:image\/png;base64,/) })]);
-    expect(previewedAssetIds).toEqual([sourceAssetId]);
-    const [mcpHostSource, runtimeSource] = await Promise.all([
-      readFile(join(process.cwd(), 'src/main/mcp-host.ts'), 'utf8'),
-      readFile(join(process.cwd(), 'src/main/engine-runtime.ts'), 'utf8'),
-    ]);
-    expect(mcpHostSource).not.toContain("from '@napi-rs/canvas'");
-    expect(mcpHostSource).toContain('await renderPreview(asset)');
-    expect(runtimeSource).toContain('(asset) => this.rasterUtilities.renderGenerationApprovalPreview(asset)');
-    const defaultExpiryMs = new Date(generationJob.approval!.expiresAt).getTime() - new Date(generationJob.createdAt).getTime();
-    expect(defaultExpiryMs).toBeGreaterThanOrEqual(119_900); expect(defaultExpiryMs).toBeLessThanOrEqual(120_100);
-    const revisionBeforeTimeout = documents.getDocument(documentId)!.revision;
-    documents.upsertJob({ ...generationJob, approval: { ...generationJob.approval!, expiresAt: new Date(Date.now() + 20).toISOString() } });
-    for (let attempt = 0; attempt < 20 && documents.getJob(generationJob.id)?.status === 'waiting-for-user'; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 5));
-    expect(documents.getJob(generationJob.id)).toMatchObject({ status: 'cancelled', approval: undefined, error: { code: 'approval_timeout', retryable: true } });
-    expect(documents.getDocument(documentId)!.revision).toBe(revisionBeforeTimeout);
-    rejectApprovalPreview = true;
-    const previewFailure = await call(61, 'generation_start', {
-      documentId, provider: 'openai', mode: 'edit', prompt: 'Approval remains available', sourceAssetIds: [sourceAssetId],
-      size: { width: 1024, height: 1024 }, resultCount: 1,
-    });
-    const previewFailureJob = documents.getJob(String(previewFailure.jobId))!;
-    expect(previewFailureJob).toMatchObject({ status: 'waiting-for-user', approval: { review: { previews: [] } } });
-    expect(previewedAssetIds).toEqual([sourceAssetId, sourceAssetId]);
-    expect(documents.resolveJob(previewFailureJob.id, 'deny')?.status).toBe('cancelled');
-    const unsupported = await call(7, 'generation_start', { documentId, provider: 'stability', mode: 'variation', prompt: 'Do not approximate this', sourceAssetIds: [], resultCount: 1 });
-    expect(unsupported).toMatchObject({ error: 'unsupported_generation_request', message: expect.stringContaining('does not support variation') });
   });
 
   it('keeps denied saves inert and allow-once authority exact and nonpersistent', async () => {

@@ -33,7 +33,7 @@ interface EditorState {
   symmetryPreferences: SpriteSymmetryPreferences;
   workspaceLayoutPreferences: WorkspaceLayoutPreferences;
   shortcutPreferences: ShortcutPreferences;
-  rightPanel: 'layers' | 'assets' | 'animation' | 'activity' | 'generation';
+  rightPanel: 'layers' | 'assets' | 'animation' | 'activity';
   selectedEntityId?: Id;
   selectedEntityIds: Id[];
   canvasViewport?: { x: number; y: number; width: number; height: number };

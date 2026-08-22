@@ -1,32 +1,27 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, net, protocol, safeStorage, session, shell, type IpcMainInvokeEvent, type MessageBoxOptions } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, net, protocol, session, shell, type IpcMainInvokeEvent, type MessageBoxOptions } from 'electron';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { link, mkdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, isAbsolute, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { CanvasTransactionSchema, HUMAN_ACTOR, createId, nowIso, type AsyncJob, type CanvasOperation } from '@aidraw/core';
-import { IPC, type BatchDocumentResult, type DocumentPresetInput, type EngineStatus, type ExportOptions, type HumanLockRequest, type InterchangeReportInput, type McpCredentialLifecycleResult, type NewDocumentOptions, type PixelLinkAction, type PixelLinkActionResult } from '../common/contracts';
+import { IPC, type BatchDocumentResult, type DocumentPresetInput, type EngineStatus, type ExportOptions, type HumanLockRequest, type InterchangeReportInput, type NewDocumentOptions, type PixelLinkAction, type PixelLinkActionResult } from '../common/contracts';
 import { EDITOR_CONTENT_VIEWPORT, MACOS_EDITOR_WINDOW_CHROME, editorOuterMinimumSize } from '../common/editor-layout';
 import { MAX_PALETTE_FILE_BYTES, applyPortablePalette, parsePaletteFile, serializePaletteFile, type PaletteFileFormat, type PaletteImportMode } from '../common/palette-interchange';
 import type { DocumentService } from './document-service';
 import type { McpHost } from './mcp-host';
-import type { ProviderCredentialStore } from './provider-credentials';
-import type { GenerationManager } from './generation-manager';
 import { EngineRuntime } from './engine-runtime';
-import type { GenerationRequest } from '../common/generation';
 import type { ExportFormat } from './export-document';
-import { parseCliArguments, runCliInvocation, type CliCommand } from './cli';
+import { parseCliArguments, runCliInvocation, selectCliArguments, selectStartupCommand, type CliCommand } from './cli';
 import { validateSpriteSheetSliceOptions, type SpriteSheetSliceOptions } from '../common/sprite-sheet';
 import { buildRendererDiagnostics, type RendererFailureDetail } from './renderer-diagnostics';
 import { embedPixelLink, externalizePixelLink } from '../common/pixel-links';
 import { MAX_PROJECT_LINK_BYTES, portableProjectAssetPath, preparePixelLinkRelink, projectLinkFileExtension, verifiedPixelLinkCache } from './pixel-link-files';
 import { agentClientDescriptor, isAgentClientId, type AgentClientId, type AgentClientSetupResult } from '../common/agent-clients';
-import { completeAgentClientSetup, configureAgentClientFile } from './agent-client-config';
-import { secureStorageStatus } from './secure-storage';
+import { prepareAgentClientSetup, publishProductMcpBridgeLauncher, type ProductMcpBridgeLaunchOptions } from './agent-client-config';
+import { desktopPlatformInfo } from '../common/platform';
 import { getStartAtLoginStatus, setStartAtLogin, wasOpenedAtLogin } from './start-at-login';
 import { resolveRendererRecoveryE2eConfiguration, sanitizedMalformedRendererRecoveryEvent } from './renderer-recovery-e2e';
-import { createQa06GenerationE2eRunner, installQa06GenerationE2eNetworkBoundary, resolveQa06GenerationE2eConfiguration } from './generation-e2e';
-import { createQa06PixelPaletteE2eRunner, installQa06PixelPaletteE2eNetworkBoundary, resolveQa06PixelPaletteE2eConfiguration } from './pixel-generation-e2e';
 import { BatchDocumentWorkflows, safeBatchFileStem as safeFileStem, type BatchExportFormat } from './batch-document-workflows';
 import { installUx11BatchE2eNetworkBoundary, resolveUx11BatchE2eConfiguration, Ux11BatchE2eController } from './batch-workflows-e2e';
 import { assertTrustedRendererInvocation, isTrustedRendererUrl } from './renderer-security';
@@ -36,12 +31,6 @@ import { resolveFnd09ObservationCodecE2eConfiguration, runFnd09ObservationCodecS
 import { resolveFnd09QuantizationResultE2eConfiguration, runFnd09QuantizationResultScenario } from './utility-quantization-result-e2e';
 import { resolveFnd09ExportResultE2eConfiguration, runFnd09ExportResultScenario } from './utility-export-result-e2e';
 import { resolveFnd09ImportResultE2eConfiguration, runFnd09ImportResultScenario } from './utility-import-result-e2e';
-import { resolveFnd09GenerationResultE2eConfiguration, runFnd09GenerationResultScenario } from './utility-generation-result-e2e';
-import {
-  createFnd09GenerationNormalizationE2eRunner,
-  installFnd09GenerationNormalizationE2eNetworkBoundary,
-  resolveFnd09GenerationNormalizationE2eConfiguration,
-} from './generation-normalization-e2e';
 import {
   assertClipboardImageGeometry,
   copyPixelSelectionToClipboard,
@@ -53,6 +42,7 @@ import {
 import { buildCheckpointComparison } from './checkpoint-comparison';
 import { readBoundedRegularFile } from './bounded-file-read';
 import { resolveMcpConnectionHandoffPath, writeMcpConnectionHandoff } from './mcp-connection-handoff';
+import { runMcpStdioBridge } from './mcp-stdio-bridge';
 import { GracefulShutdownCoordinator } from './graceful-shutdown';
 import {
   EditorWindowLifecycle,
@@ -68,8 +58,6 @@ let mainWindow: BrowserWindow | undefined;
 let engineRuntime: EngineRuntime;
 let service: DocumentService;
 let mcpHost: McpHost;
-let providerCredentials: ProviderCredentialStore;
-let generationManager: GenerationManager;
 let batchDocumentWorkflows: BatchDocumentWorkflows;
 let engineQuitPending = false;
 let engineReadyPromise: Promise<void> | undefined;
@@ -92,18 +80,21 @@ async function recordInterchangeReport(input: InterchangeReportInput) {
   return report;
 }
 
-const cliArguments = process.argv.slice(app.isPackaged ? 1 : 2);
 let cliCommand: CliCommand | undefined; let cliParseError: Error | undefined;
-try { cliCommand = parseCliArguments(cliArguments); } catch (error) { cliParseError = error instanceof Error ? error : new Error(String(error)); }
+try {
+  cliCommand = parseCliArguments(selectCliArguments(process.argv.slice(app.isPackaged ? 1 : 2)));
+} catch (error) {
+  cliParseError = error instanceof Error ? error : new Error(String(error));
+}
 const cliInvocation = Boolean(cliCommand || cliParseError);
-const startupCommand = cliInvocation
-  ? 'cli'
-  : process.argv.includes('--quit-engine')
-    ? 'quit-engine'
-    : process.argv.includes('--headless')
-      ? 'headless'
-      : 'show';
-if (startupCommand === 'headless' || startupCommand === 'cli') app.disableHardwareAcceleration();
+const bridgeInvocation = process.argv.includes('--mcp-bridge');
+const startupCommand = selectStartupCommand(process.argv, cliInvocation, Boolean(cliParseError));
+if (startupCommand === 'headless' || startupCommand === 'cli' || startupCommand === 'mcp-bridge') app.disableHardwareAcceleration();
+if (bridgeInvocation && process.platform === 'darwin') {
+  app.commandLine.appendSwitch('no-startup-window');
+  app.setActivationPolicy('accessory');
+  app.dock?.hide();
+}
 const explicitUserData = process.argv.find((argument) => argument.startsWith('--user-data-dir='))?.slice('--user-data-dir='.length);
 const explicitMcpConnectionArgument = process.argv.find((argument) => argument.startsWith('--write-mcp-connection='));
 const explicitMcpConnectionFile = explicitMcpConnectionArgument === undefined
@@ -117,7 +108,7 @@ if (explicitUserData) {
   app.setPath('userData', isolatedPath);
   app.setName(`AIDraw-${createHash('sha256').update(isolatedPath.toLowerCase()).digest('hex').slice(0, 12)}`);
 }
-const hasSingleInstanceLock = cliInvocation || app.requestSingleInstanceLock({ command: startupCommand });
+const hasSingleInstanceLock = bridgeInvocation || cliInvocation || app.requestSingleInstanceLock({ command: startupCommand });
 
 const rendererRecoveryE2e = resolveRendererRecoveryE2eConfiguration({
   nodeEnv: process.env.NODE_ENV,
@@ -126,44 +117,6 @@ const rendererRecoveryE2e = resolveRendererRecoveryE2eConfiguration({
   connectionPath: explicitMcpConnectionFile,
   diagnosticPath: process.env.AIDRAW_E2E_RENDERER_DIAGNOSTIC_PATH,
 });
-const qa06GenerationE2e = resolveQa06GenerationE2eConfiguration({
-  nodeEnv: process.env.NODE_ENV,
-  enabled: process.env.AIDRAW_E2E_QA06_GENERATION_MOCK,
-  declaredProfilePath: process.env.AIDRAW_E2E_QA06_GENERATION_PROFILE,
-  userDataPath: explicitUserData,
-  connectionPath: explicitMcpConnectionFile,
-  outputPath: process.env.AIDRAW_E2E_QA06_GENERATION_MOCK_OUTPUT_PATH,
-  auditPath: process.env.AIDRAW_E2E_QA06_GENERATION_MOCK_AUDIT_PATH,
-  networkSentinelPath: process.env.AIDRAW_E2E_QA06_GENERATION_NETWORK_SENTINEL_PATH,
-});
-const qa06PixelPaletteE2e = resolveQa06PixelPaletteE2eConfiguration({
-  nodeEnv: process.env.NODE_ENV,
-  enabled: process.env.AIDRAW_E2E_QA06_PIXEL_PALETTE_MOCK,
-  declaredProfilePath: process.env.AIDRAW_E2E_QA06_PIXEL_PALETTE_PROFILE,
-  userDataPath: explicitUserData,
-  connectionPath: explicitMcpConnectionFile,
-  outputPath: process.env.AIDRAW_E2E_QA06_PIXEL_PALETTE_MOCK_OUTPUT_PATH,
-  auditPath: process.env.AIDRAW_E2E_QA06_PIXEL_PALETTE_MOCK_AUDIT_PATH,
-  networkSentinelPath: process.env.AIDRAW_E2E_QA06_PIXEL_PALETTE_NETWORK_SENTINEL_PATH,
-});
-const fnd09GenerationNormalizationE2e = resolveFnd09GenerationNormalizationE2eConfiguration({
-  nodeEnv: process.env.NODE_ENV,
-  enabled: process.env.AIDRAW_E2E_GENERATION_NORMALIZATION,
-  workspacePath: process.cwd(),
-  declaredProfilePath: process.env.AIDRAW_E2E_FND09_NORMALIZATION_PROFILE,
-  userDataPath: explicitUserData,
-  connectionPath: explicitMcpConnectionFile,
-  normalizableOutputPath: process.env.AIDRAW_E2E_FND09_NORMALIZATION_NORMALIZABLE_OUTPUT_PATH,
-  previewOnlyOutputPath: process.env.AIDRAW_E2E_FND09_NORMALIZATION_PREVIEW_ONLY_OUTPUT_PATH,
-  auditPath: process.env.AIDRAW_E2E_FND09_NORMALIZATION_AUDIT_PATH,
-  readyProbePath: process.env.AIDRAW_E2E_FND09_NORMALIZATION_READY_PROBE_PATH,
-  previewOnlyProbePath: process.env.AIDRAW_E2E_FND09_NORMALIZATION_PREVIEW_ONLY_PROBE_PATH,
-  networkSentinelPath: process.env.AIDRAW_E2E_FND09_NORMALIZATION_NETWORK_SENTINEL_PATH,
-});
-if ([qa06GenerationE2e, qa06PixelPaletteE2e, fnd09GenerationNormalizationE2e].filter(Boolean).length > 1) throw new Error('Only one isolated generation fixture may be enabled.');
-if (qa06GenerationE2e) installQa06GenerationE2eNetworkBoundary(qa06GenerationE2e);
-if (qa06PixelPaletteE2e) installQa06PixelPaletteE2eNetworkBoundary(qa06PixelPaletteE2e);
-if (fnd09GenerationNormalizationE2e) installFnd09GenerationNormalizationE2eNetworkBoundary(fnd09GenerationNormalizationE2e);
 const ux11BatchE2e = resolveUx11BatchE2eConfiguration({
   nodeEnv: process.env.NODE_ENV,
   enabled: process.env.AIDRAW_E2E_UX11_BATCH,
@@ -234,19 +187,9 @@ const fnd09ImportResultE2e = resolveFnd09ImportResultE2eConfiguration({
   probePath: process.env.AIDRAW_E2E_FND09_IMPORT_RESULT_PROBE_PATH,
   networkSentinelPath: process.env.AIDRAW_E2E_FND09_IMPORT_RESULT_NETWORK_SENTINEL_PATH,
 });
-const fnd09GenerationResultE2e = resolveFnd09GenerationResultE2eConfiguration({
-  nodeEnv: process.env.NODE_ENV,
-  enabled: process.env.AIDRAW_E2E_UTILITY_GENERATION_RESULT,
-  workspacePath: process.cwd(),
-  declaredProfilePath: process.env.AIDRAW_E2E_FND09_GENERATION_RESULT_PROFILE,
-  userDataPath: explicitUserData,
-  connectionPath: explicitMcpConnectionFile,
-  probePath: process.env.AIDRAW_E2E_FND09_GENERATION_RESULT_PROBE_PATH,
-  networkSentinelPath: process.env.AIDRAW_E2E_FND09_GENERATION_RESULT_NETWORK_SENTINEL_PATH,
-});
-const fnd09UtilityFixtures = [fnd09UtilityContainmentE2e, fnd09UtilityPressureE2e, fnd09ObservationCodecE2e, fnd09QuantizationResultE2e, fnd09ExportResultE2e, fnd09ImportResultE2e, fnd09GenerationResultE2e].filter(Boolean);
+const fnd09UtilityFixtures = [fnd09UtilityContainmentE2e, fnd09UtilityPressureE2e, fnd09ObservationCodecE2e, fnd09QuantizationResultE2e, fnd09ExportResultE2e, fnd09ImportResultE2e].filter(Boolean);
 if (fnd09UtilityFixtures.length > 1) throw new Error('Only one isolated FND-09 utility fixture may be enabled.');
-if (fnd09UtilityFixtures.length && (startupCommand !== 'headless' || rendererRecoveryE2e || qa06GenerationE2e || qa06PixelPaletteE2e || fnd09GenerationNormalizationE2e || ux11BatchE2e)) {
+if (fnd09UtilityFixtures.length && (startupCommand !== 'headless' || rendererRecoveryE2e || ux11BatchE2e)) {
   throw new Error('The isolated FND-09 utility probe requires its own headless profile and fixture boundary.');
 }
 if (fnd09UtilityContainmentE2e) installFnd09UtilityContainmentNetworkBoundary(fnd09UtilityContainmentE2e);
@@ -255,20 +198,6 @@ if (fnd09ObservationCodecE2e) installFnd09UtilityContainmentNetworkBoundary(fnd0
 if (fnd09QuantizationResultE2e) installFnd09UtilityContainmentNetworkBoundary(fnd09QuantizationResultE2e);
 if (fnd09ExportResultE2e) installFnd09UtilityContainmentNetworkBoundary(fnd09ExportResultE2e);
 if (fnd09ImportResultE2e) installFnd09UtilityContainmentNetworkBoundary(fnd09ImportResultE2e);
-if (fnd09GenerationResultE2e) installFnd09UtilityContainmentNetworkBoundary(fnd09GenerationResultE2e);
-
-function isIsolatedOpenCodeE2eApproval(clientId: AgentClientId): boolean {
-  if (clientId !== 'opencode' || process.env.NODE_ENV !== 'test' || process.env.AIDRAW_E2E_AUTO_APPROVE_AGENT_CLIENT !== 'opencode') return false;
-  const configPath = process.env.AIDRAW_OPENCODE_CONFIG_PATH;
-  if (!explicitUserData || !explicitMcpConnectionFile || !configPath) return false;
-  const profile = resolve(explicitUserData);
-  if (!basename(profile).toLowerCase().startsWith('aidraw-e2e-')) return false;
-  const isInsideProfile = (path: string) => {
-    const candidate = relative(profile, resolve(path));
-    return candidate.length > 0 && !candidate.startsWith('..') && !isAbsolute(candidate);
-  };
-  return isInsideProfile(explicitMcpConnectionFile) && isInsideProfile(configPath);
-}
 
 protocol.registerSchemesAsPrivileged([{
   scheme: 'aidraw',
@@ -492,59 +421,6 @@ const pasteClipboard = () => pasteFromClipboard(clipboardDependencies());
 const writePixelSelectionClipboard = (value: unknown) => copyPixelSelectionToClipboard(clipboardDependencies(), value);
 const readPixelSelectionClipboard = (request?: unknown) => readPixelSelectionFromClipboard(clipboardDependencies(), request);
 
-async function confirmMcpCredentialChange(action: 'rotate' | 'revoke'): Promise<McpCredentialLifecycleResult> {
-  const window = mainWindow;
-  if (!window || window.isDestroyed()) throw new Error('The editor window is unavailable.');
-  const rotating = action === 'rotate';
-  const reEnabling = rotating && service.getMcpInfo().access === 'revoked';
-  const decision = await dialog.showMessageBox(window, {
-    type: 'warning',
-    title: reEnabling ? 'Rotate credential and re-enable MCP?' : rotating ? 'Rotate MCP credential?' : 'Revoke MCP access?',
-    message: reEnabling
-      ? 'Create a new credential and re-enable the local MCP endpoint?'
-      : rotating
-        ? 'Replace the credential and disconnect every active MCP session?'
-        : 'Revoke the credential and stop the local MCP endpoint?',
-    detail: reEnabling
-      ? 'This starts local agent access again with a new bearer. Persistent folder approvals and already admitted or pending approval work remain; they are not rolled back or silently cancelled. Existing AIDraw entries in client configuration files stay invalid until you run Connect for each intended client again.'
-      : rotating
-        ? 'Existing AIDraw entries in client configuration files will keep the invalidated bearer until you run Connect for each client again. Persistent folder approvals and already admitted or pending approval work remain; they are not rolled back or silently cancelled.'
-        : 'The editor, canonical documents, history, recovery, start-at-login setting, and persistent folder approvals remain. Already admitted work and approval jobs are not rolled back or silently cancelled. Existing client configuration files are not edited; their AIDraw entries will no longer authenticate. Rotate the credential to re-enable access, then run Connect for each client again.',
-    buttons: [reEnabling ? 'Rotate and Re-enable' : rotating ? 'Rotate Credential' : 'Revoke Access', 'Cancel'],
-    defaultId: 1,
-    cancelId: 1,
-    noLink: true,
-  });
-  if (decision.response !== 0) {
-    return {
-      action,
-      status: 'cancelled',
-      access: service.getMcpInfo().access ?? 'unavailable',
-      sessionsTerminated: 0,
-      message: action === 'rotate' ? 'MCP credential rotation was cancelled.' : 'MCP access revocation was cancelled.',
-    };
-  }
-  const transition = rotating
-    ? await engineRuntime.rotateMcpCredential()
-    : await engineRuntime.revokeMcpAccess();
-  const sessionLabel = `${transition.sessionsTerminated} active MCP session${transition.sessionsTerminated === 1 ? '' : 's'}`;
-  return {
-    action,
-    status: 'completed',
-    access: transition.access,
-    sessionsTerminated: transition.sessionsTerminated,
-    clientConfigurationsStale: true,
-    ...(transition.cleanupWarning ? { warning: true as const } : {}),
-    message: transition.cleanupWarning
-      ? `${transition.cleanupWarning} ${sessionLabel} terminated. Existing client configuration files were left unchanged.`
-      : reEnabling
-        ? `MCP credential replaced and local access re-enabled; ${sessionLabel} terminated. Existing client configurations are stale. Run Connect for each intended client, then start a fresh session and join again.`
-        : rotating
-          ? `MCP credential replaced; ${sessionLabel} terminated. Existing client configurations are stale. Run Connect for each client, then start a fresh session and join again.`
-          : `MCP access revoked; ${sessionLabel} terminated. The local editor and canonical engine remain available. Existing client configuration files were left unchanged.`,
-  };
-}
-
 function registerIpc(): void {
   const handle = <T extends unknown[], R>(
     channel: string,
@@ -627,27 +503,14 @@ function registerIpc(): void {
     : { acquired: false, reason: 'Editor is not attached.' });
   handle(IPC.releaseHumanLock, (_event, id: string) => service.releaseLock(id));
   handle(IPC.mcpInfo, () => service.getMcpInfo());
-  handle(IPC.mcpCredentials, () => mcpHost.credentials());
-  handle(IPC.mcpCredentialRotate, () => confirmMcpCredentialChange('rotate'));
-  handle(IPC.mcpAccessRevoke, () => confirmMcpCredentialChange('revoke'));
+  handle(IPC.mcpConnection, () => ({ ...mcpHost.connection(), pid: process.pid, lifetime: 'engine-process' as const }));
   handle(IPC.engineStatus, () => engineStatus());
   handle(IPC.engineStartAtLogin, (_event, enabled: boolean) => setEngineStartAtLogin(enabled === true));
   handle(IPC.resolveJob, (_event, jobId: string, decision: 'allow-once' | 'allow-session' | 'allow-always' | 'deny') => {
     const job = service.resolveJob(jobId, decision);
-    if (job?.status === 'queued' && job.kind === 'generation') void generationManager.runApproved(job);
-    else if (job?.status === 'queued' && ['import', 'export', 'save'].includes(job.kind)) void runApprovedFileJob(job);
+    if (job?.status === 'queued' && ['import', 'export', 'save'].includes(job.kind)) void runApprovedFileJob(job);
     return job;
   });
-  handle(IPC.setProviderCredential, async (_event, provider: 'openai' | 'stability', value: string) => {
-    if (provider !== 'openai' && provider !== 'stability') throw new Error('Unknown hosted provider.');
-    await providerCredentials.set(provider, value);
-    return { saved: true };
-  });
-  handle(IPC.getProviderStatus, () => providerCredentials.status());
-  handle(IPC.generationStart, (_event, request: GenerationRequest) => generationManager.startHuman(request));
-  handle(IPC.generationAccept, (_event, jobId: string, outputId: string) => generationManager.accept(jobId, outputId));
-  handle(IPC.generationReject, (_event, jobId: string, outputId: string) => generationManager.reject(jobId, outputId));
-  handle(IPC.jobCancel, (_event, jobId: string) => generationManager.cancel(jobId));
   handle(IPC.rendererRecoveryTestEvent, () => {
     if (!rendererRecoveryE2e) throw new Error('The renderer recovery test event is unavailable outside its isolated E2E profile.');
     if (!mainWindow || mainWindow.isDestroyed()) throw new Error('The isolated renderer recovery test window is unavailable.');
@@ -836,51 +699,37 @@ function registerIpc(): void {
   handle(IPC.spriteSymmetryPreferencesSet, (_event, value: unknown) => engineRuntime.setSpriteSymmetryPreferences(value));
   handle(IPC.workspaceLayoutPreferencesSet, (_event, value: unknown) => engineRuntime.setWorkspaceLayoutPreferences(value));
   handle(IPC.shortcutPreferencesSet, (_event, value: unknown) => engineRuntime.setShortcutPreferences(value));
-  handle(IPC.configureAgentClient, (_event, clientId: unknown) => configureAgentClient(clientId));
-  handle(IPC.configureCodex, () => configureAgentClient('codex'));
+  handle(IPC.agentClientSetup, (_event, clientId: unknown) => getAgentClientSetup(clientId));
 }
 
-async function configureAgentClient(value: unknown): Promise<AgentClientSetupResult> {
+async function getAgentClientSetup(value: unknown): Promise<AgentClientSetupResult> {
   if (!isAgentClientId(value)) throw new Error('Unknown agent client.');
   const clientId: AgentClientId = value;
   const descriptor = agentClientDescriptor(clientId);
-  const credentials = mcpHost.credentials();
   const base = {
     clientId,
     clientName: descriptor.name,
     restartInstruction: descriptor.restartInstruction,
     documentationUrl: descriptor.documentationUrl,
   };
-  if (!credentials.url || !credentials.token) {
-    return { ...base, status: 'manual', message: 'The AIDraw MCP server is not running.', restartRequired: false };
-  }
-  if (clientId === 'generic') return configureAgentClientFile(clientId, { url: credentials.url, token: credentials.token });
-  const platform = secureStorageStatus(safeStorage).platform;
-  const isolatedE2eApproval = isIsolatedOpenCodeE2eApproval(clientId);
-  if (!isolatedE2eApproval) {
-    const decision = await dialog.showMessageBox(mainWindow!, {
-      type: 'question',
-      title: `Connect ${descriptor.name} to AIDraw`,
-      message: `Connect ${descriptor.name} and keep the AIDraw Engine available headlessly?`,
-      detail: `AIDraw will back up ${descriptor.configurationDescription}, replace only its aidraw MCP entry, and start the engine at ${platform.label} sign-in. The authenticated engine keeps working when the editor window is closed.`,
-      buttons: ['Connect and Enable Headless Engine', 'Cancel'],
-      defaultId: 0,
-      cancelId: 1,
-      noLink: true,
-    });
-    if (decision.response !== 0) return { ...base, status: 'cancelled', message: `${descriptor.name} configuration was not changed.`, restartRequired: false };
-  }
-  let result: AgentClientSetupResult;
   try {
-    result = await configureAgentClientFile(clientId, { url: credentials.url, token: credentials.token });
+    return await prepareAgentClientSetup(clientId, await publishProductMcpBridgeLauncher(productMcpBridgeLauncherOptions()));
   } catch (error) {
-    return { ...base, status: 'manual', message: `Could not configure ${descriptor.name}: ${error instanceof Error ? error.message : String(error)}`, restartRequired: false };
+    return { ...base, status: 'manual', message: `Could not prepare ${descriptor.name} settings: ${error instanceof Error ? error.message : String(error)}`, restartRequired: false };
   }
-  return completeAgentClientSetup(result, {
-    isolated: isolatedE2eApproval,
-    platformLabel: platform.label,
-    enableStartAtLogin: () => setEngineStartAtLogin(true),
-  });
+}
+
+function productMcpBridgeLauncherOptions(): ProductMcpBridgeLaunchOptions {
+  return {
+    executable: process.execPath,
+    appPath: app.getAppPath(),
+    packaged: app.isPackaged,
+    platform: process.platform,
+    appImagePath: process.env.APPIMAGE,
+    explicitUserDataPath: explicitUserData ? app.getPath('userData') : undefined,
+    userDataPath: app.getPath('userData'),
+    environment: process.env,
+  };
 }
 
 async function requestEditorWindowRecovery(): Promise<void> {
@@ -976,7 +825,6 @@ async function requestNewDocument(kind: 'illustration' | 'sprite' = 'illustratio
 
 function engineStatus(): EngineStatus {
   const login = getStartAtLoginStatus({ app });
-  const storage = secureStorageStatus(safeStorage);
   const uiAttached = editorWindowLifecycle.isAttached();
   return {
     running: true,
@@ -984,8 +832,7 @@ function engineStatus(): EngineStatus {
     startsAtLogin: login.enabled,
     startAtLoginSupported: login.supported,
     mode: uiAttached ? 'interactive' : 'headless',
-    platform: storage.platform,
-    secureStorageAvailable: storage.available,
+    platform: desktopPlatformInfo(process.platform),
   };
 }
 
@@ -1163,6 +1010,25 @@ app.on('web-contents-created', (_event, contents) => {
 });
 
 async function initializeApplication(): Promise<void> {
+  if (startupCommand === 'mcp-bridge') {
+    const termination = new AbortController();
+    const requestTermination = (): void => { termination.abort(); };
+    process.once('SIGINT', requestTermination);
+    process.once('SIGTERM', requestTermination);
+    try {
+      await runMcpStdioBridge({
+        userDataPath: app.getPath('userData'),
+        terminationSignal: termination.signal,
+        reportError: (error) => process.stderr.write(`AIDraw MCP bridge: ${error.message}\n`),
+      });
+    } finally {
+      process.removeListener('SIGINT', requestTermination);
+      process.removeListener('SIGTERM', requestTermination);
+    }
+    gracefulShutdown.markComplete();
+    app.quit();
+    return;
+  }
   if (cliInvocation) {
     const exitCode = await runCliInvocation({
       command: cliCommand,
@@ -1179,6 +1045,7 @@ async function initializeApplication(): Promise<void> {
     app.quit();
     return;
   }
+  await publishProductMcpBridgeLauncher(productMcpBridgeLauncherOptions());
   session.defaultSession.setPermissionCheckHandler(() => false);
   session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
   if (!MAIN_WINDOW_VITE_DEV_SERVER_URL) await registerRendererProtocol();
@@ -1186,19 +1053,9 @@ async function initializeApplication(): Promise<void> {
     userDataPath: app.getPath('userData'),
     appVersion: app.getVersion(),
     runApprovedFileJob: (job) => { if (['import', 'export', 'save'].includes(job.kind)) void runApprovedFileJob(job); },
-    generationProviderRunner: qa06GenerationE2e
-      ? createQa06GenerationE2eRunner(qa06GenerationE2e)
-      : qa06PixelPaletteE2e
-        ? createQa06PixelPaletteE2eRunner(qa06PixelPaletteE2e)
-        : fnd09GenerationNormalizationE2e
-          ? createFnd09GenerationNormalizationE2eRunner(fnd09GenerationNormalizationE2e)
-          : undefined,
-    approvalTimeoutMs: qa06GenerationE2e?.approvalTimeoutMs ?? qa06PixelPaletteE2e?.approvalTimeoutMs ?? (fnd09GenerationNormalizationE2e ? 60_000 : undefined),
   });
   service = engineRuntime.service;
   mcpHost = engineRuntime.mcpHost;
-  providerCredentials = engineRuntime.providerCredentials;
-  generationManager = engineRuntime.generationManager;
   batchDocumentWorkflows = new BatchDocumentWorkflows({
     documents: {
       listTabs: () => service.snapshot().documents,
@@ -1245,12 +1102,13 @@ async function initializeApplication(): Promise<void> {
   }
   if (explicitMcpConnectionFile) {
     const connectionPath = explicitMcpConnectionFile;
-    const credentials = mcpHost.credentials();
-    if (!credentials.url) throw new Error('Cannot write an MCP connection file because the local server did not start.');
+    const connection = mcpHost.connection();
+    if (!connection.url) throw new Error('Cannot write an MCP connection file because the local server did not start.');
     await writeMcpConnectionHandoff(connectionPath, {
-      version: 1,
-      url: credentials.url,
-      token: credentials.token,
+      version: 2,
+      url: connection.url,
+      token: connection.token,
+      authority: 'engine-process',
       activeDocumentId: service.getActiveDocumentId(),
       pid: process.pid,
       trustedFolders: launchTrustedFolders,
@@ -1280,10 +1138,6 @@ async function initializeApplication(): Promise<void> {
     void runFnd09ImportResultScenario(engineRuntime, fnd09ImportResultE2e)
       .catch((error) => process.stderr.write(`FND-09 import-result probe failed: ${error instanceof Error ? error.message : String(error)}\n`));
   }
-  if (fnd09GenerationResultE2e) {
-    void runFnd09GenerationResultScenario(engineRuntime, fnd09GenerationResultE2e)
-      .catch((error) => process.stderr.write(`FND-09 generation-result probe failed: ${error instanceof Error ? error.message : String(error)}\n`));
-  }
   registerIpc();
   createMenu();
   service.on('event', (event) => mainWindow?.webContents.send(IPC.event, event));
@@ -1294,7 +1148,7 @@ async function initializeApplication(): Promise<void> {
 
 if (!hasSingleInstanceLock) {
   app.quit();
-} else if (cliInvocation) {
+} else if (cliInvocation || bridgeInvocation) {
   engineReadyPromise = app.whenReady().then(initializeApplication);
 } else {
   app.on('second-instance', (_event, commandLine, _workingDirectory, additionalData) => {

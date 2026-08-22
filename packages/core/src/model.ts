@@ -583,6 +583,7 @@ export interface DocumentAsset {
   mimeType: string;
   byteLength: number;
   sha256: string;
+  /** `generated` is retained only so existing .aidraw documents stay readable. */
   source: 'imported' | 'generated' | 'embedded' | 'rendered';
   data?: string;
 }
@@ -590,6 +591,7 @@ export interface DocumentAsset {
 export interface Provenance {
   id: Id;
   assetId: Id;
+  /** Historical provider value; AIDraw no longer creates provider provenance. */
   provider: 'openai' | 'stability' | 'comfyui' | 'external';
   modelOrWorkflow: string;
   prompt?: string;
@@ -661,7 +663,7 @@ export interface PixelDocument extends DocumentBase {
 
 export type AIDrawDocument = IllustrationDocument | PixelDocument;
 
-export type JobKind = 'playback' | 'approval' | 'generation' | 'import' | 'export' | 'save' | 'batch';
+export type JobKind = 'playback' | 'approval' | 'import' | 'export' | 'save' | 'batch';
 export type JobStatus =
   | 'queued'
   | 'waiting-for-user'
@@ -691,16 +693,7 @@ export interface AsyncJob<T = unknown> {
       target?: string;
       trustFolder?: string;
       overwritePaths?: string[];
-      fields: Array<{ label: string; value: string; tone?: 'default' | 'warning' | 'paid' }>;
-      previews?: Array<{
-        role: 'source' | 'mask';
-        assetId: Id;
-        name: string;
-        mimeType: string;
-        width: number;
-        height: number;
-        dataUrl: string;
-      }>;
+      fields: Array<{ label: string; value: string; tone?: 'default' | 'warning' }>;
     };
   };
 }

@@ -109,12 +109,6 @@ export interface Ux09LocalAxisMetric {
 export function resolveUx09TextReflowAcceptance(options?: { workspacePath?: string; environment?: NodeJS.ProcessEnv }): Ux09TextReflowAcceptance;
 export function assertUx09TextReflowSafeReporterEnvironment(environment?: NodeJS.ProcessEnv): true;
 export function buildUx09TextReflowChildEnvironment(environment?: NodeJS.ProcessEnv): NodeJS.ProcessEnv;
-export function inspectUx09EncryptedToken(value: unknown, liveToken: string): {
-  version: 2;
-  status: 'active';
-  encryption: 'electron-safe-storage';
-  encryptedValuePresent: true;
-};
 export function parseUx09OwnedProcesses(processTable: string, profilePath: string): Ux09OwnedProcess[];
 export function hasExactUx09ProcessShape(rows: Ux09OwnedProcess[], expectedOwnerPid: number): boolean;
 export function exerciseUx09ScrollBoundaries(element: Ux09ScrollableElement, axis: 'x' | 'y' | 'both'): Promise<{

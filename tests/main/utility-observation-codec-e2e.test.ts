@@ -123,7 +123,6 @@ describe('isolated FND-09 observation codec hook', () => {
         getDocument: (documentId) => documentId === document.id ? structuredClone(document) : undefined,
       },
       rasterUtilities: supervisor,
-      generationUtilities: { status: () => ({ running: false }) },
     }, configuration);
 
     expect(evidence).toMatchObject({
@@ -143,9 +142,8 @@ describe('isolated FND-09 observation codec hook', () => {
         fixedCorruptResponseHoldMs: FND09_OBSERVATION_CODEC_E2E_HOLD_MS,
         observation: { available: true, mimeType: 'image/png', width: 8, height: 6, bytes: expect.any(Number), sha256: expect.stringMatching(/^[A-F0-9]{64}$/) },
       },
-      generationLaneUntouched: true,
       privacy: { rendererCreated: false, corruptPayloadPublished: false, publicJobCreated: false },
-      network: { nonLoopbackRequests: 0, externalProviderRequests: 0, paidRequests: 0 },
+      network: { nonLoopbackRequests: 0 },
     });
     expect(workers[0].killed).toBe(true);
     expect(workers[1].killed).toBe(false);

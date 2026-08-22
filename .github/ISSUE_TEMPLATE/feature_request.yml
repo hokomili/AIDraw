@@ -20,5 +20,5 @@ body:
   - type: textarea
     id: formats
     attributes:
-      label: File or provider impact
-      description: Note native schema, interchange, MCP, provider, performance, or security implications.
+      label: File or agent impact
+      description: Note native schema, interchange, MCP, performance, or security implications.

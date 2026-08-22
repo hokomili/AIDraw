@@ -6,7 +6,6 @@ import type {
   Id,
   NewDocumentOptionsInput,
 } from '@aidraw/core';
-import type { GenerationAcceptanceResult, GenerationProvider, GenerationProviderStatus, GenerationRequest } from './generation';
 import type { CheckpointMergeCandidate } from './checkpoint-merge';
 import type { PaletteFileFormat, PaletteImportMode } from './palette-interchange';
 import type { SpriteSheetSliceOptions } from './sprite-sheet';
@@ -110,21 +109,18 @@ export interface EditorAdvisoryState extends EditorAdvisoryInput {
 
 export interface McpConnectionInfo {
   running: boolean;
-  access?: 'active' | 'revoked' | 'unavailable';
+  authority?: 'ephemeral' | 'unavailable';
   url?: string;
   port?: number;
   tokenHint?: string;
   sessions: AgentPresence[];
 }
 
-export interface McpCredentialLifecycleResult {
-  action: 'rotate' | 'revoke';
-  status: 'completed' | 'cancelled';
-  access: 'active' | 'revoked' | 'unavailable';
-  sessionsTerminated: number;
-  clientConfigurationsStale?: true;
-  warning?: true;
-  message: string;
+export interface EphemeralMcpConnection {
+  url?: string;
+  token: string;
+  pid: number;
+  lifetime: 'engine-process';
 }
 
 export type PixelSelectionClipboardReadResult =
@@ -150,7 +146,6 @@ export interface EngineStatus {
   startAtLoginSupported: boolean;
   mode: 'headless' | 'interactive';
   platform: DesktopPlatformInfo;
-  secureStorageAvailable: boolean;
 }
 
 export interface WorkspaceSnapshot {
@@ -385,21 +380,11 @@ export interface AIDrawDesktopAPI {
   acquireHumanLock(lock: HumanLockRequest): Promise<{ acquired: boolean; lockId?: Id; reason?: string }>;
   releaseHumanLock(lockId: Id): Promise<void>;
   getMcpConnectionInfo(): Promise<McpConnectionInfo>;
-  getMcpCredentials(): Promise<{ url?: string; token: string }>;
-  rotateMcpCredential(): Promise<McpCredentialLifecycleResult>;
-  revokeMcpAccess(): Promise<McpCredentialLifecycleResult>;
+  getMcpConnection(): Promise<EphemeralMcpConnection>;
   getEngineStatus(): Promise<EngineStatus>;
   setEngineStartAtLogin(enabled: boolean): Promise<EngineStatus>;
-  configureAgentClient(clientId: AgentClientId): Promise<AgentClientSetupResult>;
-  /** Backwards-compatible alias for older preload consumers. */
-  configureCodex(): Promise<AgentClientSetupResult>;
+  getAgentClientSetup(clientId: AgentClientId): Promise<AgentClientSetupResult>;
   resolveJob(jobId: Id, decision: 'allow-once' | 'allow-session' | 'allow-always' | 'deny'): Promise<AsyncJob | undefined>;
-  setProviderCredential(provider: Exclude<GenerationProvider, 'comfyui'>, value: string): Promise<{ saved: boolean }>;
-  getProviderStatus(): Promise<GenerationProviderStatus>;
-  generationStart(request: GenerationRequest): Promise<{ jobId: Id }>;
-  generationAccept(jobId: Id, outputId: Id): Promise<GenerationAcceptanceResult>;
-  generationReject(jobId: Id, outputId: Id): Promise<{ rejected: boolean; message?: string }>;
-  jobCancel(jobId: Id): Promise<AsyncJob | undefined>;
   importFiles(pixelMode?: boolean): Promise<{ imported: number; warnings: string[]; reportIds: Id[] }>;
   importPalette(documentId: Id, mode: PaletteImportMode): Promise<PaletteImportResult>;
   exportPalette(documentId: Id, format: PaletteFileFormat): Promise<PaletteExportResult>;
@@ -461,20 +446,11 @@ export const IPC = {
   acquireHumanLock: 'aidraw:locks:acquire',
   releaseHumanLock: 'aidraw:locks:release',
   mcpInfo: 'aidraw:mcp:info',
-  mcpCredentials: 'aidraw:mcp:credentials',
-  mcpCredentialRotate: 'aidraw:mcp:credential:rotate',
-  mcpAccessRevoke: 'aidraw:mcp:access:revoke',
+  mcpConnection: 'aidraw:mcp:connection',
   engineStatus: 'aidraw:engine:status',
   engineStartAtLogin: 'aidraw:engine:start-at-login',
-  configureAgentClient: 'aidraw:mcp:configure-agent-client',
-  configureCodex: 'aidraw:mcp:configure-codex',
+  agentClientSetup: 'aidraw:mcp:agent-client-setup',
   resolveJob: 'aidraw:jobs:resolve',
-  setProviderCredential: 'aidraw:generation:set-credential',
-  getProviderStatus: 'aidraw:generation:provider-status',
-  generationStart: 'aidraw:generation:start',
-  generationAccept: 'aidraw:generation:accept',
-  generationReject: 'aidraw:generation:reject',
-  jobCancel: 'aidraw:jobs:cancel',
   importFiles: 'aidraw:documents:import',
   importPalette: 'aidraw:palette:import',
   exportPalette: 'aidraw:palette:export',

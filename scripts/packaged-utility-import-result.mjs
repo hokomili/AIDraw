@@ -121,7 +121,7 @@ export function assertImportResultObserverNoForceSource(observerSource) {
     "createHash('sha256').update(fixture)",
     'invalidUtilityPayloadsNotPublished: true',
     'await quitGracefully(profile, child)',
-    "credentialStatus).toBe('redacted-after-graceful-stop')",
+    "authorityStatus).toBe('redacted-after-graceful-stop')",
   ]) {
     if (!scenario.includes(marker)) throw new Error(`Import-result scenario is missing ${marker}.`);
   }

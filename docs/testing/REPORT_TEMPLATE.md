@@ -92,7 +92,7 @@ List every skipped, unavailable, confirmation-blocked, or environment-dependent 
 
 - MCP session left:
 - MCP state credentials redacted:
-- Engine connection credentials redacted after stop:
+- Engine-process authority handoff redacted after stop:
 - Initially active isolated document restored:
 - QA documents closed safely:
 - Remaining QA documents:

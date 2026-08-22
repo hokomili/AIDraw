@@ -47,13 +47,13 @@ describe('QA-08 v2 opt-in aggregate Tiled cell-budget gate', () => {
 
   it('builds the exact Vitest 4 child CLI without the removed reporter override', () => {
     const args = qa08CellBudgetChildArgsV2('accept');
-    expect(args).toEqual(expect.arrayContaining(['--max-old-space-size=1024', '--expose-gc', 'run']));
+    expect(args).toEqual(expect.arrayContaining(['--max-old-space-size=1024', '--expose-gc', 'run', '--cache=false']));
     expect(args.some((argument) => argument.startsWith('--reporter'))).toBe(false);
     expect(args.at(-1)).toMatch(/vitest\.qa08-tiled-cell-budget-v2\.config\.mjs$/);
     expect(() => qa08CellBudgetChildArgsV2('other' as 'accept')).toThrow(/Unknown QA-08 v2 scenario/);
-    const environment = qa08CellBudgetChildEnvironmentV2(retainedRoot, 'accept', { PATH: 'test-path', OPENAI_API_KEY: 'must-not-pass', NODE_OPTIONS: '--inspect', FORCE_COLOR: '1' });
+    const environment = qa08CellBudgetChildEnvironmentV2(retainedRoot, 'accept', { PATH: 'test-path', UNRELATED_SECRET: 'must-not-pass', NODE_OPTIONS: '--inspect', FORCE_COLOR: '1' });
     expect(environment).toMatchObject({ PATH: 'test-path', AIDRAW_QA08_CELL_BUDGET_SCENARIO: 'accept', NO_COLOR: '1', HTTP_PROXY: 'http://127.0.0.1:9' });
-    expect(environment).not.toHaveProperty('OPENAI_API_KEY'); expect(environment).not.toHaveProperty('NODE_OPTIONS'); expect(environment).not.toHaveProperty('FORCE_COLOR');
+    expect(environment).not.toHaveProperty('UNRELATED_SECRET'); expect(environment).not.toHaveProperty('NODE_OPTIONS'); expect(environment).not.toHaveProperty('FORCE_COLOR');
   });
 
   it('self-tests every guard without spawning a child or creating a root', () => {

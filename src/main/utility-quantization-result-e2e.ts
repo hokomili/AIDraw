@@ -57,7 +57,6 @@ export interface Fnd09QuantizationResultEngine {
     getDocument(documentId: string): AIDrawDocument | undefined;
   };
   rasterUtilities: QuantizationResultLane;
-  generationUtilities: { status(): { running: boolean } };
 }
 
 function normalizedPath(value: string): string {
@@ -195,8 +194,6 @@ export async function runFnd09QuantizationResultScenario(
     if (!current) throw new Error('The canonical document disappeared during quantization-result containment.');
     const after = { documentId, revision: current.revision, sha256: documentSha256(current) };
     if (JSON.stringify(after) !== JSON.stringify(before)) throw new Error('Quantization-result containment changed canonical document state.');
-    if (engine.generationUtilities.status().running) throw new Error('The provider/generation utility lane was unexpectedly started.');
-
     retained = {
       version: 1,
       scenario: 'FND-09 packaged quantization result containment',
@@ -214,9 +211,8 @@ export async function runFnd09QuantizationResultScenario(
       },
       fixedInvalidResponseHoldMs: FND09_QUANTIZATION_RESULT_E2E_HOLD_MS,
       workerPidsDistinct: true,
-      generationLaneUntouched: true,
       privacy: { rendererCreated: false, invalidPayloadPublished: false, publicJobCreated: false },
-      network: { nonLoopbackRequests: 0, externalProviderRequests: 0, paidRequests: 0 },
+      network: { nonLoopbackRequests: 0 },
     };
   } catch (error) {
     const value = error instanceof Error ? error : new Error(String(error));
@@ -226,7 +222,7 @@ export async function runFnd09QuantizationResultScenario(
       result: 'failed',
       error: { name: value.name, message: value.message.slice(0, 500) },
       canonical: { before },
-      network: { nonLoopbackRequests: 0, externalProviderRequests: 0, paidRequests: 0 },
+      network: { nonLoopbackRequests: 0 },
     };
   }
   await writeFile(configuration.probePath, `${JSON.stringify(retained, null, 2)}\n`, { flag: 'wx', mode: 0o600 });

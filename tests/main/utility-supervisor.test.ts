@@ -5,10 +5,8 @@ import { createCanvas } from '@napi-rs/canvas';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createIllustrationDocument, createPixelDocument, type PaletteEntry } from '@aidraw/core';
 import { MAX_QUEUED_UTILITY_TASKS, RasterUtilitySupervisor, type UtilityProcessLike } from '@main/utility-supervisor';
-import { MAX_EXPORT_UTILITY_MEMBERS, MAX_GENERATED_OUTPUT_BYTES, MAX_GENERATION_PROGRESS_MESSAGE_BYTES, MAX_GENERATION_PROVIDER_METADATA_BYTES, MAX_IMPORT_UTILITY_DOCUMENTS, MAX_OBSERVATION_PNG_BYTES, MAX_OBSERVATION_UTILITY_RESULT_SERIALIZED_BYTES, MAX_QUANTIZE_UTILITY_BASE64_CHARACTERS, MAX_QUANTIZE_UTILITY_SOURCE_BYTES, MAX_UTILITY_ERROR_MESSAGE_BYTES, MAX_UTILITY_REPORT_SERIALIZED_BYTES, MAX_UTILITY_TEXT_BYTES, assertExportUtilityResponse, generationApprovalPreviewDimensions, type UtilityResponse } from '@main/utility-contract';
-import type { GeneratedOutput, GenerationRequest } from '../../src/common/generation';
-import { normalizeGeneratedOutputForAcceptance } from '../../src/main/normalize-generation-output';
-import { renderUtilityImagePreview, validateUtilityImage } from '../../src/main/utility-image-validation';
+import { MAX_EXPORT_UTILITY_MEMBERS, MAX_IMPORT_UTILITY_DOCUMENTS, MAX_OBSERVATION_PNG_BYTES, MAX_OBSERVATION_UTILITY_RESULT_SERIALIZED_BYTES, MAX_QUANTIZE_UTILITY_BASE64_CHARACTERS, MAX_QUANTIZE_UTILITY_SOURCE_BYTES, MAX_UTILITY_ERROR_MESSAGE_BYTES, MAX_UTILITY_REPORT_SERIALIZED_BYTES, MAX_UTILITY_TEXT_BYTES, assertExportUtilityResponse, type UtilityResponse } from '@main/utility-contract';
+import { validateUtilityImage } from '../../src/main/utility-image-validation';
 
 class FakeUtility extends EventEmitter implements UtilityProcessLike {
   readonly messages: unknown[] = [];
@@ -81,31 +79,6 @@ function validObservationResult(data = observationPng(8, 6)): Record<string, unk
   };
 }
 
-function validGeneratedOutput(overrides: Partial<GeneratedOutput> = {}): GeneratedOutput {
-  return {
-    id: 'result',
-    mimeType: 'image/png',
-    data: observationPng(2, 2),
-    width: 2,
-    height: 2,
-    providerMetadata: { fixture: 'utility-supervisor' },
-    ...overrides,
-  };
-}
-
-function generatedImageData(mimeType: GeneratedOutput['mimeType']): string {
-  const canvas = createCanvas(2, 2);
-  canvas.getContext('2d').fillRect(0, 0, 2, 2);
-  return (mimeType === 'image/png' ? canvas.toBuffer('image/png') : canvas.toBuffer(mimeType)).toString('base64');
-}
-
-function oversizedGeneratedOutput(): GeneratedOutput {
-  const png = Buffer.from(observationPng(2, 2), 'base64'); const type = Buffer.from('raNd'); const payload = Buffer.alloc(MAX_QUANTIZE_UTILITY_SOURCE_BYTES + 129 - png.byteLength - 12, 0x5a); const chunk = Buffer.alloc(payload.byteLength + 12);
-  chunk.writeUInt32BE(payload.byteLength, 0); type.copy(chunk, 4); payload.copy(chunk, 8); chunk.writeUInt32BE(crc32(Buffer.concat([type, payload])) >>> 0, chunk.byteLength - 4);
-  const bytes = Buffer.concat([png.subarray(0, -12), chunk, png.subarray(-12)]);
-  return validGeneratedOutput({ id: 'oversized-preview', data: bytes.toString('base64') });
-}
-
 afterEach(() => vi.unstubAllEnvs());
 
 describe('RasterUtilitySupervisor', () => {
@@ -113,9 +86,6 @@ describe('RasterUtilitySupervisor', () => {
     const bytes = createCanvas(2, 3).toBuffer('image/png');
     await expect(validateUtilityImage(bytes, { mimeType: 'image/png', width: 2, height: 3 })).resolves.toEqual({ width: 2, height: 3 });
     await expect(validateUtilityImage(bytes, { mimeType: 'image/png', width: 2, height: 3 }, async () => ({ width: 3, height: 2 }))).rejects.toThrow('disagree');
-    const renderedPreview = await renderUtilityImagePreview(bytes, { mimeType: 'image/png', width: 2, height: 3 }, { width: 1, height: 2 });
-    expect([renderedPreview.readUInt32BE(16), renderedPreview.readUInt32BE(20)]).toEqual([1, 2]);
-
     const workers = [new FakeUtility(), new FakeUtility()];
     const fork = vi.fn(() => workers[fork.mock.calls.length - 1]);
     const supervisor = new RasterUtilitySupervisor(fork);
@@ -133,40 +103,6 @@ describe('RasterUtilitySupervisor', () => {
     await expect(recovered).resolves.toBeUndefined();
     expect(fork).toHaveBeenCalledTimes(2);
     supervisor.stop();
-  });
-
-  it('admits generation approval thumbnails only after exact static-PNG validation and fresh-worker recovery', async () => {
-    expect(generationApprovalPreviewDimensions(360, 120)).toEqual({ width: 180, height: 60 });
-    expect(generationApprovalPreviewDimensions(90, 240)).toEqual({ width: 45, height: 120 });
-    expect(generationApprovalPreviewDimensions(2, 3)).toEqual({ width: 2, height: 3 });
-    const { document } = importedDocumentWithPng('Approval preview source');
-    const asset = document.assets['imported-image'];
-    const workers = [new FakeUtility(), new FakeUtility()];
-    const fork = vi.fn(() => workers[fork.mock.calls.length - 1]);
-    const supervisor = new RasterUtilitySupervisor(fork);
-    const malformed = supervisor.renderGenerationApprovalPreview(asset);
-    const recovered = supervisor.renderGenerationApprovalPreview(asset);
-    await nextTurn();
-    const firstRequest = workers[0].messages[0] as Record<string, any>;
-    expect(firstRequest).toMatchObject({
-      kind: 'render-generation-approval-preview', mimeType: 'image/png', width: 2, height: 3,
-      previewWidth: 2, previewHeight: 3,
-    });
-    workers[0].respond({
-      id: firstRequest.id, ok: true, kind: 'render-generation-approval-preview',
-      previewDataBase64: observationPng(3, 3),
-    });
-    await expect(malformed).rejects.toThrow('malformed generation approval preview PNG');
-    expect(workers[0].killed).toBe(true);
-    await nextTurn();
-    const secondRequest = workers[1].messages[0] as Record<string, any>;
-    const previewDataBase64 = observationPng(2, 3);
-    workers[1].respond({
-      id: secondRequest.id, ok: true, kind: 'render-generation-approval-preview', previewDataBase64,
-    });
-    await expect(recovered).resolves.toEqual({
-      width: 2, height: 3, previewPng: Buffer.from(previewDataBase64, 'base64'),
-    });
   });
 
   it('rejects a contradictory image-validation result and retires that worker', async () => {
@@ -666,211 +602,6 @@ describe('RasterUtilitySupervisor', () => {
     workers[1].respond({ id: recoveryRequest.id, ok: true, kind: 'capture-observation', result: validObservationResult() });
     await expect(recovery).resolves.toEqual(validObservationResult());
     expect(fork).toHaveBeenCalledTimes(2);
-    supervisor.stop();
-  });
-
-  it('relays generation progress and returns provider outputs on a separate supervised request', async () => {
-    const worker = new FakeUtility(); const supervisor = new RasterUtilitySupervisor(() => worker); const document = createIllustrationDocument('Generated in worker'); const progress = vi.fn();
-    const request = { documentId: document.id, provider: 'openai' as const, mode: 'create' as const, prompt: 'A brass turkey locomotive', sourceAssetIds: [], size: 'auto' as const, resultCount: 1, providerOptions: {} };
-    const pending = supervisor.generate('generation-job', document, request, undefined, { onProgress: progress });
-    await nextTurn();
-    const message = worker.messages[0] as { id: string; kind: string; jobId: string };
-    expect(message).toMatchObject({ kind: 'generation-run', jobId: 'generation-job' });
-    worker.respond({ id: message.id, ok: true, kind: 'generation-progress', progress: 0.42, message: 'Rendering' });
-    expect(progress).toHaveBeenCalledWith(0.42, 'Rendering');
-    const output = validGeneratedOutput();
-    worker.respond({ id: message.id, ok: true, kind: 'generation-run', outputs: [output] });
-    await expect(pending).resolves.toEqual([output]);
-
-    const empty = supervisor.generate('empty-generation-job', document, request, undefined);
-    await nextTurn();
-    const emptyMessage = worker.messages[1] as { id: string };
-    worker.respond({ id: emptyMessage.id, ok: true, kind: 'generation-run', outputs: [] });
-    await expect(empty).resolves.toEqual([]);
-
-    const formatsRequest: GenerationRequest = { ...request, provider: 'comfyui', resultCount: 2, providerOptions: { workflow: {} } };
-    const formats = supervisor.generate('format-generation-job', document, formatsRequest, undefined);
-    await nextTurn();
-    const formatsMessage = worker.messages[2] as { id: string };
-    const formatOutputs = [
-      validGeneratedOutput({ id: 'jpeg-result', mimeType: 'image/jpeg', data: generatedImageData('image/jpeg') }),
-      validGeneratedOutput({ id: 'webp-result', mimeType: 'image/webp', data: generatedImageData('image/webp') }),
-    ];
-    worker.respond({ id: formatsMessage.id, ok: true, kind: 'generation-run', outputs: formatOutputs });
-    await expect(formats).resolves.toEqual(formatOutputs);
-    supervisor.stop();
-  });
-
-  it('keeps malformed and cross-lane generation progress out of caller state without aborting terminal work', async () => {
-    const worker = new FakeUtility(); const fork = vi.fn(() => worker); const supervisor = new RasterUtilitySupervisor(fork); const document = createIllustrationDocument('Guarded progress'); const progress = vi.fn();
-    const request: GenerationRequest = { documentId: document.id, provider: 'openai', mode: 'create', prompt: 'A deterministic progress contract', sourceAssetIds: [], size: 'auto', resultCount: 1, providerOptions: {} };
-    const pending = supervisor.generate('progress-contract-job', document, request, undefined, { onProgress: progress });
-    await nextTurn();
-    const generationRequest = worker.messages[0] as { id: string };
-    let coercions = 0;
-    worker.respond({ id: generationRequest.id, ok: true, kind: 'generation-progress', progress: Number.POSITIVE_INFINITY, message: { toString: () => { coercions += 1; return 'must-not-coerce'; } } });
-    expect(progress).not.toHaveBeenCalled(); expect(coercions).toBe(0); expect(worker.killed).toBe(false);
-    worker.respond({ id: generationRequest.id, ok: true, kind: 'generation-progress', progress: 0.2, message: 'x'.repeat(MAX_GENERATION_PROGRESS_MESSAGE_BYTES + 1) });
-    expect(progress).not.toHaveBeenCalled(); expect(worker.killed).toBe(false);
-    worker.respond({ id: generationRequest.id, ok: true, kind: 'generation-progress', progress: 0.25, message: 'Rendering locally' });
-    expect(progress).toHaveBeenCalledTimes(1); expect(progress).toHaveBeenLastCalledWith(0.25, 'Rendering locally');
-    const output = validGeneratedOutput(); worker.respond({ id: generationRequest.id, ok: true, kind: 'generation-run', outputs: [output] });
-    await expect(pending).resolves.toEqual([output]);
-
-    const quantized = supervisor.quantizeImage(Buffer.from('wrong-lane-progress'), 1, 1, palette, { alphaThreshold: 0.5, dithering: 'none' });
-    await nextTurn();
-    const quantizeRequest = worker.messages.at(-1) as { id: string };
-    worker.respond({ id: quantizeRequest.id, ok: true, kind: 'generation-progress', progress: 0.75, message: 'Wrong lane' });
-    expect(progress).toHaveBeenCalledTimes(1); expect(worker.killed).toBe(false);
-    worker.respond({ id: quantizeRequest.id, ok: true, kind: 'quantize-image', changes: [{ x: 0, y: 0, index: 1 }] });
-    await expect(quantized).resolves.toEqual([{ x: 0, y: 0, index: 1 }]);
-    expect(fork).toHaveBeenCalledTimes(1);
-    supervisor.stop();
-  });
-
-  it('rejects over-count, duplicate, over-byte, MIME, dimension, seed, and metadata-contradictory generation results before fresh-worker recovery', async () => {
-    const workers = Array.from({ length: 8 }, () => new FakeUtility());
-    const fork = vi.fn(() => workers[fork.mock.calls.length - 1]);
-    const supervisor = new RasterUtilitySupervisor(fork);
-    const document = createIllustrationDocument('Guarded generation');
-    const openAiRequest: GenerationRequest = { documentId: document.id, provider: 'openai', mode: 'create', prompt: 'A deterministic local fixture', sourceAssetIds: [], size: 'auto', resultCount: 1, providerOptions: {} };
-    const stabilityRequest: GenerationRequest = { ...openAiRequest, provider: 'stability', seed: 17 };
-    const start = (request: GenerationRequest) => supervisor.generate('fixture-generation-job', document, request, undefined);
-
-    const rejectThenRecover = async (
-      workerIndex: number,
-      bad: Promise<GeneratedOutput[]>,
-      recovery: Promise<GeneratedOutput[]>,
-      badOutputs: GeneratedOutput[],
-      expectedError: string,
-      recoveryOutputs: GeneratedOutput[],
-    ) => {
-      await nextTurn();
-      const badMessage = workers[workerIndex].messages.at(-1) as { id: string };
-      workers[workerIndex].respond({ id: badMessage.id, ok: true, kind: 'generation-run', outputs: badOutputs });
-      await expect(bad).rejects.toThrow(expectedError);
-      expect(workers[workerIndex].killed).toBe(true);
-      await nextTurn();
-      const recoveryMessage = workers[workerIndex + 1].messages[0] as { id: string };
-      workers[workerIndex + 1].respond({ id: recoveryMessage.id, ok: true, kind: 'generation-run', outputs: recoveryOutputs });
-      await expect(recovery).resolves.toEqual(recoveryOutputs);
-    };
-
-    await rejectThenRecover(
-      0,
-      start(openAiRequest),
-      start(openAiRequest),
-      [validGeneratedOutput({ id: 'one' }), validGeneratedOutput({ id: 'two' })],
-      'more than the requested 1 result',
-      [validGeneratedOutput()],
-    );
-
-    const twoResultRequest = { ...openAiRequest, resultCount: 2 };
-    await rejectThenRecover(
-      1,
-      start(twoResultRequest),
-      start(openAiRequest),
-      [validGeneratedOutput({ id: 'duplicate' }), validGeneratedOutput({ id: 'duplicate' })],
-      'malformed result',
-      [validGeneratedOutput()],
-    );
-
-    let oversizedData = Buffer.alloc(MAX_GENERATED_OUTPUT_BYTES + 1).toString('base64');
-    await rejectThenRecover(
-      2,
-      start(openAiRequest),
-      start(openAiRequest),
-      [validGeneratedOutput({ data: oversizedData })],
-      `${MAX_GENERATED_OUTPUT_BYTES}-byte limit`,
-      [validGeneratedOutput()],
-    );
-    oversizedData = '';
-
-    await rejectThenRecover(
-      3,
-      start(openAiRequest),
-      start(openAiRequest),
-      [validGeneratedOutput({ mimeType: 'image/jpeg' })],
-      'malformed image result',
-      [validGeneratedOutput()],
-    );
-
-    await rejectThenRecover(
-      4,
-      start(openAiRequest),
-      start(openAiRequest),
-      [validGeneratedOutput({ width: 3 })],
-      'malformed image result',
-      [validGeneratedOutput()],
-    );
-
-    await rejectThenRecover(
-      5,
-      start(stabilityRequest),
-      start(stabilityRequest),
-      [validGeneratedOutput({ seed: 99 })],
-      'malformed result',
-      [validGeneratedOutput({ seed: 17 })],
-    );
-
-    await rejectThenRecover(
-      6,
-      start(openAiRequest),
-      start(openAiRequest),
-      [validGeneratedOutput({ providerMetadata: { payload: 'x'.repeat(MAX_GENERATION_PROVIDER_METADATA_BYTES) } })],
-      `${MAX_GENERATION_PROVIDER_METADATA_BYTES}-byte serialized limit`,
-      [validGeneratedOutput()],
-    );
-    expect(fork).toHaveBeenCalledTimes(8);
-    supervisor.stop();
-  });
-
-  it('rejects contradictory normalized acceptance provenance before queued work recovers through a fresh worker', async () => {
-    const output = oversizedGeneratedOutput(); const prepared = await normalizeGeneratedOutputForAcceptance(output);
-    if (prepared.status !== 'ready' || !prepared.normalization) throw new Error('Expected normalized fixture');
-    const workers = [new FakeUtility(), new FakeUtility()]; const fork = vi.fn(() => workers[fork.mock.calls.length - 1]); const supervisor = new RasterUtilitySupervisor(fork);
-    const invalid = supervisor.normalizeGeneratedOutput(output); const recovery = supervisor.normalizeGeneratedOutput(output); await nextTurn();
-    const invalidRequest = workers[0].messages[0] as { id: string };
-    workers[0].respond({ id: invalidRequest.id, ok: true, kind: 'normalize-generation-acceptance', result: { ...prepared, normalization: { ...prepared.normalization, acceptedByteLength: prepared.normalization.acceptedByteLength + 1 } } });
-    await expect(invalid).rejects.toThrow('contradictory generation normalization provenance'); expect(workers[0].killed).toBe(true);
-    await nextTurn(); const recoveryRequest = workers[1].messages[0] as { id: string };
-    workers[1].respond({ id: recoveryRequest.id, ok: true, kind: 'normalize-generation-acceptance', result: prepared });
-    await expect(recovery).resolves.toEqual(prepared); expect(fork).toHaveBeenCalledTimes(2); supervisor.stop();
-  });
-
-  it('lets generation providers clean up before replacing a cancelled worker', async () => {
-    const workers = [new FakeUtility(), new FakeUtility()];
-    let workerIndex = 0;
-    const supervisor = new RasterUtilitySupervisor(() => workers[workerIndex++]);
-    const document = createIllustrationDocument('Cancelled generation');
-    const controller = new AbortController();
-    const generation = supervisor.generate('cancel-job', document, {
-      documentId: document.id,
-      provider: 'comfyui',
-      mode: 'create',
-      prompt: 'A clockwork turkey',
-      sourceAssetIds: [],
-      size: 'auto',
-      resultCount: 1,
-      providerOptions: { endpoint: 'http://127.0.0.1:8188', workflowPath: 'C:\\approved\\workflow.json' },
-    }, undefined, { signal: controller.signal });
-    await nextTurn();
-    const generationRequest = workers[0].messages[0] as { id: string; kind: string };
-    controller.abort();
-    await expect(generation).rejects.toMatchObject({ name: 'AbortError' });
-    expect(workers[0].messages[1]).toEqual({ id: generationRequest.id, kind: 'utility-cancel' });
-    expect(workers[0].killed).toBe(false);
-
-    const queued = supervisor.quantizeImage(Buffer.from('after-cancel'), 1, 1, palette, { alphaThreshold: 0.5, dithering: 'none' });
-    await nextTurn();
-    expect(workers[0].messages).toHaveLength(2);
-    workers[0].respond({ id: generationRequest.id, ok: false, error: { code: 'utility_failed', message: 'AbortError' } });
-    await nextTurn();
-    expect(workers[0].killed).toBe(true);
-    expect(workers[1].messages).toHaveLength(1);
-    const quantizeRequest = workers[1].messages[0] as { id: string };
-    workers[1].respond({ id: quantizeRequest.id, ok: true, kind: 'quantize-image', changes: [] });
-    await expect(queued).resolves.toEqual([]);
     supervisor.stop();
   });
 

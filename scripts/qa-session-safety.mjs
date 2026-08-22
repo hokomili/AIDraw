@@ -58,12 +58,12 @@ export function assertForceStopIdentity({ manifest, connection, currentExeSha256
 
 export function buildRedactedConnection(connection, manifest, stoppedAt = new Date().toISOString()) {
   return {
-    version: connection.version ?? 1,
+    version: 2,
     url: connection.url ?? manifest.mcpUrl,
     activeDocumentId: connection.activeDocumentId,
     pid: connection.pid ?? manifest.pid,
     trustedFolders: connection.trustedFolders ?? manifest.trustedFolders ?? [],
     stoppedAt,
-    credentialsRedacted: true,
+    authorityRedacted: true,
   };
 }

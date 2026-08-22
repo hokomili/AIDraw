@@ -2,7 +2,7 @@ import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { HUMAN_ACTOR, createPixelDocument, createPixelSprite, createPixelTilemap, createPixelTileset, encodeTiledGid, nowIso, readPixel, readTileAt, writePixels, writeTiles, type CollisionShape, type PixelSprite } from '@aidraw/core';
+import { HUMAN_ACTOR, applyTransaction, createId, createPixelDocument, createPixelSprite, createPixelTilemap, createPixelTileset, encodeTiledGid, nowIso, readPixel, readTileAt, writePixels, writeTiles, type CanvasTransaction, type CollisionShape, type PixelSprite } from '@aidraw/core';
 import UPNG from 'upng-js';
 
 import { importDocument } from '../../src/main/import-document';
@@ -12,6 +12,7 @@ import { renderSprite, renderTilemap, renderTilemapRegion } from '../../src/main
 import { runImportUtilityRequest } from '../../src/main/utility-import';
 import { editTileObject } from '../../src/common/tile-object-authoring';
 import { appendImageCollectionSource, createImageCollectionTileset, removeUnusedImageCollectionSource, replaceImageCollectionSource } from '../../src/common/image-collection-authoring';
+import { planImageCollectionTileIdMove } from '../../src/common/image-collection-tile-move';
 
 const fixture = new URL('../fixtures/tiled/isometric-external.tmj', import.meta.url).pathname.replace(/^\/(?=[A-Za-z]:)/, '');
 const xmlFixtureSource = new URL('../fixtures/tiled/orthogonal-external.tmx', import.meta.url).pathname.replace(/^\/(?=[A-Za-z]:)/, '');
@@ -767,6 +768,103 @@ describe('representative Tiled JSON interchange', () => {
       const reopenedCollection = reopenedDocument.pixelAssets[reopenedMap.tilesetIds[0]]; if (reopenedCollection.type !== 'tileset') throw new Error('Expected tileset');
       expect(Object.keys(reopenedCollection.tiles)).toEqual(['0', '7']);
       expect(reopenedCollection.tiles[7]).toMatchObject({ id: 7, probability: 0.7, properties: { retained: true } });
+    }
+  });
+
+  it('persists and JSON/XML reopens a deliberate sparse-ID move with rewritten GIDs and byte-exact artwork', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'aidraw-moved-image-collection-')); temporaryDirectories.push(directory);
+    const document = createPixelDocument('project', 'Moved collection tile project'); document.assetIds = []; document.pixelAssets = {};
+    const source0 = createPixelSprite('Source zero', 2, 2); writePixels(Object.values(source0.cels)[0], [{ x: 0, y: 0, index: 2 }]);
+    const source3 = createPixelSprite('Moved source three', 3, 1); writePixels(Object.values(source3.cels)[0], [{ x: 0, y: 0, index: 3 }, { x: 1, y: 0, index: 4 }, { x: 2, y: 0, index: 3 }]);
+    const source7 = createPixelSprite('Source seven', 1, 3); writePixels(Object.values(source7.cels)[0], [{ x: 0, y: 0, index: 4 }, { x: 0, y: 1, index: 2 }, { x: 0, y: 2, index: 4 }]);
+    const collection = createPixelTileset('Deliberately moved collection', source0.id, 3, 3, 1, 1);
+    delete collection.spriteAssetId; collection.firstGid = 17; collection.columns = 2; collection.rows = 0; collection.tileOffset = { x: -1, y: 2 };
+    collection.tiles = {
+      0: { id: 0, sourceX: 0, sourceY: 0, imageAssetId: source0.id, probability: 1, animation: [{ tileId: 3, durationMs: 70 }], collisions: [], properties: { origin: true } },
+      3: { id: 3, sourceX: 0, sourceY: 0, imageAssetId: source3.id, probability: 0.4, animation: [{ tileId: 3, durationMs: 90 }, { tileId: 7, durationMs: 110 }], collisions: [{ id: 'moved-collision', type: 'rectangle', x: 0, y: 0, width: 3, height: 1, properties: { exact: true } }], properties: { moved: true } },
+      7: { id: 7, sourceX: 0, sourceY: 0, imageAssetId: source7.id, probability: 0.8, animation: [], collisions: [], properties: { retained: true } },
+    };
+    collection.wangSets = [{ id: 'moved-wang', name: 'Moved Wang', type: 'mixed', colors: [{ id: 1, name: 'Ground', color: '#55aa44', tileId: 3, probability: 1 }], tiles: [{ tileId: 3, wangId: [1, 0, 1, 0, 1, 0, 1, 0] }] }];
+    const map = createPixelTilemap('Moved sparse isometric map'); map.orientation = 'isometric'; map.infinite = true; map.width = 3; map.height = 3; map.tileWidth = 4; map.tileHeight = 2; map.tilesetIds = [collection.id];
+    const tileLayer = map.layers[map.layerIds[0]]; if (tileLayer.type !== 'tile' || !tileLayer.chunks) throw new Error('Expected tile layer');
+    const oldRaw = encodeTiledGid(20, { hFlip: true, diagonal: true });
+    writeTiles(tileLayer.chunks, [{ x: -1, y: 1, gid: oldRaw }, { x: 1, y: 0, gid: 24 }]);
+    const timestamp = nowIso(); const objectLayer = {
+      id: 'moved-objects', revision: 0, name: 'Moved objects', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
+      type: 'object' as const, visible: true, locked: false, opacity: 1, offsetX: 0, offsetY: 0, parallaxX: 1, parallaxY: 1,
+      objects: [{ id: 'moved-object', type: 'tile' as const, gid: encodeTiledGid(20, { vFlip: true }), x: 4, y: 4, width: 6, height: 2, rotation: 15, name: 'Moved tile', className: 'prop', properties: { exact: true } }],
+    };
+    map.layers[objectLayer.id] = objectLayer; map.layerIds.push(objectLayer.id);
+    document.assetIds = [source0.id, source3.id, source7.id, collection.id, map.id];
+    document.pixelAssets = { [source0.id]: source0, [source3.id]: source3, [source7.id]: source7, [collection.id]: collection, [map.id]: map };
+    document.activeAssetId = map.id;
+    document.tileStamps = [{ id: 'moved-stamp', name: 'Moved stamp', width: 1, height: 1, anchorX: 0, anchorY: 0, cells: [{ x: 0, y: 0, gid: encodeTiledGid(20, { hFlip: true, vFlip: true }) }] }];
+    const beforeSources = JSON.stringify([source0, source3, source7]);
+    const beforeRaster = Buffer.from(renderTilemap(document, map, undefined, 0).getContext('2d').getImageData(0, 0, 12, 6).data);
+    expect(beforeRaster.some((value, index) => index % 4 === 3 && value > 0)).toBe(true);
+
+    const plan = planImageCollectionTileIdMove(document, collection.id, 3, 2);
+    const transaction: CanvasTransaction = {
+      id: createId('tx'), clientOperationId: createId('move-op'), documentId: document.id, expectedDocumentRevision: document.revision,
+      actor: HUMAN_ACTOR, label: 'Move image-collection tile ID', createdAt: nowIso(), operations: plan.operations,
+    };
+    const applied = applyTransaction(document, transaction).document; if (applied.kind !== 'pixel') throw new Error('Expected pixel document');
+    const appliedMap = applied.pixelAssets[map.id]; const appliedCollection = applied.pixelAssets[collection.id];
+    if (appliedMap.type !== 'tilemap' || appliedCollection.type !== 'tileset') throw new Error('Expected map and collection');
+    const appliedLayer = appliedMap.layers[tileLayer.id]; const appliedObjectLayer = appliedMap.layers[objectLayer.id];
+    if (appliedLayer.type !== 'tile' || !appliedLayer.chunks || appliedObjectLayer.type !== 'object') throw new Error('Expected moved layers');
+    const newRaw = encodeTiledGid(19, { hFlip: true, diagonal: true });
+    expect(Object.keys(appliedCollection.tiles)).toEqual(['0', '2', '7']);
+    expect(appliedCollection.tiles[2]).toMatchObject({ id: 2, imageAssetId: source3.id, probability: 0.4, animation: [{ tileId: 2, durationMs: 90 }, { tileId: 7, durationMs: 110 }], properties: { moved: true } });
+    expect(appliedCollection.tiles[0].animation).toEqual([{ tileId: 2, durationMs: 70 }]);
+    expect(appliedCollection.wangSets[0]).toMatchObject({ colors: [{ tileId: 2 }], tiles: [{ tileId: 2 }] });
+    expect(readTileAt(appliedLayer.chunks, -1, 1)).toBe(newRaw);
+    expect(readTileAt(appliedLayer.chunks, 1, 0)).toBe(24);
+    expect(appliedObjectLayer.objects?.[0]).toMatchObject({ gid: encodeTiledGid(19, { vFlip: true }), width: 6, height: 2, rotation: 15 });
+    expect(applied.tileStamps[0].cells[0].gid).toBe(encodeTiledGid(19, { hFlip: true, vFlip: true }));
+    expect(JSON.stringify([applied.pixelAssets[source0.id], applied.pixelAssets[source3.id], applied.pixelAssets[source7.id]])).toBe(beforeSources);
+    expect(Buffer.from(renderTilemap(applied, appliedMap, undefined, 0).getContext('2d').getImageData(0, 0, 12, 6).data)).toEqual(beforeRaster);
+
+    const nativePath = await writeNativeDocument(join(directory, 'moved-native'), applied, '1.0.0');
+    const native = await readNativeDocument(nativePath); if (native.document.kind !== 'pixel') throw new Error('Expected native pixel document');
+    const nativeCollection = native.document.pixelAssets[collection.id]; const nativeMap = native.document.pixelAssets[map.id];
+    if (nativeCollection.type !== 'tileset' || nativeMap.type !== 'tilemap') throw new Error('Expected native collection and map');
+    const nativeLayer = nativeMap.layers[tileLayer.id]; if (nativeLayer.type !== 'tile' || !nativeLayer.chunks) throw new Error('Expected native tile layer');
+    expect(Object.keys(nativeCollection.tiles)).toEqual(['0', '2', '7']);
+    expect(readTileAt(nativeLayer.chunks, -1, 1)).toBe(newRaw);
+    expect(native.document.tileStamps[0].cells[0].gid).toBe(encodeTiledGid(19, { hFlip: true, vFlip: true }));
+    expect(Buffer.from(renderTilemap(native.document, nativeMap, undefined, 0).getContext('2d').getImageData(0, 0, 12, 6).data)).toEqual(beforeRaster);
+
+    const standalone = structuredClone(native.document); standalone.activeAssetId = collection.id;
+    for (const format of ['tiled-json', 'tiled-xml'] as const) {
+      const artifact = await exportDocument(standalone, format);
+      expect(artifact.extension).toBe(format === 'tiled-json' ? 'tsj' : 'tsx');
+      expect(artifact.companions?.map(({ name }) => name)).toEqual(['Deliberately moved collection tile 0.png', 'Deliberately moved collection tile 2.png', 'Deliberately moved collection tile 7.png']);
+      if (format === 'tiled-json') expect(JSON.parse(artifact.data.toString()).tiles.map((tile: { id: number }) => tile.id)).toEqual([0, 2, 7]);
+      else { expect(artifact.data.toString()).toContain('<tile id="2" probability="0.4">'); expect(artifact.data.toString()).not.toContain('<tile id="3"'); }
+      const movedCompanion = artifact.companions?.[1]; if (!movedCompanion) throw new Error('Expected moved companion');
+      const decoded = UPNG.decode(movedCompanion.data.buffer.slice(movedCompanion.data.byteOffset, movedCompanion.data.byteOffset + movedCompanion.data.byteLength) as ArrayBuffer);
+      expect([decoded.width, decoded.height]).toEqual([3, 1]);
+      expect(Buffer.from(UPNG.toRGBA8(decoded)[0])).toEqual(Buffer.from(renderSprite(native.document, native.document.pixelAssets[source3.id] as PixelSprite).getContext('2d').getImageData(0, 0, 3, 1).data));
+    }
+
+    for (const format of ['tiled-json', 'tiled-xml'] as const) {
+      const artifact = await exportDocument(native.document, format);
+      expect(artifact.report).toEqual({ warnings: [], rasterized: [] });
+      const outputDirectory = join(directory, `moved-${format}`); await mkdir(outputDirectory);
+      const outputPath = join(outputDirectory, format === 'tiled-json' ? 'moved.tmj' : 'moved.tmx');
+      await Promise.all([writeFile(outputPath, artifact.data), ...artifact.companions!.map((entry) => writeFile(join(outputDirectory, entry.name), entry.data))]);
+      const reopened = await importDocument(outputPath, true); expect(reopened.warnings).toEqual([]);
+      const reopenedDocument = reopened.documents[0]; if (reopenedDocument.kind !== 'pixel') throw new Error('Expected reopened pixel document');
+      const reopenedMap = reopenedDocument.pixelAssets[reopenedDocument.activeAssetId]; if (reopenedMap.type !== 'tilemap') throw new Error('Expected reopened map');
+      const reopenedLayer = reopenedMap.layers[reopenedMap.layerIds.find((id) => reopenedMap.layers[id]?.type === 'tile')!]; if (reopenedLayer.type !== 'tile' || !reopenedLayer.chunks) throw new Error('Expected reopened tile layer');
+      const reopenedCollection = reopenedDocument.pixelAssets[reopenedMap.tilesetIds[0]]; if (reopenedCollection.type !== 'tileset') throw new Error('Expected reopened collection');
+      expect(Object.keys(reopenedCollection.tiles)).toEqual(['0', '2', '7']);
+      expect(reopenedCollection.tiles[2]).toMatchObject({ id: 2, probability: 0.4, animation: [{ tileId: 2, durationMs: 90 }, { tileId: 7, durationMs: 110 }], properties: { moved: true } });
+      expect(reopenedCollection.wangSets[0]).toMatchObject({ colors: [{ tileId: 2 }], tiles: [{ tileId: 2 }] });
+      expect(readTileAt(reopenedLayer.chunks, -1, 1)).toBe(newRaw);
+      expect(readTileAt(reopenedLayer.chunks, 1, 0)).toBe(24);
+      expect(Buffer.from(renderTilemap(reopenedDocument, reopenedMap, undefined, 0).getContext('2d').getImageData(0, 0, 12, 6).data)).toEqual(beforeRaster);
     }
   });
 

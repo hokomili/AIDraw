@@ -90,7 +90,6 @@ export function installUx11BatchE2eNetworkBoundary(configuration: Ux11BatchE2eCo
       protocol: url.protocol,
       hostname: url.hostname,
       externalRequests: 1,
-      paidRequests: 0,
     }, null, 2)}\n`, { flag: 'wx', mode: 0o600 }).catch(() => undefined);
     throw new Error('The isolated UX-11 fixture blocked an external request.');
   };
@@ -117,8 +116,6 @@ export class Ux11BatchE2eController {
       events: this.events,
       exportFailureDocument: UX11_BATCH_E2E_FAILURE_DOCUMENT_NAME,
       externalRequests: 0,
-      providerRequests: 0,
-      paidRequests: 0,
     }, null, 2)}\n`;
     await writeFile(this.configuration.auditPath, text, {
       ...(this.auditCreated ? {} : { flag: 'wx' }),

@@ -48,7 +48,6 @@ export interface Fnd09UtilityPressureEngine {
     getDocument(documentId: string): AIDrawDocument | undefined;
   };
   rasterUtilities: PressureLane;
-  generationUtilities: { status(): { running: boolean } };
 }
 
 function normalizedPath(value: string): string {
@@ -203,8 +202,6 @@ export async function runFnd09UtilityPressureScenario(
     if (!current) throw new Error('The canonical document disappeared during utility pressure containment.');
     const after = { documentId, revision: current.revision, sha256: documentSha256(current) };
     if (JSON.stringify(after) !== JSON.stringify(before)) throw new Error('Utility pressure containment changed canonical document state.');
-    if (engine.generationUtilities.status().running) throw new Error('The separate generation lane was unexpectedly started.');
-
     retained = {
       version: 1,
       scenario: 'FND-09 packaged raster utility admission pressure containment',
@@ -226,7 +223,6 @@ export async function runFnd09UtilityPressureScenario(
       cancellation: { label: cancelled.label, error: cancelledError, queuedAfterCancellation: afterCancellation.queued },
       refill: { label: replacement.label, queuedAfterRefill: afterRefill.queued },
       drain: { expectedOrder, completionOrder, sameWorker: true, workerPid: afterDrain.pid, queuedAfterDrain: afterDrain.queued },
-      generationLaneUntouched: true,
       privacy: { rawUtilityPayloadsPublished: false, publicJobCreated: false },
     };
   } catch (error) {

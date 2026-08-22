@@ -37,6 +37,14 @@ export class CliRefusalError extends Error {
   }
 }
 
+export type StartupCommand = 'mcp-bridge' | 'cli' | 'quit-engine' | 'headless' | 'show';
+
+function assertNoSplitUserDataDirectory(arguments_: string[]): void {
+  if (arguments_.includes('--user-data-dir')) {
+    throw new CliRefusalError('The app-owned profile selector must use the unambiguous --user-data-dir=<profile> form.');
+  }
+}
+
 export interface CliInvocationOptions {
   command: CliCommand | undefined;
   parseError?: Error;
@@ -47,6 +55,29 @@ export interface CliInvocationOptions {
   executeBatch?: typeof executeBatchExport;
 }
 
+/**
+ * Electron consumes this app-owned profile selector while AIDraw still sees it
+ * in process.argv. Keep it available to main.ts for app.setPath(), but do not
+ * reinterpret it as a batch-export option.
+ */
+export function selectCliArguments(arguments_: string[]): string[] {
+  assertNoSplitUserDataDirectory(arguments_);
+  return arguments_.filter((argument) => !argument.startsWith('--user-data-dir='));
+}
+
+export function selectStartupCommand(
+  arguments_: string[],
+  cliInvocation: boolean,
+  cliParseFailed: boolean,
+): StartupCommand {
+  if (cliParseFailed) return 'cli';
+  if (arguments_.includes('--mcp-bridge')) return 'mcp-bridge';
+  if (cliInvocation) return 'cli';
+  if (arguments_.includes('--quit-engine')) return 'quit-engine';
+  if (arguments_.includes('--headless')) return 'headless';
+  return 'show';
+}
+
 function nextValue(arguments_: string[], index: number, option: string): string {
   const value = arguments_[index + 1];
   if (!value || value.startsWith('-')) throw new CliRefusalError(`${option} requires a value.`);
@@ -54,6 +85,7 @@ function nextValue(arguments_: string[], index: number, option: string): string 
 }
 
 export function parseCliArguments(arguments_: string[]): CliCommand | undefined {
+  assertNoSplitUserDataDirectory(arguments_);
   const isCli = arguments_.some((argument) => ['-b', '--batch', '-h', '--help', '--version'].includes(argument));
   if (!isCli) return undefined;
   if (arguments_.includes('-h') || arguments_.includes('--help')) return { kind: 'help' };

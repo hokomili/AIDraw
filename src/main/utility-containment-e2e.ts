@@ -39,7 +39,6 @@ export interface Fnd09UtilityContainmentEngine {
     getDocument(documentId: string): AIDrawDocument | undefined;
   };
   rasterUtilities: ContainmentLane;
-  generationUtilities: { status(): { running: boolean } };
 }
 
 function normalizedPath(value: string): string {
@@ -89,8 +88,6 @@ export function installFnd09UtilityContainmentNetworkBoundary(
       blocked: true,
       protocol: url.protocol,
       hostname: url.hostname,
-      externalProviderRequests: 0,
-      paidRequests: 0,
       nonLoopbackRequests: 1,
     }, null, 2)}\n`, { flag: 'wx', mode: 0o600 }).catch(() => undefined);
     throw new Error('The isolated FND-09 utility probe blocked a non-loopback request.');
@@ -169,8 +166,6 @@ export async function runFnd09UtilityContainmentScenario(
     if (!current) throw new Error('The canonical document disappeared during utility containment.');
     const after = { documentId, revision: current.revision, sha256: documentSha256(current) };
     if (JSON.stringify(after) !== JSON.stringify(before)) throw new Error('Utility containment changed canonical document state.');
-    if (engine.generationUtilities.status().running) throw new Error('The provider/generation utility lane was unexpectedly started.');
-
     retained = {
       version: 1,
       scenario: 'FND-09 packaged raster utility crash/cancel/restart containment',
@@ -179,8 +174,7 @@ export async function runFnd09UtilityContainmentScenario(
       crash: { workerPid: crashing.pid, error: crashError, restartPid: afterCrash.pid, queuedExport: crashArtifact },
       cancellation: { workerPid: cancelling.pid, error: cancellationError, restartPid: afterCancel.pid, queuedExport: cancelArtifact },
       workerPidsDistinct: new Set([crashing.pid, afterCrash.pid, afterCancel.pid]).size === 3,
-      generationLaneUntouched: true,
-      network: { nonLoopbackRequests: 0, externalProviderRequests: 0, paidRequests: 0 },
+      network: { nonLoopbackRequests: 0 },
     };
     if (retained.workerPidsDistinct !== true) throw new Error('Crash and cancellation did not produce three distinct worker identities.');
   } catch (error) {
@@ -191,7 +185,7 @@ export async function runFnd09UtilityContainmentScenario(
       result: 'failed',
       error: { name: value.name, message: value.message.slice(0, 500) },
       canonical: { before },
-      network: { nonLoopbackRequests: 0, externalProviderRequests: 0, paidRequests: 0 },
+      network: { nonLoopbackRequests: 0 },
     };
   }
   await writeFile(configuration.probePath, `${JSON.stringify(retained, null, 2)}\n`, { flag: 'wx', mode: 0o600 });

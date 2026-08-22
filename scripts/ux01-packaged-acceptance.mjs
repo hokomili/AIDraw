@@ -1,6 +1,5 @@
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import process from 'node:process';
-import { inspectPackagedMcpCredential } from './packaged-e2e-runtime.mjs';
 
 export const UX01_PACKAGED_SCENARIO = 'UX-01-DENSITY exact package preserves supported content viewports and reachable editor controls';
 export const UX01_PACKAGED_PROFILE_ENV = 'AIDRAW_E2E_UX01_DENSITY_PROFILE';
@@ -35,8 +34,8 @@ export const UX01_PACKAGED_FILES = Object.freeze({
   failure: 'ux01-density-failure.json',
   cleanup: 'ux01-density-cleanup.json',
   forbiddenNetwork: 'ux01-forbidden-network.json',
-  providerCredentials: join('credentials', 'generation.json'),
-  tokenCredentials: join('credentials', 'mcp-token.json'),
+  retiredProviderStore: join('credentials', 'generation.json'),
+  retiredAuthorityStore: join('credentials', 'mcp-token.json'),
 });
 
 function required(environment, name) {
@@ -91,17 +90,9 @@ export function resolveUx01PackagedAcceptance({ workspacePath = process.cwd(), e
 export function assertUx01SafeReporterEnvironment(environment = process.env) {
   const configured = UX01_UNSAFE_REPORT_ENVIRONMENTS.filter((name) => String(environment[name] ?? '').trim());
   if (configured.length) {
-    throw new Error(`UX-01 native acceptance rejects credential-capable Playwright report configuration: ${configured.join(', ')}.`);
+    throw new Error(`UX-01 native acceptance rejects secret-bearing Playwright report configuration: ${configured.join(', ')}.`);
   }
   return true;
-}
-
-export function inspectUx01EncryptedToken(value, liveToken) {
-  try {
-    return inspectPackagedMcpCredential(value, liveToken);
-  } catch {
-    throw new Error('The UX-01 MCP credential is not the expected encrypted safe-storage record.');
-  }
 }
 
 export function parseUx01WindowMeasurement(value) {
@@ -237,7 +228,7 @@ export function redactUx01FailureText(value, secrets = []) {
 export function assertUx01EvidenceRedacted(serialized, forbiddenValues = []) {
   const text = String(serialized);
   if (/"(?:token|authorization)"\s*:/i.test(text) || /Bearer\s+(?!\[redacted\])[^\s"']+/i.test(text)) {
-    throw new Error('UX-01 retained evidence contains a credential-shaped field or bearer value.');
+    throw new Error('UX-01 retained evidence contains a secret-bearing field or bearer value.');
   }
   const leaked = forbiddenValues.filter((value) => value && text.includes(value));
   if (leaked.length) throw new Error('UX-01 retained evidence contains a declared secret value.');

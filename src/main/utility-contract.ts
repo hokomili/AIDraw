@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { crc32 } from 'node:zlib';
 import UPNG from 'upng-js';
 import { migrateDocument, type AIDrawDocument, type PaletteEntry } from '@aidraw/core';
@@ -12,26 +11,15 @@ import {
   isInterchangeFidelityEntry,
   type InterchangeFidelityEntry,
 } from '../common/interchange-fidelity';
-import {
-  GENERATION_ACCEPTANCE_WEBP_QUALITIES,
-  type GeneratedAcceptancePreparation,
-  type GeneratedOutput,
-  type GenerationRequest,
-} from '../common/generation';
 import { displayImageDimensions, inspectEmbeddedDocumentImageAssets, inspectImageHeader, MAX_INLINE_ASSET_BYTES, MAX_INLINE_IMAGE_DIMENSION, MAX_INLINE_IMAGE_PIXELS } from './transaction-policy';
 import { MAX_NATIVE_BINARY_ENTRY_BYTES } from './native-container-limits';
 import type { Fnd09QuantizationResultFault } from './utility-quantization-result-e2e-contract';
 import type { Fnd09ExportResultFault } from './utility-export-result-e2e-contract';
 import type { Fnd09ImportResultFault } from './utility-import-result-e2e-contract';
-import type { Fnd09GenerationResultFixture } from './utility-generation-result-e2e-contract';
 import { expectedExportArtifactIdentity, type ExportArtifactMemberIdentity } from './export-artifact-policy';
 import {
   MAX_EXPORT_UTILITY_MEMBERS,
   MAX_EXPORT_UTILITY_TOTAL_DECODED_BYTES,
-  MAX_GENERATION_PROGRESS_MESSAGE_BYTES,
-  MAX_GENERATION_PROVIDER_METADATA_BYTES,
-  MAX_GENERATION_PROVIDER_METADATA_DEPTH,
-  MAX_GENERATION_PROVIDER_METADATA_NODES,
   MAX_IMPORT_UTILITY_DEPTH,
   MAX_IMPORT_UTILITY_NODES,
   MAX_IMPORT_UTILITY_SERIALIZED_BYTES,
@@ -48,8 +36,6 @@ import {
 export {
   MAX_EXPORT_UTILITY_MEMBERS,
   MAX_EXPORT_UTILITY_TOTAL_DECODED_BYTES,
-  MAX_GENERATION_PROGRESS_MESSAGE_BYTES,
-  MAX_GENERATION_PROVIDER_METADATA_BYTES,
   MAX_IMPORT_UTILITY_SERIALIZED_BYTES,
   MAX_UTILITY_ERROR_CODE_BYTES,
   MAX_UTILITY_ERROR_MESSAGE_BYTES,
@@ -62,11 +48,6 @@ export const MAX_QUANTIZE_UTILITY_SOURCE_BYTES = MAX_INLINE_ASSET_BYTES;
 export const MAX_QUANTIZE_UTILITY_BASE64_CHARACTERS = 2_000_000;
 export const MAX_IMAGE_VALIDATION_UTILITY_SOURCE_BYTES = MAX_NATIVE_BINARY_ENTRY_BYTES;
 export const MAX_IMAGE_VALIDATION_UTILITY_BASE64_CHARACTERS = Math.ceil(MAX_IMAGE_VALIDATION_UTILITY_SOURCE_BYTES / 3) * 4;
-/** Approval cards show only a small, static rendering of an already-canonical source asset. */
-export const MAX_GENERATION_APPROVAL_PREVIEW_WIDTH = 180;
-export const MAX_GENERATION_APPROVAL_PREVIEW_HEIGHT = 120;
-export const MAX_GENERATION_APPROVAL_PREVIEW_BYTES = 256 * 1024;
-export const MAX_GENERATION_APPROVAL_PREVIEW_BASE64_CHARACTERS = Math.ceil(MAX_INLINE_ASSET_BYTES / 3) * 4;
 const MAX_EXPORT_UTILITY_BASE64_CHARACTERS = Math.ceil(MAX_EXPORT_UTILITY_TOTAL_DECODED_BYTES / 3) * 4;
 /** PDF is the only multi-document importer and already caps its page/result count here. */
 export const MAX_IMPORT_UTILITY_DOCUMENTS = 256;
@@ -76,10 +57,6 @@ export const MAX_OBSERVATION_PNG_BYTES = 4 * 1024 * 1024;
 export const MAX_SPRITE_SHEET_PREVIEW_BYTES = 4 * 1024 * 1024;
 /** Includes the maximum base64 PNG plus bounded JSON observation metadata. */
 export const MAX_OBSERVATION_UTILITY_RESULT_SERIALIZED_BYTES = Math.ceil(MAX_OBSERVATION_PNG_BYTES / 3) * 4 + 64 * 1024;
-/** Provider adapters enforce these per-image limits before returning generated output. */
-export const MAX_GENERATED_OUTPUT_BYTES = 32 * 1024 * 1024;
-export const MAX_GENERATED_OUTPUT_SIDE = 8_192;
-export const MAX_GENERATED_OUTPUT_PIXELS = 32 * 1024 * 1024;
 
 interface QuantizeUtilityParameters {
   width?: unknown;
@@ -95,17 +72,6 @@ export interface ValidateImageUtilityRequest {
   mimeType: string;
   width: number;
   height: number;
-}
-
-export interface RenderGenerationApprovalPreviewUtilityRequest {
-  id: string;
-  kind: 'render-generation-approval-preview';
-  encodedBase64: string;
-  mimeType: string;
-  width: number;
-  height: number;
-  previewWidth: number;
-  previewHeight: number;
 }
 
 /** Keep supervisor admission and worker validation on the same quantization limits. */
@@ -168,28 +134,6 @@ export interface ObservationUtilityRequest {
   e2eCorruptIdat?: true;
 }
 
-export interface GenerationUtilityRequest {
-  id: string;
-  kind: 'generation-run';
-  jobId: string;
-  document: AIDrawDocument;
-  request: GenerationRequest;
-  credential?: string;
-  /** Fixed provider-free packaged-QA result; accepted only by the isolated worker gate. */
-  e2eResultFixture?: Fnd09GenerationResultFixture;
-}
-
-export interface NormalizeGenerationAcceptanceUtilityRequest {
-  id: string;
-  kind: 'normalize-generation-acceptance';
-  output: GeneratedOutput;
-}
-
-export interface UtilityCancelRequest {
-  id: string;
-  kind: 'utility-cancel';
-}
-
 /** Fixed packaged-QA probe; unavailable unless the isolated FND-09 hook is enabled. */
 export interface UtilityContainmentProbeRequest {
   id: string;
@@ -206,20 +150,16 @@ export interface SerializedExportArtifact {
   companions?: Array<{ dataBase64: string; extension: string; mimeType: string; name: string }>;
 }
 
-export type UtilityRequest = ValidateImageUtilityRequest | RenderGenerationApprovalPreviewUtilityRequest | QuantizeUtilityRequest | ExportUtilityRequest | ImportUtilityRequest | InspectSpriteSheetUtilityRequest | ObservationUtilityRequest | GenerationUtilityRequest | NormalizeGenerationAcceptanceUtilityRequest | UtilityContainmentProbeRequest;
+export type UtilityRequest = ValidateImageUtilityRequest | QuantizeUtilityRequest | ExportUtilityRequest | ImportUtilityRequest | InspectSpriteSheetUtilityRequest | ObservationUtilityRequest | UtilityContainmentProbeRequest;
 
 export type UtilityResponse =
   | { id: string; ok: true; kind: 'validate-image'; width: number; height: number }
-  | { id: string; ok: true; kind: 'render-generation-approval-preview'; previewDataBase64: string }
   | { id: string; ok: true; kind: 'quantize-image'; changes: Array<{ x: number; y: number; index: number }> }
   | { id: string; ok: true; kind: 'export-document'; artifact: SerializedExportArtifact }
   | { id: string; ok: true; kind: 'import-document'; documents: AIDrawDocument[]; warnings: string[]; fidelity?: InterchangeFidelityEntry[] }
   | { id: string; ok: true; kind: 'inspect-sprite-sheet'; sha256: string; mimeType: 'image/png' | 'image/jpeg' | 'image/webp'; width: number; height: number; previewDataBase64: string }
   | { id: string; ok: true; kind: 'capture-observation'; result: Record<string, unknown> }
-  | { id: string; ok: true; kind: 'generation-run'; outputs: GeneratedOutput[] }
-  | { id: string; ok: true; kind: 'normalize-generation-acceptance'; result: GeneratedAcceptancePreparation }
   | { id: string; ok: true; kind: 'containment-probe' }
-  | { id: string; ok: true; kind: 'generation-progress'; progress: number; message: string }
   | { id: string; ok: false; error: { code: string; message: string } };
 
 /** Reject compromised/malformed quantization output before it can become canonical operations. */
@@ -298,16 +238,6 @@ function isNonEmptyString(value: unknown): value is string {
   return isBoundedUtilityString(value, MAX_UTILITY_TEXT_BYTES, false);
 }
 
-export function generationApprovalPreviewDimensions(width: number, height: number): { width: number; height: number } {
-  if (!isPositiveInteger(width) || !isPositiveInteger(height)
-    || width > MAX_INLINE_IMAGE_DIMENSION || height > MAX_INLINE_IMAGE_DIMENSION
-    || width * height > MAX_INLINE_IMAGE_PIXELS) {
-    throw new Error('Generation approval preview source exceeds the image safety limit.');
-  }
-  const scale = Math.min(1, MAX_GENERATION_APPROVAL_PREVIEW_WIDTH / width, MAX_GENERATION_APPROVAL_PREVIEW_HEIGHT / height);
-  return { width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)) };
-}
-
 export function assertValidateImageUtilityRequest(value: unknown): asserts value is ValidateImageUtilityRequest {
   if (!isRecord(value)
     || !hasOnlyKeys(value, ['id', 'kind', 'encodedBase64', 'mimeType', 'width', 'height'])
@@ -338,37 +268,6 @@ export function assertValidateImageUtilityRequest(value: unknown): asserts value
   }
 }
 
-export function assertRenderGenerationApprovalPreviewUtilityRequest(
-  value: unknown,
-): asserts value is RenderGenerationApprovalPreviewUtilityRequest {
-  if (!isRecord(value)
-    || !hasOnlyKeys(value, ['id', 'kind', 'encodedBase64', 'mimeType', 'width', 'height', 'previewWidth', 'previewHeight'])
-    || !hasKeys(value, ['id', 'kind', 'encodedBase64', 'mimeType', 'width', 'height', 'previewWidth', 'previewHeight'])
-    || typeof value.id !== 'string' || !value.id
-    || value.kind !== 'render-generation-approval-preview'
-    || typeof value.encodedBase64 !== 'string'
-    || value.encodedBase64.length > MAX_GENERATION_APPROVAL_PREVIEW_BASE64_CHARACTERS
-    || !isCanonicalBase64(value.encodedBase64)
-    || typeof value.mimeType !== 'string'
-    || !isPositiveInteger(value.width) || !isPositiveInteger(value.height)
-    || !isPositiveInteger(value.previewWidth) || !isPositiveInteger(value.previewHeight)) {
-    throw new Error('Generation approval preview utility request is malformed.');
-  }
-  if (base64DecodedByteLength(value.encodedBase64) > MAX_INLINE_ASSET_BYTES) {
-    throw new Error("Generation approval preview source exceeds AIDraw's 1,500,000-byte editable-asset limit.");
-  }
-  const expectedPreview = generationApprovalPreviewDimensions(value.width, value.height);
-  if (value.previewWidth !== expectedPreview.width || value.previewHeight !== expectedPreview.height) {
-    throw new Error('Generation approval preview utility request has contradictory preview dimensions.');
-  }
-  const bytes = Buffer.from(value.encodedBase64, 'base64');
-  const header = inspectImageHeader(bytes);
-  const display = displayImageDimensions(header);
-  if (value.mimeType !== header.mimeType || value.width !== display.width || value.height !== display.height) {
-    throw new Error('Generation approval preview utility request disagrees with its source header.');
-  }
-}
-
 export function assertValidateImageUtilityResponse(
   request: ValidateImageUtilityRequest,
   value: unknown,
@@ -382,46 +281,6 @@ export function assertValidateImageUtilityResponse(
     || value.height !== request.height) {
     throw new Error('Raster utility returned a malformed image-validation result.');
   }
-}
-
-export function assertRenderGenerationApprovalPreviewUtilityResponse(
-  request: RenderGenerationApprovalPreviewUtilityRequest,
-  value: unknown,
-): asserts value is Extract<UtilityResponse, { ok: true; kind: 'render-generation-approval-preview' }> {
-  if (!isRecord(value)
-    || !hasOnlyKeys(value, ['id', 'ok', 'kind', 'previewDataBase64'])
-    || !hasKeys(value, ['id', 'ok', 'kind', 'previewDataBase64'])
-    || value.id !== request.id
-    || value.ok !== true
-    || value.kind !== request.kind) {
-    throw new Error('Raster utility returned a malformed generation approval preview.');
-  }
-  assertStaticPng(value.previewDataBase64, request.previewWidth, request.previewHeight, MAX_GENERATION_APPROVAL_PREVIEW_BYTES, {
-    malformed: 'Raster utility returned a malformed generation approval preview PNG.',
-    limit: `Raster utility generation approval preview exceeds its ${MAX_GENERATION_APPROVAL_PREVIEW_BYTES}-byte PNG limit.`,
-    undecodable: 'Raster utility returned an undecodable generation approval preview PNG.',
-  });
-}
-
-/**
- * Progress is advisory rather than a terminal utility result. Relay only the
- * established finite 0–1/string shape for the active generation request; a
- * malformed or cross-lane message stays invisible while the terminal result,
- * timeout, or cancellation path remains authoritative.
- */
-export function isGenerationProgressUtilityResponse(
-  request: UtilityRequest,
-  value: unknown,
-): value is Extract<UtilityResponse, { ok: true; kind: 'generation-progress' }> {
-  if (request.kind !== 'generation-run' || !isRecord(value)) return false;
-  return value.id === request.id
-    && value.ok === true
-    && value.kind === 'generation-progress'
-    && typeof value.progress === 'number'
-    && Number.isFinite(value.progress)
-    && value.progress >= 0
-    && value.progress <= 1
-    && isBoundedUtilityString(value.message, MAX_GENERATION_PROGRESS_MESSAGE_BYTES);
 }
 
 export function isBoundedUtilityErrorResponse(value: unknown): value is { code: string; message: string } {
@@ -712,168 +571,6 @@ export function assertObservationUtilityResponse(
     throw new Error(`Raster utility observation result exceeds or contradicts its ${request.maxPixels}-pixel request contract.`);
   }
   assertObservationPng(result.data, width, height);
-}
-
-function expectedGeneratedSeed(request: GenerationUtilityRequest, index: number): number | undefined {
-  if (request.request.provider === 'stability') return request.request.seed === undefined ? undefined : request.request.seed + index;
-  if (request.request.provider === 'comfyui') return request.request.seed;
-  return undefined;
-}
-
-/** Validate provider-worker output before it can become preview, job, or canonical provenance input. */
-export function assertGenerationUtilityResponse(
-  request: GenerationUtilityRequest,
-  value: unknown,
-): asserts value is Extract<UtilityResponse, { ok: true; kind: 'generation-run' }> {
-  if (!isRecord(value)) throw new Error('Generation utility returned a malformed result.');
-  const response = value as Record<string, unknown>;
-  if (response.kind !== request.kind || !Array.isArray(response.outputs)) throw new Error('Generation utility returned a malformed result.');
-  if (response.outputs.length > request.request.resultCount) {
-    throw new Error(`Generation utility returned more than the requested ${request.request.resultCount} result${request.request.resultCount === 1 ? '' : 's'}.`);
-  }
-
-  const seenIds = new Set<string>();
-  const maxBase64Characters = Math.ceil(MAX_GENERATED_OUTPUT_BYTES / 3) * 4;
-  for (const [index, candidate] of response.outputs.entries()) {
-    if (!isRecord(candidate)
-      || !hasOnlyKeys(candidate, ['id', 'mimeType', 'data', 'width', 'height', 'seed', 'providerMetadata'])
-      || !hasKeys(candidate, ['id', 'mimeType', 'data', 'width', 'height'])
-      || !isNonEmptyString(candidate.id) || seenIds.has(candidate.id)
-      || !['image/png', 'image/webp', 'image/jpeg'].includes(String(candidate.mimeType))
-      || typeof candidate.data !== 'string' || candidate.data.length > maxBase64Characters || !isCanonicalBase64(candidate.data)
-      || !isPositiveInteger(candidate.width) || !isPositiveInteger(candidate.height)
-      || candidate.width > MAX_GENERATED_OUTPUT_SIDE || candidate.height > MAX_GENERATED_OUTPUT_SIDE
-      || !Number.isSafeInteger(candidate.width * candidate.height) || candidate.width * candidate.height > MAX_GENERATED_OUTPUT_PIXELS
-      || candidate.seed !== expectedGeneratedSeed(request, index)
-      || candidate.providerMetadata !== undefined && !isRecord(candidate.providerMetadata)) {
-      throw new Error('Generation utility returned a malformed result.');
-    }
-    if (candidate.providerMetadata !== undefined) {
-      assertUtilityJsonBudget(candidate.providerMetadata, {
-        label: 'Generation utility provider metadata',
-        maxBytes: MAX_GENERATION_PROVIDER_METADATA_BYTES,
-        maxNodes: MAX_GENERATION_PROVIDER_METADATA_NODES,
-        maxDepth: MAX_GENERATION_PROVIDER_METADATA_DEPTH,
-      });
-    }
-    const decodedBytes = base64DecodedByteLength(candidate.data);
-    if (decodedBytes < 1) throw new Error('Generation utility returned a malformed image result.');
-    if (decodedBytes > MAX_GENERATED_OUTPUT_BYTES) {
-      throw new Error(`Generation utility image result exceeds its ${MAX_GENERATED_OUTPUT_BYTES}-byte limit.`);
-    }
-    const bytes = Buffer.from(candidate.data, 'base64');
-    try {
-      const header = inspectImageHeader(bytes);
-      if (header.mimeType !== candidate.mimeType || header.width !== candidate.width || header.height !== candidate.height) throw new Error('header mismatch');
-    } catch {
-      throw new Error('Generation utility returned a malformed image result.');
-    }
-    seenIds.add(candidate.id);
-  }
-}
-
-/** Validate the retained provider output before sending it to the acceptance normalizer. */
-export function assertNormalizeGenerationAcceptanceInput(output: unknown): asserts output is GeneratedOutput {
-  if (!isRecord(output)
-    || !hasOnlyKeys(output, ['id', 'mimeType', 'data', 'width', 'height', 'seed', 'providerMetadata'])
-    || !hasKeys(output, ['id', 'mimeType', 'data', 'width', 'height'])
-    || !isNonEmptyString(output.id)
-    || !['image/png', 'image/webp', 'image/jpeg'].includes(String(output.mimeType))
-    || typeof output.data !== 'string'
-    || output.data.length > Math.ceil(MAX_GENERATED_OUTPUT_BYTES / 3) * 4
-    || !isCanonicalBase64(output.data)
-    || !isPositiveInteger(output.width) || !isPositiveInteger(output.height)
-    || output.width > MAX_GENERATED_OUTPUT_SIDE || output.height > MAX_GENERATED_OUTPUT_SIDE
-    || !Number.isSafeInteger(output.width * output.height) || output.width * output.height > MAX_GENERATED_OUTPUT_PIXELS
-    || output.seed !== undefined && !Number.isSafeInteger(output.seed)
-    || output.providerMetadata !== undefined && !isRecord(output.providerMetadata)) {
-    throw new Error('Generated acceptance input is malformed.');
-  }
-  if (output.providerMetadata !== undefined) {
-    assertUtilityJsonBudget(output.providerMetadata, {
-      label: 'Generated acceptance provider metadata',
-      maxBytes: MAX_GENERATION_PROVIDER_METADATA_BYTES,
-      maxNodes: MAX_GENERATION_PROVIDER_METADATA_NODES,
-      maxDepth: MAX_GENERATION_PROVIDER_METADATA_DEPTH,
-    });
-  }
-  const decodedBytes = base64DecodedByteLength(output.data);
-  if (decodedBytes < 1 || decodedBytes > MAX_GENERATED_OUTPUT_BYTES) throw new Error('Generated acceptance input exceeds the preview byte contract.');
-  try {
-    const header = inspectImageHeader(Buffer.from(output.data, 'base64'));
-    if (header.mimeType !== output.mimeType || header.width !== output.width || header.height !== output.height) throw new Error('header mismatch');
-  } catch {
-    throw new Error('Generated acceptance input has a malformed image contract.');
-  }
-}
-
-/** Validate a normalized accepted copy before it can reach quantization or canonical state. */
-export function assertNormalizeGenerationAcceptanceUtilityResponse(
-  request: NormalizeGenerationAcceptanceUtilityRequest,
-  value: unknown,
-): asserts value is Extract<UtilityResponse, { ok: true; kind: 'normalize-generation-acceptance' }> {
-  assertNormalizeGenerationAcceptanceInput(request.output);
-  if (!isRecord(value) || value.kind !== request.kind || !isRecord(value.result)) {
-    throw new Error('Raster utility returned a malformed generation-acceptance result.');
-  }
-  const result = value.result;
-  const sourceByteLength = base64DecodedByteLength(request.output.data);
-  const exceedsInlineGeometry = request.output.width > MAX_INLINE_IMAGE_DIMENSION || request.output.height > MAX_INLINE_IMAGE_DIMENSION || request.output.width * request.output.height > MAX_INLINE_IMAGE_PIXELS;
-  if (result.status === 'preview-only') {
-    if (!hasOnlyKeys(result, ['status', 'reason', 'message', 'guidance'])
-      || !hasKeys(result, ['status', 'reason', 'message', 'guidance'])
-      || !isNonEmptyString(result.message) || !isNonEmptyString(result.guidance)
-      || result.reason === 'inline-geometry-limit' && !exceedsInlineGeometry
-      || result.reason === 'encoded-byte-limit' && (exceedsInlineGeometry || sourceByteLength <= MAX_INLINE_ASSET_BYTES)
-      || result.reason !== 'inline-geometry-limit' && result.reason !== 'encoded-byte-limit') {
-      throw new Error('Raster utility returned a malformed generation preview-only result.');
-    }
-    return;
-  }
-  if (result.status !== 'ready'
-    || !hasOnlyKeys(result, ['status', 'mimeType', 'data', 'width', 'height', 'normalization'])
-    || !hasKeys(result, ['status', 'mimeType', 'data', 'width', 'height'])
-    || exceedsInlineGeometry
-    || !['image/png', 'image/webp', 'image/jpeg'].includes(String(result.mimeType))
-    || typeof result.data !== 'string' || !isCanonicalBase64(result.data)
-    || result.width !== request.output.width || result.height !== request.output.height) {
-    throw new Error('Raster utility returned a malformed generation-acceptance result.');
-  }
-  const acceptedByteLength = base64DecodedByteLength(result.data);
-  if (acceptedByteLength < 1 || acceptedByteLength > MAX_INLINE_ASSET_BYTES) {
-    throw new Error(`Raster utility generation acceptance exceeds the ${MAX_INLINE_ASSET_BYTES}-byte limit.`);
-  }
-  const acceptedBytes = Buffer.from(result.data, 'base64');
-  try {
-    const header = inspectImageHeader(acceptedBytes);
-    if (header.mimeType !== result.mimeType || header.width !== result.width || header.height !== result.height) throw new Error('header mismatch');
-  } catch {
-    throw new Error('Raster utility returned a malformed normalized image.');
-  }
-
-  if (sourceByteLength <= MAX_INLINE_ASSET_BYTES) {
-    if (result.normalization !== undefined || result.mimeType !== request.output.mimeType || result.data !== request.output.data) {
-      throw new Error('Raster utility changed a generation result that already met acceptance policy.');
-    }
-    return;
-  }
-  if (!isRecord(result.normalization)) throw new Error('Raster utility omitted generation normalization provenance.');
-  const normalization = result.normalization;
-  if (!hasOnlyKeys(normalization, ['method', 'sourceOutputId', 'sourceMimeType', 'acceptedMimeType', 'sourceByteLength', 'acceptedByteLength', 'sourceSha256', 'acceptedSha256', 'width', 'height', 'quality'])
-    || !hasKeys(normalization, ['method', 'sourceOutputId', 'sourceMimeType', 'acceptedMimeType', 'sourceByteLength', 'acceptedByteLength', 'sourceSha256', 'acceptedSha256', 'width', 'height'])
-    || normalization.sourceOutputId !== request.output.id
-    || normalization.sourceMimeType !== request.output.mimeType
-    || normalization.acceptedMimeType !== result.mimeType
-    || normalization.sourceByteLength !== sourceByteLength
-    || normalization.acceptedByteLength !== acceptedByteLength
-    || normalization.sourceSha256 !== createHash('sha256').update(Buffer.from(request.output.data, 'base64')).digest('hex')
-    || normalization.acceptedSha256 !== createHash('sha256').update(acceptedBytes).digest('hex')
-    || normalization.width !== request.output.width || normalization.height !== request.output.height
-    || normalization.method === 'png-reencode' && (result.mimeType !== 'image/png' || normalization.quality !== undefined)
-    || normalization.method === 'webp-quality' && (result.mimeType !== 'image/webp' || !GENERATION_ACCEPTANCE_WEBP_QUALITIES.includes(normalization.quality as never))
-    || normalization.method !== 'png-reencode' && normalization.method !== 'webp-quality') {
-    throw new Error('Raster utility returned contradictory generation normalization provenance.');
-  }
 }
 
 function isMimeType(value: unknown): value is string {
