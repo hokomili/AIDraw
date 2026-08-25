@@ -17,6 +17,8 @@ describe('durable transaction trace policy', () => {
   it('accepts only the exact writer envelope and canonical bounded transaction', () => {
     const valid = fixture();
     expect(parseTransactionTraceEntry(valid, valid.documentId)).toEqual(valid);
+    const batchBound = { ...valid, requestFingerprint: 'a'.repeat(64) };
+    expect(parseTransactionTraceEntry(batchBound, valid.documentId)).toEqual(batchBound);
     const missingVersion = structuredClone(valid) as unknown as Record<string, unknown>; delete missingVersion.version;
     const malformed: Array<[string, unknown]> = [
       ['non-record', null],
@@ -30,6 +32,7 @@ describe('durable transaction trace policy', () => {
       ['unsafe revision', { ...valid, revision: Number.MAX_SAFE_INTEGER + 1 }],
       ['noncanonical timestamp', { ...valid, recordedAt: '2026-08-12T00:00:00Z' }],
       ['unknown outcome', { ...valid, outcome: 'replayed' }],
+      ['invalid request fingerprint', { ...valid, requestFingerprint: 'not-a-digest' }],
       ['missing transaction', { ...valid, transaction: undefined }],
       ['foreign transaction document', { ...valid, transaction: { ...valid.transaction, documentId: 'document-other' } }],
       ['invalid canonical operation', { ...valid, transaction: { ...valid.transaction, operations: [{ kind: 'document.rename', name: '' }] } }],

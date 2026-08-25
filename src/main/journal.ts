@@ -1,12 +1,14 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { appendFile, lstat, mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { CanvasTransactionSchema, applyTransaction, migrateDocument, type AIDrawDocument, type CanvasTransaction } from '@aidraw/core';
+import { assertStrictNativeEditableTransaction } from './transaction-policy';
 
 const WORKSPACE_FILE = 'workspace.json';
 const WORKSPACE_QUEUE = Symbol('workspace');
 const JOURNAL_PREFIX = 'document-';
-const SNAPSHOT_RECORD_KEYS = new Set(['type', 'document']);
+const LEGACY_SNAPSHOT_RECORD_KEYS = new Set(['type', 'document']);
+const SNAPSHOT_RECORD_KEYS = new Set(['type', 'document', 'incarnationId']);
 const TRANSACTION_RECORD_KEYS = new Set(['type', 'transaction']);
 const WORKSPACE_KEYS = new Set(['version', 'documentIds', 'activeDocumentId']);
 
@@ -18,6 +20,7 @@ interface PersistedWorkspace {
 
 export interface RecoveredWorkspace {
   documents: AIDrawDocument[];
+  documentIncarnations: Record<string, string>;
   activeDocumentId?: string;
 }
 
@@ -46,23 +49,42 @@ function journalEntryPriority(entry: string, documentId: string): number {
   return entry === legacyJournalFilename(documentId) ? 1 : 0;
 }
 
-function recoverJournal(source: string): AIDrawDocument | undefined {
+function validIncarnationId(value: unknown): value is string {
+  return typeof value === 'string' && (/^[0-9a-f]{64}$/u.test(value)
+    || /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(value));
+}
+
+function legacyIncarnationId(document: AIDrawDocument): string {
+  return createHash('sha256').update(JSON.stringify(document)).digest('hex');
+}
+
+function recoverJournal(source: string): { document: AIDrawDocument; incarnationId: string } | undefined {
   let document: AIDrawDocument | undefined;
+  let incarnationId: string | undefined;
   for (const line of source.split(/\r?\n/)) {
     if (!line.trim()) continue;
     let value: unknown;
-    try { value = JSON.parse(line); } catch { return document; }
+    try { value = JSON.parse(line); }
+    catch { return document && incarnationId ? { document, incarnationId } : undefined; }
     if (!document) {
-      if (!isRecord(value) || !hasExactKeys(value, SNAPSHOT_RECORD_KEYS) || value.type !== 'snapshot') return undefined;
+      if (!isRecord(value) || value.type !== 'snapshot'
+        || (!hasExactKeys(value, SNAPSHOT_RECORD_KEYS) && !hasExactKeys(value, LEGACY_SNAPSHOT_RECORD_KEYS))) return undefined;
       try { document = migrateDocument(value.document); } catch { return undefined; }
+      if (Object.hasOwn(value, 'incarnationId')) {
+        if (!validIncarnationId(value.incarnationId)) return undefined;
+        incarnationId = value.incarnationId;
+      } else incarnationId = legacyIncarnationId(document);
       continue;
     }
     if (!isRecord(value) || !hasExactKeys(value, TRANSACTION_RECORD_KEYS) || value.type !== 'transaction') break;
     const transaction = CanvasTransactionSchema.safeParse(value.transaction);
     if (!transaction.success || transaction.data.documentId !== document.id) break;
-    try { document = applyTransaction(document, transaction.data).document; } catch { break; }
+    try {
+      assertStrictNativeEditableTransaction(transaction.data);
+      document = applyTransaction(document, transaction.data).document;
+    } catch { break; }
   }
-  return document;
+  return document && incarnationId ? { document, incarnationId } : undefined;
 }
 
 function parseWorkspace(value: unknown): PersistedWorkspace | undefined {
@@ -136,6 +158,8 @@ export class RecoveryJournal {
   append(documentId: string, transaction: CanvasTransaction): Promise<void> {
     const parsed = CanvasTransactionSchema.safeParse(transaction);
     if (!parsed.success || parsed.data.documentId !== documentId) return Promise.reject(new Error('Recovery transaction is invalid or belongs to another document.'));
+    try { assertStrictNativeEditableTransaction(parsed.data); }
+    catch (error) { return Promise.reject(error); }
     let record: string;
     try { record = `${JSON.stringify({ type: 'transaction', transaction: parsed.data })}\n`; }
     catch { return Promise.reject(new Error('Recovery transaction must be JSON-serializable.')); }
@@ -146,11 +170,12 @@ export class RecoveryJournal {
     });
   }
 
-  compact(document: AIDrawDocument): Promise<void> {
+  compact(document: AIDrawDocument, incarnationId: string = randomUUID()): Promise<void> {
     let snapshot: AIDrawDocument; let record: string;
     try {
+      if (!validIncarnationId(incarnationId)) throw new Error('Recovery document incarnation is invalid.');
       snapshot = migrateDocument(document);
-      record = `${JSON.stringify({ type: 'snapshot', document: snapshot })}\n`;
+      record = `${JSON.stringify({ type: 'snapshot', document: snapshot, incarnationId })}\n`;
     } catch (error) { return Promise.reject(error); }
     return this.enqueue(snapshot.id, async () => {
       await mkdir(this.root, { recursive: true });
@@ -196,15 +221,15 @@ export class RecoveryJournal {
 
   async recoverWorkspace(): Promise<RecoveredWorkspace> {
     let entries;
-    try { entries = await readdir(this.root, { withFileTypes: true }); } catch { return { documents: [] }; }
-    const recovered = new Map<string, { document: AIDrawDocument; priority: number }>();
+    try { entries = await readdir(this.root, { withFileTypes: true }); } catch { return { documents: [], documentIncarnations: {} }; }
+    const recovered = new Map<string, { document: AIDrawDocument; incarnationId: string; priority: number }>();
     for (const entry of entries.filter((value) => value.isFile() && value.name.endsWith('.jsonl')).sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0)) {
       try {
-        const document = recoverJournal(await readFile(join(this.root, entry.name), 'utf8'));
-        if (!document) continue;
-        const priority = journalEntryPriority(entry.name, document.id);
-        const current = recovered.get(document.id);
-        if (priority > 0 && (!current || priority > current.priority)) recovered.set(document.id, { document, priority });
+        const result = recoverJournal(await readFile(join(this.root, entry.name), 'utf8'));
+        if (!result) continue;
+        const priority = journalEntryPriority(entry.name, result.document.id);
+        const current = recovered.get(result.document.id);
+        if (priority > 0 && (!current || priority > current.priority)) recovered.set(result.document.id, { ...result, priority });
       } catch {
         // A corrupt journal is isolated; the remaining documents can still recover.
       }
@@ -226,7 +251,8 @@ export class RecoveryJournal {
     const activeDocumentId = workspace?.activeDocumentId && recoveredDocuments.has(workspace.activeDocumentId)
       ? workspace.activeDocumentId
       : undefined;
-    return { documents, activeDocumentId };
+    const documentIncarnations = Object.fromEntries(orderedIds.map((id) => [id, recovered.get(id)!.incarnationId]));
+    return { documents, documentIncarnations, activeDocumentId };
   }
 
   async recover(): Promise<AIDrawDocument[]> {

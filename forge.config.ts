@@ -6,6 +6,7 @@ import { MakerRpm } from '@electron-forge/maker-rpm';
 import { VitePlugin } from '@electron-forge/plugin-vite';
 import { AutoUnpackNativesPlugin } from '@electron-forge/plugin-auto-unpack-natives';
 import { SafeDmgMaker } from './scripts/safe-dmg-maker.mjs';
+import { capturePackageBuildInput } from './scripts/package-build-input.mjs';
 import { reservePackageGeneration, resolvePackageOutputRoot } from './scripts/package-output-policy.mjs';
 import { resolve } from 'node:path';
 import process from 'node:process';
@@ -107,6 +108,7 @@ const config: ForgeConfig = {
   hooks: {
     prePackage: async (_forgeConfig, platform, arch) => {
       await reservePackageGeneration({ outputDirectory: packageOutputRoot, platform, architecture: arch });
+      await capturePackageBuildInput({ outputDirectory: packageOutputRoot });
     },
     packageAfterCopy: async (_forgeConfig, buildPath, _electronVersion, platform, arch) => {
       const { flipFuses, FuseV1Options, FuseVersion } = await import('@electron/fuses');

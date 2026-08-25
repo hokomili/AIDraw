@@ -23,6 +23,7 @@ import {
   type TextStyleRange,
   type Transform,
 } from '@aidraw/core';
+import { inspectNativeEditableSvgPathData } from '../common/path-conversion';
 import { inspectImageHeader, MAX_INLINE_IMAGE_DIMENSION, MAX_INLINE_IMAGE_PIXELS } from './transaction-policy';
 
 type Attributes = Record<string, unknown>;
@@ -551,8 +552,11 @@ export function importEditableSvg(source: string, name: string): SvgImportResult
     if (node.tag === 'path' || node.tag === 'polygon' || node.tag === 'polyline') {
       const pathData = node.tag === 'path' ? String(node.attributes.d ?? '') : pathFromPoints(parsePoints(node.attributes.points), node.tag === 'polygon');
       if (!pathData.trim()) return undefined;
+      let pathInspection: ReturnType<typeof inspectNativeEditableSvgPathData>;
+      try { pathInspection = inspectNativeEditableSvgPathData(pathData); }
+      catch { throw new Error(INVALID_CANONICAL_SVG_ERROR); }
       const bounds = { x: 0, y: 0, width, height };
-      const object: PathObject = { ...base(node, style, visuallyFinite(matrix), node.tag === 'path' ? 'Path' : node.tag === 'polygon' ? 'Polygon' : 'Polyline'), type: 'path', pathData, closed: node.tag === 'polygon' || /[zZ]\s*$/.test(pathData), fill: paint(style.fill, bounds, node.tag === 'polyline' ? 'none' : '#000000', style.color), stroke: stroke(style, bounds), fillRule: style['fill-rule'] === 'evenodd' ? 'evenodd' : 'nonzero' };
+      const object: PathObject = { ...base(node, style, visuallyFinite(matrix), node.tag === 'path' ? 'Path' : node.tag === 'polygon' ? 'Polygon' : 'Polyline'), type: 'path', pathData, closed: pathInspection.closed, fill: paint(style.fill, bounds, node.tag === 'polyline' ? 'none' : '#000000', style.color), stroke: stroke(style, bounds), fillRule: style['fill-rule'] === 'evenodd' ? 'evenodd' : 'nonzero' };
       if (style.fill?.startsWith('url(')) warnings.add('Object-bounding-box gradients on arbitrary SVG paths use the artboard as a conservative editable bound.');
       return finish(object, style, asMask);
     }

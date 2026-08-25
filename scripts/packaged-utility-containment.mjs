@@ -30,6 +30,26 @@ const UNINITIALIZED_VALUE = Object.freeze({ kind: 'uninitialized' });
 // The fixture identity keeps source tests portable and is never selected by
 // scripts/verify-package.mjs.
 const EXACT_EMITTED_SUBJECTS = Object.freeze({
+  'reviewed-main-worker-pair-20260825-published-pixel-tile-contract': Object.freeze({
+    main: Object.freeze({
+      bytes: 2_792_944,
+      sha256: '89fb235085ff5c8d498ae08ea2d2c7ef37eb55cd2fe5768f7d526212619f4386',
+    }),
+    worker: Object.freeze({
+      bytes: 226_266,
+      sha256: '67e5684f1e4dce03350e8caa506de9a4eafe7dbb1ec3cb630cbc5dc6db0581b5',
+    }),
+  }),
+  'reviewed-main-worker-pair-20260825-authoring-contract': Object.freeze({
+    main: Object.freeze({
+      bytes: 2_786_217,
+      sha256: '73779f92fc830f4ef1b99708abebdea2d5196f72f7b75629a7eae042a4c827db',
+    }),
+    worker: Object.freeze({
+      bytes: 226_266,
+      sha256: '67e5684f1e4dce03350e8caa506de9a4eafe7dbb1ec3cb630cbc5dc6db0581b5',
+    }),
+  }),
   'reviewed-main-worker-pair-20260822': Object.freeze({
     main: Object.freeze({
       bytes: 2_725_816,

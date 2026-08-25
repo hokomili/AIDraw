@@ -3,14 +3,19 @@ import { access, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink,
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
+import Ajv2020 from 'ajv/dist/2020.js';
 import { DocumentService } from '@main/document-service';
 import { RecoveryJournal } from '@main/journal';
 import { McpHost, parseFolderTrustSettings, parsePreferredPortSettings } from '@main/mcp-host';
+import { BatchManager } from '@main/batch-manager';
 import { TransactionTraceStore } from '@main/trace-store';
 import { createCanvas, loadImage } from '@napi-rs/canvas';
-import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createId, createPixelDocument, createPixelSprite, createPixelTilemap, createPixelTileset, decodeTiledGid, encodeTiledGid, nowIso, readPixel, readTileAt } from '@aidraw/core';
+import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createId, createIllustrationDocument, createPixelDocument, createPixelSprite, createPixelTilemap, createPixelTileset, decodeTiledGid, encodeTiledGid, nowIso, readPixel, readTileAt } from '@aidraw/core';
 import { LATEST_PROTOCOL_VERSION } from '@modelcontextprotocol/server';
 import { MCP_BRIDGE_PROVISIONAL_HEADER } from '@main/mcp-authority';
+import { renderIllustration } from '@main/render-document';
+import { illustrationToSvg } from '@main/export-document';
+import { TransactionImageWorkContext } from '@main/transaction-policy';
 
 const temporaryPaths: string[] = [];
 const hosts: McpHost[] = [];
@@ -59,15 +64,33 @@ async function callTool(url: string, headers: Record<string, string>, id: number
 }
 
 interface DiscoverySchema {
+  anyOf?: DiscoverySchema[];
+  allOf?: DiscoverySchema[];
   const?: unknown;
   default?: unknown;
   description?: string;
   enum?: unknown[];
+  items?: DiscoverySchema;
+  maxItems?: number;
+  maxLength?: number;
   maximum?: number;
+  minimum?: number;
+  oneOf?: DiscoverySchema[];
+  pattern?: string;
   properties?: Record<string, DiscoverySchema>;
   required?: string[];
   additionalProperties?: boolean;
   type?: string | string[];
+}
+
+function findDiscoverySchema(schema: DiscoverySchema | undefined, predicate: (candidate: DiscoverySchema) => boolean): DiscoverySchema | undefined {
+  if (!schema) return undefined;
+  if (predicate(schema)) return schema;
+  for (const candidate of [...(schema.anyOf ?? []), ...(schema.oneOf ?? []), ...(schema.allOf ?? []), ...Object.values(schema.properties ?? {}), ...(schema.items ? [schema.items] : [])]) {
+    const found = findDiscoverySchema(candidate, predicate);
+    if (found) return found;
+  }
+  return undefined;
 }
 
 function expectFlatActionSchema(schema: DiscoverySchema | undefined, actions: string[], properties: string[]): void {
@@ -279,6 +302,7 @@ describe('authenticated stateful MCP contract', () => {
     expect(initialized.result?.protocolVersion).toBe(LATEST_PROTOCOL_VERSION);
     expect(initialized.result?.instructions).toEqual(expect.stringContaining('aidraw_help'));
     expect(initialized.result?.instructions).toEqual(expect.stringContaining('human alone approves'));
+    expect(initialized.result?.instructions).toEqual(expect.stringContaining('Automatic MCP availability grants no file authority'));
     expect(initialized.result?.instructions).toEqual(expect.stringContaining('canvas_observe'));
     expect(initialized.result?.instructions).toEqual(expect.stringContaining('404 unknown_session'));
     const sessionId = initialize.headers.get('mcp-session-id');
@@ -309,7 +333,131 @@ describe('authenticated stateful MCP contract', () => {
     expect(documentSchema?.properties?.kind).toMatchObject({ default: 'illustration', description: expect.stringContaining('new only') });
     expect(documentSchema?.properties?.path?.description).toContain('open/save-as only');
     expect(tools.find((tool) => tool.name === 'job_manage')?.inputSchema?.properties?.timeoutMs).toMatchObject({ default: 0, maximum: 30_000, description: expect.stringContaining('wait only') });
-    expect(tools.find((tool) => tool.name === 'canvas_apply')?.inputSchema?.properties?.clientOperationId?.description).toContain('idempotency');
+    const canvasApplySchema = tools.find((tool) => tool.name === 'canvas_apply')?.inputSchema;
+    expect(canvasApplySchema?.properties?.clientOperationId?.description).toContain('idempotency');
+    const operationItems = canvasApplySchema?.properties?.operations?.items;
+    const validateAdvertisedOperation = new Ajv2020({ strict: false, allErrors: true }).compile(operationItems as object);
+    for (const incomplete of [
+      { kind: 'illustration.object.add' },
+      { kind: 'illustration.object.replace' },
+      { kind: 'illustration.object.move' },
+      { kind: 'illustration.object.delete' },
+      { kind: 'pixel.cel.region' },
+      { kind: 'pixel.tilemap.region' },
+      { kind: 'pixel.tile-stamps.replace' },
+      { kind: 'pixel.tile-stamp.place' },
+    ]) expect(validateAdvertisedOperation(incomplete), JSON.stringify(incomplete)).toBe(false);
+    expect(validateAdvertisedOperation({ kind: 'illustration.object.add', object: { id: 'schema-object', name: 'Schema object', layerId: 'vector-layer', type: 'shape', shape: 'rectangle', width: 10, height: 12 } })).toBe(true);
+    expect(validateAdvertisedOperation({ kind: 'pixel.cel.region', spriteId: 'sprite', celId: 'cel', runs: [{ x: 0, y: 0, length: 4, index: 3 }], expectedRevision: 2 })).toBe(true);
+    expect(validateAdvertisedOperation({ kind: 'pixel.tilemap.region', mapId: 'map', layerId: 'tiles', runs: [{ x: 0, y: 0, length: 4, gid: 7 }], expectedRevision: 3 })).toBe(true);
+    expect(validateAdvertisedOperation({ kind: 'pixel.tile-stamps.replace', stamps: [{ id: 'stamp', name: 'Stamp', width: 2, height: 1, anchorX: 0, anchorY: 0, cells: [{ x: 0, y: 0, gid: 7 }] }] })).toBe(true);
+    expect(validateAdvertisedOperation({ kind: 'pixel.tile-stamp.place', stampId: 'stamp', mapId: 'map', layerId: 'tiles', x: 4, y: 5, transform: 'rotate-clockwise', expectedRevision: 3 })).toBe(true);
+    expect(validateAdvertisedOperation({ kind: 'document.rename', name: 'Other exact runtime family' })).toBe(true);
+    const addOperationSchema = findDiscoverySchema(operationItems, (candidate) => candidate.properties?.kind?.const === 'illustration.object.add');
+    expect(addOperationSchema).toMatchObject({ required: expect.arrayContaining(['kind', 'object']), additionalProperties: false });
+    expect(addOperationSchema?.properties?.object?.description).toContain('Omit revision/createdAt/updatedAt/createdBy');
+    const shapeSchema = findDiscoverySchema(addOperationSchema?.properties?.object, (candidate) => candidate.properties?.type?.const === 'shape' && candidate.properties?.shape?.const === 'rectangle');
+    expect(shapeSchema).toMatchObject({ required: expect.arrayContaining(['id', 'name', 'layerId', 'type', 'shape', 'width', 'height']), additionalProperties: false });
+    expect(shapeSchema?.properties).toMatchObject({
+      visible: { default: true }, locked: { default: false }, opacity: { default: 1 }, blendMode: { default: 'normal' },
+      fill: { default: { kind: 'solid', color: '#000000' } },
+      stroke: { default: { paint: { kind: 'solid', color: '#000000' }, width: 1, opacity: 1, lineCap: 'round', lineJoin: 'round', dash: [] } },
+      cornerRadius: { default: 0 },
+    });
+    expect(shapeSchema?.properties?.sides).toBeUndefined();
+    expect(shapeSchema?.properties?.innerRadius).toBeUndefined();
+    expect(shapeSchema?.properties?.stroke?.properties).toEqual(expect.objectContaining({ paint: expect.any(Object), width: expect.any(Object), opacity: expect.any(Object), lineCap: expect.any(Object), lineJoin: expect.any(Object), dash: expect.any(Object) }));
+    expect(shapeSchema?.properties?.transform?.properties).toMatchObject({
+      x: { default: 0 }, y: { default: 0 }, scaleX: { default: 1 }, scaleY: { default: 1 }, rotation: { default: 0 }, skewX: { default: 0 }, skewY: { default: 0 },
+    });
+    const pathSchema = findDiscoverySchema(addOperationSchema?.properties?.object, (candidate) => candidate.properties?.type?.const === 'path');
+    expect(pathSchema).toMatchObject({ required: expect.arrayContaining(['pathData']) });
+    expect(pathSchema?.properties?.pathData).toMatchObject({
+      maxLength: 1_000_000,
+      description: expect.stringContaining('2–7,000 effective native nodes after arc conversion and close coalescing'),
+    });
+    expect(pathSchema?.properties?.pathData?.description).toContain('spans more than 0.00001° after ellipse normalization');
+    expect(pathSchema?.properties?.stroke).toMatchObject({ default: { paint: { kind: 'solid', color: '#000000' }, width: 1, opacity: 1, lineCap: 'round', lineJoin: 'round', dash: [] } });
+    expect(pathSchema?.properties?.closed).toMatchObject({ description: expect.stringContaining('derives it from the final SVG close-path command') });
+    expect(pathSchema?.properties?.closed?.default).toBeUndefined();
+    const lineSchema = findDiscoverySchema(addOperationSchema?.properties?.object, (candidate) => candidate.properties?.shape?.const === 'line');
+    expect(lineSchema?.properties?.fill).toMatchObject({ default: { kind: 'none' } });
+    expect(lineSchema?.properties?.sides).toBeUndefined();
+    expect(lineSchema?.properties?.innerRadius).toBeUndefined();
+    expect(lineSchema?.properties?.cornerRadius).toBeUndefined();
+    const polygonSchema = findDiscoverySchema(addOperationSchema?.properties?.object, (candidate) => candidate.properties?.shape?.const === 'polygon');
+    expect(polygonSchema?.properties?.sides).toMatchObject({ default: 6, minimum: 3, maximum: 1_000 });
+    expect(polygonSchema?.properties?.innerRadius).toBeUndefined();
+    expect(polygonSchema?.properties?.cornerRadius).toBeUndefined();
+    const starSchema = findDiscoverySchema(addOperationSchema?.properties?.object, (candidate) => candidate.properties?.shape?.const === 'star');
+    expect(starSchema?.properties).toMatchObject({ sides: { default: 5 }, innerRadius: { default: 0.45 } });
+    expect(starSchema?.properties?.cornerRadius).toBeUndefined();
+    const vectorStrokeSchema = findDiscoverySchema(addOperationSchema?.properties?.object, (candidate) => candidate.properties?.type?.const === 'vector-stroke');
+    expect(vectorStrokeSchema).toMatchObject({ required: expect.arrayContaining(['points']) });
+    expect(vectorStrokeSchema?.properties?.brush).toMatchObject({ default: { size: 4, thinning: 0.5, smoothing: 0.5, streamline: 0.5, simulatePressure: true, color: '#000000' } });
+    const textSchema = findDiscoverySchema(addOperationSchema?.properties?.object, (candidate) => candidate.properties?.type?.const === 'text');
+    expect(textSchema?.properties).toMatchObject({ width: { default: 600 }, height: { default: 80 }, align: { default: 'left' }, lineHeight: { default: 1.2 }, ranges: { default: [] } });
+    const imageSchema = findDiscoverySchema(addOperationSchema?.properties?.object, (candidate) => candidate.properties?.type?.const === 'image');
+    expect(imageSchema).toMatchObject({ required: expect.arrayContaining(['assetId', 'width', 'height']), additionalProperties: false });
+    expect(imageSchema?.properties?.filters).toMatchObject({ default: [] });
+    expect(imageSchema?.properties?.crop?.description).toContain('derives source dimensions from the embedded asset');
+    const groupSchema = findDiscoverySchema(addOperationSchema?.properties?.object, (candidate) => candidate.properties?.type?.const === 'group');
+    expect(groupSchema?.properties?.childIds).toMatchObject({ default: [] });
+    const replaceOperationSchema = findDiscoverySchema(operationItems, (candidate) => candidate.properties?.kind?.const === 'illustration.object.replace');
+    expect(replaceOperationSchema).toMatchObject({ required: expect.arrayContaining(['kind', 'object', 'expectedRevision']), additionalProperties: false, description: expect.stringContaining('partial patches are rejected') });
+    const replacementShapes = Object.fromEntries(['rectangle', 'ellipse', 'line', 'arrow', 'polygon', 'star'].map((shape) => [shape, findDiscoverySchema(
+      replaceOperationSchema?.properties?.object,
+      (candidate) => candidate.properties?.type?.const === 'shape' && candidate.properties?.shape?.const === shape,
+    )]));
+    expect(Object.values(replacementShapes).every(Boolean)).toBe(true);
+    expect(replacementShapes.rectangle?.required).toContain('cornerRadius');
+    expect(replacementShapes.polygon?.required).toContain('sides');
+    expect(replacementShapes.star?.required).toEqual(expect.arrayContaining(['sides', 'innerRadius']));
+    expect(replacementShapes.rectangle?.properties?.cornerRadius?.default).toBeUndefined();
+    expect(replacementShapes.polygon?.properties?.sides?.default).toBeUndefined();
+    expect(replacementShapes.star?.properties?.sides?.default).toBeUndefined();
+    expect(replacementShapes.star?.properties?.innerRadius?.default).toBeUndefined();
+    expect(replacementShapes.rectangle?.properties?.cornerRadius?.description).toContain('supply 0');
+    expect(replacementShapes.polygon?.properties?.sides?.description).toContain('supply 6');
+    expect(replacementShapes.star?.properties?.sides?.description).toContain('supply 5');
+    expect(replacementShapes.star?.properties?.innerRadius?.description).toContain('supply 0.45');
+    for (const shape of ['line', 'arrow']) {
+      const fill = replacementShapes[shape]?.properties?.fill;
+      expect(findDiscoverySchema(fill, (candidate) => candidate.properties?.kind?.const === 'none')).toBeTruthy();
+      expect(findDiscoverySchema(fill, (candidate) => candidate.properties?.kind?.const === 'solid')).toBeUndefined();
+      expect(fill?.description).toContain('no fill-rendering surface');
+    }
+    expect(replacementShapes.rectangle?.properties?.sides).toBeUndefined();
+    expect(replacementShapes.rectangle?.properties?.innerRadius).toBeUndefined();
+    for (const shape of ['ellipse', 'line', 'arrow']) {
+      expect(replacementShapes[shape]?.properties?.sides).toBeUndefined();
+      expect(replacementShapes[shape]?.properties?.innerRadius).toBeUndefined();
+      expect(replacementShapes[shape]?.properties?.cornerRadius).toBeUndefined();
+    }
+    expect(replacementShapes.polygon?.properties?.innerRadius).toBeUndefined();
+    expect(replacementShapes.polygon?.properties?.cornerRadius).toBeUndefined();
+    expect(replacementShapes.star?.properties?.cornerRadius).toBeUndefined();
+    const groupedAddSchema = findDiscoverySchema(operationItems, (candidate) => candidate.properties?.kind?.const === 'illustration.object.add' && candidate.required?.includes('parentGroupId') === true);
+    expect(groupedAddSchema).toMatchObject({ required: expect.arrayContaining(['parentGroupId']), additionalProperties: false });
+    const groupedMoveSchema = findDiscoverySchema(operationItems, (candidate) => candidate.properties?.kind?.const === 'illustration.object.move' && candidate.required?.includes('parentGroupId') === true);
+    expect(groupedMoveSchema).toMatchObject({ required: expect.arrayContaining(['parentGroupId']), additionalProperties: false });
+    const pixelRegionSchema = findDiscoverySchema(operationItems, (candidate) => candidate.properties?.kind?.const === 'pixel.cel.region');
+    expect(pixelRegionSchema).toMatchObject({ required: ['kind', 'spriteId', 'celId', 'runs', 'expectedRevision'], additionalProperties: false });
+    expect(pixelRegionSchema?.properties?.runs?.maxItems).toBe(65_536);
+    expect(pixelRegionSchema?.properties?.runs?.items?.properties?.index).toMatchObject({ minimum: 0, maximum: 255 });
+    const tileRegionSchema = findDiscoverySchema(operationItems, (candidate) => candidate.properties?.kind?.const === 'pixel.tilemap.region');
+    expect(tileRegionSchema).toMatchObject({ required: ['kind', 'mapId', 'layerId', 'runs', 'expectedRevision'], additionalProperties: false });
+    expect(tileRegionSchema?.properties?.runs?.items?.properties?.gid).toMatchObject({ minimum: 0, maximum: 0xffff_ffff, description: expect.stringContaining('observed attached tileset') });
+    const tileStampsSchema = findDiscoverySchema(operationItems, (candidate) => candidate.properties?.kind?.const === 'pixel.tile-stamps.replace');
+    expect(tileStampsSchema).toMatchObject({ required: ['kind', 'stamps'], additionalProperties: false });
+    expect(tileStampsSchema?.properties?.stamps?.maxItems).toBe(1_024);
+    expect(tileStampsSchema?.properties?.stamps?.items).toMatchObject({ required: ['id', 'name', 'width', 'height', 'anchorX', 'anchorY', 'cells'], additionalProperties: false });
+    const tilePlaceSchema = findDiscoverySchema(operationItems, (candidate) => candidate.properties?.kind?.const === 'pixel.tile-stamp.place');
+    expect(tilePlaceSchema).toMatchObject({ required: ['kind', 'stampId', 'mapId', 'layerId', 'x', 'y', 'expectedRevision'], additionalProperties: false });
+    expect(tilePlaceSchema?.properties?.transform?.enum).toEqual(['flip-horizontal', 'flip-vertical', 'rotate-clockwise', 'rotate-counterclockwise']);
+    const fallbackSchema = findDiscoverySchema(operationItems, (candidate) => typeof candidate.properties?.kind?.pattern === 'string');
+    expect(fallbackSchema?.properties?.kind?.pattern).toContain('illustration\\.object');
+    expect(fallbackSchema?.properties?.kind?.pattern).toContain('pixel\\.');
     expect(tools.find((tool) => tool.name === 'aidraw_help')?.outputSchema).toMatchObject({ required: expect.arrayContaining(['topic', 'steps', 'invariants', 'guideUri']), properties: { guideUri: { const: 'aidraw://guide' } } });
     const canvasApplyOutput = tools.find((tool) => tool.name === 'canvas_apply')?.outputSchema;
     expect(canvasApplyOutput?.properties?.next?.description ?? canvasApplyOutput?.properties?.next).toBeTruthy();
@@ -559,7 +707,8 @@ describe('authenticated stateful MCP contract', () => {
     const guide = ((parseMcp(await guideResponse.text()).result?.contents ?? []) as Array<{ text?: string }>)[0]?.text ?? '';
     expect(guide).toContain('Conditional action contracts');
     expect(guide).toContain('Strict server validation rejects fields from other actions');
-    expect(guide).toContain('Only a human can approve');
+    expect(guide).toContain('Automatic MCP connection grants no file authority');
+    expect(guide).toContain('only a human can approve');
     expect(guide).toContain('Transport and tool failures');
     expect(guide).toContain('Direct HTTP 401 invalid_token');
     expect(guide).toContain('unchanged stdio client configuration');
@@ -575,6 +724,23 @@ describe('authenticated stateful MCP contract', () => {
     expect(guide).toContain('pixel.image-collection.tile.move');
     expect(guide).toContain('pixel.tile-object.create');
     expect(guide).toContain('intent-derived deterministic stream');
+    expect(guide).toContain('every shape defaults to a visible 1 px black round stroke');
+    expect(guide).toContain('line and arrow shapes default to no fill');
+    expect(guide).toContain('polygon sides to 6');
+    expect(guide).toContain('star sides/innerRadius to 5/0.45');
+    expect(guide).toContain('derive closed from the final Z command');
+    expect(guide).toContain('Arc flags are literal one-character 0/1 grammar terminals');
+    expect(guide).toContain('Exact repeated references to one unchanged asset reuse one inspected buffer and supervised decode');
+    expect(guide).toContain('refuses a seventeenth distinct image projection before base64 decoding or hashing');
+    expect(guide).toContain('require one simple subpath retaining 2–7,000 effective native nodes after actual arc conversion and close coalescing inside the 1,000,000-character ceiling');
+    expect(guide).toContain('Every arc command needs endpoints at least 0.000002 document units apart');
+    expect(guide).toContain('every nonzero-radius arc must span more than 0.00001 degrees after ellipse normalization');
+    expect(guide).toContain('exact recovered document incarnation across engine restart');
+    expect(guide).toContain('replacement requires those subtype values explicitly');
+    expect(guide).toContain('delete/undo remains available for readable legacy/imported objects');
+    expect(guide).toContain('source dimensions are derived from its bytes');
+    expect(guide).toContain('groupIndex is accepted only with parentGroupId');
+    expect(guide).not.toContain('Shapes default to a solid black fill and no stroke');
     const safetyHelp = await callTool(started.url, client.headers, 13, 'aidraw_help', { topic: 'safety' });
     expect(safetyHelp.steps).toEqual(expect.arrayContaining([
       expect.stringContaining('direct HTTP 401 means an explicit QA bearer'),
@@ -586,6 +752,24 @@ describe('authenticated stateful MCP contract', () => {
     expect(operationsHelp.steps).toEqual(expect.arrayContaining([
       expect.stringContaining('pixel.wang-terrain.stroke requires one exact map'),
       expect.stringContaining('creates no revision for an unmatched or already-matching stroke'),
+      expect.stringContaining('every shape defaults to a visible 1 px solid black round stroke'),
+      expect.stringContaining('groupIndex is valid only together with parentGroupId'),
+      expect.stringContaining('Arc flags are literal one-character 0/1 values'),
+      expect.stringContaining('2–7,000 nodes retained by actual native arc conversion and close coalescing'),
+      expect.stringContaining('each nonzero-radius arc must span more than 0.00001 degrees after ellipse normalization'),
+      expect.stringContaining('Same-endpoint, eccentric native-collapsed arcs and closed geometry that collapses below two native nodes reject'),
+      expect.stringContaining('Repeated references to one unchanged asset reuse one inspection buffer and supervised decode'),
+      expect.stringContaining('admits at most 16 distinct projections before base64 decoding or hashing'),
+      expect.stringContaining('Add-time geometry defaults do not apply to replacement'),
+      expect.stringContaining('exact delete inverses remain undoable'),
+      expect.stringContaining('tools/list publishes complete closed branches for pixel.cel.region'),
+      expect.stringContaining('Derive nonzero GIDs from observed attached tilesets rather than guessing'),
+    ]));
+    const jobsHelp = await callTool(started.url, client.headers, 15, 'aidraw_help', { topic: 'jobs' });
+    expect(jobsHelp.steps).toEqual(expect.arrayContaining([
+      expect.stringContaining('Proven pre-dispatch abandonment reopens'),
+      expect.stringContaining('otherwise fails as ambiguous without replay'),
+      expect.stringContaining('Cancellation after dispatch remains pending until settlement'),
     ]));
     expect(JSON.stringify(operationsHelp.examples)).toContain('pixel.wang-terrain.stroke');
     expect(JSON.stringify(operationsHelp.examples)).toContain('pixel.image-collection.create');
@@ -593,6 +777,316 @@ describe('authenticated stateful MCP contract', () => {
     expect(JSON.stringify(operationsHelp.examples)).toContain('pixel.image-collection.source.remove');
     expect(JSON.stringify(operationsHelp.examples)).toContain('pixel.image-collection.tile.move');
     expect(JSON.stringify(operationsHelp.examples)).toContain('pixel.tile-object.create');
+    expect(JSON.stringify(operationsHelp.examples)).toContain('pixel.cel.region');
+    expect(JSON.stringify(operationsHelp.examples)).toContain('pixel.tile-stamp.place');
+    const filesHelp = await callTool(started.url, client.headers, 16, 'aidraw_help', { topic: 'files' });
+    expect(filesHelp.steps).toEqual(expect.arrayContaining([
+      expect.stringContaining('Automatic stdio MCP connection grants no file authority'),
+      expect.stringContaining('--trust-folder option is run-scoped launch authority'),
+      expect.stringContaining('not a zero-per-launch file-access promise'),
+    ]));
+  });
+
+  it('lets a clean public client discover, author, revise, save, and export editable vector objects without metadata placeholders', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-mcp-public-vector-')); temporaryPaths.push(root);
+    const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0'); documents.initialize();
+    const host = new McpHost(documents, '1.0.0', join(root, 'port.json')); hosts.push(host);
+    const started = await host.start('public-vector-token');
+    const client = await initializeClient(started.url, 'public-vector-token', 'public-vector-client');
+    const joined = await callTool(started.url, client.headers, 2, 'session_manage', { action: 'join', name: 'Public vector agent', color: '#5177cc' });
+    const actorId = String((joined.actor as { id: string }).id);
+    const created = await callTool(started.url, client.headers, 3, 'document_manage', { action: 'new', kind: 'illustration', name: 'Public vector board', width: 640, height: 480, background: null });
+    const documentId = String((created.activeDocument as { id: string }).id);
+    const before = await callTool(started.url, client.headers, 4, 'canvas_observe', { documentId });
+    const beforeDocument = before.document as { revision: number; layers: Record<string, { id: string; type: string }> };
+    const layer = Object.values(beforeDocument.layers).find((entry) => entry.type === 'vector');
+    if (!layer) throw new Error('Public vector workflow did not discover a vector layer.');
+
+    const operationsHelp = await callTool(started.url, client.headers, 5, 'aidraw_help', { topic: 'operations' });
+    expect(operationsHelp.steps).toEqual(expect.arrayContaining([
+      expect.stringContaining('illustration.object.add'),
+      expect.stringContaining('server-owned revision'),
+      expect.stringContaining('copy the complete observed object'),
+    ]));
+    expect(JSON.stringify(operationsHelp.examples)).toContain('Public rectangle');
+
+    const added = await callTool(started.url, client.headers, 6, 'canvas_apply', {
+      documentId,
+      clientOperationId: 'public-vector-add-v1',
+      label: 'Author public editable vectors',
+      playback: { mode: 'instant', speed: 1 },
+      operations: [
+        { kind: 'illustration.object.add', object: { id: 'public-rectangle', name: 'Public rectangle', layerId: layer.id, type: 'shape', shape: 'rectangle', width: 180, height: 96, transform: { x: 40, y: 50 }, fill: { kind: 'solid', color: '#8268dd' } } },
+        { kind: 'illustration.object.add', object: { id: 'public-path', name: 'Public path', layerId: layer.id, type: 'path', pathData: 'M 20 20 C 80 0 120 100 180 40' } },
+        { kind: 'illustration.object.add', object: { id: 'public-stroke', name: 'Public stroke', layerId: layer.id, type: 'vector-stroke', points: [{ x: 20, y: 220 }, { x: 100, y: 250, pressure: 0.8 }, { x: 200, y: 210 }] } },
+        { kind: 'illustration.object.add', object: { id: 'public-text', name: 'Public text', layerId: layer.id, type: 'text', text: 'Editable' } },
+        { kind: 'illustration.object.add', object: { id: 'public-group', name: 'Public group', layerId: layer.id, type: 'group', childIds: ['public-rectangle', 'public-path'] } },
+      ],
+    });
+    expect(added).toMatchObject({ status: 'committed', revision: beforeDocument.revision + 1 });
+
+    const afterAdd = await callTool(started.url, client.headers, 7, 'canvas_observe', { documentId });
+    const authored = (afterAdd.document as { objects: Record<string, Record<string, unknown>> }).objects;
+    expect(authored['public-rectangle']).toMatchObject({
+      id: 'public-rectangle', name: 'Public rectangle', createdBy: actorId, revision: 0, visible: true, locked: false, opacity: 1, blendMode: 'normal',
+      transform: { x: 40, y: 50, scaleX: 1, scaleY: 1, rotation: 0, skewX: 0, skewY: 0 },
+      fill: { kind: 'solid', color: '#8268dd' }, stroke: { paint: { kind: 'solid', color: '#000000' }, width: 1, opacity: 1, lineCap: 'round', lineJoin: 'round', dash: [] },
+    });
+    expect(authored['public-path']).toMatchObject({ fill: { kind: 'none' }, stroke: { paint: { kind: 'solid', color: '#000000' }, width: 1 }, closed: false, fillRule: 'nonzero' });
+    expect(authored['public-stroke']).toMatchObject({ brush: { size: 4, thinning: 0.5, smoothing: 0.5, streamline: 0.5, simulatePressure: true, color: '#000000' }, points: [{ x: 20, y: 220, pressure: 0.5 }, { x: 100, y: 250, pressure: 0.8 }, { x: 200, y: 210, pressure: 0.5 }] });
+    expect(authored['public-text']).toMatchObject({ width: 600, height: 80, align: 'left', lineHeight: 1.2, ranges: [] });
+    expect(authored['public-group']).toMatchObject({ type: 'group', childIds: ['public-rectangle', 'public-path'] });
+    for (const object of Object.values(authored).filter((entry) => String(entry.id).startsWith('public-'))) {
+      expect(object.createdAt).toEqual(expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/));
+      expect(object.updatedAt).toEqual(expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/));
+    }
+
+    const rectangle = structuredClone(authored['public-rectangle']);
+    rectangle.fill = { kind: 'solid', color: '#ff6b7a' };
+    const replaced = await callTool(started.url, client.headers, 8, 'canvas_apply', {
+      documentId,
+      clientOperationId: 'public-vector-replace-v1',
+      label: 'Revise public rectangle',
+      playback: { mode: 'instant', speed: 1 },
+      operations: [{ kind: 'illustration.object.replace', object: rectangle, expectedRevision: rectangle.revision }],
+    });
+    expect(replaced).toMatchObject({ status: 'committed', revision: Number(afterAdd.revision) + 1 });
+    const afterReplace = await callTool(started.url, client.headers, 9, 'canvas_observe', { documentId });
+    expect(((afterReplace.document as { objects: Record<string, Record<string, unknown>> }).objects['public-rectangle'])).toMatchObject({ revision: 1, createdBy: actorId, fill: { kind: 'solid', color: '#ff6b7a' } });
+
+    const invalidRevision = Number(afterReplace.revision);
+    for (const [id, object] of [
+      ['unknown-field', { id: 'public-invalid-extra', name: 'Invalid extra', layerId: layer.id, type: 'shape', shape: 'rectangle', width: 10, height: 10, surprise: true }],
+      ['invalid-stroke', { id: 'public-invalid-stroke', name: 'Invalid stroke', layerId: layer.id, type: 'path', pathData: 'M0 0 L10 10', stroke: { paint: { kind: 'solid', color: '#000000' }, width: -1, opacity: 1, lineCap: 'round', lineJoin: 'round', dash: [] } }],
+    ] as const) {
+      const rejected = await callToolMessage(started.url, client.headers, id === 'unknown-field' ? 10 : 11, 'canvas_apply', {
+        documentId, clientOperationId: `public-vector-reject-${id}`, label: `Reject ${id}`, operations: [{ kind: 'illustration.object.add', object }],
+      });
+      expect(rejected.result?.isError).toBe(true);
+      expect(JSON.stringify(rejected)).toContain('Invalid arguments');
+    }
+    expect((await callTool(started.url, client.headers, 12, 'canvas_observe', { documentId })).revision).toBe(invalidRevision);
+
+    const savePath = join(root, 'public-vector.aidraw');
+    const exportPath = join(root, 'public-vector.svg');
+    const save = await callTool(started.url, client.headers, 13, 'document_manage', { action: 'save-as', documentId, path: savePath });
+    const exported = await callTool(started.url, client.headers, 14, 'document_export', { documentId, path: exportPath, format: 'svg', scale: 1 });
+    expect(save).toMatchObject({ status: 'waiting-for-user', jobId: expect.any(String) });
+    expect(exported).toMatchObject({ status: 'waiting-for-user', jobId: expect.any(String) });
+    expect(await callTool(started.url, client.headers, 15, 'job_manage', { action: 'cancel', jobId: save.jobId })).toMatchObject({ status: 'cancelled' });
+    expect(await callTool(started.url, client.headers, 16, 'job_manage', { action: 'cancel', jobId: exported.jobId })).toMatchObject({ status: 'cancelled' });
+    await expect(access(savePath)).rejects.toThrow();
+    await expect(access(exportPath)).rejects.toThrow();
+  });
+
+  it('rejects malformed public illustration objects without a revision and renders/exports only byte-bound canonical geometry', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-mcp-public-geometry-')); temporaryPaths.push(root);
+    const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0'); documents.initialize();
+    const sourceDocument = createIllustrationDocument('Public geometry boundary');
+    sourceDocument.assets['metadata-only-image'] = { id: 'metadata-only-image', name: 'Recovered missing payload', mimeType: 'image/png', byteLength: 0, sha256: '0'.repeat(64), source: 'embedded' };
+    documents.addDocument(sourceDocument);
+    const host = new McpHost(documents, '1.0.0', join(root, 'port.json')); hosts.push(host);
+    const started = await host.start('public-geometry-token');
+    const client = await initializeClient(started.url, 'public-geometry-token', 'public-geometry-client');
+    const layer = Object.values(sourceDocument.layers).find((entry) => entry.type === 'vector');
+    if (!layer) throw new Error('Expected vector layer');
+
+    const source = createCanvas(4, 3); const sourceContext = source.getContext('2d'); sourceContext.fillStyle = '#e5b84b'; sourceContext.fillRect(0, 0, 4, 3);
+    const bytes = source.toBuffer('image/png');
+    const asset = { id: 'public-image-bytes', name: 'Public image bytes', mimeType: 'image/png', byteLength: bytes.byteLength, sha256: createHash('sha256').update(bytes).digest('hex'), source: 'embedded', data: bytes.toString('base64') };
+    expect(await callTool(started.url, client.headers, 2, 'canvas_apply', {
+      documentId: sourceDocument.id, clientOperationId: 'public-geometry-asset', label: 'Add validated image source', playback: { mode: 'instant', speed: 1 }, operations: [{ kind: 'asset.add', asset }],
+    })).toMatchObject({ status: 'committed' });
+
+    let requestId = 3;
+    const expectRejectedWithoutMutation = async (clientOperationId: string, operation: Record<string, unknown>) => {
+      const before = documents.getDocument(sourceDocument.id)!;
+      const message = await callToolMessage(started.url, client.headers, requestId++, 'canvas_apply', {
+        documentId: sourceDocument.id, clientOperationId, label: `Reject ${clientOperationId}`, playback: { mode: 'instant', speed: 1 }, operations: [operation],
+      });
+      expect(message.result?.isError, JSON.stringify(message)).toBe(true);
+      expect(documents.getDocument(sourceDocument.id)).toEqual(before);
+    };
+    const objectBase = { name: 'Rejected object', layerId: layer.id };
+    await expectRejectedWithoutMutation('invalid-svg-path', { kind: 'illustration.object.add', object: { ...objectBase, id: 'invalid-svg-path', type: 'path', pathData: 'not-valid-path-data' } });
+    await expectRejectedWithoutMutation('inconsistent-path-closure', { kind: 'illustration.object.add', object: { ...objectBase, id: 'inconsistent-path-closure', type: 'path', pathData: 'M0 0 L10 0', closed: true } });
+    await expectRejectedWithoutMutation('exponent-arc-flag', { kind: 'illustration.object.add', object: { ...objectBase, id: 'exponent-arc-flag', type: 'path', pathData: 'M0 0 A1 2 0 1e0 0 3 4' } });
+    await expectRejectedWithoutMutation('decimal-arc-flag', { kind: 'illustration.object.add', object: { ...objectBase, id: 'decimal-arc-flag', type: 'path', pathData: 'M0 0 A1 2 0 0.0 1 3 4' } });
+    await expectRejectedWithoutMutation('signed-arc-flag', { kind: 'illustration.object.add', object: { ...objectBase, id: 'signed-arc-flag', type: 'path', pathData: 'M0 0 A1 2 0 -0 1 3 4' } });
+    for (const [id, pathData] of [
+      ['coincident-closed-line', 'M0 0 L0 0 Z'],
+      ['epsilon-closed-line', 'M0 0 L0.00000001 0 Z'],
+      ['closed-curve-to-start', 'M0 0 C1 1 2 2 0 0 Z'],
+      ['zero-displacement-arc', 'M0 0 A10 10 0 0 1 0 0'],
+      ['native-collapsed-tiny-arc', 'M0 0 A10 10 0 0 1 0.000001 0'],
+    ]) {
+      await expectRejectedWithoutMutation(id, { kind: 'illustration.object.add', object: { ...objectBase, id, type: 'path', pathData } });
+    }
+    const overEditingLimit = `M0 0 A1 1 0 0 1 2 2 ${'L0 0 '.repeat(200_000)}`;
+    expect(overEditingLimit.length).toBeGreaterThan(1_000_000);
+    await expectRejectedWithoutMutation('path-above-editing-limit', { kind: 'illustration.object.add', object: { ...objectBase, id: 'path-above-editing-limit', type: 'path', pathData: overEditingLimit } });
+    await expectRejectedWithoutMutation('missing-image-asset', { kind: 'illustration.object.add', object: { ...objectBase, id: 'missing-image-asset', type: 'image', assetId: 'does-not-exist', width: 20, height: 10 } });
+    await expectRejectedWithoutMutation('missing-image-payload', { kind: 'illustration.object.add', object: { ...objectBase, id: 'missing-image-payload', type: 'image', assetId: 'metadata-only-image', width: 20, height: 10 } });
+    await expectRejectedWithoutMutation('invalid-image-crop', { kind: 'illustration.object.add', object: { ...objectBase, id: 'invalid-image-crop', type: 'image', assetId: asset.id, width: 20, height: 10, crop: { x: 3, y: 1, width: 2, height: 2 } } });
+    await expectRejectedWithoutMutation('partial-source-geometry', { kind: 'illustration.object.add', object: { ...objectBase, id: 'partial-source-geometry', type: 'image', assetId: asset.id, width: 20, height: 10, sourceWidth: 4 } });
+    await expectRejectedWithoutMutation('irrelevant-shape-field', { kind: 'illustration.object.add', object: { ...objectBase, id: 'irrelevant-shape-field', type: 'shape', shape: 'rectangle', width: 20, height: 10, sides: 7 } });
+    await expectRejectedWithoutMutation('orphan-add-group-index', { kind: 'illustration.object.add', groupIndex: 0, object: { ...objectBase, id: 'orphan-add-group-index', type: 'shape', shape: 'rectangle', width: 20, height: 10 } });
+    await expectRejectedWithoutMutation('orphan-move-group-index', { kind: 'illustration.object.move', objectId: 'not-dispatched', layerId: layer.id, groupIndex: 0, expectedRevision: 0 });
+
+    const added = await callTool(started.url, client.headers, requestId++, 'canvas_apply', {
+      documentId: sourceDocument.id, clientOperationId: 'valid-public-geometry', label: 'Add validated public geometry', playback: { mode: 'instant', speed: 1 },
+      operations: [
+        { kind: 'illustration.object.add', object: { ...objectBase, id: 'validated-closed-path', name: 'Validated closed path', type: 'path', pathData: 'M 10 10 L 70 10 L 70 60 Z' } },
+        { kind: 'illustration.object.add', object: { ...objectBase, id: 'compact-arc-path', name: 'Compact arc path', type: 'path', pathData: 'M0 0 A20 10 30 0140 20', transform: { x: 10, y: 90 } } },
+        { kind: 'illustration.object.add', object: { ...objectBase, id: 'spaced-compact-arc-path', name: 'Spaced compact arc path', type: 'path', pathData: 'M0 0 A20 10 30 01 40 20', transform: { x: 30, y: 90 } } },
+        { kind: 'illustration.object.add', object: { ...objectBase, id: 'strict-rectangle', name: 'Strict rectangle', type: 'shape', shape: 'rectangle', width: 40, height: 30, transform: { x: 10, y: 120 } } },
+        { kind: 'illustration.object.add', object: { ...objectBase, id: 'strict-ellipse', name: 'Strict ellipse', type: 'shape', shape: 'ellipse', width: 40, height: 30, transform: { x: 60, y: 120 } } },
+        { kind: 'illustration.object.add', object: { ...objectBase, id: 'strict-line', name: 'Strict line', type: 'shape', shape: 'line', width: 40, height: 30, transform: { x: 110, y: 120 } } },
+        { kind: 'illustration.object.add', object: { ...objectBase, id: 'strict-arrow', name: 'Strict arrow', type: 'shape', shape: 'arrow', width: 40, height: 30, transform: { x: 160, y: 120 } } },
+        { kind: 'illustration.object.add', object: { ...objectBase, id: 'default-polygon', name: 'Default polygon', type: 'shape', shape: 'polygon', width: 60, height: 60, transform: { x: 90, y: 10 } } },
+        { kind: 'illustration.object.add', object: { ...objectBase, id: 'default-star', name: 'Default star', type: 'shape', shape: 'star', width: 60, height: 60, transform: { x: 170, y: 10 } } },
+        { kind: 'illustration.object.add', object: { ...objectBase, id: 'validated-image', name: 'Validated image', type: 'image', assetId: asset.id, width: 40, height: 20, transform: { x: 250, y: 10 }, crop: { x: 1, y: 1, width: 2, height: 1 } } },
+      ],
+    });
+    expect(added).toMatchObject({ status: 'committed' });
+    const committed = documents.getDocument(sourceDocument.id);
+    if (!committed || committed.kind !== 'illustration') throw new Error('Expected canonical illustration');
+    expect(committed.objects['validated-closed-path']).toMatchObject({ closed: true });
+    expect(committed.objects['compact-arc-path']).toMatchObject({ pathData: 'M0 0 A20 10 30 0140 20', closed: false });
+    expect(committed.objects['spaced-compact-arc-path']).toMatchObject({ pathData: 'M0 0 A20 10 30 01 40 20', closed: false });
+    expect(committed.objects['default-polygon']).toMatchObject({ shape: 'polygon', sides: 6 });
+    expect(committed.objects['default-star']).toMatchObject({ shape: 'star', sides: 5, innerRadius: 0.45 });
+    expect(committed.objects['validated-image']).toMatchObject({ sourceWidth: 4, sourceHeight: 3, crop: { x: 1, y: 1, width: 2, height: 1 } });
+    const degenerateReplacement = structuredClone(committed.objects['compact-arc-path']);
+    if (degenerateReplacement.type !== 'path') throw new Error('Expected replaceable compact arc');
+    degenerateReplacement.pathData = 'M0 0 A10 10 0 0 1 0.000001 0';
+    await expectRejectedWithoutMutation('native-collapsed-path-replacement', {
+      kind: 'illustration.object.replace', object: degenerateReplacement, expectedRevision: degenerateReplacement.revision,
+    });
+    expect(await callTool(started.url, client.headers, requestId++, 'canvas_apply', {
+      documentId: sourceDocument.id, clientOperationId: 'convert-admitted-compact-arcs', label: 'Convert compact arcs', playback: { mode: 'instant', speed: 1 },
+      operations: [
+        { kind: 'illustration.path.arcs.convert', objectId: 'compact-arc-path', expectedRevision: 0 },
+        { kind: 'illustration.path.arcs.convert', objectId: 'spaced-compact-arc-path', expectedRevision: 0 },
+      ],
+    })).toMatchObject({ status: 'committed' });
+    const convertedDocument = documents.getDocument(sourceDocument.id);
+    if (!convertedDocument || convertedDocument.kind !== 'illustration') throw new Error('Expected converted compact arcs');
+    expect(convertedDocument.objects['compact-arc-path'].type === 'path' ? convertedDocument.objects['compact-arc-path'].pathData : '').not.toMatch(/[aA]/);
+    expect(convertedDocument.objects['spaced-compact-arc-path'].type === 'path' ? convertedDocument.objects['spaced-compact-arc-path'].pathData : '').not.toMatch(/[aA]/);
+    for (const [clientOperationId, objectId, omittedField] of [
+      ['incomplete-rectangle-replace', 'strict-rectangle', 'cornerRadius'],
+      ['incomplete-polygon-replace', 'default-polygon', 'sides'],
+      ['incomplete-star-sides-replace', 'default-star', 'sides'],
+      ['incomplete-star-radius-replace', 'default-star', 'innerRadius'],
+    ] as const) {
+      const object = structuredClone(convertedDocument.objects[objectId]) as unknown as Record<string, unknown>;
+      delete object[omittedField];
+      await expectRejectedWithoutMutation(clientOperationId, { kind: 'illustration.object.replace', object, expectedRevision: object.revision });
+    }
+    for (const objectId of ['strict-line', 'strict-arrow']) {
+      const object = structuredClone(convertedDocument.objects[objectId]);
+      if (object.type !== 'shape') throw new Error('Expected open shape');
+      object.fill = { kind: 'solid', color: '#ff6b7a' };
+      await expectRejectedWithoutMutation(`inert-fill-${objectId}`, { kind: 'illustration.object.replace', object, expectedRevision: object.revision });
+    }
+    const forbiddenShapeFields = [
+      ['strict-rectangle', 'sides', 7],
+      ['strict-ellipse', 'cornerRadius', 4],
+      ['strict-line', 'innerRadius', 0.4],
+      ['strict-arrow', 'sides', 7],
+      ['default-polygon', 'innerRadius', 0.4],
+      ['default-star', 'cornerRadius', 4],
+    ] as const;
+    for (const [objectId, field, value] of forbiddenShapeFields) {
+      const current = documents.getDocument(sourceDocument.id);
+      if (!current || current.kind !== 'illustration') throw new Error('Expected shape replacement document');
+      const object = structuredClone(current.objects[objectId]) as unknown as Record<string, unknown>;
+      object[field] = value;
+      await expectRejectedWithoutMutation(`irrelevant-replace-${objectId}`, { kind: 'illustration.object.replace', object, expectedRevision: object.revision });
+    }
+    const beforeValidReplacements = documents.getDocument(sourceDocument.id);
+    if (!beforeValidReplacements || beforeValidReplacements.kind !== 'illustration') throw new Error('Expected shape replacement document');
+    expect(await callTool(started.url, client.headers, requestId++, 'canvas_apply', {
+      documentId: sourceDocument.id, clientOperationId: 'valid-shape-subtype-replacements', label: 'Replace every strict shape subtype', playback: { mode: 'instant', speed: 1 },
+      operations: forbiddenShapeFields.map(([objectId]) => {
+        const object = structuredClone(beforeValidReplacements.objects[objectId]);
+        object.transform.x += 1;
+        return { kind: 'illustration.object.replace', object, expectedRevision: object.revision };
+      }),
+    })).toMatchObject({ status: 'committed' });
+    const finalDocument = documents.getDocument(sourceDocument.id);
+    if (!finalDocument || finalDocument.kind !== 'illustration') throw new Error('Expected final canonical illustration');
+    await expect(renderIllustration(finalDocument)).resolves.toBeTruthy();
+    const svg = illustrationToSvg(finalDocument);
+    expect(svg).toContain('d="M 10 10 L 70 10 L 70 60 Z"');
+    expect(finalDocument.objects['compact-arc-path'].type === 'path' ? finalDocument.objects['compact-arc-path'].pathData : '').not.toMatch(/[aA]/);
+    expect(finalDocument.objects['spaced-compact-arc-path'].type === 'path' ? finalDocument.objects['spaced-compact-arc-path'].pathData : '').not.toMatch(/[aA]/);
+    expect(svg).toContain('data-aidraw-source-width="4"');
+    expect(svg).toContain('data-aidraw-source-height="3"');
+  });
+
+  it('decodes one projected image asset once across the maximum public transaction', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-mcp-image-cache-')); temporaryPaths.push(root);
+    const decoder = vi.fn(async () => undefined);
+    const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0', undefined, decoder); documents.initialize();
+    const document = createIllustrationDocument('Public image cache');
+    const layer = Object.values(document.layers).find((entry) => entry.type === 'vector');
+    if (!layer) throw new Error('Expected vector layer');
+    const canvas = createCanvas(1, 1); canvas.getContext('2d').fillRect(0, 0, 1, 1);
+    const bytes = canvas.toBuffer('image/png');
+    const asset = { id: 'public-shared-image', name: 'Shared image', mimeType: 'image/png', byteLength: bytes.byteLength, sha256: createHash('sha256').update(bytes).digest('hex'), source: 'embedded', data: bytes.toString('base64') } as const;
+    document.assets[asset.id] = asset;
+    documents.addDocument(document);
+    const host = new McpHost(documents, '1.0.0', join(root, 'port.json')); hosts.push(host);
+    const started = await host.start('public-image-cache-token');
+    const client = await initializeClient(started.url, 'public-image-cache-token', 'public-image-cache-client');
+    const response = await callTool(started.url, client.headers, 2, 'canvas_apply', {
+      documentId: document.id, clientOperationId: 'public-image-cache-256', label: 'Reuse one public image asset', playback: { mode: 'instant', speed: 1 },
+      operations: Array.from({ length: 256 }, (_, index) => ({
+        kind: 'illustration.object.add',
+        object: { id: `public-shared-image-${index}`, name: `Shared image ${index}`, layerId: layer.id, type: 'image', assetId: asset.id, width: 1, height: 1, transform: { x: index % 32, y: Math.floor(index / 32) } },
+      })),
+    });
+    expect(response).toMatchObject({ status: 'committed' });
+    expect(decoder).toHaveBeenCalledOnce();
+    const committed = documents.getDocument(document.id);
+    expect(committed?.kind === 'illustration' ? Object.keys(committed.objects).filter((id) => id.startsWith('public-shared-image-')) : []).toHaveLength(256);
+  });
+
+  it('rejects the seventeenth public image projection before its bytes are decoded or hashed', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-mcp-image-preflight-')); temporaryPaths.push(root);
+    const decoder = vi.fn(async () => undefined);
+    const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0', undefined, decoder); documents.initialize();
+    const document = createIllustrationDocument('Public image preflight');
+    const layer = Object.values(document.layers).find((entry) => entry.type === 'vector');
+    if (!layer) throw new Error('Expected vector layer');
+    const canvas = createCanvas(1, 1); canvas.getContext('2d').fillRect(0, 0, 1, 1);
+    const bytes = canvas.toBuffer('image/png'); const data = bytes.toString('base64'); const digest = createHash('sha256').update(bytes).digest('hex');
+    for (let index = 0; index < 17; index += 1) {
+      const id = `public-distinct-image-${index}`;
+      document.assets[id] = {
+        id, name: `Distinct image ${index}`, mimeType: 'image/png', byteLength: bytes.byteLength,
+        sha256: index === 16 ? '0'.repeat(64) : digest, source: 'embedded', data,
+      };
+    }
+    documents.addDocument(document);
+    const host = new McpHost(documents, '1.0.0', join(root, 'port.json')); hosts.push(host);
+    const started = await host.start('public-image-preflight-token');
+    const client = await initializeClient(started.url, 'public-image-preflight-token', 'public-image-preflight-client');
+    const before = documents.getDocument(document.id);
+    const message = await callToolMessage(started.url, client.headers, 2, 'canvas_apply', {
+      documentId: document.id, clientOperationId: 'public-image-preflight-17', label: 'Reject excessive public image work', playback: { mode: 'instant', speed: 1 },
+      operations: Array.from({ length: 17 }, (_, index) => ({
+        kind: 'illustration.object.add',
+        object: { id: `public-distinct-object-${index}`, name: `Distinct object ${index}`, layerId: layer.id, type: 'image', assetId: `public-distinct-image-${index}`, width: 1, height: 1 },
+      })),
+    });
+    expect(message.result?.isError, JSON.stringify(message)).toBe(true);
+    expect(JSON.stringify(message)).toContain('at most 16 distinct image-asset projections');
+    expect(JSON.stringify(message)).not.toContain('public-distinct-image-16 SHA-256');
+    expect(decoder).not.toHaveBeenCalled();
+    expect(documents.getDocument(document.id)).toEqual(before);
   });
 
   it('initializes the same raw Streamable HTTP profile under each configured client name', async () => {
@@ -1209,6 +1703,115 @@ describe('authenticated stateful MCP contract', () => {
     expect([[0, 0], [1, 0], [0, 1], [1, 1]].map(([x, y]) => readPixel(undoneSprite.cels[cel.id], x, y))).toEqual([0, 0, 0, 0]);
   });
 
+  it('fails an authenticated edit when its document incarnation changes during asynchronous preparation', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-mcp-preparation-incarnation-')); temporaryPaths.push(root);
+    const traces = new TransactionTraceStore(join(root, 'traces'));
+    const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0', traces); documents.initialize();
+    const predecessor = createPixelDocument(); predecessor.name = 'Preparation predecessor';
+    const sprite = predecessor.pixelAssets[predecessor.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('Expected sprite');
+    const cel = Object.values(sprite.cels)[0];
+    const source = createCanvas(1, 1); source.getContext('2d').fillRect(0, 0, 1, 1);
+    const bytes = source.toBuffer('image/png');
+    predecessor.assets['preparation-source'] = {
+      id: 'preparation-source', name: 'Preparation source', mimeType: 'image/png', byteLength: bytes.byteLength,
+      sha256: createHash('sha256').update(bytes).digest('hex'), source: 'embedded', data: bytes.toString('base64'),
+    };
+    documents.addDocument(predecessor);
+    const predecessorIncarnation = documents.getDocumentIncarnation(predecessor.id);
+    const entered = deferred(); const release = deferred();
+    const quantize = vi.fn(async () => { entered.resolve(); await release.promise; return [{ x: 0, y: 0, index: 4 }]; });
+    const host = new McpHost(documents, '1.0.0', join(root, 'port.json'), undefined, quantize); hosts.push(host);
+    const started = await host.start('preparation-incarnation-token');
+    const client = await initializeClient(started.url, 'preparation-incarnation-token', 'preparation-incarnation-client');
+
+    const pending = callTool(started.url, client.headers, 2, 'canvas_apply', {
+      documentId: predecessor.id,
+      clientOperationId: 'preparation-incarnation-edit',
+      label: 'Must remain bound to predecessor',
+      playback: { mode: 'instant', speed: 1 },
+      operations: [{
+        kind: 'pixel.image.quantize', assetId: 'preparation-source', spriteId: sprite.id, celId: cel.id,
+        x: 0, y: 0, width: 1, height: 1, expectedRevision: cel.revision,
+      }],
+    });
+    await entered.promise;
+
+    await expect(documents.close(predecessor.id, true)).resolves.toMatchObject({ closed: true });
+    const replacement = structuredClone(predecessor); replacement.name = 'Same-ID preparation replacement';
+    documents.addDocument(replacement);
+    expect(documents.getDocumentIncarnation(predecessor.id)).not.toBe(predecessorIncarnation);
+    release.resolve();
+
+    await expect(pending).resolves.toMatchObject({
+      status: 'conflict',
+      message: expect.stringMatching(/incarnation changed.*old edit was not applied/i),
+    });
+    const unchanged = documents.getDocument(predecessor.id); if (!unchanged || unchanged.kind !== 'pixel') throw new Error('Expected replacement pixel document');
+    const unchangedSprite = unchanged.pixelAssets[sprite.id]; if (unchangedSprite.type !== 'sprite') throw new Error('Expected replacement sprite');
+    expect(unchanged).toMatchObject({ name: 'Same-ID preparation replacement', revision: 0 });
+    expect(readPixel(unchangedSprite.cels[cel.id], 0, 0)).toBe(0);
+    expect(await documents.listTrace(predecessor.id)).toEqual([]);
+    expect(host.scheduler.publicMutationStatus()).toEqual({ active: 0, reservedSamples: 0, reservedImageBytes: 0 });
+    expect(quantize).toHaveBeenCalledOnce();
+  });
+
+  it('admits aggregate instant and animated work before cloning, quantization, or image inspection and releases it after commit', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-mcp-public-admission-')); temporaryPaths.push(root);
+    const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0'); documents.initialize();
+    const source = createCanvas(1, 1); source.getContext('2d').fillRect(0, 0, 1, 1);
+    const bytes = source.toBuffer('image/png');
+    const sourceAsset = { id: 'bounded-source', name: 'Bounded source', mimeType: 'image/png' as const, byteLength: bytes.byteLength, sha256: createHash('sha256').update(bytes).digest('hex'), source: 'embedded' as const, data: bytes.toString('base64') };
+    const pixelDocuments = Array.from({ length: 4 }, (_, index) => {
+      const document = createPixelDocument(); document.name = `Admission ${index}`; document.assets[sourceAsset.id] = structuredClone(sourceAsset); return document;
+    });
+    const imageDocument = createIllustrationDocument(); imageDocument.name = 'Rejected image work'; imageDocument.assets[sourceAsset.id] = structuredClone(sourceAsset);
+    documents.addDocuments([...pixelDocuments, imageDocument]);
+    const gates: Array<ReturnType<typeof deferred>> = [];
+    const quantize = vi.fn(async () => {
+      const gate = deferred(); gates.push(gate); await gate.promise;
+      return [{ x: 0, y: 0, index: 0 }];
+    });
+    const host = new McpHost(documents, '1.0.0', join(root, 'port.json'), undefined, quantize); hosts.push(host);
+    const started = await host.start('public-admission-token');
+    const client = await initializeClient(started.url, 'public-admission-token', 'public-admission-client');
+    const getDocument = vi.spyOn(documents, 'getDocument');
+    const inspectProjection = vi.spyOn(TransactionImageWorkContext.prototype, 'inspectProjection');
+
+    const pending = pixelDocuments.map((document, index) => {
+      const sprite = document.pixelAssets[document.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('Expected sprite');
+      const cel = Object.values(sprite.cels)[0];
+      return callTool(started.url, client.headers, 20 + index, 'canvas_apply', {
+        documentId: document.id, clientOperationId: `held-quantize-${index}`, label: `Held quantize ${index}`, playback: { mode: index % 2 === 0 ? 'instant' : 'animated', speed: 4 },
+        operations: [{ kind: 'pixel.image.quantize', assetId: sourceAsset.id, spriteId: sprite.id, celId: cel.id, x: 0, y: 0, width: 1, height: 1, expectedRevision: 0 }],
+      });
+    });
+    await vi.waitFor(() => expect(quantize).toHaveBeenCalledTimes(4));
+    expect(getDocument).toHaveBeenCalledTimes(4);
+    expect(inspectProjection).not.toHaveBeenCalled();
+    expect(host.scheduler.publicMutationStatus()).toMatchObject({ active: 4, reservedImageBytes: 96_000_000 });
+
+    const layer = Object.values(imageDocument.layers).find((entry) => entry.type === 'vector'); if (!layer) throw new Error('Expected vector layer');
+    const rejected = await callTool(started.url, client.headers, 30, 'canvas_apply', {
+      documentId: imageDocument.id, clientOperationId: 'rejected-image-work', label: 'Reject before image work', playback: { mode: 'instant', speed: 1 },
+      operations: [{ kind: 'illustration.object.add', object: { id: 'bounded-image', name: 'Bounded image', layerId: layer.id, type: 'image', assetId: sourceAsset.id, width: 1, height: 1 } }],
+    });
+    expect(rejected).toMatchObject({ status: 'busy', message: expect.stringContaining('preparation capacity') });
+    expect(getDocument).toHaveBeenCalledTimes(4);
+    expect(quantize).toHaveBeenCalledTimes(4);
+    expect(inspectProjection).not.toHaveBeenCalled();
+
+    gates.forEach((gate) => gate.resolve());
+    await expect(Promise.all(pending)).resolves.toEqual(Array.from({ length: 4 }, () => expect.objectContaining({ status: 'committed' })));
+    expect(host.scheduler.publicMutationStatus()).toEqual({ active: 0, reservedSamples: 0, reservedImageBytes: 0 });
+    expect(await callTool(started.url, client.headers, 31, 'canvas_apply', {
+      documentId: imageDocument.id, clientOperationId: 'accepted-image-work', label: 'Accept after release', playback: { mode: 'instant', speed: 1 },
+      operations: [{ kind: 'illustration.object.add', object: { id: 'bounded-image', name: 'Bounded image', layerId: layer.id, type: 'image', assetId: sourceAsset.id, width: 1, height: 1 } }],
+    })).toMatchObject({ status: 'committed' });
+    expect(inspectProjection).toHaveBeenCalledTimes(2);
+    expect(inspectProjection.mock.instances[0]).toBe(inspectProjection.mock.instances[1]);
+    expect(host.scheduler.publicMutationStatus()).toEqual({ active: 0, reservedSamples: 0, reservedImageBytes: 0 });
+  });
+
   it('expands semantic pixel fill, dither, replacement, and palette-index adjustment against canonical cel state', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aidraw-mcp-')); temporaryPaths.push(root); const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0'); documents.initialize(); const host = new McpHost(documents, '1.0.0', join(root, 'port.json')); hosts.push(host); const started = await host.start('pixel-semantic-token'); const client = await initializeClient(started.url, 'pixel-semantic-token', 'pixel-semantic-client');
     const created = await callTool(started.url, client.headers, 2, 'document_manage', { action: 'new', kind: 'sprite', name: 'Semantic sprite', width: 8, height: 8 }); const document = created.activeDocument as ReturnType<DocumentService['snapshot']>['activeDocument']; if (!document || document.kind !== 'pixel') throw new Error('Expected pixel document'); const sprite = document.pixelAssets[document.activeAssetId]; if (sprite.type !== 'sprite') throw new Error('Expected sprite'); const cel = Object.values(sprite.cels)[0];
@@ -1635,6 +2238,109 @@ describe('authenticated stateful MCP contract', () => {
     expect(await callTool(secondStart.url, secondClient.headers, 11, 'job_manage', { action: 'cancel', jobId: cancelJob.id })).toMatchObject({ kind: 'batch', status: 'cancelled', progress: 0 });
     expect(await callTool(secondStart.url, secondClient.headers, 12, 'canvas_apply', { documentId: document.id, clientOperationId: 'cancelled-batch-step', label: 'Must stay cancelled', playback: { mode: 'instant', speed: 1 }, batch: { jobId: cancelJob.id, resumeToken: cancelToken, sequence: 0 }, operations: [{ kind: 'document.rename', name: 'Must not commit' }] })).toMatchObject({ status: 'cancelled' });
     expect(documents.getDocument(document.id)?.name).toBe('Durable batch complete');
+  });
+
+  it('reopens a durable chunk cancelled after preparation but before first dispatch', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-mcp-batch-predispatch-')); temporaryPaths.push(root);
+    const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0', new TransactionTraceStore(join(root, 'traces'))); documents.initialize();
+    const host = new McpHost(documents, '1.0.0', join(root, 'port.json')); hosts.push(host); const started = await host.start('batch-predispatch-token');
+    const client = await initializeClient(started.url, 'batch-predispatch-token', 'batch-predispatch-client');
+    const document = documents.snapshot().activeDocument!;
+    const startedBatch = await callTool(started.url, client.headers, 2, 'job_manage', { action: 'start-batch', documentId: document.id, totalTransactions: 1, label: 'Pre-dispatch cancellation' });
+    const job = startedBatch.job as { id: string }; const resumeToken = String(startedBatch.resumeToken);
+    const batches = (host as unknown as { batches: BatchManager }).batches;
+    const prepare = batches.prepare.bind(batches); const entered = deferred(); const release = deferred(); let blockOnce = true;
+    batches.prepare = async (...args: Parameters<BatchManager['prepare']>) => {
+      const result = await prepare(...args);
+      if (blockOnce && result.accepted) { blockOnce = false; entered.resolve(); await release.promise; }
+      return result;
+    };
+    const request = {
+      documentId: document.id, clientOperationId: 'cancelled-before-dispatch-step', label: 'Cancelled before dispatch', playback: { mode: 'instant', speed: 1 },
+      batch: { jobId: job.id, resumeToken, sequence: 0 }, operations: [{ kind: 'document.rename', name: 'Must not commit before retry' }],
+    };
+    const pending = fetch(started.url, {
+      method: 'POST', headers: client.headers,
+      body: JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'canvas_apply', arguments: request } }),
+    }).then(async (response) => ({ status: response.status, body: await response.text() })).catch((error: unknown) => ({ status: 0, body: String(error) }));
+    await entered.promise;
+    expect(documents.getDocument(document.id)?.revision).toBe(0);
+    expect((await fetch(started.url, { method: 'DELETE', headers: client.headers })).status).toBe(200);
+    release.resolve();
+    await pending;
+    await expect.poll(async () => (await batches.preflight({ jobId: job.id, resumeToken, sequence: 0 }, document.id, 'cancelled-before-dispatch-step')).accepted, { timeout: 2_000 }).toBe(true);
+    expect(documents.getDocument(document.id)?.revision).toBe(0);
+
+    const replacement = await initializeClient(started.url, 'batch-predispatch-token', 'batch-predispatch-replacement');
+    expect(await callTool(started.url, replacement.headers, 4, 'canvas_apply', request)).toMatchObject({ status: 'committed', batch: { status: 'completed', nextSequence: 1 } });
+    expect(documents.getDocument(document.id)).toMatchObject({ name: 'Must not commit before retry', revision: 1 });
+    expect((await documents.listTrace(document.id)).filter((entry) => entry.transaction.clientOperationId === 'cancelled-before-dispatch-step')).toHaveLength(1);
+  });
+
+  it('reconciles a committed durable chunk after ledger finalization fails without replay', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-mcp-batch-finalize-')); temporaryPaths.push(root);
+    const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0', new TransactionTraceStore(join(root, 'traces'))); documents.initialize();
+    const host = new McpHost(documents, '1.0.0', join(root, 'port.json')); hosts.push(host); const started = await host.start('batch-finalize-token');
+    const client = await initializeClient(started.url, 'batch-finalize-token', 'batch-finalize-client');
+    const document = documents.snapshot().activeDocument!;
+    const startedBatch = await callTool(started.url, client.headers, 2, 'job_manage', { action: 'start-batch', documentId: document.id, totalTransactions: 1, label: 'Finalization recovery' });
+    const job = startedBatch.job as { id: string }; const resumeToken = String(startedBatch.resumeToken);
+    const batches = (host as unknown as { batches: BatchManager }).batches;
+    const internals = batches as unknown as { replaceFile: (source: string, destination: string) => Promise<void> };
+    const replaceFile = internals.replaceFile; const finish = batches.finish.bind(batches); let insideFinish = false; let rejected = false;
+    internals.replaceFile = async (source, destination) => {
+      if (insideFinish && !rejected) { rejected = true; throw new Error('Injected post-commit batch-ledger finalization failure.'); }
+      await replaceFile(source, destination);
+    };
+    batches.finish = async (...args: Parameters<BatchManager['finish']>) => {
+      insideFinish = true;
+      try { return await finish(...args); }
+      finally { insideFinish = false; }
+    };
+    const request = {
+      documentId: document.id, clientOperationId: 'committed-before-ledger-finalize', label: 'Commit before ledger finalize', playback: { mode: 'instant', speed: 1 },
+      batch: { jobId: job.id, resumeToken, sequence: 0 }, operations: [{ kind: 'document.rename', name: 'Committed exactly once' }],
+    };
+    const failed = await callToolMessage(started.url, client.headers, 3, 'canvas_apply', request);
+    expect(JSON.stringify(failed)).toContain('Injected post-commit batch-ledger finalization failure');
+    expect(documents.getDocument(document.id)).toMatchObject({ name: 'Committed exactly once', revision: 1 });
+    expect((await documents.listTrace(document.id)).filter((entry) => entry.transaction.clientOperationId === 'committed-before-ledger-finalize')).toHaveLength(1);
+
+    batches.finish = finish;
+    internals.replaceFile = replaceFile;
+    expect(await callTool(started.url, client.headers, 4, 'canvas_apply', request)).toMatchObject({ status: 'duplicate', batch: { expectedSequence: 1, duplicate: true } });
+    expect(documents.getDocument(document.id)).toMatchObject({ name: 'Committed exactly once', revision: 1 });
+    expect((await documents.listTrace(document.id)).filter((entry) => entry.transaction.clientOperationId === 'committed-before-ledger-finalize')).toHaveLength(1);
+  });
+
+  it('keeps a dispatched batch cancellation pending until the exact committed result is durably recorded', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-mcp-batch-cancel-settlement-')); temporaryPaths.push(root);
+    const appendEntered = deferred(); const appendRelease = deferred();
+    class BlockingJournal extends RecoveryJournal {
+      override async append(...args: Parameters<RecoveryJournal['append']>): Promise<void> {
+        appendEntered.resolve();
+        await appendRelease.promise;
+        return super.append(...args);
+      }
+    }
+    const documents = new DocumentService(new BlockingJournal(join(root, 'journal')), '1.0.0', new TransactionTraceStore(join(root, 'traces'))); documents.initialize();
+    const host = new McpHost(documents, '1.0.0', join(root, 'port.json')); hosts.push(host); const started = await host.start('batch-cancel-settlement-token');
+    const client = await initializeClient(started.url, 'batch-cancel-settlement-token', 'batch-cancel-settlement-client'); const document = documents.snapshot().activeDocument!;
+    const startedBatch = await callTool(started.url, client.headers, 2, 'job_manage', { action: 'start-batch', documentId: document.id, totalTransactions: 1, label: 'Cancellation settlement' });
+    const job = startedBatch.job as { id: string }; const resumeToken = String(startedBatch.resumeToken);
+    const pending = callTool(started.url, client.headers, 3, 'canvas_apply', {
+      documentId: document.id, clientOperationId: 'cancel-after-canonical-dispatch', label: 'Retain committed cancellation progress', playback: { mode: 'instant', speed: 1 },
+      batch: { jobId: job.id, resumeToken, sequence: 0 }, operations: [{ kind: 'document.rename', name: 'Committed before cancellation settled' }],
+    });
+    await appendEntered.promise;
+    expect(documents.getDocument(document.id)).toMatchObject({ name: 'Committed before cancellation settled', revision: 1 });
+    expect(await callTool(started.url, client.headers, 4, 'job_manage', { action: 'cancel', jobId: job.id })).toMatchObject({ status: 'running', progress: 0 });
+    appendRelease.resolve();
+    expect(await pending).toMatchObject({ status: 'committed', transactionId: expect.any(String), batch: { status: 'cancelled', progress: 1, nextSequence: 1, transactionIds: [expect.any(String)] } });
+    expect(await callTool(started.url, client.headers, 5, 'job_manage', { action: 'resume-batch', jobId: job.id, resumeToken })).toMatchObject({
+      nextSequence: 1, job: { status: 'cancelled', progress: 1, batch: { nextSequence: 1, transactionIds: [expect.any(String)] } },
+    });
+    expect((await documents.listTrace(document.id)).filter((entry) => entry.transaction.clientOperationId === 'cancel-after-canonical-dispatch')).toHaveLength(1);
   });
 
   it('derives new-entity attribution from the authenticated session and blocks forged provenance', async () => {

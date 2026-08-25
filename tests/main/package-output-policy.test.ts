@@ -10,6 +10,11 @@ import {
   reservePackageGeneration,
   resolvePackageOutputRoot,
 } from '../../scripts/package-output-policy.mjs';
+import {
+  PACKAGE_BUILD_INPUT_MANIFEST,
+  capturePackageBuildInput,
+  readPackageBuildInput,
+} from '../../scripts/package-build-input.mjs';
 
 const temporaryDirectories: string[] = [];
 
@@ -72,6 +77,66 @@ describe('immutable package-output generations', () => {
     await expect(readPackageGeneration(options)).resolves.toMatchObject({
       generation: { target: { platform: 'linux', architecture: 'x64' } },
     });
+  });
+
+  it('captures exact package source inputs, ignores documentation, and fails closed on post-capture source drift', async () => {
+    const workspace = await createWorkspace('aidraw-package-build-input-');
+    await mkdir(join(workspace, 'src'), { recursive: true });
+    await mkdir(join(workspace, 'docs'), { recursive: true });
+    await writeFile(join(workspace, 'src', 'main.ts'), 'export const subject = 1;\n', 'utf8');
+    await writeFile(join(workspace, 'docs', 'TESTING.md'), 'pre-build documentation\n', 'utf8');
+    await reservePackageGeneration({ workspace, environment: {}, platform: 'darwin', architecture: 'arm64' });
+    const captured = await capturePackageBuildInput({
+      workspace,
+      outputDirectory: join(workspace, 'out'),
+      inputPaths: ['package.json', 'src'],
+    });
+    expect(captured.manifest.summary).toMatchObject({ files: 2, bytes: expect.any(Number), recordsSha256: expect.stringMatching(/^[0-9a-f]{64}$/u) });
+    expect(JSON.parse(await readFile(join(workspace, 'out', PACKAGE_BUILD_INPUT_MANIFEST), 'utf8'))).toEqual(captured.manifest);
+    await writeFile(join(workspace, 'docs', 'TESTING.md'), 'changed after build\n', 'utf8');
+    await expect(readPackageBuildInput({
+      workspace,
+      outputDirectory: join(workspace, 'out'),
+      inputPaths: ['package.json', 'src'],
+    })).resolves.toMatchObject({ fileSha256: captured.fileSha256 });
+    await writeFile(join(workspace, 'src', 'main.ts'), 'export const subject = 2;\n', 'utf8');
+    await expect(readPackageBuildInput({
+      workspace,
+      outputDirectory: join(workspace, 'out'),
+      inputPaths: ['package.json', 'src'],
+    })).rejects.toThrow('source inputs changed after the package build began');
+  });
+
+  it('fails closed on malformed, duplicate, reordered, or forged build-input records', async () => {
+    const workspace = await createWorkspace('aidraw-package-build-input-invalid-');
+    await mkdir(join(workspace, 'src'), { recursive: true });
+    await writeFile(join(workspace, 'src', 'main.ts'), 'export const subject = 1;\n', 'utf8');
+    await reservePackageGeneration({ workspace, environment: {}, platform: 'darwin', architecture: 'arm64' });
+    await capturePackageBuildInput({
+      workspace,
+      outputDirectory: join(workspace, 'out'),
+      inputPaths: ['package.json', 'src'],
+    });
+    const manifestPath = join(workspace, 'out', PACKAGE_BUILD_INPUT_MANIFEST);
+    const original = JSON.parse(await readFile(manifestPath, 'utf8')) as {
+      records: Array<{ path: string; bytes: number; sha256: string }>;
+    };
+
+    for (const records of [
+      [{ ...original.records[0], path: '../package.json' }, ...original.records.slice(1)],
+      [{ ...original.records[0], bytes: -1 }, ...original.records.slice(1)],
+      [{ ...original.records[0], sha256: 'not-a-digest' }, ...original.records.slice(1)],
+      [...original.records].reverse(),
+      [original.records[0], original.records[0], ...original.records.slice(1)],
+    ]) {
+      const malformed = { ...original, records };
+      await writeFile(manifestPath, `${JSON.stringify(malformed)}\n`, 'utf8');
+      await expect(readPackageBuildInput({
+        workspace,
+        outputDirectory: join(workspace, 'out'),
+        inputPaths: ['package.json', 'src'],
+      })).rejects.toThrow(/invalid file record|summary does not match/u);
+    }
   });
 
   it('keeps explicit run-owned prepared-package roots distinct', async () => {
@@ -145,10 +210,12 @@ describe('immutable package-output generations', () => {
     expect(policy).toContain("from 'node:path'");
     expect(forge).toContain('prePackage: async');
     expect(forge).toContain('await reservePackageGeneration');
+    expect(forge).toContain('await capturePackageBuildInput');
     expect(forgePackage.indexOf("'prePackage'" )).toBeLessThan(forgePackage.indexOf('packager(packageOpts)'));
     expect(packager).toContain('await fs_extra_1.default.remove(outDir)');
     expect(verifier).toContain('await readPackageGeneration');
     expect(verifier.indexOf('await readPackageGeneration')).toBeLessThan(verifier.indexOf('let executable'));
+    expect(verifier).toContain('await readPackageBuildInput');
     expect(prepare).not.toMatch(/\b(?:rm|rename|unlink)\s*\(/u);
     expect(prepare).toContain('await assertPackageOutputAvailable');
     expect(checksums).toContain('resolvePackageOutputRoot');

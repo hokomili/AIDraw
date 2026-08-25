@@ -1,8 +1,9 @@
 import { z } from 'zod';
-import type { AIDrawDocument, PixelDocument } from './model';
+import type { AIDrawDocument, IllustrationObject, PixelDocument } from './model';
 import type { CanvasOperation, CanvasTransaction } from './operations';
 import { assertPixelDocumentPaletteReferences } from './palette';
 import { assertAcyclicReferences } from './reference-graph';
+import { EDITABLE_SVG_PATH_NATIVE_ARC_CHORD, EDITABLE_SVG_PATH_NATIVE_ARC_EXTENT_EPSILON_DEGREES, inspectEditableSvgPathData, MAX_EDITABLE_SVG_PATH_CHARACTERS, MAX_EDITABLE_SVG_PATH_NODES } from './svg-path';
 
 const OperationKindSchema = z.enum([
   'document.rename',
@@ -66,6 +67,15 @@ const TransformInputSchema = z.object({
   skewX: FiniteNumberSchema.min(-89.999).max(89.999),
   skewY: FiniteNumberSchema.min(-89.999).max(89.999),
 }).strict();
+const IllustrationObjectAuthoringTransformSchema = z.object({
+  x: FiniteNumberSchema.min(-1_000_000).max(1_000_000).default(0),
+  y: FiniteNumberSchema.min(-1_000_000).max(1_000_000).default(0),
+  scaleX: FiniteNumberSchema.min(-10_000).max(10_000).default(1),
+  scaleY: FiniteNumberSchema.min(-10_000).max(10_000).default(1),
+  rotation: FiniteNumberSchema.min(-1_000_000).max(1_000_000).default(0),
+  skewX: FiniteNumberSchema.min(-89.999).max(89.999).default(0),
+  skewY: FiniteNumberSchema.min(-89.999).max(89.999).default(0),
+}).strict().default({ x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, skewX: 0, skewY: 0 });
 export const NewDocumentOptionsSchema = z.object({
   kind: z.enum(['illustration', 'sprite', 'tilemap', 'project']),
   name: z.string().trim().min(1).max(200).optional(),
@@ -268,6 +278,9 @@ const StrokeStyleInputSchema = z.object({
   lineJoin: z.enum(['miter', 'round', 'bevel']),
   dash: z.array(FiniteNumberSchema.min(0).max(1_000_000)).max(256),
 }).strict();
+const VisibleStrokeAuthoringInputSchema = StrokeStyleInputSchema.default({
+  paint: { kind: 'solid', color: '#000000' }, width: 1, opacity: 1, lineCap: 'round', lineJoin: 'round', dash: [],
+});
 const IllustrationLayerBaseInputShape = {
   ...EntityBaseInputShape,
   parentId: IdSchema.optional(),
@@ -322,8 +335,7 @@ const TextStyleRangeInputSchema = z.object({
   letterSpacing: FiniteNumberSchema.min(-20).max(100),
   underline: z.boolean().optional(),
 }).strict().refine((range) => range.end >= range.start, { path: ['end'], message: 'Text range end must not precede its start' });
-const IllustrationObjectInputSchema = z.discriminatedUnion('type', [
-  z.object({
+const IllustrationVectorStrokeInputSchema = z.object({
     ...IllustrationObjectBaseInputShape,
     type: z.literal('vector-stroke'),
     points: z.array(PointSampleInputSchema).min(1).max(1_000_000),
@@ -336,9 +348,10 @@ const IllustrationObjectInputSchema = z.discriminatedUnion('type', [
       color: ColorInputSchema,
     }).strict(),
     pathData: z.string().max(2_000_000).optional(),
-  }).strict(),
-  z.object({ ...IllustrationObjectBaseInputShape, type: z.literal('path'), pathData: z.string().min(1).max(2_000_000), closed: z.boolean(), fill: PaintStyleInputSchema, stroke: StrokeStyleInputSchema, fillRule: z.enum(['nonzero', 'evenodd']) }).strict(),
-  z.object({
+  }).strict();
+const IllustrationPathPersistenceInputSchema = z.object({ ...IllustrationObjectBaseInputShape, type: z.literal('path'), pathData: z.string().min(1).max(2_000_000), closed: z.boolean(), fill: PaintStyleInputSchema, stroke: StrokeStyleInputSchema, fillRule: z.enum(['nonzero', 'evenodd']) }).strict();
+const IllustrationPathMutationInputSchema = z.object({ ...IllustrationObjectBaseInputShape, type: z.literal('path'), pathData: z.string().min(1).max(MAX_EDITABLE_SVG_PATH_CHARACTERS).describe(`Renderable, node/arc-editable SVG data: exactly one simple subpath, 2–${MAX_EDITABLE_SVG_PATH_NODES.toLocaleString('en-US')} effective native nodes after arc conversion and close coalescing, every arc command has endpoints at least ${EDITABLE_SVG_PATH_NATIVE_ARC_CHORD} document units apart, every nonzero-radius arc spans more than ${EDITABLE_SVG_PATH_NATIVE_ARC_EXTENT_EPSILON_DEGREES}° after ellipse normalization, and at most 1,000,000 characters.`), closed: z.boolean(), fill: PaintStyleInputSchema, stroke: StrokeStyleInputSchema, fillRule: z.enum(['nonzero', 'evenodd']) }).strict();
+const IllustrationShapePersistenceInputSchema = z.object({
     ...IllustrationObjectBaseInputShape,
     type: z.literal('shape'),
     shape: z.enum(['rectangle', 'ellipse', 'line', 'arrow', 'polygon', 'star']),
@@ -349,8 +362,8 @@ const IllustrationObjectInputSchema = z.discriminatedUnion('type', [
     fill: PaintStyleInputSchema,
     stroke: StrokeStyleInputSchema,
     cornerRadius: FiniteNumberSchema.min(0).max(1_000_000).optional(),
-  }).strict(),
-  z.object({
+  }).strict();
+const IllustrationTextInputSchema = z.object({
     ...IllustrationObjectBaseInputShape,
     type: z.literal('text'),
     text: z.string().max(MAX_ILLUSTRATION_TEXT_LENGTH),
@@ -359,8 +372,8 @@ const IllustrationObjectInputSchema = z.discriminatedUnion('type', [
     align: z.enum(['left', 'center', 'right', 'justify']),
     lineHeight: FiniteNumberSchema.min(0.1).max(10),
     ranges: z.array(TextStyleRangeInputSchema).max(100_000),
-  }).strict(),
-  z.object({
+  }).strict();
+const IllustrationImageInputSchema = z.object({
     ...IllustrationObjectBaseInputShape,
     type: z.literal('image'),
     assetId: IdSchema,
@@ -370,13 +383,278 @@ const IllustrationObjectInputSchema = z.discriminatedUnion('type', [
     sourceHeight: FiniteNumberSchema.positive().max(1_000_000).optional(),
     crop: z.object({ x: FiniteNumberSchema.nonnegative(), y: FiniteNumberSchema.nonnegative(), width: FiniteNumberSchema.positive(), height: FiniteNumberSchema.positive() }).strict().optional(),
     filters: ImageFiltersInputSchema,
-  }).strict(),
-  z.object({ ...IllustrationObjectBaseInputShape, type: z.literal('group'), childIds: z.array(IdSchema).max(1_000_000) }).strict(),
-]).superRefine((object, context) => {
+  }).strict();
+const IllustrationGroupInputSchema = z.object({ ...IllustrationObjectBaseInputShape, type: z.literal('group'), childIds: z.array(IdSchema).max(1_000_000) }).strict();
+
+function validateIllustrationObjectPersistentConstraints(object: IllustrationObject, context: z.RefinementCtx): void {
   if (object.type === 'group' && new Set(object.childIds).size !== object.childIds.length) context.addIssue({ code: 'custom', path: ['childIds'], message: 'Object-group child IDs must be unique' });
   if (object.type === 'text' && object.ranges.some((range) => range.end > object.text.length)) context.addIssue({ code: 'custom', path: ['ranges'], message: 'Text style ranges must fit inside the text' });
   if (object.type === 'image' && object.crop && object.sourceWidth !== undefined && object.sourceHeight !== undefined && (object.crop.x + object.crop.width > object.sourceWidth || object.crop.y + object.crop.height > object.sourceHeight)) context.addIssue({ code: 'custom', path: ['crop'], message: 'Image crop must fit inside source geometry' });
-});
+}
+
+export const IllustrationObjectInputSchema = z.discriminatedUnion('type', [
+  IllustrationVectorStrokeInputSchema,
+  IllustrationPathPersistenceInputSchema,
+  IllustrationShapePersistenceInputSchema,
+  IllustrationTextInputSchema,
+  IllustrationImageInputSchema,
+  IllustrationGroupInputSchema,
+]).superRefine(validateIllustrationObjectPersistentConstraints);
+
+function validateIllustrationObjectMutationGeometry(object: IllustrationObject, context: z.RefinementCtx): void {
+  if (object.type === 'path') {
+    try {
+      const path = inspectEditableSvgPathData(object.pathData);
+      if (path.closed !== object.closed) {
+        context.addIssue({ code: 'custom', path: ['closed'], message: 'Path closed must match the final SVG close-path command' });
+      }
+    } catch (error) {
+      context.addIssue({ code: 'custom', path: ['pathData'], message: error instanceof Error ? error.message : 'Invalid SVG path data' });
+    }
+  }
+  if (object.type !== 'image') return;
+  const hasSourceWidth = object.sourceWidth !== undefined;
+  const hasSourceHeight = object.sourceHeight !== undefined;
+  if (hasSourceWidth !== hasSourceHeight) {
+    context.addIssue({ code: 'custom', path: ['sourceWidth'], message: 'Image sourceWidth and sourceHeight must be supplied together' });
+  }
+  if (!object.crop) return;
+  if (!hasSourceWidth || !hasSourceHeight) {
+    context.addIssue({ code: 'custom', path: ['crop'], message: 'Image crops require complete source dimensions' });
+  } else if (object.crop.x + object.crop.width > object.sourceWidth! || object.crop.y + object.crop.height > object.sourceHeight!) {
+    context.addIssue({ code: 'custom', path: ['crop'], message: 'Image crop must fit inside source geometry' });
+  }
+}
+
+const IllustrationShapeMutationBaseInputShape = {
+  ...IllustrationObjectBaseInputShape,
+  type: z.literal('shape'),
+  width: FiniteNumberSchema.min(0).max(1_000_000),
+  height: FiniteNumberSchema.min(0).max(1_000_000),
+  stroke: StrokeStyleInputSchema,
+};
+const ClosedIllustrationShapeMutationBaseInputShape = {
+  ...IllustrationShapeMutationBaseInputShape,
+  fill: PaintStyleInputSchema,
+};
+const OpenIllustrationShapeMutationBaseInputShape = {
+  ...IllustrationShapeMutationBaseInputShape,
+  fill: z.object({ kind: z.literal('none') }).strict().describe('Line and arrow geometry has no fill-rendering surface; canonical add/replacement therefore requires exactly { kind: "none" }.'),
+};
+const IllustrationShapeAddInputSchema = z.discriminatedUnion('shape', [
+  z.object({ ...ClosedIllustrationShapeMutationBaseInputShape, shape: z.literal('rectangle'), cornerRadius: FiniteNumberSchema.min(0).max(1_000_000).default(0) }).strict(),
+  z.object({ ...ClosedIllustrationShapeMutationBaseInputShape, shape: z.literal('ellipse') }).strict(),
+  z.object({ ...OpenIllustrationShapeMutationBaseInputShape, shape: z.literal('line') }).strict(),
+  z.object({ ...OpenIllustrationShapeMutationBaseInputShape, shape: z.literal('arrow') }).strict(),
+  z.object({ ...ClosedIllustrationShapeMutationBaseInputShape, shape: z.literal('polygon'), sides: FiniteNumberSchema.int().min(3).max(1_000).default(6) }).strict(),
+  z.object({
+    ...ClosedIllustrationShapeMutationBaseInputShape,
+    shape: z.literal('star'),
+    sides: FiniteNumberSchema.int().min(3).max(1_000).default(5),
+    innerRadius: FiniteNumberSchema.min(0).max(1).default(0.45),
+  }).strict(),
+]);
+const IllustrationShapeReplacementInputSchema = z.discriminatedUnion('shape', [
+  z.object({ ...ClosedIllustrationShapeMutationBaseInputShape, shape: z.literal('rectangle'), cornerRadius: FiniteNumberSchema.min(0).max(1_000_000).describe('Required complete replacement geometry. A readable predecessor rectangle that omitted this field rendered as 0; supply 0 to preserve that appearance.') }).strict(),
+  z.object({ ...ClosedIllustrationShapeMutationBaseInputShape, shape: z.literal('ellipse') }).strict(),
+  z.object({ ...OpenIllustrationShapeMutationBaseInputShape, shape: z.literal('line') }).strict(),
+  z.object({ ...OpenIllustrationShapeMutationBaseInputShape, shape: z.literal('arrow') }).strict(),
+  z.object({ ...ClosedIllustrationShapeMutationBaseInputShape, shape: z.literal('polygon'), sides: FiniteNumberSchema.int().min(3).max(1_000).describe('Required complete replacement geometry. A readable predecessor polygon that omitted this field rendered with 6 sides; supply 6 to preserve that appearance.') }).strict(),
+  z.object({
+    ...ClosedIllustrationShapeMutationBaseInputShape,
+    shape: z.literal('star'),
+    sides: FiniteNumberSchema.int().min(3).max(1_000).describe('Required complete replacement geometry. A readable predecessor star that omitted this field rendered with 5 sides; supply 5 to preserve that appearance.'),
+    innerRadius: FiniteNumberSchema.min(0).max(1).describe('Required complete replacement geometry. A readable predecessor star that omitted this field rendered with innerRadius 0.45; supply 0.45 to preserve that appearance.'),
+  }).strict(),
+]);
+
+/**
+ * Strict hostile-input boundary for a new canonical illustration-object mutation.
+ * Persistent documents retain the broader compatibility schema above, but newly
+ * authored shapes expose and accept only fields that affect their exact subtype.
+ */
+export const IllustrationObjectMutationInputSchema = z.union([
+  IllustrationVectorStrokeInputSchema,
+  IllustrationPathMutationInputSchema,
+  IllustrationShapeReplacementInputSchema,
+  IllustrationTextInputSchema,
+  IllustrationImageInputSchema,
+  IllustrationGroupInputSchema,
+]).superRefine(validateIllustrationObjectPersistentConstraints).superRefine(validateIllustrationObjectMutationGeometry);
+
+const IllustrationObjectAddInputSchema = z.union([
+  IllustrationVectorStrokeInputSchema,
+  IllustrationPathMutationInputSchema,
+  IllustrationShapeAddInputSchema,
+  IllustrationTextInputSchema,
+  IllustrationImageInputSchema,
+  IllustrationGroupInputSchema,
+]).superRefine(validateIllustrationObjectPersistentConstraints).superRefine(validateIllustrationObjectMutationGeometry);
+
+/**
+ * Converts one already-readable object to the strict replacement contract for a
+ * trusted native or server-authored edit. This is deliberately not part of the
+ * public replacement parser: hostile callers must supply complete subtype
+ * geometry and may not smuggle inert compatibility fields into canonical state.
+ */
+export function normalizeIllustrationObjectForReplacement(object: IllustrationObject): IllustrationObject {
+  if (object.type !== 'shape') return IllustrationObjectMutationInputSchema.parse(object) as IllustrationObject;
+  const normalized = structuredClone(object) as unknown as Record<string, unknown>;
+  delete normalized.cornerRadius;
+  delete normalized.sides;
+  delete normalized.innerRadius;
+  if (object.shape === 'rectangle') normalized.cornerRadius = object.cornerRadius ?? 0;
+  else if (object.shape === 'line' || object.shape === 'arrow') normalized.fill = { kind: 'none' };
+  else if (object.shape === 'polygon') normalized.sides = object.sides ?? 6;
+  else if (object.shape === 'star') {
+    normalized.sides = object.sides ?? 5;
+    normalized.innerRadius = object.innerRadius ?? 0.45;
+  }
+  return IllustrationObjectMutationInputSchema.parse(normalized) as IllustrationObject;
+}
+
+const IllustrationObjectAuthoringBaseInputShape = {
+  id: IdSchema.describe('Caller-chosen unique object ID; obtain existing IDs from canvas_observe and never reuse one.'),
+  name: z.string().min(1).max(200).describe('Human-readable object name.'),
+  layerId: IdSchema.describe('Exact writable vector-layer ID returned by canvas_observe.'),
+  visible: z.boolean().default(true),
+  locked: z.boolean().default(false),
+  opacity: FiniteNumberSchema.min(0).max(1).default(1),
+  blendMode: BlendModeInputSchema.default('normal'),
+  transform: IllustrationObjectAuthoringTransformSchema,
+  blur: FiniteNumberSchema.min(0).max(4_096).optional(),
+  filters: ImageFiltersInputSchema.optional(),
+  maskObjectId: IdSchema.optional(),
+  shadow: z.object({ color: ColorInputSchema, blur: FiniteNumberSchema.min(0).max(4_096), offsetX: FiniteNumberSchema, offsetY: FiniteNumberSchema }).strict().optional(),
+  revision: FiniteNumberSchema.int().nonnegative().optional().describe('Compatibility input only; ignored for add. The server starts the object at revision 0.'),
+  createdAt: z.string().min(1).optional().describe('Compatibility input only; ignored for add. The server supplies its commit time.'),
+  updatedAt: z.string().min(1).optional().describe('Compatibility input only; ignored for add. The server supplies its commit time.'),
+  createdBy: IdSchema.optional().describe('Compatibility input only; ignored for add. The authenticated MCP actor owns attribution.'),
+};
+
+const IllustrationObjectAuthoringPointSchema = z.object({
+  x: FiniteNumberSchema,
+  y: FiniteNumberSchema,
+  pressure: FiniteNumberSchema.min(0).max(1).default(0.5),
+  time: FiniteNumberSchema.optional(),
+}).strict();
+
+const ClosedShapeAuthoringInputShape = {
+  ...IllustrationObjectAuthoringBaseInputShape,
+  type: z.literal('shape'),
+  width: FiniteNumberSchema.min(0).max(1_000_000),
+  height: FiniteNumberSchema.min(0).max(1_000_000),
+  fill: PaintStyleInputSchema.default({ kind: 'solid', color: '#000000' }),
+  stroke: VisibleStrokeAuthoringInputSchema,
+};
+const OpenShapeAuthoringInputShape = {
+  ...IllustrationObjectAuthoringBaseInputShape,
+  type: z.literal('shape'),
+  width: FiniteNumberSchema.min(0).max(1_000_000),
+  height: FiniteNumberSchema.min(0).max(1_000_000),
+  fill: z.object({ kind: z.literal('none') }).strict().default({ kind: 'none' }),
+  stroke: VisibleStrokeAuthoringInputSchema,
+};
+const IllustrationShapeAuthoringInputSchema = z.discriminatedUnion('shape', [
+  z.object({ ...ClosedShapeAuthoringInputShape, shape: z.literal('rectangle'), cornerRadius: FiniteNumberSchema.min(0).max(1_000_000).default(0) }).strict(),
+  z.object({ ...ClosedShapeAuthoringInputShape, shape: z.literal('ellipse') }).strict(),
+  z.object({ ...OpenShapeAuthoringInputShape, shape: z.literal('line') }).strict(),
+  z.object({ ...OpenShapeAuthoringInputShape, shape: z.literal('arrow') }).strict(),
+  z.object({ ...ClosedShapeAuthoringInputShape, shape: z.literal('polygon'), sides: FiniteNumberSchema.int().min(3).max(1_000).default(6) }).strict(),
+  z.object({
+    ...ClosedShapeAuthoringInputShape,
+    shape: z.literal('star'),
+    sides: FiniteNumberSchema.int().min(3).max(1_000).default(5),
+    innerRadius: FiniteNumberSchema.min(0).max(1).default(0.45),
+  }).strict(),
+]);
+
+/**
+ * Public MCP authoring input for illustration.object.add. Persistent entity metadata is
+ * optional compatibility input and is replaced with authenticated server-owned values.
+ */
+export const IllustrationObjectAuthoringInputSchema = z.union([
+  z.object({
+    ...IllustrationObjectAuthoringBaseInputShape,
+    type: z.literal('vector-stroke'),
+    points: z.array(IllustrationObjectAuthoringPointSchema).min(1).max(1_000_000),
+    brush: z.object({
+      size: FiniteNumberSchema.min(1).max(500).default(4),
+      thinning: FiniteNumberSchema.min(-1).max(1).default(0.5),
+      smoothing: FiniteNumberSchema.min(0).max(1).default(0.5),
+      streamline: FiniteNumberSchema.min(0).max(1).default(0.5),
+      simulatePressure: z.boolean().default(true),
+      color: ColorInputSchema.default('#000000'),
+    }).strict().default({ size: 4, thinning: 0.5, smoothing: 0.5, streamline: 0.5, simulatePressure: true, color: '#000000' }),
+    pathData: z.string().max(2_000_000).optional(),
+  }).strict(),
+  z.object({
+    ...IllustrationObjectAuthoringBaseInputShape,
+    type: z.literal('path'),
+    pathData: z.string().min(1).max(MAX_EDITABLE_SVG_PATH_CHARACTERS).describe(`Renderable, node/arc-editable SVG data: exactly one simple subpath, 2–${MAX_EDITABLE_SVG_PATH_NODES.toLocaleString('en-US')} effective native nodes after arc conversion and close coalescing, every arc command has endpoints at least ${EDITABLE_SVG_PATH_NATIVE_ARC_CHORD} document units apart, every nonzero-radius arc spans more than ${EDITABLE_SVG_PATH_NATIVE_ARC_EXTENT_EPSILON_DEGREES}° after ellipse normalization, and at most 1,000,000 characters.`),
+    closed: z.boolean().optional().describe('Optional closure assertion. When omitted, AIDraw derives it from the final SVG close-path command; when supplied, it must match.'),
+    fill: PaintStyleInputSchema.default({ kind: 'none' }),
+    stroke: VisibleStrokeAuthoringInputSchema,
+    fillRule: z.enum(['nonzero', 'evenodd']).default('nonzero'),
+  }).strict(),
+  IllustrationShapeAuthoringInputSchema,
+  z.object({
+    ...IllustrationObjectAuthoringBaseInputShape,
+    type: z.literal('text'),
+    text: z.string().max(MAX_ILLUSTRATION_TEXT_LENGTH),
+    width: FiniteNumberSchema.min(0).max(1_000_000).default(600),
+    height: FiniteNumberSchema.min(0).max(1_000_000).default(80),
+    align: z.enum(['left', 'center', 'right', 'justify']).default('left'),
+    lineHeight: FiniteNumberSchema.min(0.1).max(10).default(1.2),
+    ranges: z.array(TextStyleRangeInputSchema).max(100_000).default([]).describe('Optional complete style ranges; each end must fit within the authored text.'),
+  }).strict(),
+  z.object({
+    ...IllustrationObjectAuthoringBaseInputShape,
+    type: z.literal('image'),
+    assetId: IdSchema,
+    width: FiniteNumberSchema.positive().max(1_000_000),
+    height: FiniteNumberSchema.positive().max(1_000_000),
+    sourceWidth: FiniteNumberSchema.positive().max(1_000_000).optional(),
+    sourceHeight: FiniteNumberSchema.positive().max(1_000_000).optional(),
+    crop: z.object({ x: FiniteNumberSchema.nonnegative(), y: FiniteNumberSchema.nonnegative(), width: FiniteNumberSchema.positive(), height: FiniteNumberSchema.positive() }).strict().optional().describe('Optional source-space crop. AIDraw derives source dimensions from the embedded asset and rejects out-of-bounds crops.'),
+    filters: ImageFiltersInputSchema.default([]),
+  }).strict(),
+  z.object({
+    ...IllustrationObjectAuthoringBaseInputShape,
+    type: z.literal('group'),
+    childIds: z.array(IdSchema).max(1_000_000).default([]).describe('Unique existing object IDs from the same vector layer.'),
+  }).strict(),
+]).superRefine((object, context) => {
+  if (object.type === 'group' && new Set(object.childIds).size !== object.childIds.length) context.addIssue({ code: 'custom', path: ['childIds'], message: 'Object-group child IDs must be unique' });
+  if (object.type === 'text' && object.ranges.some((range) => range.end > object.text.length)) context.addIssue({ code: 'custom', path: ['ranges'], message: 'Text style ranges must fit inside the text' });
+  if (object.type === 'path') {
+    try {
+      const path = inspectEditableSvgPathData(object.pathData);
+      if (object.closed !== undefined && object.closed !== path.closed) context.addIssue({ code: 'custom', path: ['closed'], message: 'Path closed must match the final SVG close-path command' });
+    } catch (error) {
+      context.addIssue({ code: 'custom', path: ['pathData'], message: error instanceof Error ? error.message : 'Invalid SVG path data' });
+    }
+  }
+  if (object.type === 'image') {
+    const hasSourceWidth = object.sourceWidth !== undefined;
+    const hasSourceHeight = object.sourceHeight !== undefined;
+    if (hasSourceWidth !== hasSourceHeight) context.addIssue({ code: 'custom', path: ['sourceWidth'], message: 'Image sourceWidth and sourceHeight must be supplied together' });
+    if (object.crop && hasSourceWidth && hasSourceHeight && (object.crop.x + object.crop.width > object.sourceWidth! || object.crop.y + object.crop.height > object.sourceHeight!)) context.addIssue({ code: 'custom', path: ['crop'], message: 'Image crop must fit inside source geometry' });
+  }
+}).describe('Complete public editable illustration object contract for illustration.object.add. Common presentation fields have deterministic defaults; type-specific geometry remains strict.');
+
+export type IllustrationObjectAuthoringInput = z.input<typeof IllustrationObjectAuthoringInputSchema>;
+
+export function materializeIllustrationObjectAuthoringInput(input: unknown, actorId: string, timestamp: string): IllustrationObject {
+  const parsed = IllustrationObjectAuthoringInputSchema.parse(input);
+  const authored = { ...parsed } as Record<string, unknown>;
+  for (const field of ['revision', 'createdAt', 'updatedAt', 'createdBy']) delete authored[field];
+  if (parsed.type === 'path') authored.closed = inspectEditableSvgPathData(parsed.pathData).closed;
+  const materialized = { ...authored, revision: 0, createdAt: timestamp, updatedAt: timestamp, createdBy: actorId };
+  // Image source dimensions are derived from the document's validated embedded asset
+  // by the commit policy, which owns that document-dependent check.
+  return (parsed.type === 'image' ? IllustrationObjectInputSchema : IllustrationObjectMutationInputSchema).parse(materialized) as IllustrationObject;
+}
 const IllustrationLayerIdsInputSchema = z.array(IdSchema).max(1_000_000).refine((ids) => new Set(ids).size === ids.length, { message: 'Illustration root layer IDs must be unique' });
 const IllustrationLayersInputSchema = z.record(z.string(), IllustrationLayerInputSchema).superRefine((layers, context) => {
   for (const [id, layer] of Object.entries(layers)) if (layer.id !== id) context.addIssue({ code: 'custom', path: [id, 'id'], message: 'Illustration layer record keys must match entity IDs' });
@@ -804,8 +1082,10 @@ const TargetedOperationSchemas: Record<z.infer<typeof OperationKindSchema>, z.Zo
   'illustration.layer.replace': z.object({ kind: z.literal('illustration.layer.replace'), layer: IllustrationLayerInputSchema, expectedRevision: ExpectedRevisionSchema }).strict(),
   'illustration.layer.move': z.object({ kind: z.literal('illustration.layer.move'), layerId: IdSchema, parentId: IdSchema.optional(), index: FiniteNumberSchema.int().nonnegative().max(1_000_000).optional(), expectedRevision: ExpectedRevisionSchema }).strict(),
   'illustration.layer.delete': z.object({ kind: z.literal('illustration.layer.delete'), layerId: IdSchema, expectedRevision: ExpectedRevisionSchema }).strict(),
-  'illustration.object.add': z.object({ kind: z.literal('illustration.object.add'), object: IllustrationObjectInputSchema, index: FiniteNumberSchema.int().nonnegative().max(1_000_000).optional(), parentGroupId: IdSchema.optional(), groupIndex: FiniteNumberSchema.int().nonnegative().max(1_000_000).optional() }).strict(),
-  'illustration.object.replace': z.object({ kind: z.literal('illustration.object.replace'), object: IllustrationObjectInputSchema, expectedRevision: ExpectedRevisionSchema }).strict(),
+  'illustration.object.add': z.object({ kind: z.literal('illustration.object.add'), object: IllustrationObjectAddInputSchema, index: FiniteNumberSchema.int().nonnegative().max(1_000_000).optional(), parentGroupId: IdSchema.optional(), groupIndex: FiniteNumberSchema.int().nonnegative().max(1_000_000).optional() }).strict().superRefine((operation, context) => {
+    if (operation.groupIndex !== undefined && operation.parentGroupId === undefined) context.addIssue({ code: 'custom', path: ['groupIndex'], message: 'groupIndex requires parentGroupId' });
+  }),
+  'illustration.object.replace': z.object({ kind: z.literal('illustration.object.replace'), object: IllustrationObjectMutationInputSchema, expectedRevision: ExpectedRevisionSchema }).strict(),
   'illustration.object.move': z.object({
     kind: z.literal('illustration.object.move'),
     objectId: IdSchema,
@@ -814,7 +1094,9 @@ const TargetedOperationSchemas: Record<z.infer<typeof OperationKindSchema>, z.Zo
     parentGroupId: IdSchema.optional(),
     groupIndex: z.number().int().nonnegative().optional(),
     expectedRevision: ExpectedRevisionSchema,
-  }).strict(),
+  }).strict().superRefine((operation, context) => {
+    if (operation.groupIndex !== undefined && operation.parentGroupId === undefined) context.addIssue({ code: 'custom', path: ['groupIndex'], message: 'groupIndex requires parentGroupId' });
+  }),
   'illustration.object.delete': z.object({ kind: z.literal('illustration.object.delete'), objectId: IdSchema, expectedRevision: ExpectedRevisionSchema }).strict(),
   'illustration.paint.stroke': z.object({
     layerId: IdSchema,
@@ -945,7 +1227,9 @@ export const CanvasOperationSchema = z
     const result = validator.safeParse(value);
     if (!result.success) for (const issue of result.error.issues) context.addIssue({ code: 'custom', path: issue.path, message: issue.message });
   })
-  .transform((value) => value as CanvasOperation);
+  .transform((value) => (value.kind === 'illustration.object.add' || value.kind === 'illustration.object.replace'
+    ? TargetedOperationSchemas[value.kind].parse(value)
+    : value) as CanvasOperation);
 
 export const CanvasTransactionSchema = z
   .object({

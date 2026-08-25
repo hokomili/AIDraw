@@ -5,6 +5,10 @@ import {
   ActorSchema,
   HUMAN_ACTOR,
   IDENTITY_TRANSFORM,
+  IllustrationObjectAuthoringInputSchema,
+  IllustrationObjectInputSchema,
+  IllustrationObjectMutationInputSchema,
+  MAX_EDITABLE_SVG_PATH_CHARACTERS,
   NewDocumentOptionsSchema,
   createIllustrationDocument,
   createId,
@@ -14,6 +18,10 @@ import {
   createPixelTileset,
   createPredecessorDefaultBitmapFont,
   migrateDocument,
+  materializeIllustrationObjectAuthoringInput,
+  normalizeIllustrationObjectForReplacement,
+  inspectEditableSvgPathData,
+  inspectSvgPathData,
   nowIso,
   writePixels,
   writeTiles,
@@ -148,6 +156,9 @@ describe('canvas operation schemas', () => {
       layerId: 'layer-b',
       index: -1,
     }).success).toBe(false);
+    expect(CanvasOperationSchema.safeParse({
+      kind: 'illustration.object.move', objectId: 'object-a', layerId: 'layer-b', groupIndex: 0,
+    }).success).toBe(false);
   });
 
   it('fully validates every canonical illustration layer and object payload', () => {
@@ -158,6 +169,7 @@ describe('canvas operation schemas', () => {
       id: 'schema-shape', revision: 0, name: 'Schema shape', createdAt: nowIso(), updatedAt: nowIso(), createdBy: HUMAN_ACTOR.id,
       layerId: layer.id, visible: true, locked: false, opacity: 1, blendMode: 'normal' as const, transform: { ...IDENTITY_TRANSFORM },
       type: 'shape' as const, shape: 'rectangle' as const, width: 12, height: 8, fill: { kind: 'solid' as const, color: '#ff6b7a' },
+      cornerRadius: 0,
       stroke: { paint: { kind: 'none' as const }, width: 0, opacity: 1, lineCap: 'round' as const, lineJoin: 'round' as const, dash: [] },
     };
     const valid = [
@@ -179,6 +191,243 @@ describe('canvas operation schemas', () => {
       { kind: 'illustration.object.add', object: { ...object, surprise: true } },
     ];
     for (const operation of malformed) expect(CanvasOperationSchema.safeParse(operation).success).toBe(false);
+  });
+
+  it('advertises and enforces only meaningful canonical fields for every shape subtype', () => {
+    const document = createIllustrationDocument();
+    const layer = Object.values(document.layers).find((entry) => entry.type === 'vector');
+    if (!layer) throw new Error('Expected vector layer');
+    const timestamp = nowIso();
+    const base = {
+      id: 'strict-shape', revision: 0, name: 'Strict shape', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
+      layerId: layer.id, visible: true, locked: false, opacity: 1, blendMode: 'normal' as const, transform: { ...IDENTITY_TRANSFORM },
+      type: 'shape' as const, width: 24, height: 18, fill: { kind: 'solid' as const, color: '#8268dd' },
+      stroke: { paint: { kind: 'none' as const }, width: 0, opacity: 1, lineCap: 'round' as const, lineJoin: 'round' as const, dash: [] },
+    };
+    const variants = [
+      { shape: 'rectangle', replacement: { cornerRadius: 0 }, defaults: { cornerRadius: 0 }, forbidden: { sides: 7, innerRadius: 0.4 } },
+      { shape: 'ellipse', replacement: {}, defaults: {}, forbidden: { sides: 7, innerRadius: 0.4, cornerRadius: 3 } },
+      { shape: 'line', replacement: {}, defaults: {}, forbidden: { sides: 7, innerRadius: 0.4, cornerRadius: 3 } },
+      { shape: 'arrow', replacement: {}, defaults: {}, forbidden: { sides: 7, innerRadius: 0.4, cornerRadius: 3 } },
+      { shape: 'polygon', replacement: { sides: 6 }, defaults: { sides: 6 }, forbidden: { innerRadius: 0.4, cornerRadius: 3 } },
+      { shape: 'star', replacement: { sides: 5, innerRadius: 0.45 }, defaults: { sides: 5, innerRadius: 0.45 }, forbidden: { cornerRadius: 3 } },
+    ] as const;
+    for (const variant of variants) {
+      const fill = variant.shape === 'line' || variant.shape === 'arrow' ? { kind: 'none' as const } : base.fill;
+      const object = { ...base, fill, id: `strict-${variant.shape}`, shape: variant.shape };
+      const added = CanvasOperationSchema.safeParse({ kind: 'illustration.object.add', object });
+      expect(added.success, `illustration.object.add:${variant.shape}`).toBe(true);
+      if (added.success && 'object' in added.data) expect(added.data.object).toMatchObject(variant.defaults);
+      const replaced = CanvasOperationSchema.safeParse({ kind: 'illustration.object.replace', object: { ...object, ...variant.replacement }, expectedRevision: 0 });
+      expect(replaced.success, `illustration.object.replace:${variant.shape}`).toBe(true);
+      if (replaced.success && 'object' in replaced.data) expect(replaced.data.object).toMatchObject(variant.replacement);
+      for (const [field, value] of Object.entries(variant.forbidden)) {
+        expect(CanvasOperationSchema.safeParse({ kind: 'illustration.object.add', object: { ...object, [field]: value } }).success, `${variant.shape}:${field}`).toBe(false);
+        expect(CanvasOperationSchema.safeParse({ kind: 'illustration.object.replace', object: { ...object, ...variant.replacement, [field]: value }, expectedRevision: 0 }).success, `replace:${variant.shape}:${field}`).toBe(false);
+      }
+    }
+
+    for (const shape of ['rectangle', 'polygon', 'star'] as const) {
+      const fill = base.fill;
+      expect(CanvasOperationSchema.safeParse({ kind: 'illustration.object.replace', object: { ...base, fill, id: `incomplete-${shape}`, shape }, expectedRevision: 0 }).success).toBe(false);
+    }
+    for (const shape of ['line', 'arrow'] as const) {
+      expect(CanvasOperationSchema.safeParse({ kind: 'illustration.object.replace', object: { ...base, id: `filled-${shape}`, shape }, expectedRevision: 0 }).success).toBe(false);
+    }
+
+    const legacy = createIllustrationDocument('Legacy shape compatibility');
+    const legacyLayer = Object.values(legacy.layers).find((entry) => entry.type === 'vector');
+    if (!legacyLayer || legacyLayer.type !== 'vector') throw new Error('Expected legacy vector layer');
+    const legacyRectangle = { ...base, id: 'legacy-rectangle', layerId: legacyLayer.id, shape: 'rectangle' as const, sides: 777 };
+    legacy.objects[legacyRectangle.id] = legacyRectangle;
+    legacyLayer.objectIds.push(legacyRectangle.id);
+    expect(migrateDocument(legacy)).toMatchObject({ objects: { [legacyRectangle.id]: { shape: 'rectangle', sides: 777 } } });
+    const normalizedLegacy = normalizeIllustrationObjectForReplacement(legacyRectangle as ShapeObject);
+    expect(normalizedLegacy).toMatchObject({ id: legacyRectangle.id, shape: 'rectangle', cornerRadius: 0 });
+    expect(normalizedLegacy).not.toHaveProperty('sides');
+
+    for (const shape of ['rectangle', 'ellipse', 'line', 'arrow', 'polygon', 'star'] as const) {
+      const predecessor = {
+        ...base,
+        id: `predecessor-${shape}`,
+        shape,
+        sides: shape === 'star' ? 5 : 6,
+        innerRadius: 0.46,
+        cornerRadius: shape === 'rectangle' ? 12 : undefined,
+        fill: shape === 'line' || shape === 'arrow' ? { kind: 'none' as const } : base.fill,
+      } as ShapeObject;
+      const normalized = normalizeIllustrationObjectForReplacement(predecessor);
+      expect(CanvasOperationSchema.safeParse({ kind: 'illustration.object.replace', object: normalized, expectedRevision: 0 }).success, shape).toBe(true);
+      expect(normalized).toEqual(expect.objectContaining(shape === 'rectangle' ? { cornerRadius: 12 } : shape === 'polygon' ? { sides: 6 } : shape === 'star' ? { sides: 5, innerRadius: 0.46 } : {}));
+      if (shape !== 'rectangle') expect(normalized).not.toHaveProperty('cornerRadius');
+      if (shape !== 'polygon' && shape !== 'star') expect(normalized).not.toHaveProperty('sides');
+      if (shape !== 'star') expect(normalized).not.toHaveProperty('innerRadius');
+    }
+  });
+
+  it('retains shared group and text invariants across the strict mutation union', () => {
+    const timestamp = nowIso();
+    const common = {
+      revision: 0, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
+      layerId: 'vector-layer', visible: true, locked: false, opacity: 1, blendMode: 'normal' as const, transform: { ...IDENTITY_TRANSFORM },
+    };
+    expect(CanvasOperationSchema.safeParse({
+      kind: 'illustration.object.add',
+      object: { ...common, id: 'duplicate-group', name: 'Duplicate group', type: 'group', childIds: ['child', 'child'] },
+    }).success).toBe(false);
+    expect(CanvasOperationSchema.safeParse({
+      kind: 'illustration.object.replace', expectedRevision: 0,
+      object: {
+        ...common, id: 'overflow-text', name: 'Overflow text', type: 'text', text: 'x', width: 10, height: 10, align: 'left', lineHeight: 1.2,
+        ranges: [{ start: 0, end: 2, fontFamily: 'sans-serif', fontSize: 12, fontWeight: 400, fontStyle: 'normal', color: '#000000', letterSpacing: 0 }],
+      },
+    }).success).toBe(false);
+  });
+
+  it('materializes strict public illustration drafts with deterministic defaults and server-owned metadata', () => {
+    const draft = {
+      id: 'public-shape',
+      name: 'Public shape',
+      layerId: 'vector-layer',
+      type: 'shape' as const,
+      shape: 'rectangle' as const,
+      width: 120,
+      height: 80,
+      transform: { x: 12, y: 18 },
+      fill: { kind: 'solid' as const, color: '#8268dd' },
+      revision: 99,
+      createdAt: 'forged-created-at',
+      updatedAt: 'forged-updated-at',
+      createdBy: 'forged-actor',
+    };
+    expect(IllustrationObjectAuthoringInputSchema.safeParse(draft).success).toBe(true);
+    expect(materializeIllustrationObjectAuthoringInput(draft, 'authenticated-agent', '2026-08-24T00:00:00.000Z')).toEqual({
+      id: 'public-shape', revision: 0, name: 'Public shape', createdAt: '2026-08-24T00:00:00.000Z', updatedAt: '2026-08-24T00:00:00.000Z', createdBy: 'authenticated-agent',
+      layerId: 'vector-layer', visible: true, locked: false, opacity: 1, blendMode: 'normal',
+      transform: { x: 12, y: 18, scaleX: 1, scaleY: 1, rotation: 0, skewX: 0, skewY: 0 },
+      type: 'shape', shape: 'rectangle', width: 120, height: 80, cornerRadius: 0, fill: { kind: 'solid', color: '#8268dd' },
+      stroke: { paint: { kind: 'solid', color: '#000000' }, width: 1, opacity: 1, lineCap: 'round', lineJoin: 'round', dash: [] },
+    });
+
+    const common = { name: 'Variant', layerId: 'vector-layer' };
+    for (const variant of [
+      { ...common, id: 'public-line', type: 'shape', shape: 'line', width: 80, height: 0 },
+      { ...common, id: 'public-path', type: 'path', pathData: 'M0 0 L20 20' },
+      { ...common, id: 'public-stroke', type: 'vector-stroke', points: [{ x: 0, y: 0 }, { x: 10, y: 10 }] },
+      { ...common, id: 'public-text', type: 'text', text: 'Editable' },
+      { ...common, id: 'public-image', type: 'image', assetId: 'embedded-image', width: 32, height: 24 },
+      { ...common, id: 'public-group', type: 'group' },
+    ]) expect(IllustrationObjectAuthoringInputSchema.safeParse(variant).success).toBe(true);
+    expect(materializeIllustrationObjectAuthoringInput({ ...common, id: 'public-line', type: 'shape', shape: 'line', width: 80, height: 0 }, 'authenticated-agent', '2026-08-24T00:00:00.000Z')).toMatchObject({
+      fill: { kind: 'none' },
+      stroke: { paint: { kind: 'solid', color: '#000000' }, width: 1 },
+    });
+    expect(materializeIllustrationObjectAuthoringInput({ ...common, id: 'public-polygon', type: 'shape', shape: 'polygon', width: 80, height: 60 }, 'authenticated-agent', '2026-08-24T00:00:00.000Z')).toMatchObject({ sides: 6 });
+    expect(materializeIllustrationObjectAuthoringInput({ ...common, id: 'public-star', type: 'shape', shape: 'star', width: 80, height: 60 }, 'authenticated-agent', '2026-08-24T00:00:00.000Z')).toMatchObject({ sides: 5, innerRadius: 0.45 });
+    expect(materializeIllustrationObjectAuthoringInput({ ...common, id: 'public-closed-path', type: 'path', pathData: 'M0 0 L10 0 L10 10 Z' }, 'authenticated-agent', '2026-08-24T00:00:00.000Z')).toMatchObject({ closed: true });
+
+    for (const malformed of [
+      { ...draft, surprise: true },
+      { ...draft, fill: { kind: 'solid', color: 'purple' } },
+      { ...draft, transform: { x: Number.NaN } },
+      { ...draft, stroke: { paint: { kind: 'none' }, width: -1, opacity: 1, lineCap: 'round', lineJoin: 'round', dash: [] } },
+      { ...common, id: 'irrelevant-rectangle-sides', type: 'shape', shape: 'rectangle', width: 80, height: 60, sides: 7 },
+      { ...common, id: 'irrelevant-ellipse-radius', type: 'shape', shape: 'ellipse', width: 80, height: 60, cornerRadius: 4 },
+      { ...common, id: 'irrelevant-polygon-radius', type: 'shape', shape: 'polygon', width: 80, height: 60, innerRadius: 0.5 },
+      { ...common, id: 'irrelevant-star-corner', type: 'shape', shape: 'star', width: 80, height: 60, cornerRadius: 4 },
+      { ...common, id: 'malformed-path', type: 'path', pathData: 'not-valid-path-data' },
+      { ...common, id: 'inconsistent-path', type: 'path', pathData: 'M0 0 L10 0', closed: true },
+      { ...common, id: 'partial-image-size', type: 'image', assetId: 'embedded-image', width: 32, height: 24, sourceWidth: 32 },
+    ]) expect(IllustrationObjectAuthoringInputSchema.safeParse(malformed).success).toBe(false);
+  });
+
+  it('validates bounded SVG path grammar and reports final authored closure', () => {
+    expect(inspectSvgPathData('M 0 0 C 10 0 10 10 20 10 A 5 6 30 0 1 30 20 Z')).toMatchObject({ closed: true, segmentCount: 3 });
+    expect(inspectSvgPathData('m.5-.5 10 0 0 10')).toMatchObject({ closed: false, segmentCount: 3 });
+    expect(inspectSvgPathData('M0 0 H10 V10 M20 20 q5 5 10 0')).toMatchObject({ closed: false });
+    expect(inspectSvgPathData('M0 0 A1 2 0 013 4')).toMatchObject({ closed: false, segmentCount: 2 });
+    expect(inspectSvgPathData('M0 0 A1 2 0 01 3 4')).toMatchObject({ closed: false, segmentCount: 2 });
+    for (const malformed of [
+      'not-valid-path-data',
+      'L0 0',
+      'M0',
+      'M0 0 L10',
+      'M0 0 A-1 2 0 0 1 3 4',
+      'M0 0 A1 2 0 2 0 3 4',
+      'M0 0 A1 2 0 1e0 0 3 4',
+      'M0 0 A1 2 0 0.0 1 3 4',
+      'M0 0 A1 2 0 -0 1 3 4',
+      'M0 0 L10 10 garbage',
+      'M0 0,',
+      'M0,,0',
+      'M,0 0',
+      'M1e999 0 L0 0',
+    ]) expect(() => inspectSvgPathData(malformed), malformed).toThrow();
+  });
+
+  it('narrows new path admission to one node-editable subpath and a post-arc node budget', () => {
+    expect(inspectEditableSvgPathData('M0 0 L10 10')).toMatchObject({ subpathCount: 1, segmentCount: 2, editableNodeUpperBound: 2, effectiveNodeLowerBound: 2, hasArc: false });
+    expect(inspectEditableSvgPathData('M0 0 10 10')).toMatchObject({ subpathCount: 1, segmentCount: 2, editableNodeUpperBound: 2, effectiveNodeLowerBound: 2 });
+    expect(inspectEditableSvgPathData('M0 0 A1 2 0 013 4')).toMatchObject({ subpathCount: 1, segmentCount: 2, editableNodeUpperBound: 5, effectiveNodeLowerBound: 3, hasArc: true });
+    expect(inspectEditableSvgPathData('M0 0 A10 10 0 0 1 0.000002 0')).toMatchObject({ effectiveNodeLowerBound: 2, hasArc: true });
+    expect(inspectEditableSvgPathData('M0 0 A1 1000 0 0 0 0 0.001')).toMatchObject({ effectiveNodeLowerBound: 2, hasArc: true });
+    expect(inspectEditableSvgPathData('m5 5 l10 0 l0 10 z')).toMatchObject({ closed: true, effectiveNodeLowerBound: 3 });
+    for (const incompatible of [
+      'M0 0',
+      'M0 0 L1 1 M2 2 L3 3',
+      'M0 0 Z L1 1',
+      'M0 0 L0 0 Z',
+      'M0 0 L0.00000001 0 Z',
+      'M0 0 C1 1 2 2 0 0 Z',
+      'M0 0 A10 10 0 0 1 0 0',
+      'M0 0 A10 10 0 0 1 0.000001 0',
+      'M0 0 A1 1000 0 0 0 0 0.00001',
+    ]) expect(() => inspectEditableSvgPathData(incompatible), incompatible).toThrow();
+
+    const excessiveNodes = `M0 0${' L1 1'.repeat(7_000)}`;
+    expect(excessiveNodes.length).toBeLessThan(MAX_EDITABLE_SVG_PATH_CHARACTERS);
+    expect(inspectSvgPathData(excessiveNodes)).toMatchObject({ segmentCount: 7_001 });
+    expect(() => inspectEditableSvgPathData(excessiveNodes)).toThrow('7,000 nodes after arc conversion');
+
+    const excessiveConvertedArcs = `M0 0${' a1 1 0 0 1 2 2'.repeat(1_750)}`;
+    expect(excessiveConvertedArcs.length).toBeLessThan(MAX_EDITABLE_SVG_PATH_CHARACTERS);
+    expect(() => inspectEditableSvgPathData(excessiveConvertedArcs)).toThrow('7,000 nodes after arc conversion');
+
+    const publicPath = { id: 'strict-topology', name: 'Strict topology', layerId: 'vector-layer', type: 'path' as const, pathData: 'M0 0 L1 1' };
+    expect(IllustrationObjectAuthoringInputSchema.safeParse(publicPath).success).toBe(true);
+    for (const pathData of ['M0 0', 'M0 0 L1 1 M2 2 L3 3', 'M0 0 L0.00000001 0 Z', 'M0 0 A10 10 0 0 1 0 0', 'M0 0 A10 10 0 0 1 0.000001 0', 'M0 0 A1 1000 0 0 0 0 0.00001', excessiveNodes, excessiveConvertedArcs]) {
+      expect(IllustrationObjectAuthoringInputSchema.safeParse({ ...publicPath, pathData }).success, pathData.slice(0, 80)).toBe(false);
+    }
+    const timestamp = nowIso();
+    const passive = {
+      ...publicPath,
+      revision: 0, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
+      visible: true, locked: false, opacity: 1, blendMode: 'normal' as const, transform: { ...IDENTITY_TRANSFORM },
+      closed: false, fill: { kind: 'none' as const },
+      stroke: { paint: { kind: 'none' as const }, width: 0, opacity: 1, lineCap: 'round' as const, lineJoin: 'round' as const, dash: [] },
+      fillRule: 'nonzero' as const,
+    };
+    for (const pathData of ['M0 0', 'M0 0 L1 1 M2 2 L3 3', 'M0 0 L0.00000001 0 Z', 'M0 0 A10 10 0 0 1 0 0', 'M0 0 A10 10 0 0 1 0.000001 0', 'M0 0 A1 1000 0 0 0 0 0.00001']) {
+      expect(IllustrationObjectInputSchema.safeParse({ ...passive, pathData }).success).toBe(true);
+      expect(IllustrationObjectMutationInputSchema.safeParse({ ...passive, pathData }).success).toBe(false);
+    }
+  });
+
+  it('keeps passive predecessor paths readable while strict editing shares the one-million-character workflow limit', () => {
+    const pathData = `M0 0 A1 1 0 0 1 2 2 ${'L0 0 '.repeat(200_000)}`;
+    expect(pathData.length).toBeGreaterThan(MAX_EDITABLE_SVG_PATH_CHARACTERS);
+    expect(pathData.length).toBeLessThanOrEqual(2_000_000);
+    const timestamp = nowIso();
+    const object = {
+      id: 'passive-large-path', revision: 0, name: 'Passive large path', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
+      layerId: 'vector-layer', visible: true, locked: false, opacity: 1, blendMode: 'normal' as const, transform: { ...IDENTITY_TRANSFORM },
+      type: 'path' as const, pathData, closed: false, fill: { kind: 'none' as const },
+      stroke: { paint: { kind: 'none' as const }, width: 0, opacity: 1, lineCap: 'round' as const, lineJoin: 'round' as const, dash: [] }, fillRule: 'nonzero' as const,
+    };
+    expect(IllustrationObjectInputSchema.safeParse(object).success).toBe(true);
+    expect(IllustrationObjectMutationInputSchema.safeParse(object).success).toBe(false);
+    expect(IllustrationObjectAuthoringInputSchema.safeParse(object).success).toBe(false);
+    expect(() => inspectSvgPathData(pathData)).toThrow('1–1,000,000 characters');
   });
 
   it('strictly validates revision-checked artboard updates', () => {

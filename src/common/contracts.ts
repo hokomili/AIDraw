@@ -212,6 +212,8 @@ export interface TransactionTraceEntry {
   revision: number;
   recordedAt: string;
   outcome: 'committed' | 'partial' | 'undo' | 'redo';
+  /** Exact ingress request binding for durable-batch reconciliation; never authority. */
+  requestFingerprint?: string;
   transaction: CanvasTransaction;
 }
 

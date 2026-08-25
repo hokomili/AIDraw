@@ -1,6 +1,9 @@
+import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { access, readFile, readdir } from 'node:fs/promises';
 import { relative, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { PACKAGE_BUILD_INPUT_PATHS } from '../../scripts/package-build-input.mjs';
 import { IPC } from '../../src/common/contracts';
 
 const removedRuntimePaths = [
@@ -185,6 +188,73 @@ async function maintainedVitestCommands(): Promise<VitestCommand[]> {
 }
 
 describe('native drawing product boundary', () => {
+  it('routes trusted renderer transactions through the same main-owned canonical service policy', async () => {
+    const main = await source('src/main/main.ts');
+    const service = await source('src/main/document-service.ts');
+    const journal = await source('src/main/journal.ts');
+    expect(main).toContain('handle(IPC.applyTransaction');
+    expect(main).toContain('return service.apply({ ...transaction, actor: HUMAN_ACTOR });');
+    expect(service).toContain('assertStrictNativeEditableTransaction(transaction);');
+    expect(journal.match(/assertStrictNativeEditableTransaction\(/gu)).toHaveLength(2);
+  });
+
+  it('publishes a byte-exact reproducible source-subject manifest generator', () => {
+    const script = resolve('scripts/source-subject-manifest.mjs');
+    const manifest = execFileSync(process.execPath, [script, 'manifest'], { cwd: process.cwd(), maxBuffer: 16 * 1024 * 1024 });
+    const repeated = execFileSync(process.execPath, [script, 'manifest'], { cwd: process.cwd(), maxBuffer: 16 * 1024 * 1024 });
+    const summary = JSON.parse(execFileSync(process.execPath, [script, 'summary'], { cwd: process.cwd(), encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 })) as {
+      version: number; encoding: string; ordering: string; recordFormat: string; finalNewline: boolean; entries: number; bytes: number; sha256: string;
+    };
+    expect(repeated.equals(manifest)).toBe(true);
+    expect(manifest.at(-1)).toBe(0x0a);
+    expect(summary).toMatchObject({
+      version: 1,
+      encoding: 'UTF-8',
+      ordering: 'ascending raw UTF-8 path bytes',
+      finalNewline: true,
+      bytes: manifest.byteLength,
+      sha256: createHash('sha256').update(manifest).digest('hex'),
+    });
+    expect(summary.recordFormat).toBe('<XY>\\t<file|symlink|deleted>\\t<byteLength>\\t<sha256>\\t<path>\\n');
+    const lines = manifest.toString('utf8').trimEnd().split('\n');
+    expect(summary.entries).toBe(lines.length);
+    const paths = lines.map((line) => {
+      const fields = line.split('\t');
+      expect(fields).toHaveLength(5);
+      expect(fields[0]).toHaveLength(2);
+      expect(['file', 'symlink', 'deleted']).toContain(fields[1]);
+      expect(Number.isSafeInteger(Number(fields[2]))).toBe(true);
+      expect(fields[3]).toMatch(/^[0-9a-f]{64}$/u);
+      return fields[4];
+    });
+    expect(paths).toContain('scripts/source-subject-manifest.mjs');
+    expect(paths).toEqual([...paths].sort((left, right) => Buffer.compare(Buffer.from(left, 'utf8'), Buffer.from(right, 'utf8'))));
+  });
+
+  it('binds packages to exact runtime build inputs without conflating later documentation bytes', async () => {
+    expect(PACKAGE_BUILD_INPUT_PATHS).toContain('src');
+    expect(PACKAGE_BUILD_INPUT_PATHS).toContain('packages');
+    expect(PACKAGE_BUILD_INPUT_PATHS).toContain('index.html');
+    expect(PACKAGE_BUILD_INPUT_PATHS).not.toContain('docs');
+    expect(PACKAGE_BUILD_INPUT_PATHS).not.toContain('README.md');
+
+    const [forge, verifier, testing, release] = await Promise.all([
+      source('forge.config.ts'),
+      source('scripts/verify-package.mjs'),
+      source('docs/TESTING.md'),
+      source('docs/RELEASE_CHECKLIST.md'),
+    ]);
+    expect(forge.indexOf('await reservePackageGeneration')).toBeLessThan(forge.indexOf('await capturePackageBuildInput'));
+    expect(verifier).toContain('const sourceBuildInput = await readPackageBuildInput');
+    expect(verifier).toContain('sourceBuildInput: {');
+    expect(verifier).toContain("'pixel.tilemap.region'");
+    expect(verifier).toContain("'Automatic MCP connection grants no file authority'");
+    expect(testing).toContain('Package source-input manifest');
+    expect(testing).toContain('Final worktree manifest');
+    expect(release).toContain('exact first-party package source-input manifest');
+    expect(release).toContain('later documentation bytes are not package source inputs');
+  });
+
   it('scans the ignored local handoff when present without requiring it in a clean clone', async () => {
     const handoff = resolve('.codex', 'SECRETARY_HANDOFF.md');
     await expect(existingOptionalPath(handoff, async () => undefined)).resolves.toEqual([handoff]);

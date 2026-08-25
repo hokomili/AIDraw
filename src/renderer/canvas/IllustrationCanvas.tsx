@@ -913,11 +913,18 @@ function gestureToShape(
   const width = isLine ? gesture.end.x - gesture.start.x : Math.abs(gesture.end.x - gesture.start.x);
   const height = isLine ? gesture.end.y - gesture.start.y : Math.abs(gesture.end.y - gesture.start.y);
   if (Math.abs(width) < 1 && Math.abs(height) < 1) return undefined;
+  const subtypeFields = shapeType === 'rectangle'
+    ? { cornerRadius: 12 }
+    : shapeType === 'polygon'
+      ? { sides: 6 }
+      : shapeType === 'star'
+        ? { sides: 5, innerRadius: 0.46 }
+        : {};
   const object: ShapeObject = {
     ...objectBase(layer.id, `${shapeType[0].toUpperCase()}${shapeType.slice(1)}`), type: 'shape', shape: shapeType,
-    width, height, sides: shapeType === 'star' ? 5 : 6, innerRadius: 0.46,
+    width, height, ...subtypeFields,
     fill: isLine ? noPaint : solid(`${color}${Math.round(opacity * 255).toString(16).padStart(2, '0')}`),
-    stroke: strokeStyle(color, Math.max(1, Math.min(brushSize, 24)), opacity), cornerRadius: shapeType === 'rectangle' ? 12 : undefined,
+    stroke: strokeStyle(color, Math.max(1, Math.min(brushSize, 24)), opacity),
   };
   object.transform.x = x; object.transform.y = y;
   return object;

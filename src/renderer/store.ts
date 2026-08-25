@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import type { Actor, CanvasOperation, Id } from '@aidraw/core';
-import { CanvasOperationSchema, HUMAN_ACTOR, createId, nowIso } from '@aidraw/core';
+import { CanvasOperationSchema, HUMAN_ACTOR, createId, normalizeIllustrationObjectForReplacement, nowIso } from '@aidraw/core';
 import type { NewDocumentOptions, WorkspaceSnapshot } from '../common/contracts';
 import { DEFAULT_ONION_SKIN_PREFERENCES, parseOnionSkinPreferences, type OnionSkinPreferences } from '../common/onion-skin';
 import { DEFAULT_ORDERED_DITHER_PREFERENCES, parseOrderedDitherPreferences, type OrderedDitherPreferences } from '../common/ordered-dither-preferences';
@@ -250,6 +250,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   apply: async (label, operations, expectedDocumentId, expectedDocumentRevision) => {
     const document = get().snapshot?.activeDocument;
     if (!document || operations.length === 0 || (expectedDocumentId && document.id !== expectedDocumentId)) return false;
+    const normalizedOperations = operations.map((operation): CanvasOperation => operation.kind === 'illustration.object.replace'
+      ? { ...operation, object: normalizeIllustrationObjectForReplacement(operation.object) }
+      : operation);
     const response = await window.aidraw.applyTransaction({
       id: createId('tx'),
       clientOperationId: createId('human-op'),
@@ -258,7 +261,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       actor: HUMAN_ACTOR,
       label,
       createdAt: nowIso(),
-      operations,
+      operations: normalizedOperations,
       playback: { mode: 'instant', speed: 1 },
     });
     if (response.status !== 'committed' && response.status !== 'duplicate') {

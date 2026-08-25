@@ -22,6 +22,7 @@ import { assertPackagedUtilityExportResultSources } from './packaged-utility-exp
 import { assertPackagedUtilityImportResultSources } from './packaged-utility-import-result.mjs';
 import { inspectPackagedFontLicense } from './packaged-font-license.mjs';
 import { assertPackagedElectronVersion, inspectDependencySecurityPolicy } from './dependency-security.mjs';
+import { readPackageBuildInput } from './package-build-input.mjs';
 import { readPackageGeneration, resolvePackageOutputRoot } from './package-output-policy.mjs';
 
 const execute = promisify(execFile);
@@ -110,7 +111,16 @@ try {
   if (/\bnativeImage\b/.test(importerSource)) throw new Error('Packaged raster utility importer must not depend on Electron nativeImage, which is unavailable in utilityProcess.');
   if (!archiveFiles.includes('/.vite/build/main.js')) throw new Error('Packaged main process bundle is missing.');
   const mainSource = extractFile(archive, join('.vite', 'build', 'main.js')).toString('utf8');
-  const mcpDiscoveryMarkers = ['aidraw_help', 'aidraw://guide', 'AIDraw agent protocol guide'];
+  const mcpDiscoveryMarkers = [
+    'aidraw_help',
+    'aidraw://guide',
+    'AIDraw agent protocol guide',
+    'pixel.cel.region',
+    'pixel.tilemap.region',
+    'pixel.tile-stamps.replace',
+    'pixel.tile-stamp.place',
+    'Automatic MCP connection grants no file authority',
+  ];
   const missingMcpDiscoveryMarkers = mcpDiscoveryMarkers.filter((marker) => !mainSource.includes(marker));
   if (missingMcpDiscoveryMarkers.length) throw new Error(`Packaged main process is missing current MCP discovery markers: ${missingMcpDiscoveryMarkers.join(', ')}.`);
   if (!archiveFiles.includes('/.vite/build/preload.js')) throw new Error('Packaged preload bundle is missing.');
@@ -129,7 +139,7 @@ try {
     archiveFiles,
     firstPartyJavaScriptChunks,
   });
-  const utilityContainmentSubject = 'reviewed-main-worker-pair-20260822';
+  const utilityContainmentSubject = 'reviewed-main-worker-pair-20260825-published-pixel-tile-contract';
   const packagedUtilityContainment = assertPackagedUtilityContainmentSources({
     mainSource,
     workerSource: utilityWorkerSource,
@@ -174,6 +184,11 @@ try {
     dependencySecurity.electron,
     await readFile(join(packageDir, 'version'), 'utf8'),
   );
+  // Read this only after structural/package negatives have run so synthetic
+  // adversaries retain their precise failure. A package that would otherwise
+  // pass must bind the source/configuration bytes captured immediately before
+  // Forge compilation and prove those inputs did not move before verification.
+  const sourceBuildInput = await readPackageBuildInput({ outputDirectory: outDir });
   process.stdout.write(`${JSON.stringify({
     verified: true,
     node: process.version,
@@ -183,6 +198,15 @@ try {
     dependencySecurity,
     packageDir,
     packageGeneration: packageGeneration.generation,
+    sourceBuildInput: {
+      policy: sourceBuildInput.manifest.policy,
+      summary: sourceBuildInput.manifest.summary,
+      manifest: {
+        path: sourceBuildInput.manifestPath,
+        bytes: sourceBuildInput.fileBytes,
+        sha256: sourceBuildInput.fileSha256,
+      },
+    },
     executable,
     executableBytes: executableInfo.size,
     runtimeBytes: runtimeInfo.size,

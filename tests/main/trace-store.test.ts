@@ -19,6 +19,15 @@ afterEach(async () => {
 });
 
 describe('durable autonomous transaction traces', () => {
+  it('treats only a missing trace as empty and propagates unexpected read failures', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-trace-read-policy-')); temporaryPaths.push(root);
+    const traceRoot = join(root, 'traces'); const documentId = 'trace-read-policy-document'; const traces = new TransactionTraceStore(traceRoot);
+    await expect(traces.list(documentId)).resolves.toEqual([]);
+    const tracePath = join(traceRoot, `${createHash('sha256').update(documentId).digest('hex')}.jsonl`);
+    await mkdir(tracePath, { recursive: true });
+    await expect(traces.list(documentId)).rejects.toMatchObject({ code: 'EISDIR' });
+  });
+
   it('survives recovery compaction and retains the complete attributed transaction', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aidraw-trace-'));
     temporaryPaths.push(root);

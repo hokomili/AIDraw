@@ -1,4 +1,6 @@
 import { EventEmitter } from 'node:events';
+import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import {
   CanvasTransactionSchema,
   HUMAN_ACTOR,
@@ -38,10 +40,12 @@ import { renderDocument, renderDocumentDimensions } from './render-document';
 import { TransactionTraceStore } from './trace-store';
 import {
   assertDocumentImageAssetMetadata,
+  assertStrictNativeEditableTransaction,
   inspectDocumentImageAsset,
   inspectImageHeader,
   prepareTransactionForCommit,
   type ImageDecodeValidator,
+  type TransactionImageWorkContext,
 } from './transaction-policy';
 import { rebaseRestoredEntityRevisions } from '../common/document-branch';
 import { checkpointMergeCandidates, checkpointMergeOperations } from '../common/checkpoint-merge';
@@ -66,10 +70,18 @@ interface HistoryState {
   redo: HistoryEntry[];
 }
 
-interface ApplyOptions {
+export interface ApplyOptions {
   recordHistory?: boolean;
   actorMayBypassLocks?: boolean;
   activityStatus?: 'committed' | 'partial';
+  /** Internal non-serializable workload context created by an ingress boundary. */
+  imageWorkContext?: TransactionImageWorkContext;
+  /** Internal ingress cancellation; checked only before a mutation is dispatched. */
+  signal?: AbortSignal;
+  /** Internal exact ingress binding persisted for durable-batch reconciliation. */
+  requestFingerprint?: string;
+  /** Internal authority captured when delayed playback is admitted. */
+  expectedDocumentIncarnationId?: string;
 }
 
 interface HumanLock extends HumanLockRequest {
@@ -86,6 +98,14 @@ function historyActionAvailable(entries: HistoryEntry[]): boolean {
   return Boolean(entry && !entry.invalidatedBy);
 }
 
+function exactStrictTransaction(transaction: CanvasTransaction): CanvasTransaction | undefined {
+  const parsed = CanvasTransactionSchema.safeParse(transaction);
+  if (!parsed.success || !isDeepStrictEqual(parsed.data, transaction)) return undefined;
+  try { assertStrictNativeEditableTransaction(parsed.data); }
+  catch { return undefined; }
+  return parsed.data;
+}
+
 export type NativeDocumentPreviewRenderer = (document: AIDrawDocument) => Promise<Buffer>;
 
 const renderNativeDocumentPreviewDirect: NativeDocumentPreviewRenderer = async (document) =>
@@ -94,7 +114,7 @@ const renderNativeDocumentPreviewDirect: NativeDocumentPreviewRenderer = async (
 export class DocumentService extends EventEmitter {
   private readonly documents = new Map<Id, AIDrawDocument>();
   private readonly histories = new Map<Id, Map<Id, HistoryState>>();
-  private readonly operationIds = new Map<Id, Map<string, number>>();
+  private readonly operationIds = new Map<Id, Map<string, { revision: number; transactionId: Id }>>();
   private readonly changes = new Map<Id, Array<{ revision: number; transaction: CanvasTransaction }>>();
   private readonly comparisons = new Map<Id, { transactionId: Id; before: AIDrawDocument; afterRevision: number }>();
   private readonly checkpoints = new Map<Id, Map<Id, DocumentCheckpointRecord>>();
@@ -103,7 +123,7 @@ export class DocumentService extends EventEmitter {
   private readonly jobTimers = new Map<Id, NodeJS.Timeout>();
   private readonly presence = new Map<Id, AgentPresence>();
   private readonly acknowledgedAgentActivityCounts = new Map<Id, number>();
-  private readonly documentIncarnations = new Map<Id, symbol>();
+  private readonly documentIncarnations = new Map<Id, string>();
   private readonly mutationQueues = new Map<Id, Promise<void>>();
   private readonly saveQueues = new Map<Id, Promise<void>>();
   private editorAdvisory: EditorAdvisoryState = { advisory: true, attached: false, updatedAt: nowIso() };
@@ -138,7 +158,9 @@ export class DocumentService extends EventEmitter {
         omittedPayloads += omitted;
         affectedDocuments += 1;
       }
-      this.documents.set(document.id, document); this.documentIncarnations.set(document.id, Symbol(document.id)); this.histories.set(document.id, new Map()); this.operationIds.set(document.id, new Map()); this.changes.set(document.id, []); this.checkpoints.set(document.id, new Map()); this.acknowledgedAgentActivityCounts.set(document.id, agentActivityEntries(document).length);
+      const incarnationId = recovered.documentIncarnations[document.id];
+      if (!incarnationId) continue;
+      this.documents.set(document.id, document); this.documentIncarnations.set(document.id, incarnationId); this.histories.set(document.id, new Map()); this.operationIds.set(document.id, new Map()); this.changes.set(document.id, []); this.checkpoints.set(document.id, new Map()); this.acknowledgedAgentActivityCounts.set(document.id, agentActivityEntries(document).length);
     }
     if (omittedPayloads > 0) {
       this.recoveryWarnings.push(`Recovery omitted ${omittedPayloads} invalid embedded image payload${omittedPayloads === 1 ? '' : 's'} across ${affectedDocuments} recovered document${affectedDocuments === 1 ? '' : 's'}; the recovered document state and asset metadata were preserved.`);
@@ -172,7 +194,11 @@ export class DocumentService extends EventEmitter {
   }
 
   async compactRecovery(): Promise<void> {
-    await Promise.all(this.getDocuments().map((document) => this.journal.compact(document)));
+    await Promise.all(this.getDocuments().map((document) => {
+      const incarnationId = this.documentIncarnations.get(document.id);
+      if (!incarnationId) throw new Error('Document is no longer open.');
+      return this.journal.compact(document, incarnationId);
+    }));
     await this.journal.compactWorkspace([...this.documents.keys()], this.activeDocumentId);
   }
 
@@ -192,6 +218,11 @@ export class DocumentService extends EventEmitter {
   getDocument(documentId: Id): AIDrawDocument | undefined {
     const document = this.documents.get(documentId);
     return document ? structuredClone(document) : undefined;
+  }
+
+  /** Internal durable identity for one live/recoverable document incarnation. */
+  getDocumentIncarnation(documentId: Id): string | undefined {
+    return this.documentIncarnations.get(documentId);
   }
 
   getDocuments(): AIDrawDocument[] {
@@ -313,14 +344,15 @@ export class DocumentService extends EventEmitter {
       }
     }
     this.documents.set(document.id, document);
-    this.documentIncarnations.set(document.id, Symbol(document.id));
+    const incarnationId = randomUUID();
+    this.documentIncarnations.set(document.id, incarnationId);
     this.histories.set(document.id, new Map());
     this.operationIds.set(document.id, new Map());
     this.changes.set(document.id, []);
     this.checkpoints.set(document.id, new Map());
     this.comparisons.delete(document.id);
     this.acknowledgedAgentActivityCounts.set(document.id, agentActivityEntries(document).length);
-    void this.journal.compact(document).catch((error) => this.emit('recovery-error', error));
+    void this.journal.compact(document, incarnationId).catch((error) => this.emitAdvisory('recovery-error', error));
     this.setActiveDocument(document.id);
     this.publish();
     return this.snapshot();
@@ -362,6 +394,7 @@ export class DocumentService extends EventEmitter {
     let transaction: CanvasTransaction;
     try {
       transaction = CanvasTransactionSchema.parse(value);
+      assertStrictNativeEditableTransaction(transaction);
     } catch (error) {
       return { status: 'conflict', message: error instanceof Error ? error.message : 'Invalid transaction' };
     }
@@ -373,27 +406,32 @@ export class DocumentService extends EventEmitter {
     if (size > MAX_TRANSACTION_SERIALIZED_BYTES) {
       return { status: 'busy', message: 'Transaction exceeds the 2 MiB request limit.' };
     }
-    const incarnation = this.documentIncarnations.get(transaction.documentId);
-    if (!incarnation || !this.documents.has(transaction.documentId)) return { status: 'conflict', message: 'Document is not open.' };
+    const currentIncarnation = this.documentIncarnations.get(transaction.documentId);
+    if (!currentIncarnation || !this.documents.has(transaction.documentId)) return { status: 'conflict', message: 'Document is not open.' };
+    if (options.expectedDocumentIncarnationId !== undefined && options.expectedDocumentIncarnationId !== currentIncarnation) {
+      return { status: 'conflict', message: 'Document incarnation changed after mutation admission; delayed work was not applied.' };
+    }
+    const incarnation = options.expectedDocumentIncarnationId ?? currentIncarnation;
     return this.enqueueMutation(transaction.documentId, () => this.applyQueued(transaction, { ...options }, incarnation));
   }
 
   private async applyQueued(
     value: CanvasTransaction,
     options: ApplyOptions,
-    incarnation: symbol,
+    incarnation: string,
   ): Promise<ApplyTransactionResponse> {
+    if (options.signal?.aborted) return { status: 'cancelled', message: 'Mutation cancelled before document dispatch.' };
     let transaction = value;
     const current = this.documents.get(transaction.documentId);
     if (!current || this.documentIncarnations.get(transaction.documentId) !== incarnation) {
       return { status: 'conflict', message: 'Document is no longer open.' };
     }
 
-    const dedupe = this.operationIds.get(current.id) ?? new Map<string, number>();
+    const dedupe = this.operationIds.get(current.id) ?? new Map<string, { revision: number; transactionId: Id }>();
     this.operationIds.set(current.id, dedupe);
-    const priorRevision = dedupe.get(transaction.clientOperationId);
-    if (priorRevision !== undefined) {
-      return { status: 'duplicate', revision: priorRevision, transactionId: transaction.id };
+    const prior = dedupe.get(transaction.clientOperationId);
+    if (prior !== undefined) {
+      return { status: 'duplicate', revision: prior.revision, transactionId: prior.transactionId };
     }
 
     if (!options.actorMayBypassLocks && transaction.actor.kind !== 'human') {
@@ -404,7 +442,9 @@ export class DocumentService extends EventEmitter {
     try {
       transaction = await prepareTransactionForCommit(current, transaction, nowIso(), {
         imageDecoder: this.imageDecoder,
+        imageWorkContext: options.imageWorkContext,
       });
+      if (options.signal?.aborted) return { status: 'cancelled', message: 'Mutation cancelled before document dispatch.' };
       if (this.documents.get(current.id) !== current || this.documentIncarnations.get(current.id) !== incarnation) {
         return { status: 'conflict', message: 'Document is no longer open.' };
       }
@@ -416,7 +456,7 @@ export class DocumentService extends EventEmitter {
       const historyTargets = committedHistoryTargets(current, transaction, result.document, result.inverse);
       this.comparisons.set(current.id, { transactionId: transaction.id, before: structuredClone(current), afterRevision: result.document.revision });
       this.documents.set(current.id, result.document);
-      dedupe.set(transaction.clientOperationId, result.document.revision);
+      dedupe.set(transaction.clientOperationId, { revision: result.document.revision, transactionId: transaction.id });
       if (dedupe.size > 10_000) dedupe.delete(dedupe.keys().next().value as string);
 
       this.invalidateConflictingHistories(current.id, transaction.actor, transaction.id, mutationHistoryTargets(historyTargets), options.recordHistory === false);
@@ -430,7 +470,7 @@ export class DocumentService extends EventEmitter {
       }
       this.recordChange(current.id, result.document.revision, transaction);
       await this.journal.append(current.id, transaction);
-      await this.recordTrace(transaction, result.document.revision, options.activityStatus === 'partial' ? 'partial' : 'committed');
+      await this.recordTrace(transaction, result.document.revision, options.activityStatus === 'partial' ? 'partial' : 'committed', options.requestFingerprint);
       this.publish();
       return { status: 'committed', revision: result.document.revision, transactionId: transaction.id };
     } catch (error) {
@@ -457,7 +497,7 @@ export class DocumentService extends EventEmitter {
     return this.enqueueMutation(documentId, () => this.undoQueued(documentId, structuredClone(actor), incarnation));
   }
 
-  private async undoQueued(documentId: Id, actor: Actor, incarnation: symbol): Promise<ApplyTransactionResponse> {
+  private async undoQueued(documentId: Id, actor: Actor, incarnation: string): Promise<ApplyTransactionResponse> {
     const current = this.documents.get(documentId);
     if (!current || this.documentIncarnations.get(documentId) !== incarnation) return { status: 'conflict', message: 'Document is no longer open.' };
     const history = this.getHistory(documentId, actor.id);
@@ -467,8 +507,8 @@ export class DocumentService extends EventEmitter {
     let transaction: CanvasTransaction;
     let result: ReturnType<typeof applyTransaction>;
     try {
-      transaction = rebaseTransactionExpectedRevisions(current, { ...structuredClone(entry.transaction), actor: structuredClone(actor) });
-      result = applyTransaction(current, transaction);
+      transaction = rebaseTransactionExpectedRevisions(current, { ...structuredClone(entry.transaction), actor: structuredClone(actor) }, { allowCompatibilityObjects: true });
+      result = applyTransaction(current, transaction, { allowCompatibilityObjects: true });
     } catch (error) {
       return { status: 'conflict', message: error instanceof Error ? error.message : 'Undo failed.' };
     }
@@ -480,8 +520,17 @@ export class DocumentService extends EventEmitter {
     this.invalidateConflictingHistories(documentId, actor, transaction.id, mutationHistoryTargets(appliedTargets));
     history.redo.push({ transaction: result.inverse, targets: historyTargets });
     this.recordChange(documentId, result.document.revision, transaction);
-    await this.journal.append(documentId, transaction);
-    await this.recordTrace(transaction, result.document.revision, 'undo');
+    const strictTransaction = exactStrictTransaction(transaction);
+    if (strictTransaction) {
+      await this.journal.append(documentId, strictTransaction);
+      await this.recordTrace(strictTransaction, result.document.revision, 'undo');
+    } else {
+      // Exact inverses may restore a safely readable legacy/imported object that
+      // strict new-mutation admission intentionally rejects. Persist the already
+      // migrated canonical snapshot instead of broadening the untrusted journal
+      // or trace transaction grammar.
+      await this.journal.compact(result.document, incarnation);
+    }
     this.publish();
     return { status: 'committed', revision: result.document.revision, transactionId: transaction.id };
   }
@@ -493,7 +542,7 @@ export class DocumentService extends EventEmitter {
     return this.enqueueMutation(documentId, () => this.redoQueued(documentId, structuredClone(actor), incarnation));
   }
 
-  private async redoQueued(documentId: Id, actor: Actor, incarnation: symbol): Promise<ApplyTransactionResponse> {
+  private async redoQueued(documentId: Id, actor: Actor, incarnation: string): Promise<ApplyTransactionResponse> {
     const current = this.documents.get(documentId);
     if (!current || this.documentIncarnations.get(documentId) !== incarnation) return { status: 'conflict', message: 'Document is no longer open.' };
     const history = this.getHistory(documentId, actor.id);
@@ -503,8 +552,8 @@ export class DocumentService extends EventEmitter {
     let transaction: CanvasTransaction;
     let result: ReturnType<typeof applyTransaction>;
     try {
-      transaction = rebaseTransactionExpectedRevisions(current, { ...structuredClone(entry.transaction), actor: structuredClone(actor) });
-      result = applyTransaction(current, transaction);
+      transaction = rebaseTransactionExpectedRevisions(current, { ...structuredClone(entry.transaction), actor: structuredClone(actor) }, { allowCompatibilityObjects: true });
+      result = applyTransaction(current, transaction, { allowCompatibilityObjects: true });
     } catch (error) {
       return { status: 'conflict', message: error instanceof Error ? error.message : 'Redo failed.' };
     }
@@ -516,8 +565,13 @@ export class DocumentService extends EventEmitter {
     this.invalidateConflictingHistories(documentId, actor, transaction.id, mutationHistoryTargets(appliedTargets));
     history.undo.push({ transaction: result.inverse, targets: historyTargets });
     this.recordChange(documentId, result.document.revision, transaction);
-    await this.journal.append(documentId, transaction);
-    await this.recordTrace(transaction, result.document.revision, 'redo');
+    const strictTransaction = exactStrictTransaction(transaction);
+    if (strictTransaction) {
+      await this.journal.append(documentId, strictTransaction);
+      await this.recordTrace(strictTransaction, result.document.revision, 'redo');
+    } else {
+      await this.journal.compact(result.document, incarnation);
+    }
     this.publish();
     return { status: 'committed', revision: result.document.revision, transactionId: transaction.id };
   }
@@ -603,7 +657,7 @@ export class DocumentService extends EventEmitter {
     return this.enqueueMutation(documentId, () => this.restoreCheckpointQueued(documentId, checkpointId, structuredClone(actor), incarnation));
   }
 
-  private async restoreCheckpointQueued(documentId: Id, checkpointId: Id, actor: Actor, incarnation: symbol): Promise<ApplyTransactionResponse> {
+  private async restoreCheckpointQueued(documentId: Id, checkpointId: Id, actor: Actor, incarnation: string): Promise<ApplyTransactionResponse> {
     const current = this.documents.get(documentId);
     const checkpoint = this.checkpoints.get(documentId)?.get(checkpointId);
     if (!current || !checkpoint || this.documentIncarnations.get(documentId) !== incarnation) return { status: 'conflict', message: 'Checkpoint not found.' };
@@ -643,7 +697,7 @@ export class DocumentService extends EventEmitter {
     this.histories.set(documentId, new Map());
     this.operationIds.set(documentId, new Map());
     this.changes.set(documentId, []);
-    await this.journal.compact(restored);
+    await this.journal.compact(restored, incarnation);
     this.publish();
     return { status: 'committed', revision: restored.revision, transactionId };
   }
@@ -661,19 +715,20 @@ export class DocumentService extends EventEmitter {
         }
         this.assertDocumentIdentityAvailable(loaded.document.id);
         this.documents.set(loaded.document.id, loaded.document);
-        this.documentIncarnations.set(loaded.document.id, Symbol(loaded.document.id));
+        const incarnationId = randomUUID();
+        this.documentIncarnations.set(loaded.document.id, incarnationId);
         this.histories.set(loaded.document.id, new Map());
         this.operationIds.set(loaded.document.id, new Map());
         this.changes.set(loaded.document.id, []);
         this.checkpoints.set(loaded.document.id, new Map(loaded.checkpoints.map((checkpoint) => [checkpoint.id, checkpoint])));
         this.comparisons.delete(loaded.document.id);
         this.acknowledgedAgentActivityCounts.set(loaded.document.id, agentActivityEntries(loaded.document).length);
-        void this.journal.compact(loaded.document).catch((error) => this.emit('recovery-error', error));
+        void this.journal.compact(loaded.document, incarnationId).catch((error) => this.emitAdvisory('recovery-error', error));
         warnings.push(...loaded.warnings);
         try {
           await this.traceStore?.import(loaded.document.id, loaded.trace);
         } catch (error) {
-          this.emit('trace-error', error);
+          this.emitAdvisory('trace-error', error);
           warnings.push(`${filePath}: Transaction trace history could not be imported: ${error instanceof Error ? error.message : 'Unknown trace import error.'}`);
         }
         this.activeDocumentId = loaded.document.id;
@@ -733,7 +788,7 @@ export class DocumentService extends EventEmitter {
           current.dirty = false;
           current.updatedAt = nowIso();
         }
-        await this.journal.compact(current);
+        await this.journal.compact(current, incarnation);
         this.publish();
       }
       return destination;
@@ -845,6 +900,22 @@ export class DocumentService extends EventEmitter {
       .map((job) => structuredClone(job));
   }
 
+  /** Retires main-owned public job mirrors after their authoritative store drops them. */
+  removeJobs(jobIds: Iterable<Id>, expectedKind?: AsyncJob['kind']): number {
+    let removed = 0;
+    for (const jobId of jobIds) {
+      const job = this.jobs.get(jobId);
+      if (!job || expectedKind && job.kind !== expectedKind) continue;
+      const timer = this.jobTimers.get(jobId);
+      if (timer) clearTimeout(timer);
+      this.jobTimers.delete(jobId);
+      this.jobs.delete(jobId);
+      removed += 1;
+    }
+    if (removed > 0) this.publish();
+    return removed;
+  }
+
   resolveJob(jobId: Id, decision: 'allow-once' | 'allow-session' | 'allow-always' | 'deny'): AsyncJob | undefined {
     const current = this.jobs.get(jobId);
     if (!current || current.status !== 'waiting-for-user') return current ? structuredClone(current) : undefined;
@@ -856,7 +927,7 @@ export class DocumentService extends EventEmitter {
       approval: undefined,
       result: { ...(typeof current.result === 'object' && current.result ? current.result : {}), approvalDecision: decision },
     };
-    this.emit('approval-resolved', structuredClone(current), decision);
+    this.emitAdvisory('approval-resolved', structuredClone(current), decision);
     this.upsertJob(job);
     return structuredClone(job);
   }
@@ -922,14 +993,15 @@ export class DocumentService extends EventEmitter {
 
   private installAddedDocument(document: AIDrawDocument): void {
     this.documents.set(document.id, document);
-    this.documentIncarnations.set(document.id, Symbol(document.id));
+    const incarnationId = randomUUID();
+    this.documentIncarnations.set(document.id, incarnationId);
     this.histories.set(document.id, new Map());
     this.operationIds.set(document.id, new Map());
     this.changes.set(document.id, []);
     this.checkpoints.set(document.id, new Map());
     this.comparisons.delete(document.id);
     this.acknowledgedAgentActivityCounts.set(document.id, agentActivityEntries(document).length);
-    void this.journal.compact(document).catch((error) => this.emit('recovery-error', error));
+    void this.journal.compact(document, incarnationId).catch((error) => this.emitAdvisory('recovery-error', error));
   }
 
   private enqueueSave<T>(documentId: Id, operation: () => Promise<T>): Promise<T> {
@@ -975,12 +1047,12 @@ export class DocumentService extends EventEmitter {
     return actor?.kind === 'agent' ? structuredClone(actor) : undefined;
   }
 
-  private async recordTrace(transaction: CanvasTransaction, revision: number, outcome: TransactionTraceEntry['outcome']): Promise<void> {
+  private async recordTrace(transaction: CanvasTransaction, revision: number, outcome: TransactionTraceEntry['outcome'], requestFingerprint?: string): Promise<void> {
     if (!this.traceStore) return;
     try {
-      await this.traceStore.append({ documentId: transaction.documentId, revision, outcome, transaction });
+      await this.traceStore.append({ documentId: transaction.documentId, revision, outcome, transaction, ...(requestFingerprint === undefined ? {} : { requestFingerprint }) });
     } catch (error) {
-      this.emit('trace-error', error);
+      this.emitAdvisory('trace-error', error);
     }
   }
 
@@ -1031,7 +1103,30 @@ export class DocumentService extends EventEmitter {
   }
 
   private emitEvent(event: WorkspaceEvent): void {
-    this.emit('event', event);
+    this.emitAdvisoryPerListener('event', () => [structuredClone(event)]);
+  }
+
+  /**
+   * Workspace, playback, presence, job, and diagnostic listeners are observers.
+   * One observer must never alter an already authoritative service/scheduler
+   * outcome or prevent later observers from receiving the same event.
+   */
+  private emitAdvisory(eventName: string | symbol, ...arguments_: unknown[]): void {
+    this.emitAdvisoryPerListener(eventName, () => arguments_);
+  }
+
+  private emitAdvisoryPerListener(eventName: string | symbol, argumentsForListener: () => unknown[]): void {
+    for (const listener of this.rawListeners(eventName)) {
+      try {
+        const result: unknown = listener.apply(this, argumentsForListener());
+        if (result !== null && (typeof result === 'object' || typeof result === 'function')
+          && typeof (result as { then?: unknown }).then === 'function') {
+          void Promise.resolve(result as PromiseLike<unknown>).catch(() => undefined);
+        }
+      } catch {
+        // Observer failure is isolated from canonical state and other observers.
+      }
+    }
   }
 
   private setActiveDocument(documentId: Id): void {
@@ -1052,6 +1147,6 @@ export class DocumentService extends EventEmitter {
   }
 
   private persistWorkspace(): void {
-    void this.journal.compactWorkspace([...this.documents.keys()], this.activeDocumentId).catch((error) => this.emit('recovery-error', error));
+    void this.journal.compactWorkspace([...this.documents.keys()], this.activeDocumentId).catch((error) => this.emitAdvisory('recovery-error', error));
   }
 }

@@ -204,7 +204,7 @@ export async function executeBatchExport(
   imageDecoder?: ImageDecodeValidator,
 ): Promise<BatchExportResult> {
   const ownedUtilities = imageDecoder ? undefined : new RasterUtilitySupervisor();
-  const decode = imageDecoder ?? ((bytes, expected) => ownedUtilities!.validateImage(bytes, expected));
+  const decode = imageDecoder ?? ((bytes, expected, control) => ownedUtilities!.validateImage(bytes, expected, control));
   try {
     const inputPath = resolve(command.inputPath);
     if (extname(inputPath).toLowerCase() !== '.aidraw') throw new CliRefusalError('Batch export input must be an .aidraw file.');

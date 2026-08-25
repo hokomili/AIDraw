@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { HUMAN_ACTOR, IDENTITY_TRANSFORM, applyTransaction, createId, createIllustrationDocument, createPixelDocument, createPixelSprite, createPixelTilemap, createPixelTileset, encodeTiledGid, nowIso, readTileAt, writeTiles, type Actor, type CanvasTransaction, type ShapeObject } from '@aidraw/core';
+import { HUMAN_ACTOR, IDENTITY_TRANSFORM, applyTransaction, createId, createIllustrationDocument, createPixelDocument, createPixelSprite, createPixelTilemap, createPixelTileset, encodeTiledGid, nowIso, readTileAt, writeTiles, type Actor, type CanvasTransaction, type PathObject, type ShapeObject } from '@aidraw/core';
 import type { TransactionTraceEntry } from '@common/contracts';
 import { appendImageCollectionSource, createImageCollectionTileset, imageCollectionSourceDependencyGuards, removeUnusedImageCollectionSource, replaceImageCollectionSource, replaceImageCollectionTileMetadata } from '@common/image-collection-authoring';
 import { planImageCollectionTileIdMove } from '@common/image-collection-tile-move';
@@ -42,6 +42,60 @@ afterEach(async () => {
 });
 
 describe('document service collaboration semantics', () => {
+  it('enforces exact native path topology for direct canonical add and replace without mutating on refusal', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-service-native-path-policy-')); temporaryPaths.push(root);
+    const service = new DocumentService(new RecoveryJournal(join(root, 'recovery')), '1.0.0'); services.push(service); service.initialize();
+    const document = service.create({ kind: 'illustration', name: 'Strict native topology' }).activeDocument!;
+    if (document.kind !== 'illustration') throw new Error('Expected illustration document');
+    const layer = Object.values(document.layers).find((entry) => entry.type === 'vector')!; const timestamp = nowIso();
+    const path = (pathData: string): PathObject => ({
+      id: 'direct-native-path', revision: 0, name: 'Direct native path', createdAt: timestamp, updatedAt: timestamp,
+      createdBy: HUMAN_ACTOR.id, layerId: layer.id, visible: true, locked: false, opacity: 1, blendMode: 'normal',
+      transform: IDENTITY_TRANSFORM, type: 'path', pathData, closed: false, fillRule: 'nonzero', fill: { kind: 'none' },
+      stroke: { paint: { kind: 'solid', color: '#8268dd' }, width: 2, opacity: 1, lineCap: 'round', lineJoin: 'round', dash: [] },
+    });
+    const transaction = (clientOperationId: string, operation: CanvasTransaction['operations'][number]): CanvasTransaction => ({
+      id: `tx-${clientOperationId}`, clientOperationId, documentId: document.id, actor: HUMAN_ACTOR,
+      label: clientOperationId, createdAt: timestamp, operations: [operation], playback: { mode: 'instant', speed: 1 },
+    });
+
+    expect(await service.apply(transaction('collapsed-add', { kind: 'illustration.object.add', object: path('M0 0 A10 10 0 0 1 0.000001 0') }))).toMatchObject({
+      status: 'conflict', message: expect.stringContaining('native conversion'),
+    });
+    expect(await service.apply(transaction('eccentric-collapsed-add', { kind: 'illustration.object.add', object: path('M0 0 A1 1000 0 0 0 0 0.00001') }))).toMatchObject({
+      status: 'conflict', message: expect.stringContaining('native conversion'),
+    });
+    expect(service.getDocument(document.id)).toMatchObject({ revision: 0, objects: {} });
+
+    expect(await service.apply(transaction('compact-arc-add', { kind: 'illustration.object.add', object: path('M0 0 A1 2 0 013 4') }))).toMatchObject({ status: 'committed', revision: 1 });
+    const current = service.getDocument(document.id); if (!current || current.kind !== 'illustration') throw new Error('Expected committed illustration');
+    const currentPath = current.objects['direct-native-path']; if (currentPath.type !== 'path') throw new Error('Expected committed path');
+    expect(await service.apply(transaction('collapsed-replace', {
+      kind: 'illustration.object.replace', object: { ...currentPath, pathData: 'M0 0 A10 10 0 0 1 0.000001 0' }, expectedRevision: currentPath.revision,
+    }))).toMatchObject({ status: 'conflict', message: expect.stringContaining('native conversion') });
+    expect(service.getDocument(document.id)).toMatchObject({ revision: 1, objects: { 'direct-native-path': { pathData: 'M0 0 A1 2 0 013 4' } } });
+  });
+
+  it('isolates every advisory observer from an authoritative committed mutation and later observers', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-service-advisory-isolation-')); temporaryPaths.push(root);
+    const service = new DocumentService(new RecoveryJournal(root), '1.0.0'); services.push(service); service.initialize();
+    const document = service.snapshot().activeDocument!;
+    let delivered = 0;
+    service.on('event', () => { throw new Error('Injected advisory observer failure.'); });
+    service.on('event', () => { delivered += 1; });
+
+    const response = await service.apply({
+      id: 'tx-advisory-isolation', clientOperationId: 'operation-advisory-isolation', documentId: document.id,
+      actor: HUMAN_ACTOR, label: 'Authoritative rename', createdAt: nowIso(),
+      operations: [{ kind: 'document.rename', name: 'Committed despite observer failure' }],
+      playback: { mode: 'instant', speed: 1 },
+    });
+
+    expect(response).toMatchObject({ status: 'committed', revision: document.revision + 1, transactionId: 'tx-advisory-isolation' });
+    expect(service.getDocument(document.id)).toMatchObject({ name: 'Committed despite observer failure', revision: document.revision + 1 });
+    expect(delivered).toBeGreaterThan(0);
+  });
+
   it('archives the exact admitted preview while isolating renderer mutations from the saved document', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aidraw-service-supervised-preview-'));
     temporaryPaths.push(root);
@@ -1373,7 +1427,7 @@ describe('document service collaboration semantics', () => {
     const shape = (id: string, name: string): ShapeObject => ({
       id, revision: 0, name, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
       layerId: layer.id, visible: true, locked: false, opacity: 1, blendMode: 'normal', transform: { ...IDENTITY_TRANSFORM },
-      type: 'shape', shape: 'rectangle', width: 12, height: 12, fill: { kind: 'solid', color: '#ff6b7a' },
+      type: 'shape', shape: 'rectangle', width: 12, height: 12, cornerRadius: 0, fill: { kind: 'solid', color: '#ff6b7a' },
       stroke: { paint: { kind: 'none' }, width: 0, opacity: 1, lineCap: 'round', lineJoin: 'round', dash: [] },
     });
     const original = shape('locked-shape', 'Locked shape');

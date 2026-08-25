@@ -18,3 +18,4 @@ export * from './tile-stamps';
 export * from './text';
 export * from './bitmap-font';
 export * from './ordered-dither';
+export * from './svg-path';

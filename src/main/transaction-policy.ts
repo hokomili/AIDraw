@@ -6,13 +6,17 @@ import type {
   CanvasTransaction,
   DocumentAsset,
   EntityBase,
+  IllustrationObject,
   PixelAsset,
   PixelSprite,
 } from '@aidraw/core';
+import { inspectNativeEditableSvgPathData } from '../common/path-conversion';
 
 export const MAX_INLINE_ASSET_BYTES = 1_500_000;
 export const MAX_INLINE_IMAGE_DIMENSION = 8_192;
 export const MAX_INLINE_IMAGE_PIXELS = 16_777_216;
+export const MAX_TRANSACTION_IMAGE_DECODES = 16;
+export const MAX_TRANSACTION_IMAGE_DECODE_MS = 30_000;
 
 export type JpegExifOrientation = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
 
@@ -40,13 +44,38 @@ export interface InspectedDocumentImageAssetEntry extends InspectedDocumentImage
   asset: DocumentAsset;
 }
 
-export type ImageDecodeValidator = (bytes: Buffer, expected: ExpectedDecodedImage) => Promise<void>;
+export interface ImageDecodeControl {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}
+
+export type ImageDecodeValidator = (bytes: Buffer, expected: ExpectedDecodedImage, control?: ImageDecodeControl) => Promise<void>;
 
 export interface TransactionPolicyOptions {
   imageDecoder?: ImageDecodeValidator;
+  /** Internal context started by a public ingress before any image materialization work. */
+  imageWorkContext?: TransactionImageWorkContext;
+  /** Test/internal override; public transactions cannot choose their safety budget. */
+  maxImageDecodes?: number;
+  /** Test/internal override; public transactions cannot choose their safety budget. */
+  imageDecodeBudgetMs?: number;
 }
 
 const DOCUMENT_ASSET_SOURCES = new Set(['imported', 'generated', 'embedded', 'rendered']);
+
+/**
+ * Main-owned strict admission shared by canonical service, IPC-through-service,
+ * and recovery-journal transaction boundaries. Passive snapshots and exact
+ * compatibility history intentionally do not call this policy.
+ */
+export function assertStrictNativeEditableTransaction(transaction: CanvasTransaction): void {
+  for (const operation of transaction.operations) {
+    if ((operation.kind === 'illustration.object.add' || operation.kind === 'illustration.object.replace')
+      && operation.object.type === 'path') {
+      inspectNativeEditableSvgPathData(operation.object.pathData);
+    }
+  }
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -190,6 +219,98 @@ export function inspectDocumentImageAsset(
   return { bytes, expected: { mimeType: header.mimeType, width: display.width, height: display.height } };
 }
 
+interface ImageAssetByteIdentity {
+  readonly mimeType: DocumentAsset['mimeType'];
+  readonly byteLength: number;
+  readonly sha256: string;
+  readonly data: string;
+}
+
+interface TransactionImageInspectionRecord {
+  readonly identity: ImageAssetByteIdentity;
+  readonly inspected: InspectedDocumentImageAsset;
+}
+
+export class TransactionImageProjectionCursor {
+  private readonly generations = new Map<string, number>();
+
+  key(assetId: string): string {
+    return JSON.stringify([assetId, this.generations.get(assetId) ?? 0]);
+  }
+
+  invalidate(assetId: string): void {
+    this.generations.set(assetId, (this.generations.get(assetId) ?? 0) + 1);
+  }
+}
+
+/**
+ * One non-serializable ingress-to-commit workload boundary. Projection admission
+ * happens before base64 decode or hashing, and the retained inspection buffer is
+ * shared with commit instead of being duplicated by each validation layer.
+ */
+export class TransactionImageWorkContext {
+  readonly deadline: number;
+  readonly maximum: number;
+  readonly signal?: AbortSignal;
+  private admitted = 0;
+  private readonly inspections = new Map<string, TransactionImageInspectionRecord>();
+
+  constructor(options: { maximum?: number; budgetMs?: number; startedAt?: number; signal?: AbortSignal } = {}) {
+    this.maximum = options.maximum ?? MAX_TRANSACTION_IMAGE_DECODES;
+    const budgetMs = options.budgetMs ?? MAX_TRANSACTION_IMAGE_DECODE_MS;
+    const startedAt = options.startedAt ?? Date.now();
+    if (!Number.isSafeInteger(this.maximum) || this.maximum < 1) throw new Error('Transaction image projection maximum must be a positive safe integer.');
+    if (!Number.isFinite(budgetMs) || budgetMs <= 0 || !Number.isFinite(startedAt)) throw new Error('Transaction image workload deadline must be finite and positive.');
+    this.deadline = startedAt + budgetMs;
+    this.signal = options.signal;
+  }
+
+  remainingMs(): number {
+    return Math.max(0, this.deadline - Date.now());
+  }
+
+  assertActive(): void {
+    if (this.signal?.aborted) throw this.signal.reason instanceof Error ? this.signal.reason : new Error('The transaction image workload was cancelled.');
+  }
+
+  inspectProjection(
+    cursor: TransactionImageProjectionCursor,
+    assetId: string,
+    candidate: unknown,
+    label: string,
+  ): InspectedDocumentImageAsset {
+    this.assertActive();
+    const asset = assertDocumentImageAssetMetadata(assetId, candidate);
+    const key = cursor.key(assetId);
+    const cached = this.inspections.get(key);
+    if (cached) {
+      if (asset.data === undefined
+        || cached.identity.mimeType !== asset.mimeType
+        || cached.identity.byteLength !== asset.byteLength
+        || cached.identity.sha256 !== asset.sha256.toLowerCase()
+        || cached.identity.data !== asset.data) {
+        throw new Error(`Image asset projection ${assetId} changed while its transaction was being prepared.`);
+      }
+      return cached.inspected;
+    }
+    if (this.remainingMs() === 0) throw new Error('The transaction image-work deadline expired before all distinct assets could be inspected.');
+    if (this.admitted >= this.maximum) throw new Error(`One transaction may inspect or decode at most ${this.maximum} distinct image-asset projections.`);
+    this.admitted += 1;
+    const inspected = inspectDocumentImageAsset(asset, {
+      maxBytes: MAX_INLINE_ASSET_BYTES,
+      limitLabel: '1.5 MB',
+      label,
+    });
+    this.assertActive();
+    if (this.remainingMs() === 0) throw new Error('The transaction image-work deadline expired while an asset was being inspected.');
+    this.inspections.set(key, {
+      identity: { mimeType: asset.mimeType, byteLength: asset.byteLength, sha256: asset.sha256.toLowerCase(), data: asset.data! },
+      inspected,
+    });
+    return inspected;
+  }
+}
+
 export function inspectEmbeddedDocumentImageAssets(
   document: AIDrawDocument,
   options: { maxBytes: number; limitLabel: string; labelPrefix: string },
@@ -211,14 +332,51 @@ export function inspectEmbeddedDocumentImageAssets(
   return inspected;
 }
 
-export async function validateInlineDocumentAsset(asset: DocumentAsset, imageDecoder?: ImageDecodeValidator): Promise<void> {
-  const inspected = inspectDocumentImageAsset(asset);
-  if (!imageDecoder) return;
+async function inspectAndDecodeDocumentImageAsset(
+  assetId: string,
+  candidate: unknown,
+  imageDecoder: ImageDecodeValidator | undefined,
+  label: string,
+  context: TransactionImageWorkContext,
+  cursor: TransactionImageProjectionCursor,
+): Promise<InspectedDocumentImageAsset> {
+  const inspected = context.inspectProjection(cursor, assetId, candidate, label);
+  if (!imageDecoder) return inspected;
+  const remainingMs = context.remainingMs();
+  if (remainingMs === 0) throw new Error('The transaction image-work deadline expired before a supervised decode could start.');
+  context.assertActive();
+  const controller = new AbortController();
+  const cancelFromIngress = () => controller.abort(context.signal?.reason);
+  context.signal?.addEventListener('abort', cancelFromIngress, { once: true });
+  const timeout = setTimeout(() => controller.abort(), remainingMs);
   try {
-    await imageDecoder(inspected.bytes, inspected.expected);
+    const decoding = imageDecoder(inspected.bytes, inspected.expected, {
+      signal: controller.signal,
+      timeoutMs: remainingMs,
+    });
+    await Promise.race([
+      decoding,
+      new Promise<never>((_resolve, reject) => controller.signal.addEventListener('abort', () => reject(new Error('transaction image-work deadline expired')), { once: true })),
+    ]);
+    if (context.remainingMs() === 0) throw new Error('transaction image-work deadline expired');
   } catch (error) {
-    throw new Error(`Inline asset ${asset.id} could not be decoded safely: ${error instanceof Error ? error.message : 'unsupported image'}.`);
+    throw new Error(`${label} could not be decoded safely: ${error instanceof Error ? error.message : 'unsupported image'}.`);
+  } finally {
+    clearTimeout(timeout);
+    context.signal?.removeEventListener('abort', cancelFromIngress);
   }
+  return inspected;
+}
+
+export async function validateInlineDocumentAsset(asset: DocumentAsset, imageDecoder?: ImageDecodeValidator): Promise<void> {
+  await inspectAndDecodeDocumentImageAsset(
+    asset.id,
+    asset,
+    imageDecoder,
+    `Inline asset ${asset.id}`,
+    new TransactionImageWorkContext(),
+    new TransactionImageProjectionCursor(),
+  );
 }
 
 function normalizeEntity<T extends EntityBase>(entity: T, actor: Actor, timestamp: string, current?: EntityBase): T {
@@ -282,6 +440,49 @@ function normalizeEntityOperation(document: AIDrawDocument, operation: CanvasOpe
   }
 }
 
+async function normalizeIllustrationImageOperation(
+  operation: CanvasOperation,
+  availableAssets: ReadonlyMap<string, DocumentAsset>,
+  inspectionCache: Map<string, { asset: DocumentAsset; inspected: InspectedDocumentImageAsset }>,
+  imageWorkContext: TransactionImageWorkContext,
+  projectionCursor: TransactionImageProjectionCursor,
+  imageDecoder?: ImageDecodeValidator,
+): Promise<CanvasOperation> {
+  if ((operation.kind !== 'illustration.object.add' && operation.kind !== 'illustration.object.replace') || operation.object.type !== 'image') return operation;
+  const source = operation.object;
+  const candidate = availableAssets.get(source.assetId);
+  if (!candidate) throw new Error(`Image object ${source.id} references missing asset ${source.assetId}.`);
+  const cached = inspectionCache.get(source.assetId);
+  const asset = cached?.asset === candidate ? cached.asset : assertDocumentImageAssetMetadata(source.assetId, candidate);
+  const inspected = cached?.asset === asset
+    ? cached.inspected
+    : await inspectAndDecodeDocumentImageAsset(
+      source.assetId,
+      asset,
+      imageDecoder,
+      `Image object ${source.id} asset ${source.assetId}`,
+      imageWorkContext,
+      projectionCursor,
+    );
+  if (cached?.asset !== asset) inspectionCache.set(source.assetId, { asset, inspected });
+  if (source.sourceWidth !== undefined && source.sourceWidth !== inspected.expected.width) {
+    throw new Error(`Image object ${source.id} sourceWidth must match embedded asset width ${inspected.expected.width}.`);
+  }
+  if (source.sourceHeight !== undefined && source.sourceHeight !== inspected.expected.height) {
+    throw new Error(`Image object ${source.id} sourceHeight must match embedded asset height ${inspected.expected.height}.`);
+  }
+  const object: IllustrationObject = {
+    ...source,
+    sourceWidth: inspected.expected.width,
+    sourceHeight: inspected.expected.height,
+  };
+  if (object.type === 'image' && object.crop
+    && (object.crop.x + object.crop.width > inspected.expected.width || object.crop.y + object.crop.height > inspected.expected.height)) {
+    throw new Error(`Image object ${source.id} crop must fit inside embedded asset geometry ${inspected.expected.width}×${inspected.expected.height}.`);
+  }
+  return { ...operation, object } as CanvasOperation;
+}
+
 export async function prepareTransactionForCommit(
   document: AIDrawDocument,
   transaction: CanvasTransaction,
@@ -293,15 +494,44 @@ export async function prepareTransactionForCommit(
   }
 
   const operations: CanvasOperation[] = [];
+  const availableAssets = new Map(Object.entries(document.assets));
+  const inspectionCache = new Map<string, { asset: DocumentAsset; inspected: InspectedDocumentImageAsset }>();
+  const imageWorkContext = options.imageWorkContext ?? new TransactionImageWorkContext({
+    maximum: options.maxImageDecodes,
+    budgetMs: options.imageDecodeBudgetMs,
+  });
+  const projectionCursor = new TransactionImageProjectionCursor();
   for (const sourceOperation of transaction.operations) {
-    const operation = normalizeEntityOperation(document, sourceOperation, transaction.actor, timestamp);
+    let operation = normalizeEntityOperation(document, sourceOperation, transaction.actor, timestamp);
     if (operation.kind === 'asset.add') {
-      await validateInlineDocumentAsset(operation.asset, options.imageDecoder);
-      operations.push({
+      projectionCursor.invalidate(operation.asset.id);
+      const inspected = await inspectAndDecodeDocumentImageAsset(
+        operation.asset.id,
+        operation.asset,
+        options.imageDecoder,
+        `Inline asset ${operation.asset.id}`,
+        imageWorkContext,
+        projectionCursor,
+      );
+      operation = {
         ...operation,
         asset: transaction.actor.kind === 'agent' ? { ...operation.asset, source: 'embedded' } : operation.asset,
-      });
-    } else operations.push(operation);
+      };
+      availableAssets.set(operation.asset.id, operation.asset);
+      inspectionCache.set(operation.asset.id, { asset: operation.asset, inspected });
+    } else if (operation.kind === 'asset.delete') {
+      availableAssets.delete(operation.assetId);
+      inspectionCache.delete(operation.assetId);
+      projectionCursor.invalidate(operation.assetId);
+    } else operation = await normalizeIllustrationImageOperation(
+      operation,
+      availableAssets,
+      inspectionCache,
+      imageWorkContext,
+      projectionCursor,
+      options.imageDecoder,
+    );
+    operations.push(operation);
   }
 
   return { ...transaction, actor: structuredClone(transaction.actor), createdAt: timestamp, operations };

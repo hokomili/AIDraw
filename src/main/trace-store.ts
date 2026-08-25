@@ -27,7 +27,11 @@ export class TransactionTraceStore {
 
   async list(documentId: string, limit = Number.POSITIVE_INFINITY): Promise<TransactionTraceEntry[]> {
     let source: string;
-    try { source = await readFile(this.tracePath(documentId), 'utf8'); } catch { return []; }
+    try { source = await readFile(this.tracePath(documentId), 'utf8'); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw error;
+    }
     const entries = parseTransactionTraceJsonl(source, documentId).entries;
     const selected = Number.isFinite(limit) ? entries.slice(-Math.max(0, limit)) : entries;
     return selected.map((entry) => structuredClone(entry));

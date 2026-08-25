@@ -59,7 +59,7 @@ export class EngineRuntime {
       new RecoveryJournal(join(userDataPath, 'recovery')),
       appVersion,
       new TransactionTraceStore(join(userDataPath, 'traces')),
-      (bytes, expected) => this.rasterUtilities.validateImage(bytes, expected),
+      (bytes, expected, control) => this.rasterUtilities.validateImage(bytes, expected, control),
       async (document) => (await this.rasterUtilities.exportDocument(document, 'png')).data,
     );
     this.documentPresets = new DocumentPresetStore(join(userDataPath, 'settings', 'document-presets.json'));
@@ -74,7 +74,7 @@ export class EngineRuntime {
       appVersion,
       join(userDataPath, 'mcp-port.json'),
       options.runApprovedFileJob,
-      (encoded, width, height, palette, settings) => this.rasterUtilities.quantizeImage(encoded, width, height, palette, settings),
+      (encoded, width, height, palette, settings, control) => this.rasterUtilities.quantizeImage(encoded, width, height, palette, settings, control),
       (document, request, maxPixels) => this.rasterUtilities.captureObservation(document, request, maxPixels ?? 4_194_304),
       options.approvalTimeoutMs,
       { provisionalSessionTtlMs: options.mcpProvisionalSessionTtlMs },

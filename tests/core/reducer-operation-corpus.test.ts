@@ -84,6 +84,7 @@ function shape(id: string, layerId: string): ShapeObject {
     shape: 'rectangle',
     width: 12,
     height: 8,
+    cornerRadius: 0,
     fill: { kind: 'solid', color: '#ff6b7a' },
     stroke: { paint: { kind: 'none' }, width: 0, opacity: 1, lineCap: 'round', lineJoin: 'round', dash: [] },
   };

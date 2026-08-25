@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createIllustrationDocument, createPixelDocument, type AIDrawDocument } from '@aidraw/core';
+import { CanvasOperationSchema, HUMAN_ACTOR, IDENTITY_TRANSFORM, createIllustrationDocument, createPixelDocument, nowIso, type AIDrawDocument, type CanvasOperation, type ShapeObject } from '@aidraw/core';
 import type { AIDrawDesktopAPI, EditorBootstrapSnapshot, WorkspaceEvent, WorkspaceSnapshot } from '../../src/common/contracts';
 import { DEFAULT_ONION_SKIN_PREFERENCES, type OnionSkinPreferences } from '../../src/common/onion-skin';
 import { DEFAULT_ORDERED_DITHER_PREFERENCES, type OrderedDitherPreferences } from '../../src/common/ordered-dither-preferences';
@@ -385,6 +385,40 @@ describe('renderer workspace ordering and document isolation', () => {
 
     await expect(useEditorStore.getState().apply('Late first-tab preview', [{ kind: 'document.rename', name: 'Wrong target' }], first.id)).resolves.toBe(false);
     expect(applyTransaction).not.toHaveBeenCalled();
+  });
+
+  it('normalizes a readable predecessor shape before every native replacement dispatch', async () => {
+    const document = createIllustrationDocument('Predecessor shape edit');
+    const layer = Object.values(document.layers).find((entry) => entry.type === 'vector');
+    if (!layer || layer.type !== 'vector') throw new Error('Expected vector layer');
+    const timestamp = nowIso();
+    const predecessor = {
+      id: 'predecessor-rectangle', revision: 4, name: 'Readable predecessor rectangle', createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
+      layerId: layer.id, visible: true, locked: false, opacity: 1, blendMode: 'normal' as const, transform: { ...IDENTITY_TRANSFORM },
+      type: 'shape' as const, shape: 'rectangle' as const, width: 40, height: 30, sides: 6, innerRadius: 0.45,
+      fill: { kind: 'solid' as const, color: '#8268dd' },
+      stroke: { paint: { kind: 'none' as const }, width: 0, opacity: 1, lineCap: 'round' as const, lineJoin: 'round' as const, dash: [] },
+    } as ShapeObject;
+    document.objects[predecessor.id] = predecessor;
+    layer.objectIds.push(predecessor.id);
+    const applyTransaction = vi.fn(async (transaction: { operations: CanvasOperation[] }) => {
+      expect(transaction.operations).toHaveLength(1);
+      return { status: 'committed' as const, revision: document.revision + 1 };
+    });
+    Object.defineProperty(globalThis, 'window', { configurable: true, value: { aidraw: { applyTransaction } } });
+    useEditorStore.setState({ snapshot: snapshot(8, document) });
+
+    await expect(useEditorStore.getState().apply('Move predecessor rectangle', [{
+      kind: 'illustration.object.replace', object: { ...predecessor, transform: { ...predecessor.transform, x: 12 } }, expectedRevision: predecessor.revision,
+    }])).resolves.toBe(true);
+
+    const sent = applyTransaction.mock.calls[0]?.[0];
+    const operation = sent?.operations[0];
+    expect(CanvasOperationSchema.safeParse(operation).success).toBe(true);
+    if (operation?.kind !== 'illustration.object.replace') throw new Error('Expected normalized object replacement');
+    expect(operation.object).toMatchObject({ id: predecessor.id, shape: 'rectangle', cornerRadius: 0, transform: { x: 12 } });
+    expect(operation.object).not.toHaveProperty('sides');
+    expect(operation.object).not.toHaveProperty('innerRadius');
   });
 
   it('forwards an exact planning revision as a canonical transaction precondition', async () => {

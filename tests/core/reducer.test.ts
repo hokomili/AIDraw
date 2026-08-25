@@ -44,6 +44,34 @@ function shapeTransaction(documentId: string, layerId: string, expectedRevision?
 }
 
 describe('transaction reducer', () => {
+  it('rejects malformed illustration geometry, missing image assets, and orphan group indexes without mutating canonical state', () => {
+    const document = createIllustrationDocument();
+    const vector = Object.values(document.layers).find((layer) => layer.type === 'vector');
+    if (!vector || vector.type !== 'vector') throw new Error('Expected vector layer');
+    const timestamp = nowIso();
+    const base = {
+      revision: 0, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
+      layerId: vector.id, visible: true, locked: false, opacity: 1, blendMode: 'normal' as const,
+      transform: { ...IDENTITY_TRANSFORM },
+    };
+    const malformed = [
+      { kind: 'illustration.object.add' as const, object: { ...base, id: 'bad-path', name: 'Bad path', type: 'path' as const, pathData: 'not-valid-path-data', closed: false, fill: { kind: 'none' as const }, stroke: { paint: { kind: 'none' as const }, width: 0, opacity: 1, lineCap: 'round' as const, lineJoin: 'round' as const, dash: [] }, fillRule: 'nonzero' as const } },
+      { kind: 'illustration.object.add' as const, object: { ...base, id: 'wrong-closure', name: 'Wrong closure', type: 'path' as const, pathData: 'M0 0 L10 0', closed: true, fill: { kind: 'none' as const }, stroke: { paint: { kind: 'none' as const }, width: 0, opacity: 1, lineCap: 'round' as const, lineJoin: 'round' as const, dash: [] }, fillRule: 'nonzero' as const } },
+      { kind: 'illustration.object.add' as const, object: { ...base, id: 'native-collapsed-arc', name: 'Native-collapsed arc', type: 'path' as const, pathData: 'M0 0 A10 10 0 0 1 0.000001 0', closed: false, fill: { kind: 'none' as const }, stroke: { paint: { kind: 'none' as const }, width: 0, opacity: 1, lineCap: 'round' as const, lineJoin: 'round' as const, dash: [] }, fillRule: 'nonzero' as const } },
+      { kind: 'illustration.object.add' as const, object: { ...base, id: 'eccentric-native-collapsed-arc', name: 'Eccentric native-collapsed arc', type: 'path' as const, pathData: 'M0 0 A1 1000 0 0 0 0 0.00001', closed: false, fill: { kind: 'none' as const }, stroke: { paint: { kind: 'none' as const }, width: 0, opacity: 1, lineCap: 'round' as const, lineJoin: 'round' as const, dash: [] }, fillRule: 'nonzero' as const } },
+      { kind: 'illustration.object.add' as const, object: { ...base, id: 'missing-image', name: 'Missing image', type: 'image' as const, assetId: 'absent', width: 10, height: 10, filters: [] } },
+      { kind: 'illustration.object.add' as const, groupIndex: 0, object: { ...base, id: 'orphan-index', name: 'Orphan index', type: 'shape' as const, shape: 'rectangle' as const, width: 10, height: 10, fill: { kind: 'solid' as const, color: '#000000' }, stroke: { paint: { kind: 'none' as const }, width: 0, opacity: 1, lineCap: 'round' as const, lineJoin: 'round' as const, dash: [] } } },
+    ];
+    const before = structuredClone(document);
+    for (const [index, operation] of malformed.entries()) {
+      expect(() => applyTransaction(document, {
+        id: createId('tx'), clientOperationId: `rejected-illustration-${index}`, documentId: document.id, actor: HUMAN_ACTOR,
+        label: 'Reject malformed illustration', createdAt: timestamp, operations: [operation],
+      })).toThrow();
+      expect(document).toEqual(before);
+    }
+  });
+
   it('commits independent overlapping tags as one guarded asset replacement with an exact inverse', () => {
     const document = createPixelDocument('sprite', 'Overlapping tag history');
     const sprite = document.pixelAssets[document.activeAssetId];

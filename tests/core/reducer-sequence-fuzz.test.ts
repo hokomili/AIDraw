@@ -74,6 +74,7 @@ function shape(id: string, layerId: string, x: number): ShapeObject {
     shape: 'rectangle',
     width: 12,
     height: 8,
+    cornerRadius: 0,
     fill: { kind: 'solid', color: '#ff6b7a' },
     stroke: { paint: { kind: 'none' }, width: 0, opacity: 1, lineCap: 'round', lineJoin: 'round', dash: [] },
   };
@@ -231,7 +232,15 @@ function illustrationOperation(document: IllustrationDocument, next: () => numbe
   const choice = next() % 10;
   if (choice === 0) return { kind: 'document.rename', name: `Illustration fuzz ${step}` };
   if (choice === 1) return { kind: 'illustration.object.replace', object: { ...object, name: `Shape ${step}`, transform: { ...object.transform, x: (next() % 400) - 200, y: (next() % 400) - 200 } }, expectedRevision: object.revision };
-  if (choice === 2) return { kind: 'illustration.object.move', objectId: object.id, layerId: targetLayer.id, index: next() % (targetLayer.objectIds.length + 1), parentGroupId: group && next() % 2 ? group.id : undefined, groupIndex: group ? next() % (group.childIds.length + 1) : undefined, expectedRevision: object.revision };
+  if (choice === 2) {
+    const index = next() % (targetLayer.objectIds.length + 1);
+    const parentGroupId = group && next() % 2 ? group.id : undefined;
+    const candidateGroupIndex = group ? next() % (group.childIds.length + 1) : undefined;
+    return {
+      kind: 'illustration.object.move', objectId: object.id, layerId: targetLayer.id, index,
+      parentGroupId, groupIndex: parentGroupId ? candidateGroupIndex : undefined, expectedRevision: object.revision,
+    };
+  }
   if (choice === 3) return { kind: 'illustration.layer.move', layerId: movableLayer.id, parentId: next() % 2 ? layerGroup.id : undefined, index: next() % (document.layerIds.length + layerGroup.childIds.length + 1), expectedRevision: movableLayer.revision };
   if (choice === 4) return { kind: 'illustration.guides.replace', guides: [{ id: 'fuzz-guide', orientation: next() % 2 ? 'vertical' : 'horizontal', position: (next() % 2_000) - 1_000, color: '#ff0000', locked: Boolean(next() % 2) }], expectedRevision: document.revision };
   if (choice === 5) return { kind: 'illustration.snap-settings.replace', settings: { ...document.snapSettings, grid: Boolean(next() % 2), pixel: Boolean(next() % 2), gridSize: 1 + next() % 128, tolerance: next() % 32 }, expectedRevision: document.revision };

@@ -1,3 +1,5 @@
+import { EDITABLE_SVG_PATH_CLOSE_EPSILON, MAX_EDITABLE_SVG_PATH_CHARACTERS } from '@aidraw/core';
+
 export type PathPointKind = 'anchor' | 'in' | 'out';
 export type PathNodeKind = 'corner' | 'smooth';
 export type PathEndpoint = 'start' | 'end';
@@ -39,7 +41,7 @@ export interface NearestPathLocation {
 
 const COMMAND = /^[a-z]$/i;
 const NUMBER = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i;
-const EPSILON = 1e-7;
+const EPSILON = EDITABLE_SVG_PATH_CLOSE_EPSILON;
 
 function point(x = 0, y = 0): Point { return { x, y }; }
 function add(left: Point, right: Point): Point { return point(left.x + right.x, left.y + right.y); }
@@ -52,7 +54,7 @@ function zero(): Point { return point(0, 0); }
 function clonePoint(value: Point): Point { return point(value.x, value.y); }
 
 function tokens(pathData: string): string[] {
-  if (typeof pathData !== 'string' || pathData.length < 3 || pathData.length > 1_000_000) throw new Error('Path data is empty or exceeds the one-million-character editing limit.');
+  if (typeof pathData !== 'string' || pathData.length < 3 || pathData.length > MAX_EDITABLE_SVG_PATH_CHARACTERS) throw new Error('Path data is empty or exceeds the one-million-character editing limit.');
   const result = pathData.match(/[a-z]|[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?/gi) ?? [];
   if (!result.length) throw new Error('Path data contains no commands.');
   return result;

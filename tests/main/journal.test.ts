@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { appendFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { HUMAN_ACTOR, createId, createIllustrationDocument, createPixelDocument, nowIso, writePixels, type CanvasTransaction } from '@aidraw/core';
+import { HUMAN_ACTOR, IDENTITY_TRANSFORM, createId, createIllustrationDocument, createPixelDocument, nowIso, writePixels, type CanvasTransaction, type IllustrationDocument, type PathObject } from '@aidraw/core';
 import { RecoveryJournal } from '@main/journal';
 
 const temporaryPaths: string[] = [];
@@ -11,6 +11,20 @@ afterEach(async () => { await Promise.all(temporaryPaths.splice(0).map((path) =>
 
 function journalPath(root: string, documentId: string): string {
   return join(root, `document-${createHash('sha256').update(documentId).digest('hex')}.jsonl`);
+}
+
+function pathTransaction(document: IllustrationDocument, id: string, pathData: string): CanvasTransaction {
+  const layer = Object.values(document.layers).find((entry) => entry.type === 'vector')!; const timestamp = nowIso();
+  const object: PathObject = {
+    id, revision: 0, name: id, createdAt: timestamp, updatedAt: timestamp, createdBy: HUMAN_ACTOR.id,
+    layerId: layer.id, visible: true, locked: false, opacity: 1, blendMode: 'normal', transform: IDENTITY_TRANSFORM,
+    type: 'path', pathData, closed: false, fillRule: 'nonzero', fill: { kind: 'none' },
+    stroke: { paint: { kind: 'solid', color: '#000000' }, width: 1, opacity: 1, lineCap: 'round', lineJoin: 'round', dash: [] },
+  };
+  return {
+    id: `tx-${id}`, clientOperationId: `operation-${id}`, documentId: document.id, actor: HUMAN_ACTOR,
+    label: id, createdAt: timestamp, operations: [{ kind: 'illustration.object.add', object }], playback: { mode: 'instant', speed: 1 },
+  };
 }
 
 describe('crash recovery journal', () => {
@@ -31,6 +45,20 @@ describe('crash recovery journal', () => {
     await journal.append(document.id, transaction);
     const recovered = await journal.recover();
     expect(recovered).toHaveLength(1); expect(recovered[0].name).toBe('Recovered drawing'); expect(recovered[0].dirty).toBe(true);
+  });
+
+  it('persists one exact document incarnation through compaction and transaction replay', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-recovery-incarnation-')); temporaryPaths.push(root);
+    const journal = new RecoveryJournal(root); const document = createIllustrationDocument('Incarnation-bound recovery');
+    const incarnationId = '4de7daee-c99d-4e76-b83a-76b53bcc739e';
+    await journal.compact(document, incarnationId);
+    await journal.append(document.id, {
+      id: 'incarnation-replay-transaction', clientOperationId: 'incarnation-replay-operation', documentId: document.id,
+      actor: HUMAN_ACTOR, label: 'Retain incarnation', createdAt: nowIso(), operations: [{ kind: 'document.rename', name: 'Incarnation retained' }],
+    });
+    const recovered = await journal.recoverWorkspace();
+    expect(recovered.documentIncarnations).toEqual({ [document.id]: incarnationId });
+    expect(recovered.documents).toEqual([expect.objectContaining({ id: document.id, name: 'Incarnation retained', revision: 1 })]);
   });
 
   it('preserves a compacted clean snapshot when no later transaction exists', async () => {
@@ -135,6 +163,30 @@ describe('crash recovery journal', () => {
     expect(await readFile(journalPath(root, document.id))).toEqual(before);
   });
 
+  it('uses exact native topology for strict journal writes and replay while retaining valid compact arcs', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-recovery-native-path-')); temporaryPaths.push(root);
+    const journal = new RecoveryJournal(root); const document = createIllustrationDocument('Native path recovery'); await journal.compact(document);
+    const path = journalPath(root, document.id); const snapshot = await readFile(path);
+    const collapsed = pathTransaction(document, 'collapsed-recovery-path', 'M0 0 A10 10 0 0 1 0.000001 0');
+    await expect(journal.append(document.id, collapsed)).rejects.toThrow('Recovery transaction is invalid');
+    const eccentricCollapsed = pathTransaction(document, 'eccentric-collapsed-recovery-path', 'M0 0 A1 1000 0 0 0 0 0.00001');
+    await expect(journal.append(document.id, eccentricCollapsed)).rejects.toThrow('Recovery transaction is invalid');
+    expect(await readFile(path)).toEqual(snapshot);
+
+    const compact = pathTransaction(document, 'compact-recovery-path', 'M0 0 A1 2 0 013 4');
+    await expect(journal.append(document.id, compact)).resolves.toBeUndefined();
+    expect(await journal.recover()).toEqual([expect.objectContaining({
+      id: document.id, revision: 1,
+      objects: { 'compact-recovery-path': expect.objectContaining({ pathData: 'M0 0 A1 2 0 013 4' }) },
+    })]);
+
+    await journal.compact(document);
+    await appendFile(path, `${JSON.stringify({ type: 'transaction', transaction: collapsed })}\n`, 'utf8');
+    const afterInvalid = { ...compact, id: 'tx-after-invalid-native-path', clientOperationId: 'operation-after-invalid-native-path', operations: [{ kind: 'document.rename' as const, name: 'Must not cross invalid path' }] };
+    await appendFile(path, `${JSON.stringify({ type: 'transaction', transaction: afterInvalid })}\n`, 'utf8');
+    expect(await journal.recover()).toEqual([expect.objectContaining({ id: document.id, name: 'Native path recovery', revision: 0, objects: {} })]);
+  });
+
   it('reopens a legacy safe-name journal and migrates it to the hashed filename on compaction', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aidraw-recovery-legacy-')); temporaryPaths.push(root);
     const document = createIllustrationDocument('Legacy recovery snapshot'); await mkdir(root, { recursive: true });
@@ -145,8 +197,12 @@ describe('crash recovery journal', () => {
       actor: HUMAN_ACTOR, label: 'Legacy recovery edit', createdAt: nowIso(), operations: [{ kind: 'document.rename', name: 'Legacy journal recovered' }],
     };
     await journal.append(document.id, transaction);
-    const recovered = await journal.recover(); expect(recovered).toEqual([expect.objectContaining({ id: document.id, name: 'Legacy journal recovered', revision: 1 })]);
-    await journal.compact(recovered[0]);
+    const recoveredWorkspace = await journal.recoverWorkspace();
+    const legacyIncarnation = recoveredWorkspace.documentIncarnations[document.id];
+    expect(legacyIncarnation).toMatch(/^[0-9a-f]{64}$/);
+    expect((await journal.recoverWorkspace()).documentIncarnations[document.id]).toBe(legacyIncarnation);
+    const recovered = recoveredWorkspace.documents; expect(recovered).toEqual([expect.objectContaining({ id: document.id, name: 'Legacy journal recovered', revision: 1 })]);
+    await journal.compact(recovered[0], legacyIncarnation);
     expect(await readdir(root)).toEqual([`document-${createHash('sha256').update(document.id).digest('hex')}.jsonl`]);
     expect(await journal.recover()).toEqual([expect.objectContaining({ id: document.id, name: 'Legacy journal recovered', revision: 1 })]);
   });

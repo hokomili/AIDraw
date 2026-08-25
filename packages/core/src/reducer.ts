@@ -4,6 +4,7 @@ import type {
   EntityBase,
   IllustrationDocument,
   IllustrationLayer,
+  IllustrationObject,
   PixelDocument,
   PixelSprite,
   PixelTilemap,
@@ -14,6 +15,7 @@ import { createId, nowIso } from './ids';
 import { remapPixelCelIndices, writePixelRuns, writePixels, writeTileRuns, writeTiles } from './pixel';
 import { findDocumentAssetReferences } from './references';
 import { resolvePixelCel } from './animation';
+import { inspectEditableSvgPathData } from './svg-path';
 import {
   assertPaletteIndicesExist,
   assertPixelCelsUsePalette,
@@ -25,6 +27,8 @@ import {
 export interface ApplyTransactionOptions {
   recordActivity?: boolean;
   status?: ActivityEntry['status'];
+  /** Internal history only: restore an exact object already admitted by persistent compatibility parsing. */
+  allowCompatibilityObjects?: boolean;
 }
 
 export interface ApplyTransactionResult {
@@ -103,6 +107,25 @@ function requireIllustration(document: AIDrawDocument, operationIndex: number): 
   });
 }
 
+function assertIllustrationObjectMutation(document: IllustrationDocument, object: IllustrationObject, allowCompatibilityObjects: boolean): void {
+  if (!allowCompatibilityObjects && object.type === 'path') {
+    const path = inspectEditableSvgPathData(object.pathData);
+    if (path.closed !== object.closed) throw new Error(`Path object ${object.id} closed must match its final SVG close-path command`);
+  }
+  if (object.type === 'image') {
+    if (!document.assets[object.assetId]) throw new Error(`Image object ${object.id} references missing asset ${object.assetId}`);
+    if (allowCompatibilityObjects) return;
+    const hasSourceWidth = object.sourceWidth !== undefined;
+    const hasSourceHeight = object.sourceHeight !== undefined;
+    if (hasSourceWidth !== hasSourceHeight) throw new Error(`Image object ${object.id} requires sourceWidth and sourceHeight together`);
+    if (object.crop && (!hasSourceWidth || !hasSourceHeight
+      || object.crop.x + object.crop.width > object.sourceWidth!
+      || object.crop.y + object.crop.height > object.sourceHeight!)) {
+      throw new Error(`Image object ${object.id} crop must fit inside complete source geometry`);
+    }
+  }
+}
+
 function requirePixel(document: AIDrawDocument, operationIndex: number): PixelDocument {
   if (document.kind === 'pixel') return document;
   throw new TransactionConflictError({
@@ -163,6 +186,7 @@ function applyOperation(
   operation: CanvasOperation,
   operationIndex: number,
   timestamp: string,
+  allowCompatibilityObjects = false,
 ): CanvasOperation | CanvasOperation[] {
   switch (operation.kind) {
     case 'document.rename': {
@@ -330,6 +354,8 @@ function applyOperation(
     }
     case 'illustration.object.add': {
       const illustration = requireIllustration(document, operationIndex);
+      if (operation.groupIndex !== undefined && operation.parentGroupId === undefined) throw new Error('groupIndex requires parentGroupId');
+      assertIllustrationObjectMutation(illustration, operation.object, allowCompatibilityObjects);
       if (illustration.objects[operation.object.id]) throw new Error(`Object ${operation.object.id} already exists`);
       const layer = illustration.layers[operation.object.layerId];
       if (!layer || layer.type !== 'vector') throw new Error('Objects must be added to a vector layer');
@@ -366,6 +392,7 @@ function applyOperation(
     }
     case 'illustration.object.replace': {
       const illustration = requireIllustration(document, operationIndex);
+      assertIllustrationObjectMutation(illustration, operation.object, allowCompatibilityObjects);
       const current = illustration.objects[operation.object.id];
       if (!current) throw new Error(`Object ${operation.object.id} does not exist`);
       assertRevision(current, operation.expectedRevision, operationIndex);
@@ -388,6 +415,7 @@ function applyOperation(
     }
     case 'illustration.object.move': {
       const illustration = requireIllustration(document, operationIndex);
+      if (operation.groupIndex !== undefined && operation.parentGroupId === undefined) throw new Error('groupIndex requires parentGroupId');
       const object = illustration.objects[operation.objectId];
       if (!object) throw new Error(`Object ${operation.objectId} does not exist`);
       assertRevision(object, operation.expectedRevision, operationIndex);
@@ -800,11 +828,11 @@ function inverseWithCurrentRevision(document: AIDrawDocument, operation: CanvasO
   return value;
 }
 
-function rebaseInverseRevisions(document: AIDrawDocument, operations: CanvasOperation[], timestamp: string): CanvasOperation[] {
+function rebaseInverseRevisions(document: AIDrawDocument, operations: CanvasOperation[], timestamp: string, allowCompatibilityObjects = false): CanvasOperation[] {
   const simulation = structuredClone(document); const rebased: CanvasOperation[] = [];
   for (let index = 0; index < operations.length; index += 1) {
     const operation = inverseWithCurrentRevision(simulation, operations[index]);
-    applyOperation(simulation, operation, index, timestamp); rebased.push(operation);
+    applyOperation(simulation, operation, index, timestamp, allowCompatibilityObjects); rebased.push(operation);
   }
   return rebased;
 }
@@ -817,11 +845,12 @@ function rebaseInverseRevisions(document: AIDrawDocument, operations: CanvasOper
 export function rebaseTransactionExpectedRevisions(
   source: AIDrawDocument,
   transaction: CanvasTransaction,
+  options: Pick<ApplyTransactionOptions, 'allowCompatibilityObjects'> = {},
 ): CanvasTransaction {
   if (source.id !== transaction.documentId) throw new Error('Transaction document ID does not match');
   const value = structuredClone(transaction);
   if (value.expectedDocumentRevision !== undefined) value.expectedDocumentRevision = source.revision;
-  value.operations = rebaseInverseRevisions(source, value.operations, nowIso());
+  value.operations = rebaseInverseRevisions(source, value.operations, nowIso(), options.allowCompatibilityObjects);
   return value;
 }
 
@@ -846,7 +875,7 @@ export function applyTransaction(
   const inverseOperations: CanvasOperation[] = [];
 
   for (let index = 0; index < transaction.operations.length; index += 1) {
-    const inverse = applyOperation(document, transaction.operations[index], index, timestamp);
+    const inverse = applyOperation(document, transaction.operations[index], index, timestamp, options.allowCompatibilityObjects);
     inverseOperations.unshift(...(Array.isArray(inverse) ? inverse : [inverse]));
   }
 
@@ -864,7 +893,7 @@ export function applyTransaction(
       operationCount: transaction.operations.length,
     });
   }
-  const rebasedInverseOperations = rebaseInverseRevisions(document, inverseOperations, timestamp);
+  const rebasedInverseOperations = rebaseInverseRevisions(document, inverseOperations, timestamp, true);
 
   return {
     document,

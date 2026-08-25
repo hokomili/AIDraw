@@ -11,6 +11,8 @@ import {
 import { z } from 'zod';
 import {
   CanvasOperationSchema,
+  IllustrationObjectAuthoringInputSchema,
+  IllustrationObjectMutationInputSchema,
   MAX_WANG_TERRAIN_COORDINATE,
   MAX_WANG_TERRAIN_STROKE_POINTS,
   NewDocumentOptionsSchema,
@@ -25,6 +27,8 @@ import {
   encodeTiledGid,
   floodPixelRegion,
   isImageCollectionTileset,
+  materializeIllustrationObjectAuthoringInput,
+  normalizeIllustrationObjectForReplacement,
   nowIso,
   orderedDitherIndex,
   placePixelStamp,
@@ -50,6 +54,7 @@ import {
   type AsyncJob,
   type CanvasOperation,
   type CanvasTransaction,
+  type DocumentAsset,
   type IllustrationDocument,
   type IllustrationObject,
   type PixelDocument,
@@ -65,7 +70,7 @@ import { transformPixelSelection } from '../common/pixel-selection';
 import { scaleGridSelection } from '../common/grid-selection';
 import { cropImageObject, cropImageToAspect, resetImageCrop } from '../common/image-crop';
 import { createBooleanPath } from '../common/path-boolean';
-import { convertPathArcsToCubics } from '../common/path-conversion';
+import { convertPathArcsToCubics, inspectNativeEditableSvgPathData } from '../common/path-conversion';
 import { joinPathObjects } from '../common/path-topology';
 import { assignWangTile, deleteWangColor, deleteWangSet, upsertWangColor, upsertWangSet } from '../common/wang-authoring';
 import { planImageCollectionWangMutation, planWangTerrainSelection } from '../common/wang-terrain-authoring';
@@ -75,10 +80,11 @@ import { appendImageCollectionSource, createImageCollectionTileset, removeUnused
 import { planImageCollectionTileIdMove } from '../common/image-collection-tile-move';
 import { planTileObjectCreation } from '../common/tile-object-authoring';
 import { DocumentService } from './document-service';
-import { BatchManager } from './batch-manager';
-import { PlaybackScheduler } from './playback-scheduler';
+import { BatchManager, batchTransactionFingerprint } from './batch-manager';
+import { PlaybackScheduler, PublicMutationDocumentChangedError } from './playback-scheduler';
 import { plannedExportCompanionPaths, type ExportFormat } from './export-document';
-import { quantizeImageToPalette } from './quantize-image';
+import { quantizeImageToPalette, type QuantizeImageOptions } from './quantize-image';
+import { TransactionImageProjectionCursor, TransactionImageWorkContext, type ImageDecodeControl } from './transaction-policy';
 import { captureObservation, MAX_OBSERVATION_PIXELS, type CaptureObservation } from './capture-observation';
 import { projectLinkFileExtension, verifiedPixelLinkCache } from './pixel-link-files';
 import { AIDRAW_GUIDE_URI, AIDRAW_HELP_TOPICS, AIDRAW_MCP_GUIDE, AIDRAW_SERVER_INSTRUCTIONS, aidrawHelp } from './mcp-guide';
@@ -311,7 +317,16 @@ const PixelTileObjectCreateSchema = z.object({
   expectedDocumentRevision: z.number().int().nonnegative(),
 }).strict();
 const PixelStampPlaceSchema = z.object({ kind: z.literal('pixel.stamp.place'), stampId: z.string().min(1), spriteId: z.string().min(1), celId: z.string().min(1), x: z.number().int().min(-8_192).max(16_384), y: z.number().int().min(-8_192).max(16_384), transform: z.enum(['flip-horizontal', 'flip-vertical', 'rotate-clockwise', 'rotate-counterclockwise']).optional(), expectedRevision: z.number().int().nonnegative() }).strict();
-const PixelTileStampPlaceSchema = z.object({ kind: z.literal('pixel.tile-stamp.place'), stampId: z.string().min(1), mapId: z.string().min(1), layerId: z.string().min(1), x: z.number().int().min(-16_777_216).max(16_777_216), y: z.number().int().min(-16_777_216).max(16_777_216), transform: z.enum(['flip-horizontal', 'flip-vertical', 'rotate-clockwise', 'rotate-counterclockwise']).optional(), expectedRevision: z.number().int().nonnegative() }).strict();
+const PixelTileStampPlaceSchema = z.object({
+  kind: z.literal('pixel.tile-stamp.place').describe('Place one observed reusable tile stamp into one observed tile layer.'),
+  stampId: z.string().min(1).describe('Exact tile-stamp ID from the canonical document tileStamps array.'),
+  mapId: z.string().min(1).describe('Exact observed tilemap pixel-asset ID.'),
+  layerId: z.string().min(1).describe('Exact observed writable tile-layer ID within mapId.'),
+  x: z.number().int().min(-16_777_216).max(16_777_216).describe('Destination map-cell x coordinate for the stamp anchor.'),
+  y: z.number().int().min(-16_777_216).max(16_777_216).describe('Destination map-cell y coordinate for the stamp anchor.'),
+  transform: z.enum(['flip-horizontal', 'flip-vertical', 'rotate-clockwise', 'rotate-counterclockwise']).optional().describe('Optional deterministic stamp transform about its declared anchor.'),
+  expectedRevision: z.number().int().nonnegative().describe('Exact observed tile-layer revision.'),
+}).strict();
 const PixelTileVariantsPaintSchema = z.object({ kind: z.literal('pixel.tile-variants.paint'), mapId: z.string().min(1), layerId: z.string().min(1), tilesetId: z.string().min(1), tileId: z.number().int().nonnegative(), points: z.array(z.object({ x: z.number().int().min(-16_777_216).max(16_777_216), y: z.number().int().min(-16_777_216).max(16_777_216) }).strict()).min(1).max(65_536), seed: z.number().int().min(-2_147_483_648).max(2_147_483_647).optional(), transforms: z.object({ hFlip: z.boolean().default(false), vFlip: z.boolean().default(false), diagonal: z.boolean().default(false) }).strict().optional(), expectedRevision: z.number().int().nonnegative() }).strict();
 const PixelWangTerrainStrokeSchema = z.object({ kind: z.literal('pixel.wang-terrain.stroke'), mapId: z.string().min(1).max(200), layerId: z.string().min(1).max(200), tilesetId: z.string().min(1).max(200), wangSetId: z.string().min(1).max(200), colorId: z.number().int().min(1).max(255), mode: z.enum(['paint', 'erase']), points: z.array(z.object({ x: z.number().int().min(-MAX_WANG_TERRAIN_COORDINATE).max(MAX_WANG_TERRAIN_COORDINATE), y: z.number().int().min(-MAX_WANG_TERRAIN_COORDINATE).max(MAX_WANG_TERRAIN_COORDINATE) }).strict()).min(1).max(MAX_WANG_TERRAIN_STROKE_POINTS), expectedRevision: z.number().int().nonnegative(), expectedDocumentRevision: z.number().int().nonnegative().optional() }).strict();
 const MapObjectInputSchema = z.object({ id: z.string().min(1), type: z.enum(['rectangle', 'ellipse', 'polygon', 'polyline']), x: z.number().finite().min(-16_777_216).max(16_777_216), y: z.number().finite().min(-16_777_216).max(16_777_216), width: z.number().finite().positive().max(16_777_216).optional(), height: z.number().finite().positive().max(16_777_216).optional(), points: z.array(z.object({ x: z.number().finite(), y: z.number().finite() }).strict()).max(65_536).optional(), properties: z.record(z.string(), z.union([z.string(), z.number().finite(), z.boolean()])) }).strict().superRefine((object, context) => { if ((object.type === 'rectangle' || object.type === 'ellipse') && (object.width === undefined || object.height === undefined)) context.addIssue({ code: 'custom', message: 'Rectangle and ellipse map objects require width and height.' }); if ((object.type === 'polygon' || object.type === 'polyline') && (!object.points || object.points.length < 2)) context.addIssue({ code: 'custom', path: ['points'], message: 'Polygon and polyline map objects require at least two points.' }); });
@@ -381,6 +396,136 @@ const IllustrationPathJoinSchema = z.object({
   endpoints: z.enum(['nearest', 'end-start', 'start-end', 'start-start', 'end-end']).default('nearest'),
   expectedRevisions: ExpectedRevisionsSchema,
 }).strict().refine((operation) => operation.primaryObjectId !== operation.secondaryObjectId, 'Join targets must be different paths.');
+const PublicIllustrationObjectAddInputShape = {
+  kind: z.literal('illustration.object.add').describe('Create one editable vector, path, shape, text, image, or group object.'),
+  object: IllustrationObjectAuthoringInputSchema.describe('Complete add-time object. Omit revision/createdAt/updatedAt/createdBy; AIDraw supplies authenticated metadata.'),
+  index: z.number().int().nonnegative().max(1_000_000).optional().describe('Optional insertion index in the target vector layer.'),
+};
+const PublicIllustrationObjectAddSchema = z.union([
+  z.object(PublicIllustrationObjectAddInputShape).strict().describe('Add at the vector-layer level.'),
+  z.object({
+    ...PublicIllustrationObjectAddInputShape,
+    parentGroupId: z.string().min(1).describe('Existing group in the same vector layer.'),
+    groupIndex: z.number().int().nonnegative().max(1_000_000).optional().describe('Optional insertion index inside parentGroupId.'),
+  }).strict().describe('Add to an existing object group; groupIndex is valid only in this branch.'),
+]).describe('Fully discoverable illustration.object.add contract. Common presentation and subtype-specific style defaults are shown in the nested object schema.');
+const PublicIllustrationObjectReplaceSchema = z.object({
+  kind: z.literal('illustration.object.replace').describe('Replace one editable illustration object.'),
+  object: IllustrationObjectMutationInputSchema.describe('Complete canonical object copied from canvas_observe with only the intended fields changed. Replacement has no subtype-geometry defaults: rectangle requires cornerRadius, polygon requires sides, star requires sides plus innerRadius, and line/arrow fill must be none. Retain only fields advertised for the exact subtype; path closure and image crop geometry are revalidated.'),
+  expectedRevision: z.number().int().nonnegative().describe('Exact object revision from canvas_observe.'),
+}).strict().describe('Observation-based complete object replacement; partial patches are rejected.');
+const PublicIllustrationObjectMoveInputShape = {
+  kind: z.literal('illustration.object.move').describe('Move one existing illustration object.'),
+  objectId: z.string().min(1),
+  layerId: z.string().min(1).describe('Destination vector-layer ID.'),
+  index: z.number().int().nonnegative().max(1_000_000).optional(),
+  expectedRevision: z.number().int().nonnegative().describe('Exact object revision from canvas_observe.'),
+};
+const PublicIllustrationObjectMoveSchema = z.union([
+  z.object(PublicIllustrationObjectMoveInputShape).strict().describe('Move at the vector-layer level.'),
+  z.object({
+    ...PublicIllustrationObjectMoveInputShape,
+    parentGroupId: z.string().min(1).describe('Existing destination group in the target vector layer.'),
+    groupIndex: z.number().int().nonnegative().max(1_000_000).optional().describe('Optional insertion index inside parentGroupId.'),
+  }).strict().describe('Move into an existing object group; groupIndex is valid only in this branch.'),
+]);
+const PublicIllustrationObjectDeleteSchema = z.object({
+  kind: z.literal('illustration.object.delete').describe('Delete one existing illustration object.'),
+  objectId: z.string().min(1),
+  expectedRevision: z.number().int().nonnegative().describe('Exact object revision from canvas_observe.'),
+}).strict();
+
+const PublicRunPositionShape = {
+  x: z.number().int().min(-16_777_216).max(16_777_216),
+  y: z.number().int().min(-16_777_216).max(16_777_216),
+  length: z.number().int().min(1).max(65_536),
+};
+function validatePublicRuns(runs: Array<{ x: number; y: number; length: number }>, context: z.core.$RefinementCtx): void {
+  const total = runs.reduce((sum, run) => Math.min(1_000_001, sum + run.length), 0);
+  if (total > 1_000_000) context.addIssue({ code: 'custom', path: ['runs'], message: 'Region operations are limited to one million cells.' });
+  const ordered = runs.map((run, index) => ({ ...run, index })).sort((left, right) => left.y - right.y || left.x - right.x);
+  for (let index = 1; index < ordered.length; index += 1) {
+    const previous = ordered[index - 1]; const current = ordered[index];
+    if (previous.y === current.y && previous.x + previous.length > current.x) {
+      context.addIssue({ code: 'custom', path: ['runs', current.index], message: 'Runs in one operation may not overlap.' });
+    }
+  }
+}
+const PublicPixelCelRegionSchema = z.object({
+  kind: z.literal('pixel.cel.region').describe('Paint compact indexed runs into one observed sprite cel.'),
+  spriteId: z.string().min(1).describe('Exact observed sprite asset ID.'),
+  celId: z.string().min(1).describe('Exact observed cel ID owned by spriteId.'),
+  runs: z.array(z.object({ ...PublicRunPositionShape, index: z.number().int().min(0).max(255).describe('Observed palette index; 0 is transparent.') }).strict()).min(1).max(65_536),
+  expectedRevision: z.number().int().nonnegative().describe('Exact observed cel revision.'),
+}).strict().superRefine(({ runs }, context) => validatePublicRuns(runs, context));
+const PublicPixelTilemapRegionSchema = z.object({
+  kind: z.literal('pixel.tilemap.region').describe('Write compact Tiled-GID runs into one observed tilemap layer.'),
+  mapId: z.string().min(1).describe('Exact observed tilemap pixel-asset ID.'),
+  layerId: z.string().min(1).describe('Exact observed writable tile-layer ID within mapId.'),
+  runs: z.array(z.object({ ...PublicRunPositionShape, gid: z.number().int().min(0).max(0xffff_ffff).describe('Raw unsigned Tiled GID; 0 clears a cell and nonzero values should come from an observed attached tileset.') }).strict()).min(1).max(65_536),
+  expectedRevision: z.number().int().nonnegative().describe('Exact observed tile-layer revision.'),
+}).strict().superRefine(({ runs }, context) => validatePublicRuns(runs, context));
+const PublicTileStampSchema = z.object({
+  id: z.string().min(1).describe('Caller-chosen unique tile-stamp ID.'),
+  name: z.string().trim().min(1).max(200),
+  width: z.number().int().min(1).max(8_192),
+  height: z.number().int().min(1).max(8_192),
+  anchorX: z.number().int().nonnegative(),
+  anchorY: z.number().int().nonnegative(),
+  cells: z.array(z.object({
+    x: z.number().int().nonnegative(),
+    y: z.number().int().nonnegative(),
+    gid: z.number().int().min(0).max(0xffff_ffff).describe('Raw unsigned Tiled GID; derive nonzero values from an observed attached tileset.'),
+  }).strict()).min(1).max(65_536),
+}).strict().superRefine((stamp, context) => {
+  if (stamp.anchorX >= stamp.width || stamp.anchorY >= stamp.height) context.addIssue({ code: 'custom', path: ['anchorX'], message: 'Stamp anchor must fit inside its bounds.' });
+  const seen = new Set<string>();
+  stamp.cells.forEach((cell, index) => {
+    if (cell.x >= stamp.width || cell.y >= stamp.height) context.addIssue({ code: 'custom', path: ['cells', index], message: 'Stamp cell must fit inside its bounds.' });
+    const key = `${cell.x},${cell.y}`;
+    if (seen.has(key)) context.addIssue({ code: 'custom', path: ['cells', index], message: 'Stamp cells may not overlap.' });
+    seen.add(key);
+  });
+});
+const PublicPixelTileStampsReplaceSchema = z.object({
+  kind: z.literal('pixel.tile-stamps.replace').describe('Replace the document reusable tile-stamp library.'),
+  stamps: z.array(PublicTileStampSchema).max(1_024).superRefine((stamps, context) => {
+    const seen = new Set<string>();
+    stamps.forEach((stamp, index) => {
+      if (seen.has(stamp.id)) context.addIssue({ code: 'custom', path: [index, 'id'], message: 'Tile stamp IDs must be unique.' });
+      seen.add(stamp.id);
+    });
+  }),
+}).strict();
+const PublicOtherCanvasOperationSchema = z.object({
+  kind: z.string().min(1).regex(/^(?!(?:illustration\.object\.(?:add|replace|move|delete)|pixel\.(?:cel\.region|tilemap\.region|tile-stamps\.replace|tile-stamp\.place))$).+$/u, 'Published structured operations must use their complete advertised branch.').describe('Other canonical or semantic operation discriminator; published illustration, indexed-pixel, and tilemap branches are excluded. See aidraw_help topic=operations for other families.'),
+}).loose().describe('Other canonical or semantic canvas operation. Its operation-specific fields remain strictly validated by the server.');
+const PublicExactCanvasOperationSchemas: Record<string, z.ZodType> = {
+  'illustration.object.add': PublicIllustrationObjectAddSchema,
+  'illustration.object.replace': PublicIllustrationObjectReplaceSchema,
+  'illustration.object.move': PublicIllustrationObjectMoveSchema,
+  'illustration.object.delete': PublicIllustrationObjectDeleteSchema,
+  'pixel.cel.region': PublicPixelCelRegionSchema,
+  'pixel.tilemap.region': PublicPixelTilemapRegionSchema,
+  'pixel.tile-stamps.replace': PublicPixelTileStampsReplaceSchema,
+  'pixel.tile-stamp.place': PixelTileStampPlaceSchema,
+};
+const PublicCanvasOperationInputSchema = z.union([
+  PublicIllustrationObjectAddSchema,
+  PublicIllustrationObjectReplaceSchema,
+  PublicIllustrationObjectMoveSchema,
+  PublicIllustrationObjectDeleteSchema,
+  PublicPixelCelRegionSchema,
+  PublicPixelTilemapRegionSchema,
+  PublicPixelTileStampsReplaceSchema,
+  PixelTileStampPlaceSchema,
+  PublicOtherCanvasOperationSchema,
+]).superRefine((operation, context) => {
+  const schema = PublicExactCanvasOperationSchemas[operation.kind];
+  if (!schema) return;
+  const parsed = schema.safeParse(operation);
+  if (!parsed.success) for (const issue of parsed.error.issues) context.addIssue({ code: 'custom', path: issue.path, message: issue.message });
+}).describe('Canvas operation. Editable illustration objects, indexed-pixel regions, tilemap regions, and reusable tile stamps have complete machine-readable branches; other strict families are documented by aidraw_help topic=operations.');
 const DocumentFragmentImportSchema = z.object({
   kind: z.literal('document.fragment.import'),
   fragment: z.unknown(),
@@ -695,9 +840,57 @@ function semanticPath(document: AIDrawDocument, objectId: string): { document: I
   return { document, object };
 }
 
-type QuantizeImage = typeof quantizeImageToPalette;
+type QuantizeImage = (
+  encoded: Buffer,
+  width: number,
+  height: number,
+  palette: PixelDocument['palette'],
+  options: QuantizeImageOptions,
+  control?: ImageDecodeControl,
+) => Promise<Array<{ x: number; y: number; index: number }>>;
 
-async function expandAgentCanvasOperation(document: AIDrawDocument, value: Record<string, unknown>, quantizeImage: QuantizeImage, actor: Actor): Promise<CanvasOperation[]> {
+function materializeAgentIllustrationObject(
+  availableAssets: Readonly<Record<string, DocumentAsset>>,
+  imageWorkContext: TransactionImageWorkContext,
+  projectionCursor: TransactionImageProjectionCursor,
+  input: unknown,
+  actorId: string,
+): IllustrationObject {
+  const object = materializeIllustrationObjectAuthoringInput(input, actorId, nowIso());
+  if (object.type !== 'image') return object;
+  const candidate = availableAssets[object.assetId];
+  if (!candidate) throw new Error(`Image object ${object.id} references missing asset ${object.assetId}.`);
+  const inspected = imageWorkContext.inspectProjection(
+    projectionCursor,
+    object.assetId,
+    candidate,
+    `Image object ${object.id} asset ${object.assetId}`,
+  );
+  if (object.sourceWidth !== undefined && object.sourceWidth !== inspected.expected.width) throw new Error(`Image object ${object.id} sourceWidth must match embedded asset width ${inspected.expected.width}.`);
+  if (object.sourceHeight !== undefined && object.sourceHeight !== inspected.expected.height) throw new Error(`Image object ${object.id} sourceHeight must match embedded asset height ${inspected.expected.height}.`);
+  if (object.crop && (object.crop.x + object.crop.width > inspected.expected.width || object.crop.y + object.crop.height > inspected.expected.height)) {
+    throw new Error(`Image object ${object.id} crop must fit inside embedded asset geometry ${inspected.expected.width}×${inspected.expected.height}.`);
+  }
+  return IllustrationObjectMutationInputSchema.parse({ ...object, sourceWidth: inspected.expected.width, sourceHeight: inspected.expected.height }) as IllustrationObject;
+}
+
+async function expandAgentCanvasOperation(
+  document: AIDrawDocument,
+  value: Record<string, unknown>,
+  quantizeImage: QuantizeImage,
+  actor: Actor,
+  availableAssets: Readonly<Record<string, DocumentAsset>> = document.assets,
+  imageWorkContext: TransactionImageWorkContext = new TransactionImageWorkContext(),
+  projectionCursor: TransactionImageProjectionCursor = new TransactionImageProjectionCursor(),
+  control: ImageDecodeControl = {},
+): Promise<CanvasOperation[]> {
+  if (value.kind === 'illustration.object.add') {
+    const operation = PublicIllustrationObjectAddSchema.parse(value);
+    return [CanvasOperationSchema.parse({
+      ...operation,
+      object: materializeAgentIllustrationObject(availableAssets, imageWorkContext, projectionCursor, operation.object, actor.id),
+    })];
+  }
   if (value.kind === 'document.fragment.import') {
     const operation = DocumentFragmentImportSchema.parse(value);
     return importDocumentFragmentOperations(document, operation.fragment, {
@@ -711,7 +904,7 @@ async function expandAgentCanvasOperation(document: AIDrawDocument, value: Recor
     if (!asset?.data) throw new Error(`Source asset ${operation.assetId} has no embedded raster data.`);
     const width = operation.width ?? target.sprite.width - operation.x; const height = operation.height ?? target.sprite.height - operation.y;
     boundedPixelRegion(target.sprite, { x: operation.x, y: operation.y, width, height }); const settings = target.document.conversionDefaults;
-    const changes = await quantizeImage(Buffer.from(asset.data, 'base64'), width, height, target.document.palette, { alphaThreshold: settings.alphaThreshold, dithering: settings.dithering, includeTransparent: true });
+    const changes = await quantizeImage(Buffer.from(asset.data, 'base64'), width, height, target.document.palette, { alphaThreshold: settings.alphaThreshold, dithering: settings.dithering, includeTransparent: true }, control);
     return [{
       kind: 'pixel.cel.region', spriteId: target.sprite.id, celId: target.celId, runs: compactIndexedChanges(changes, operation.x, operation.y), expectedRevision: operation.expectedRevision,
       conversion: { sourceAssetId: asset.id, resample: settings.resample, paletteMetric: settings.paletteMetric, dithering: settings.dithering, alphaThreshold: settings.alphaThreshold, width, height },
@@ -1580,6 +1773,7 @@ export class McpHost {
       for (const [id, active] of this.sessions) if (active === session) this.sessions.delete(id);
     }
     this.documents.removePresence(session.actor.id);
+    this.scheduler.stopActor(session.actor.id);
     this.sessionTrustedFolders.delete(session.actor.id);
     session.subscriptions.clear();
   }
@@ -1790,34 +1984,122 @@ export class McpHost {
         documentId: DocumentIdInputSchema,
         clientOperationId: z.string().min(1).max(200).describe('Caller-stable idempotency key. Reuse only for an exact retry; use a fresh key for a changed intent.'),
         label: z.string().min(1).max(200).describe('Human-visible transaction label used in playback, history, and attribution.'),
-        operations: z.array(z.record(z.string(), z.unknown())).min(1).max(256).describe('Canonical or semantic operation objects. Read aidraw_help topic=operations and canvas_observe before constructing them.'),
+        operations: z.array(PublicCanvasOperationInputSchema).min(1).max(256).describe('Canonical or semantic operation objects. Illustration object add|replace|move|delete, pixel.cel.region, pixel.tilemap.region, pixel.tile-stamps.replace, and pixel.tile-stamp.place are fully machine-readable here; read aidraw_help topic=operations and canvas_observe before constructing other families.'),
         playback: z.object({ mode: z.enum(['animated', 'instant']).default('animated'), speed: z.number().min(0.25).max(4).default(1) }).optional().describe('Visible playback policy; instant still uses the canonical scheduler and lock policy.'),
         batch: z.object({ jobId: JobIdInputSchema, resumeToken: z.string().min(32).max(200).describe('Private batch capability returned by job_manage action=start-batch.'), sequence: z.number().int().min(0).max(9_999).describe('Exact nextSequence returned by start/resume.') }).strict().optional(),
       }).strict(),
       outputSchema: CanvasApplyOutputSchema,
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     }, async ({ documentId, clientOperationId, label, operations, playback, batch }) => {
+      const admission = this.scheduler.reservePublicMutation(session.actor.id, documentId, operations);
+      if (!admission.accepted) return jsonText({ ...admission.response, next: canvasRetryNextStep(admission.response.status, documentId) });
+      const { reservation } = admission;
+      let batchPrepared = false;
+      let batchDispatched = false;
+      let batchTransactionId: string | undefined;
+      let batchTransaction: CanvasTransaction | undefined;
+      try {
+      reservation.assertActive();
+      if (batch) {
+        // Reconcile an ownerless marker before repeating validation that may be
+        // stale only because the original mutation already committed.
+        const preflight = await this.batches.preflight(batch, documentId, clientOperationId);
+        reservation.assertActive();
+        if (!preflight.accepted) {
+          const response = { ...preflight.response, batch: { jobId: batch.jobId, expectedSequence: preflight.expectedSequence, duplicate: preflight.duplicate } };
+          return jsonText({ ...response, next: canvasRetryNextStep(String(response.status), documentId) });
+        }
+      }
+      // Exact-intent validation may walk bounded reference input, so it runs
+      // only after the public aggregate lease and full semantic reservation.
+      const expectedDocumentRevision = exactIntentDocumentRevision(operations);
       const document = this.documents.getDocument(documentId);
       if (!document) return jsonText({ status: 'conflict', message: 'Document is not open.', next: { tool: 'document_manage', arguments: { action: 'list' }, guidance: 'Refresh the open-document list before choosing a mutation target.' } });
-      const expectedDocumentRevision = exactIntentDocumentRevision(operations);
       const parsedOperations: CanvasOperation[] = [];
-      for (const operation of operations) parsedOperations.push(...await expandAgentCanvasOperation(document, operation, this.quantizeImage, session.actor));
+      const availableAssets: Record<string, DocumentAsset> = { ...document.assets };
+      // Start the aggregate image-work clock before any public materialization,
+      // then carry the same non-serializable context through playback to commit.
+      const imageWorkContext = new TransactionImageWorkContext({ startedAt: reservation.startedAt, signal: reservation.signal });
+      const projectionCursor = new TransactionImageProjectionCursor();
+      for (const operation of operations) {
+        reservation.assertActive();
+        const expanded = await expandAgentCanvasOperation(
+          document,
+          operation,
+          this.quantizeImage,
+          session.actor,
+          availableAssets,
+          imageWorkContext,
+          projectionCursor,
+          { signal: reservation.signal, timeoutMs: reservation.remainingMs() },
+        );
+        reservation.assertActive();
+        const canonicalOperations = operation.kind === 'illustration.object.replace'
+          ? expanded
+          : expanded.map((canonical): CanvasOperation => canonical.kind === 'illustration.object.replace'
+            ? { ...canonical, object: normalizeIllustrationObjectForReplacement(canonical.object) }
+            : canonical);
+        for (const canonical of canonicalOperations) {
+          if ((canonical.kind === 'illustration.object.add' || canonical.kind === 'illustration.object.replace') && canonical.object.type === 'path') {
+            inspectNativeEditableSvgPathData(canonical.object.pathData);
+          }
+        }
+        parsedOperations.push(...canonicalOperations);
+        for (const canonical of canonicalOperations) {
+          if (canonical.kind === 'asset.add') {
+            availableAssets[canonical.asset.id] = canonical.asset;
+            projectionCursor.invalidate(canonical.asset.id);
+          } else if (canonical.kind === 'asset.delete') {
+            delete availableAssets[canonical.assetId];
+            projectionCursor.invalidate(canonical.assetId);
+          }
+        }
+      }
       if (parsedOperations.length === 0 || parsedOperations.length > 256) return jsonText({ status: 'conflict', message: 'Semantic expansion must produce 1–256 canonical operations.' });
       const transaction: CanvasTransaction = { id: createId('tx'), clientOperationId, documentId, ...(expectedDocumentRevision === undefined ? {} : { expectedDocumentRevision }), actor: structuredClone(session.actor), label, createdAt: nowIso(), operations: parsedOperations, playback: playback ?? { mode: 'animated', speed: 1 } };
+      batchTransaction = transaction;
       if (batch) {
-        const preparation = await this.batches.prepare(batch, documentId, clientOperationId, session.actor);
+        const preparation = await this.batches.prepare(batch, transaction, session.actor);
+        if (preparation.accepted) batchPrepared = true;
+        reservation.assertActive();
         if (!preparation.accepted) {
           const response = { ...preparation.response, batch: { jobId: batch.jobId, expectedSequence: preparation.expectedSequence, duplicate: preparation.duplicate } };
           return jsonText({ ...response, next: canvasRetryNextStep(String(response.status), documentId) });
         }
         this.activeBatchTransactions.set(batch.jobId, transaction.id);
+        batchTransactionId = transaction.id;
       }
       let result;
-      try { result = await this.scheduler.submit(transaction); }
+      try {
+        if (batch) {
+          const dispatch = await this.batches.dispatchPrepared(batch, transaction, () => this.scheduler.submitReserved(transaction, reservation, {
+            imageWorkContext,
+            requestFingerprint: batchTransactionFingerprint(transaction),
+          }));
+          if (!dispatch.accepted || !dispatch.dispatched) {
+            result = dispatch.response ?? { status: 'conflict' as const, message: 'The durable batch no longer owns this dispatch.' };
+          } else {
+            batchDispatched = true;
+            result = await dispatch.dispatched;
+          }
+        } else result = await this.scheduler.submitReserved(transaction, reservation, { imageWorkContext });
+      }
       catch (error) { result = { status: 'conflict' as const, message: error instanceof Error ? error.message : 'The batch transaction failed.' }; }
       if (batch && this.activeBatchTransactions.get(batch.jobId) === transaction.id) this.activeBatchTransactions.delete(batch.jobId);
-      const batchJob = batch ? await this.batches.finish(batch, clientOperationId, result) : undefined;
+      const batchJob = batch && batchDispatched ? await this.batches.finish(batch, transaction, result) : undefined;
       return jsonText({ ...result, batch: batchJob ? { jobId: batchJob.id, progress: batchJob.progress, status: batchJob.status, ...(batchJob.result as Record<string, unknown>) } : undefined, next: canvasRetryNextStep(result.status, documentId) });
+      } catch (error) {
+        if (!(error instanceof PublicMutationDocumentChangedError)) throw error;
+        const response = { status: 'conflict' as const, message: error.message };
+        return jsonText({ ...response, next: canvasRetryNextStep(response.status, documentId) });
+      } finally {
+        try {
+          if (batch && batchPrepared && !batchDispatched && batchTransaction) await this.batches.abandonUndispatched(batch, batchTransaction);
+        } finally {
+          if (batch && batchTransactionId && this.activeBatchTransactions.get(batch.jobId) === batchTransactionId) this.activeBatchTransactions.delete(batch.jobId);
+          reservation.release();
+        }
+      }
     });
 
     server.registerTool('history_manage', {
@@ -1996,11 +2278,16 @@ export class McpHost {
       if (!job || job.actor.id !== session.actor.id) return jsonText({ error: 'job_not_found' });
       if (request.action === 'cancel' && !['completed', 'failed', 'cancelled'].includes(job.status)) {
         if (job.kind === 'batch') {
-          job = await this.batches.cancel(request.jobId, session.actor.id) ?? job;
           const transactionId = this.activeBatchTransactions.get(request.jobId); if (transactionId) this.scheduler.cancelTransaction(transactionId);
+          job = await this.batches.cancel(request.jobId, session.actor.id) ?? job;
+          // The first attempt catches an already admitted task; the second
+          // closes the race where durable dispatch admission was serialized
+          // ahead of batch cancellation while the scheduler callback had not
+          // yet installed the task.
+          if (transactionId) this.scheduler.cancelTransaction(transactionId);
         }
         else job = this.documents.getJob(request.jobId) ?? job;
-        if (!['cancelled', 'completed', 'failed'].includes(job.status)) { job = { ...job, status: 'cancelled', updatedAt: nowIso(), message: 'Cancelled by the originating agent.' }; this.documents.upsertJob(job); }
+        if (job.kind !== 'batch' && !['cancelled', 'completed', 'failed'].includes(job.status)) { job = { ...job, status: 'cancelled', updatedAt: nowIso(), message: 'Cancelled by the originating agent.' }; this.documents.upsertJob(job); }
       } else if (request.action === 'wait' && request.timeoutMs > 0) {
         const deadline = Date.now() + request.timeoutMs;
         while (Date.now() < deadline && ['queued', 'running', 'waiting-for-user'].includes(job.status)) {

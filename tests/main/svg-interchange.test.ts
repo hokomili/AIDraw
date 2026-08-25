@@ -8,11 +8,89 @@ import { importDocument } from '@main/import-document';
 import { illustrationToSvg } from '@main/export-document';
 import { importEditableSvg } from '@main/svg-import';
 import { renderIllustration } from '@main/render-document';
-import { createIllustrationDocument, HUMAN_ACTOR, IDENTITY_TRANSFORM, nowIso, validateDocument, type DocumentAsset, type ImageObject, type TextObject } from '@aidraw/core';
+import { convertPathArcsToCubics } from '@common/path-conversion';
+import { inspectPathNodes } from '@common/path-nodes';
+import { DocumentService } from '@main/document-service';
+import { RecoveryJournal } from '@main/journal';
+import { createId, createIllustrationDocument, HUMAN_ACTOR, IDENTITY_TRANSFORM, nowIso, validateDocument, type DocumentAsset, type ImageObject, type TextObject } from '@aidraw/core';
 
 const fixture = join(process.cwd(), 'tests', 'fixtures', 'svg', 'structured-editor.svg');
 
 describe('editable SVG interchange', () => {
+  it('rejects hostile path grammar before it can enter an imported canonical document', () => {
+    for (const pathData of [
+      'M0 0 A1 2 0 1e0 0 3 4',
+      'M0 0 A1 2 0 0.0 1 3 4',
+      'M0 0 L10 10 garbage',
+      'M0 0 A-1 2 0 0 1 3 4',
+      'M0 0',
+      'M0 0 L1 1 M2 2 L3 3',
+      'M0 0 L0 0 Z',
+      'M0 0 L0.00000001 0 Z',
+      'M0 0 C1 1 2 2 0 0 Z',
+      'M0 0 A10 10 0 0 1 0 0',
+      'M0 0 A10 10 0 0 1 0.000001 0',
+      'M0 0 A1 1000 0 0 0 0 0.00001',
+      `M0 0${' L1 1'.repeat(100_000)}`,
+      `M0 0${' A1 1 0 0 1 2 2'.repeat(25_000)}`,
+      `M0 0 A1 1 0 0 1 2 2 ${'L0 0 '.repeat(200_000)}`,
+    ]) {
+      const source = `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="24"><path d="${pathData}"/></svg>`;
+      expect(() => importEditableSvg(source, 'Hostile path import'), pathData).toThrow("SVG import produced content outside AIDraw's canonical illustration limits.");
+    }
+  });
+
+  it('retains compact imported arc flags through edit, render, export, delete, undo, checkpoint, and recovery', async () => {
+    const source = '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="24"><path id="compact-arc" d="M0 0 A1 2 0 013 4" fill="none" stroke="#000"/></svg>';
+    const imported = importEditableSvg(source, 'Compact arc compatibility').document;
+    const path = Object.values(imported.objects).find((object) => object.name === 'compact-arc');
+    if (!path || path.type !== 'path') throw new Error('Expected imported compact arc');
+    expect(path.pathData).toBe('M0 0 A1 2 0 013 4');
+    await expect(renderIllustration(imported)).resolves.toBeTruthy();
+    expect(illustrationToSvg(imported)).toContain('d="M0 0 A1 2 0 013 4"');
+    const converted = convertPathArcsToCubics(path.pathData);
+    expect(converted.pathData).not.toMatch(/[aA]/);
+    expect(inspectPathNodes(converted.pathData).length).toBeGreaterThanOrEqual(2);
+    expect(inspectPathNodes(converted.pathData).length).toBeLessThanOrEqual(5);
+    const convertedDocument = structuredClone(imported); convertedDocument.objects[path.id] = { ...path, ...converted, revision: path.revision + 1 };
+    await expect(renderIllustration(convertedDocument)).resolves.toBeTruthy();
+    expect(illustrationToSvg(convertedDocument)).toContain(' d="M');
+
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-compact-arc-'));
+    const journal = new RecoveryJournal(root);
+    const service = new DocumentService(journal, '1.0.0');
+    try {
+      service.initialize();
+      service.addDocument(imported);
+      expect(await service.apply({
+        id: createId('tx'), clientOperationId: 'compact-arc-edit', documentId: imported.id, actor: HUMAN_ACTOR,
+        label: 'Edit compact imported arc', createdAt: nowIso(), operations: [{ kind: 'illustration.object.replace', object: { ...path, pathData: 'M0 0 A1 2 0 01 3 4' }, expectedRevision: path.revision }],
+      })).toMatchObject({ status: 'committed' });
+      const checkpoint = service.createCheckpoint(imported.id, 'Compact arc retained');
+      const edited = service.getDocument(imported.id);
+      if (!edited || edited.kind !== 'illustration') throw new Error('Expected edited illustration');
+      const editedPath = edited.objects[path.id];
+      expect(await service.apply({
+        id: createId('tx'), clientOperationId: 'compact-arc-delete', documentId: imported.id, actor: HUMAN_ACTOR,
+        label: 'Delete compact imported arc', createdAt: nowIso(), operations: [{ kind: 'illustration.object.delete', objectId: path.id, expectedRevision: editedPath.revision }],
+      })).toMatchObject({ status: 'committed' });
+      expect(await service.undo(imported.id)).toMatchObject({ status: 'committed' });
+      const undone = service.getDocument(imported.id);
+      expect(undone?.kind === 'illustration' ? undone.objects[path.id] : undefined).toMatchObject({ pathData: 'M0 0 A1 2 0 01 3 4' });
+      expect(await service.redo(imported.id)).toMatchObject({ status: 'committed' });
+      expect(await service.restoreCheckpoint(imported.id, checkpoint.id)).toMatchObject({ status: 'committed' });
+      await service.flushRecovery();
+      const recovered = (await new RecoveryJournal(root).recover()).find((document) => document.id === imported.id);
+      expect(recovered?.kind === 'illustration' ? recovered.objects[path.id] : undefined).toMatchObject({ pathData: 'M0 0 A1 2 0 01 3 4' });
+      if (!recovered || recovered.kind !== 'illustration') throw new Error('Expected recovered compact arc');
+      await expect(renderIllustration(recovered)).resolves.toBeTruthy();
+      expect(illustrationToSvg(recovered)).toContain('d="M0 0 A1 2 0 01 3 4"');
+    } finally {
+      await service.flushRecovery();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('imports external-style groups, transforms, styles, gradients, use, masks, filters, text ranges, and embedded images', async () => {
     const imported = await importDocument(fixture);
     expect(imported.documents).toHaveLength(1);
