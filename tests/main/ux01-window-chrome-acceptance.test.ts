@@ -489,6 +489,7 @@ describe('UX-01 exact-package native window-chrome preparation', () => {
     expect(driver).not.toContain('AXUIElement');
     expect(driver).not.toContain('CGEventPost(');
     expect(driver).not.toContain('NSApplicationActivateIgnoringOtherApps');
+    expect(driver).toContain('bounds.size.width < 320.0 || bounds.size.height < 240.0');
     expect(driver).not.toContain('activateFromApplication');
     expect(driver).not.toMatch(/\bkill\s*\(/);
     expect(driver).not.toMatch(/\bsignal\s*\(/);

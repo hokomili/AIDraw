@@ -19,6 +19,8 @@ interface FakeWindow {
 }
 
 interface HarnessOptions {
+  prepareWindow?: () => Promise<void>;
+  prepareFailures?: number;
   loadWindow?: (window: FakeWindow) => Promise<void>;
   createFailures?: number;
   bindFailures?: number;
@@ -52,6 +54,7 @@ function createHarness(options: HarnessOptions = {}) {
   const unresponsiveConfirmations: ScheduledUnresponsiveConfirmation[] = [];
   let current: FakeWindow | undefined;
   let recoverable = true;
+  let prepareAttempts = 0;
   let createAttempts = 0;
   let bindAttempts = 0;
   let revealAttempts = 0;
@@ -62,6 +65,11 @@ function createHarness(options: HarnessOptions = {}) {
     window.minimized = false;
   });
   const lifecycle = new EditorWindowLifecycle<FakeWindow>({
+    prepareWindow: async () => {
+      prepareAttempts += 1;
+      if (prepareAttempts <= (options.prepareFailures ?? 0)) throw new Error(`simulated presentation failure ${prepareAttempts}`);
+      await options.prepareWindow?.();
+    },
     createWindow: () => {
       createAttempts += 1;
       if (createAttempts <= (options.createFailures ?? 0)) throw new Error(`simulated create failure ${createAttempts}`);
@@ -495,6 +503,7 @@ describe('editor window lifecycle', () => {
   });
 
   it.each([
+    ['presentation', { prepareFailures: 1 }, 'presentation-rejected'],
     ['create', { createFailures: 1 }, 'create-rejected'],
     ['bind', { bindFailures: 1 }, 'bind-rejected'],
     ['reveal', { revealFailures: 1 }, 'reveal-rejected'],
@@ -503,7 +512,7 @@ describe('editor window lifecycle', () => {
     await expect(harness.lifecycle.show()).resolves.toBe(true);
     expect(harness.lifecycle.isAttached()).toBe(true);
     expect(harness.failures[0]?.kind).toBe(failureKind);
-    expect(harness.windows).toHaveLength(failureKind === 'create-rejected' ? 1 : 2);
+    expect(harness.windows).toHaveLength(['presentation-rejected', 'create-rejected'].includes(failureKind) ? 1 : 2);
   });
 
   it('coalesces concurrent show calls onto one loading window', async () => {
@@ -723,6 +732,30 @@ describe('editor window lifecycle', () => {
     harness.lifecycle.resumeRecovery();
     await vi.waitFor(() => { expect(harness.windows).toHaveLength(2); });
     expect(harness.current()).toBe(harness.windows[1]);
+    expect(harness.lifecycle.isAttached()).toBe(true);
+  });
+
+  it('retains an editor request interrupted while native presentation is being prepared', async () => {
+    let preparationStarted = false;
+    let releasePreparation!: () => void;
+    const preparationRelease = new Promise<void>((resolve) => { releasePreparation = resolve; });
+    const harness = createHarness({ prepareWindow: async () => {
+      preparationStarted = true;
+      await preparationRelease;
+    } });
+    const showing = harness.lifecycle.show();
+    await vi.waitFor(() => { expect(preparationStarted).toBe(true); });
+
+    harness.setRecoverable(false);
+    releasePreparation();
+    await expect(showing).resolves.toBe(false);
+    expect(harness.windows).toEqual([]);
+    expect(harness.current()).toBeUndefined();
+
+    harness.setRecoverable(true);
+    harness.lifecycle.resumeRecovery();
+    await vi.waitFor(() => { expect(harness.windows).toHaveLength(1); });
+    expect(harness.current()).toBe(harness.windows[0]);
     expect(harness.lifecycle.isAttached()).toBe(true);
   });
 

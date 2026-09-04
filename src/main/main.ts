@@ -50,6 +50,8 @@ import {
   type EditorWindowEvents,
   type EditorWindowFailure,
 } from './editor-window-lifecycle';
+import { MacosBackgroundPresentation } from './macos-background-presentation';
+import { persistentEngineTarget, targetedPersistentEngineRequest } from './single-instance-request';
 
 declare const MAIN_WINDOW_VITE_DEV_SERVER_URL: string | undefined;
 declare const MAIN_WINDOW_VITE_NAME: string;
@@ -61,7 +63,6 @@ let mcpHost: McpHost;
 let batchDocumentWorkflows: BatchDocumentWorkflows;
 let engineQuitPending = false;
 let engineReadyPromise: Promise<void> | undefined;
-let suppressMacLoginActivationUntil = 0;
 let resumeEditorRecovery = (): void => {};
 const pendingSpriteSheets = new Map<string, { filePath: string; sha256: string; name: string; mimeType: 'image/png' | 'image/jpeg' | 'image/webp'; expiresAt: number }>();
 function reportGracefulShutdownFailure(error: unknown): void {
@@ -90,11 +91,16 @@ const cliInvocation = Boolean(cliCommand || cliParseError);
 const bridgeInvocation = process.argv.includes('--mcp-bridge');
 const startupCommand = selectStartupCommand(process.argv, cliInvocation, Boolean(cliParseError));
 if (startupCommand === 'headless' || startupCommand === 'cli' || startupCommand === 'mcp-bridge') app.disableHardwareAcceleration();
-if (bridgeInvocation && process.platform === 'darwin') {
+const macosBackgroundPresentation = new MacosBackgroundPresentation({
+  enabled: process.platform === 'darwin',
+  setActivationPolicy: (policy) => { app.setActivationPolicy(policy); },
+  hideDock: () => { app.dock?.hide(); },
+  showDock: async () => { await app.dock?.show(); },
+});
+if (process.platform === 'darwin') {
   app.commandLine.appendSwitch('no-startup-window');
-  app.setActivationPolicy('accessory');
-  app.dock?.hide();
 }
+macosBackgroundPresentation.prohibitBeforeReady();
 const explicitUserData = process.argv.find((argument) => argument.startsWith('--user-data-dir='))?.slice('--user-data-dir='.length);
 const explicitMcpConnectionArgument = process.argv.find((argument) => argument.startsWith('--write-mcp-connection='));
 const explicitMcpConnectionFile = explicitMcpConnectionArgument === undefined
@@ -108,7 +114,11 @@ if (explicitUserData) {
   app.setPath('userData', isolatedPath);
   app.setName(`AIDraw-${createHash('sha256').update(isolatedPath.toLowerCase()).digest('hex').slice(0, 12)}`);
 }
-const hasSingleInstanceLock = bridgeInvocation || cliInvocation || app.requestSingleInstanceLock({ command: startupCommand });
+const singleInstanceTarget = persistentEngineTarget(app.getPath('userData'));
+const hasSingleInstanceLock = bridgeInvocation || cliInvocation || app.requestSingleInstanceLock({
+  command: startupCommand,
+  target: singleInstanceTarget,
+});
 
 const rendererRecoveryE2e = resolveRendererRecoveryE2eConfiguration({
   nodeEnv: process.env.NODE_ENV,
@@ -971,6 +981,7 @@ function bindElectronWindowEvents(window: BrowserWindow, events: EditorWindowEve
 }
 
 const editorWindowLifecycle = new EditorWindowLifecycle<BrowserWindow>({
+  prepareWindow: () => macosBackgroundPresentation.prepareEditor(),
   createWindow: createElectronWindow,
   bindWindowEvents: bindElectronWindowEvents,
   loadWindow: async (window) => {
@@ -990,7 +1001,10 @@ const editorWindowLifecycle = new EditorWindowLifecycle<BrowserWindow>({
     timeout.unref();
     return () => { clearTimeout(timeout); };
   },
-  setCurrentWindow: (window) => { mainWindow = window; },
+  setCurrentWindow: (window) => {
+    mainWindow = window;
+    if (!window) macosBackgroundPresentation.restoreBackground();
+  },
   setEditorAttached: (attached) => {
     service.setEditorAttached(attached);
     mcpHost.scheduler.setVisualPlaybackEnabled(attached);
@@ -1142,7 +1156,6 @@ async function initializeApplication(): Promise<void> {
   createMenu();
   service.on('event', (event) => mainWindow?.webContents.send(IPC.event, event));
   const macLoginLaunch = wasOpenedAtLogin({ app });
-  if (macLoginLaunch) suppressMacLoginActivationUntil = Date.now() + 3_000;
   if (startupCommand !== 'headless' && !macLoginLaunch) await createWindow();
 }
 
@@ -1151,23 +1164,18 @@ if (!hasSingleInstanceLock) {
 } else if (cliInvocation || bridgeInvocation) {
   engineReadyPromise = app.whenReady().then(initializeApplication);
 } else {
-  app.on('second-instance', (_event, commandLine, _workingDirectory, additionalData) => {
-    const requested = typeof additionalData === 'object' && additionalData && 'command' in additionalData
-      ? String((additionalData as { command?: unknown }).command)
-      : commandLine.includes('--quit-engine')
-        ? 'quit-engine'
-        : commandLine.includes('--headless')
-          ? 'headless'
-          : 'show';
+  app.on('second-instance', (_event, _commandLine, _workingDirectory, additionalData) => {
+    const requested = targetedPersistentEngineRequest(additionalData, singleInstanceTarget);
+    if (!requested) return;
     void (async () => {
       await engineReadyPromise;
       if (requested === 'quit-engine') await requestEngineQuit(false);
-      else if (requested !== 'headless') await createWindow();
+      else if (requested === 'show') await createWindow();
     })();
   });
   engineReadyPromise = app.whenReady().then(initializeApplication);
   app.on('activate', () => {
-    if (Date.now() < suppressMacLoginActivationUntil) return;
+    if (!macosBackgroundPresentation.acceptsSystemActivation()) return;
     void engineReadyPromise?.then(() => createWindow());
   });
   app.on('window-all-closed', () => {
@@ -1175,4 +1183,13 @@ if (!hasSingleInstanceLock) {
     // alive for authenticated agents and crash-safe autonomous work.
   });
   app.on('before-quit', (event) => { gracefulShutdown.handleBeforeQuit(event); });
+  const requestTerminalShutdown = (): void => {
+    void engineReadyPromise?.then(() => requestEngineQuit(false)).catch(reportGracefulShutdownFailure);
+  };
+  process.on('SIGINT', requestTerminalShutdown);
+  process.on('SIGTERM', requestTerminalShutdown);
+  app.once('will-quit', () => {
+    process.removeListener('SIGINT', requestTerminalShutdown);
+    process.removeListener('SIGTERM', requestTerminalShutdown);
+  });
 }

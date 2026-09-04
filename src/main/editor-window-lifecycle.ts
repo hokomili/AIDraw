@@ -5,6 +5,7 @@ export type EditorWindowFailure =
   | { kind: 'renderer-unresponsive'; graceMs: number }
   | { kind: 'main-frame-load-failed'; errorCode: number; errorDescription: string }
   | { kind: 'load-rejected'; message: string }
+  | { kind: 'presentation-rejected'; message: string }
   | { kind: 'create-rejected'; message: string }
   | { kind: 'bind-rejected'; message: string }
   | { kind: 'reveal-rejected'; message: string }
@@ -25,6 +26,7 @@ export interface EditorWindowEvents {
 }
 
 export interface EditorWindowLifecycleDependencies<Window> {
+  prepareWindow(): Promise<void>;
   createWindow(): Window;
   bindWindowEvents(window: Window, events: EditorWindowEvents): void;
   loadWindow(window: Window): Promise<void>;
@@ -200,10 +202,25 @@ export class EditorWindowLifecycle<Window> {
   }
 
   private async createAndLoad(allowAutomaticRecovery: boolean): Promise<boolean> {
+    try {
+      await this.dependencies.prepareWindow();
+    } catch (error) {
+      this.dependencies.setCurrentWindow(undefined);
+      this.dependencies.reportFailure({ kind: 'presentation-rejected', message: errorMessage(error) });
+      if (allowAutomaticRecovery) this.requestRecovery();
+      return false;
+    }
+    if (!this.dependencies.canOpenWindow()) {
+      this.dependencies.setCurrentWindow(undefined);
+      this.requestRecovery();
+      return false;
+    }
+
     let window: Window;
     try {
       window = this.dependencies.createWindow();
     } catch (error) {
+      this.dependencies.setCurrentWindow(undefined);
       this.dependencies.reportFailure({ kind: 'create-rejected', message: errorMessage(error) });
       if (allowAutomaticRecovery) this.requestRecovery();
       return false;

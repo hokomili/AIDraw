@@ -56,6 +56,10 @@ static NSArray<NSDictionary *> *WindowsForPid(pid_t pid) {
     if (!CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)boundsValue, &bounds)
       || !isfinite(bounds.origin.x) || !isfinite(bounds.origin.y)
       || bounds.size.width <= 0 || bounds.size.height <= 0) continue;
+    // A regular AppKit application can own short off-screen menu-bar backing
+    // surfaces at layer zero. They are not AIDraw editor windows. Keep this
+    // driver bound to the product's generously larger editor/window contract.
+    if (bounds.size.width < 320.0 || bounds.size.height < 240.0) continue;
     NSNumber *onScreen = entry[(__bridge id)kCGWindowIsOnscreen];
     [matches addObject:@{
       @"windowId": number,
@@ -67,6 +71,15 @@ static NSArray<NSDictionary *> *WindowsForPid(pid_t pid) {
     return [left[@"windowId"] compare:right[@"windowId"]];
   }];
   return matches;
+}
+
+static NSArray<NSDictionary *> *VisibleWindowsForPid(pid_t pid) {
+  NSArray<NSDictionary *> *windows = WindowsForPid(pid);
+  NSPredicate *visible = [NSPredicate predicateWithBlock:^BOOL(NSDictionary *window, NSDictionary *bindings) {
+    (void)bindings;
+    return [window[@"onScreen"] boolValue];
+  }];
+  return [windows filteredArrayUsingPredicate:visible];
 }
 
 static NSDictionary *StandardButtonMetrics(void) {
@@ -181,6 +194,31 @@ static NSDictionary *RefreshedApplicationReadiness(pid_t pid) {
   return ApplicationReadiness(pid);
 }
 
+static NSDictionary *RequestExactApplicationActivation(pid_t pid) {
+  NSRunningApplication *application = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
+  if (application == nil || application.processIdentifier != pid || application.terminated) {
+    Fail(@"The exact owner PID is not one live AppKit running application.");
+  }
+  NSDictionary *before = RefreshedApplicationReadiness(pid);
+  NSArray<NSDictionary *> *windowsBefore = WindowsForPid(pid);
+  BOOL requestAccepted = [application activateWithOptions:0];
+  NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:0.5];
+  while (deadline.timeIntervalSinceNow > 0) {
+    [[NSRunLoop currentRunLoop]
+      runMode:NSDefaultRunLoopMode
+      beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+  }
+  return @{
+    @"version": @1,
+    @"pid": @(pid),
+    @"requestAccepted": @(requestAccepted),
+    @"before": before,
+    @"after": ApplicationReadiness(pid),
+    @"windowsBefore": windowsBefore,
+    @"windowsAfter": WindowsForPid(pid),
+  };
+}
+
 static NSDictionary *ActivateExactApplication(
   pid_t pid,
   CGWindowID windowId,
@@ -223,6 +261,50 @@ static NSDictionary *ActivateExactApplication(
   };
 }
 
+static NSDictionary *CloseExactApplicationWindow(
+  pid_t pid,
+  CGWindowID windowId,
+  CGRect expectedBounds
+) {
+  if (!CGPreflightPostEventAccess()) Fail(@"CoreGraphics event-posting access is not pre-authorized; no prompt was requested.");
+  NSDictionary *windowBefore = ExactVisibleWindow(pid, windowId, expectedBounds);
+  NSDictionary *applicationReadiness = RefreshedApplicationReadiness(pid);
+  if (![applicationReadiness[@"readyForInput"] boolValue]) {
+    Fail(@"The exact owner is not frontmost and input-ready before its close accelerator.");
+  }
+  CGEventSourceRef source = CGEventSourceCreate(kCGEventSourceStatePrivate);
+  if (source == NULL) Fail(@"CoreGraphics could not create the bounded close-accelerator event source.");
+  // macOS virtual key code 118 is F4. AIDraw's native menu declares Alt+F4
+  // as Close Editor Window on every supported desktop platform.
+  CGEventRef keyDown = CGEventCreateKeyboardEvent(source, (CGKeyCode)118, true);
+  CGEventRef keyUp = CGEventCreateKeyboardEvent(source, (CGKeyCode)118, false);
+  if (keyDown == NULL || keyUp == NULL) {
+    if (keyDown != NULL) CFRelease(keyDown);
+    if (keyUp != NULL) CFRelease(keyUp);
+    CFRelease(source);
+    Fail(@"CoreGraphics could not create the bounded close-accelerator key events.");
+  }
+  CGEventSetFlags(keyDown, kCGEventFlagMaskAlternate);
+  CGEventSetFlags(keyUp, kCGEventFlagMaskAlternate);
+  CGEventPostToPid(pid, keyDown);
+  [NSThread sleepForTimeInterval:0.06];
+  CGEventPostToPid(pid, keyUp);
+  CFRelease(keyDown);
+  CFRelease(keyUp);
+  CFRelease(source);
+  [NSThread sleepForTimeInterval:0.25];
+  return @{
+    @"version": @1,
+    @"action": @"close-window",
+    @"posted": @YES,
+    @"pid": @(pid),
+    @"windowId": @(windowId),
+    @"applicationReadiness": applicationReadiness,
+    @"windowBefore": windowBefore,
+    @"windowsAfter": WindowsForPid(pid),
+  };
+}
+
 static void PostMouseEvent(
   pid_t pid,
   CGEventSourceRef source,
@@ -246,7 +328,7 @@ static void ValidateLocalPoint(CGPoint point, CGRect bounds, NSString *label) {
 
 int main(int argc, const char *argv[]) {
   @autoreleasepool {
-    if (argc < 2) Fail(@"Usage: macos-window-chrome-driver preflight|inspect|activate|click|option-click|drag <exact arguments>.");
+    if (argc < 2) Fail(@"Usage: macos-window-chrome-driver preflight|inspect|inspect-visible|request-activation|activate|close-window|click|option-click|drag <exact arguments>.");
     NSString *command = [NSString stringWithUTF8String:argv[1]];
     if ([command isEqualToString:@"preflight"]) {
       if (argc != 2) Fail(@"The preflight command accepts no owner or action arguments.");
@@ -270,6 +352,23 @@ int main(int argc, const char *argv[]) {
       });
       return 0;
     }
+    if ([command isEqualToString:@"inspect-visible"]) {
+      if (argc != 3) Fail(@"The inspect-visible command accepts only one exact owner PID.");
+      WriteJson(@{
+        @"version": @1,
+        @"pid": @(pid),
+        @"postEventAccess": @(CGPreflightPostEventAccess()),
+        @"applicationReadiness": RefreshedApplicationReadiness(pid),
+        @"windows": VisibleWindowsForPid(pid),
+        @"buttonMetrics": StandardButtonMetrics(),
+      });
+      return 0;
+    }
+    if ([command isEqualToString:@"request-activation"]) {
+      if (argc != 3) Fail(@"The request-activation command accepts only one exact owner PID.");
+      WriteJson(RequestExactApplicationActivation(pid));
+      return 0;
+    }
 
     if ([command isEqualToString:@"activate"]) {
       if (argc != 8) Fail(@"The activate command requires one exact owner/window/current-bounds shape.");
@@ -283,6 +382,19 @@ int main(int argc, const char *argv[]) {
       );
       if (expectedBounds.size.width <= 0 || expectedBounds.size.height <= 0) Fail(@"The expected window bounds are empty.");
       WriteJson(ActivateExactApplication(pid, windowId, expectedBounds));
+      return 0;
+    }
+    if ([command isEqualToString:@"close-window"]) {
+      if (argc != 8) Fail(@"The close-window command requires one exact owner/window/current-bounds shape.");
+      CGWindowID windowId = (CGWindowID)ParseInteger(argv[3], @"window ID", 1, UINT_MAX);
+      CGRect expectedBounds = CGRectMake(
+        ParseNumber(argv[4], @"expected x"),
+        ParseNumber(argv[5], @"expected y"),
+        ParseNumber(argv[6], @"expected width"),
+        ParseNumber(argv[7], @"expected height")
+      );
+      if (expectedBounds.size.width <= 0 || expectedBounds.size.height <= 0) Fail(@"The expected window bounds are empty.");
+      WriteJson(CloseExactApplicationWindow(pid, windowId, expectedBounds));
       return 0;
     }
 

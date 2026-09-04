@@ -22,6 +22,7 @@ The exact installed receipt `205970a0…2ab1` binds the package-verification rec
 - [ ] Verify no credentials, transient MCP run-state/handoff files, user profiles, QA artifacts, or personal artwork are staged, and generated client snippets contain only the stable stdio launcher/arguments.
 - [ ] Run `node scripts/npm-node24.mjs run rc:audit`; treat its ranked output as planning evidence only, not as a release certificate.
 - [ ] After fresh independent Level 3 evidence exists, fill an ignored copy of `docs/testing/RC_EVIDENCE_TEMPLATE.json` and require `node scripts/npm-node24.mjs run rc:verify -- --evidence=test-results/luna-high/<run-id>/rc-evidence.json` to pass on the exact clean candidate.
+- [ ] Repeat the proven macOS background-engine route against an exact installed candidate: `--headless` must remain windowless and prohibited through non-show activation; intentional show, editor detach/reattach, and terminal quit must preserve the lifecycle and end with zero app/helper survivors. The 2026-09-03 fresh unpacked-package receipt is supporting evidence, not installed/update proof.
 
 ## Stable v1 gate
 

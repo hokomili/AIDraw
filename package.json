@@ -35,6 +35,7 @@
     "test:e2e": "npm run package && npm run test:e2e:only",
     "test:e2e:only": "playwright test",
     "test:e2e:retained": "node scripts/run-packaged-e2e.mjs retained",
+    "test:macos-headless-lifecycle": "node scripts/run-macos-headless-lifecycle-acceptance.mjs",
     "test:performance": "vitest run --cache=false --config vitest.performance.config.ts",
     "pretest:level1:auto": "npm run qa:runtime",
     "test:level1:auto": "npm run verify && npm run package",

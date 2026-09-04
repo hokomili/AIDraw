@@ -35,8 +35,10 @@ function secureMainSource(): string {
     'const currentEngine="mcp-current.json"',
     'const identityRoute="/mcp/identity"',
     'electron.app.commandLine.appendSwitch("no-startup-window")',
-    'electron.app.setActivationPolicy("accessory")',
+    'electron.app.setActivationPolicy("prohibited")',
     'electron.app.dock?.hide()',
+    'electron.app.setActivationPolicy("regular")',
+    'electron.app.dock?.show()',
   ].join(';');
 }
 
@@ -124,7 +126,7 @@ describe('packaged Electron security verification', () => {
   });
 
   it('rejects missing stable-bridge wiring or retired per-launch setup copy', () => {
-    for (const marker of ['--mcp-bridge', 'bridge-launcher.sh', 'mcp-current.json', '/mcp/identity', 'no-startup-window', 'setActivationPolicy("accessory")', 'dock?.hide']) {
+    for (const marker of ['--mcp-bridge', 'bridge-launcher.sh', 'mcp-current.json', '/mcp/identity', 'no-startup-window', 'setActivationPolicy("prohibited")', 'dock?.hide', 'setActivationPolicy("regular")', 'dock?.show']) {
       const sources = secureSources();
       sources.mainSource = sources.mainSource.replace(marker, 'missing-marker');
       expect(() => assertPackagedSecuritySources(sources)).toThrow(/MCP|current-engine|engine-instance|macOS/);

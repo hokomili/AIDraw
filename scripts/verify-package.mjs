@@ -139,7 +139,7 @@ try {
     archiveFiles,
     firstPartyJavaScriptChunks,
   });
-  const utilityContainmentSubject = 'reviewed-main-worker-pair-20260825-published-pixel-tile-contract';
+  const utilityContainmentSubject = 'reviewed-main-worker-pair-20260903-macos-background-lifecycle';
   const packagedUtilityContainment = assertPackagedUtilityContainmentSources({
     mainSource,
     workerSource: utilityWorkerSource,

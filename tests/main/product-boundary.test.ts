@@ -203,20 +203,21 @@ describe('native drawing product boundary', () => {
     const manifest = execFileSync(process.execPath, [script, 'manifest'], { cwd: process.cwd(), maxBuffer: 16 * 1024 * 1024 });
     const repeated = execFileSync(process.execPath, [script, 'manifest'], { cwd: process.cwd(), maxBuffer: 16 * 1024 * 1024 });
     const summary = JSON.parse(execFileSync(process.execPath, [script, 'summary'], { cwd: process.cwd(), encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 })) as {
-      version: number; encoding: string; ordering: string; recordFormat: string; finalNewline: boolean; entries: number; bytes: number; sha256: string;
+      version: number; encoding: string; ordering: string; recordFormat: string; finalNewline: boolean; clean: boolean; entries: number; bytes: number; sha256: string;
     };
     expect(repeated.equals(manifest)).toBe(true);
-    expect(manifest.at(-1)).toBe(0x0a);
+    if (manifest.length > 0) expect(manifest.at(-1)).toBe(0x0a);
     expect(summary).toMatchObject({
       version: 1,
       encoding: 'UTF-8',
       ordering: 'ascending raw UTF-8 path bytes',
-      finalNewline: true,
+      finalNewline: manifest.length > 0,
       bytes: manifest.byteLength,
       sha256: createHash('sha256').update(manifest).digest('hex'),
     });
+    expect(summary.clean).toBe(summary.entries === 0);
     expect(summary.recordFormat).toBe('<XY>\\t<file|symlink|deleted>\\t<byteLength>\\t<sha256>\\t<path>\\n');
-    const lines = manifest.toString('utf8').trimEnd().split('\n');
+    const lines = manifest.length === 0 ? [] : manifest.toString('utf8').slice(0, -1).split('\n');
     expect(summary.entries).toBe(lines.length);
     const paths = lines.map((line) => {
       const fields = line.split('\t');
@@ -227,7 +228,6 @@ describe('native drawing product boundary', () => {
       expect(fields[3]).toMatch(/^[0-9a-f]{64}$/u);
       return fields[4];
     });
-    expect(paths).toContain('scripts/source-subject-manifest.mjs');
     expect(paths).toEqual([...paths].sort((left, right) => Buffer.compare(Buffer.from(left, 'utf8'), Buffer.from(right, 'utf8'))));
   });
 
@@ -374,18 +374,28 @@ describe('native drawing product boundary', () => {
     expect(renderer).not.toContain('await window.aidraw.getMcpConnection()');
   });
 
-  it('suppresses macOS bridge activation before any app-ready or editor route', async () => {
-    const main = await source('src/main/main.ts');
-    const bridgeGuard = main.indexOf("if (bridgeInvocation && process.platform === 'darwin')");
-    const activationPolicy = main.indexOf("app.setActivationPolicy('accessory')", bridgeGuard);
-    const dockHide = main.indexOf('app.dock?.hide()', bridgeGuard);
-    const startupWindow = main.indexOf("app.commandLine.appendSwitch('no-startup-window')", bridgeGuard);
+  it('starts macOS prohibited before readiness and admits only targeted editor presentation', async () => {
+    const [main, presentation, singleton] = await Promise.all([
+      source('src/main/main.ts'),
+      source('src/main/macos-background-presentation.ts'),
+      source('src/main/single-instance-request.ts'),
+    ]);
+    const presentationConstruction = main.indexOf('new MacosBackgroundPresentation({');
+    const startupWindow = main.indexOf("app.commandLine.appendSwitch('no-startup-window')", presentationConstruction);
+    const earlyProhibition = main.indexOf('macosBackgroundPresentation.prohibitBeforeReady()', presentationConstruction);
     const firstReady = main.indexOf('app.whenReady()');
-    expect(bridgeGuard).toBeGreaterThan(0);
-    expect(startupWindow).toBeGreaterThan(bridgeGuard);
-    expect(activationPolicy).toBeGreaterThan(bridgeGuard);
-    expect(dockHide).toBeGreaterThan(bridgeGuard);
-    expect(Math.max(startupWindow, activationPolicy, dockHide)).toBeLessThan(firstReady);
+    expect(presentationConstruction).toBeGreaterThan(0);
+    expect(startupWindow).toBeGreaterThan(presentationConstruction);
+    expect(earlyProhibition).toBeGreaterThan(startupWindow);
+    expect(earlyProhibition).toBeLessThan(firstReady);
+    expect(presentation).toContain("this.dependencies.setActivationPolicy('prohibited')");
+    expect(presentation).toContain("this.dependencies.setActivationPolicy('regular')");
+    expect(presentation).toContain('if (!this.foregroundRequested) this.applyBackgroundPolicy()');
+    expect(main).toContain('prepareWindow: () => macosBackgroundPresentation.prepareEditor()');
+    expect(main).toContain('if (!window) macosBackgroundPresentation.restoreBackground()');
+    expect(main).toContain('if (!macosBackgroundPresentation.acceptsSystemActivation()) return;');
+    expect(main).toContain('targetedPersistentEngineRequest(additionalData, singleInstanceTarget)');
+    expect(singleton).toContain('if (data.target !== expectedTarget) return undefined;');
   });
 
   it('keeps old provenance readable only as passive document compatibility', async () => {

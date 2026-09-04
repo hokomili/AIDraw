@@ -196,8 +196,10 @@ export function assertPackagedSecuritySources({ mainSource, preloadSource, rende
   invariant(/bridge-launcher\.(?:cmd|sh)/u.test(mainSource), 'Packaged main bundle is missing the stable product-owned MCP wrapper.');
   invariant(mainSource.includes('mcp-current.json'), 'Packaged main bundle is missing private current-engine discovery.');
   invariant(mainSource.includes('/mcp/identity'), 'Packaged main bundle is missing authenticated engine-instance validation.');
-  invariant(mainSource.includes('no-startup-window') && /setActivationPolicy\(["']accessory["']\)/u.test(mainSource)
-    && /\.dock\?\.hide\(\)/u.test(mainSource), 'Packaged main bundle is missing pre-ready macOS bridge UI suppression.');
+  invariant(mainSource.includes('no-startup-window') && /setActivationPolicy\(["']prohibited["']\)/u.test(mainSource)
+    && /setActivationPolicy\(["']regular["']\)/u.test(mainSource)
+    && /\.dock\?\.hide\(\)/u.test(mainSource) && /\.dock\?\.show\(\)/u.test(mainSource),
+  'Packaged main bundle is missing prohibited-background macOS editor presentation.');
   invariant(!mainSource.includes('fresh connection after every AIDraw restart'), 'Packaged main bundle still requires per-launch MCP client reconfiguration.');
 
   const cspMatch = rendererHtml.match(/http-equiv="Content-Security-Policy"\s+content="([^"]+)"/);

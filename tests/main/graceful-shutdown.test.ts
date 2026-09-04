@@ -76,6 +76,11 @@ describe('graceful application shutdown', () => {
     const source = await readFile(join(process.cwd(), 'src/main/main.ts'), 'utf8');
     expect(source).toContain('await gracefulShutdown.requestQuit();');
     expect(source).toContain("app.on('before-quit', (event) => { gracefulShutdown.handleBeforeQuit(event); });");
+    expect(source).toContain("process.on('SIGINT', requestTerminalShutdown);");
+    expect(source).toContain("process.on('SIGTERM', requestTerminalShutdown);");
+    expect(source).toContain('engineReadyPromise?.then(() => requestEngineQuit(false))');
+    expect(source).toContain("process.removeListener('SIGINT', requestTerminalShutdown);");
+    expect(source).toContain("process.removeListener('SIGTERM', requestTerminalShutdown);");
     expect(source).not.toContain('void engineRuntime?.stop()');
   });
 });
