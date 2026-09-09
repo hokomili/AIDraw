@@ -54,6 +54,16 @@ jobs:
         if: runner.os != 'Linux'
         env:
           AIDRAW_E2E_LAUNCH_CONTEXT: unsandboxed-gui
+      - name: Configure the native Linux sandbox helper
+        if: runner.os == 'Linux'
+        run: |
+          test -f out/AIDraw-linux-x64/chrome-sandbox
+          test ! -L out/AIDraw-linux-x64/chrome-sandbox
+          sha256sum out/AIDraw-linux-x64/chrome-sandbox > /tmp/aidraw-sandbox.sha256
+          sudo chown root:root out/AIDraw-linux-x64/chrome-sandbox
+          sudo chmod 4755 out/AIDraw-linux-x64/chrome-sandbox
+          sha256sum --check /tmp/aidraw-sandbox.sha256
+          test "$(stat -c '%u:%g:%a' out/AIDraw-linux-x64/chrome-sandbox)" = '0:0:4755'
       - run: xvfb-run --auto-servernum npm run test:e2e:only
         if: runner.os == 'Linux'
       - run: npm run checksums

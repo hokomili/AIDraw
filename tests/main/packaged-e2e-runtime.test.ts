@@ -66,10 +66,10 @@ describe('packaged Level 2 platform routing', () => {
     expect(() => resolvePackagedE2eSelection({ AIDRAW_E2E_SUITE: 'self-contained', AIDRAW_E2E_FND09_UTILITY_PROFILE: 'configured' }, [])).toThrow(/cannot be combined/);
   });
 
-  it('freezes the reviewed split after retiring two native generation cases', () => {
-    expect(PACKAGED_E2E_SELF_CONTAINED_CASES).toBe(27);
+  it('records the current split after retiring ordinary and retained generation cases', () => {
+    expect(PACKAGED_E2E_SELF_CONTAINED_CASES).toBe(25);
     expect(PACKAGED_E2E_RETAINED_CASES).toBe(13);
-    expect(PACKAGED_E2E_SELF_CONTAINED_CASES + PACKAGED_E2E_RETAINED_CASES).toBe(40);
+    expect(PACKAGED_E2E_SELF_CONTAINED_CASES + PACKAGED_E2E_RETAINED_CASES).toBe(38);
   });
 
   it('keeps spawn behavior and primary shortcuts native on both desktop platforms', () => {

@@ -101,7 +101,8 @@ describe('existing map storage mode presentation', () => {
     expect(app).toContain('summary={`${asset.infinite ? "Sparse infinite" : "Finite"}');
     expect(app).not.toContain('className="map-infinite-toggle"');
     expect(e2e).toContain("getByRole('radio', { name: 'Use sparse infinite map mode' })");
-    expect(e2e).toContain('await infiniteToggle.check();');
+    expect(e2e).toContain('await infiniteToggle.click();');
+    expect(e2e).toContain('await expect(infiniteToggle).toBeChecked();');
     expect(e2e).not.toContain("locator('.map-infinite-toggle input')");
   });
 

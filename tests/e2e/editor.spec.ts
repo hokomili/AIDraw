@@ -42,27 +42,32 @@ let preserveProfileAfterTest = false;
 const packagedArtifact = resolvePackagedE2eArtifact();
 const packagedExecutable = packagedArtifact.executable;
 
+function hasExited(child: ChildProcess): boolean {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
 test.afterEach(async () => {
+  const testInfo = test.info();
   const child = applicationProcess;
   let cleanupError: Error | undefined;
-  if (child && child.exitCode === null) {
+  if (child && !hasExited(child)) {
     if (gracefulOnlyCleanup) {
       try { await quitIsolatedEngineGracefully(); }
       catch (error) { cleanupError = error instanceof Error ? error : new Error('The owned packaged process did not exit through graceful-only cleanup.'); }
-      if (child.exitCode === null && !cleanupError) cleanupError = new Error('The owned packaged process was still running after graceful-only cleanup; refusing force termination.');
+      if (!hasExited(child) && !cleanupError) cleanupError = new Error('The owned packaged process was still running after graceful-only cleanup; refusing force termination.');
     } else {
       try { await quitIsolatedEngineGracefully(); }
       catch (error) {
         cleanupError = error instanceof Error ? error : new Error('The owned packaged process did not exit through graceful cleanup.');
-        if (child.exitCode === null) {
+        if (!hasExited(child)) {
           child.kill();
           await new Promise<void>((resolveWait) => { child.once('exit', () => resolveWait()); setTimeout(resolveWait, 5_000); });
         }
       }
-      if (child.exitCode === null && !cleanupError) cleanupError = new Error('The owned packaged process was still running after graceful cleanup.');
+      if (!hasExited(child) && !cleanupError) cleanupError = new Error('The owned packaged process was still running after graceful cleanup.');
     }
   }
-  if (profilePath && child?.exitCode !== null) {
+  if (profilePath && child && hasExited(child)) {
     try { await redactOwnedConnection(join(profilePath, 'mcp-connection.json')); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT' && !cleanupError) cleanupError = error instanceof Error ? error : new Error('The owned MCP connection could not be redacted.');
@@ -72,7 +77,7 @@ test.afterEach(async () => {
   applicationProcess = undefined;
   applicationStderr = [];
   browser = undefined;
-  if (profilePath && !preserveProfileAfterTest) await rm(profilePath, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 });
+  if (profilePath && !preserveProfileAfterTest && testInfo.status === testInfo.expectedStatus && !cleanupError) await rm(profilePath, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 });
   profilePath = undefined;
   gracefulOnlyCleanup = false;
   preserveProfileAfterTest = false;
@@ -195,7 +200,10 @@ async function signalExistingEngine(...args: string[]): Promise<void> {
 }
 
 async function waitForOwnedProcessExit(child: ChildProcess, label: string, timeoutMs: number): Promise<void> {
-  if (child.exitCode !== null) return;
+  if (hasExited(child)) {
+    if (child.signalCode || child.exitCode !== 0) throw new Error(`${label} exited with code ${String(child.exitCode)} and signal ${String(child.signalCode)}.`);
+    return;
+  }
   await new Promise<void>((resolve, reject) => {
     let settled = false;
     const cleanup = () => {
@@ -207,7 +215,8 @@ async function waitForOwnedProcessExit(child: ChildProcess, label: string, timeo
       if (settled) return;
       settled = true;
       cleanup();
-      resolve();
+      if (child.signalCode || child.exitCode !== 0) reject(new Error(`${label} exited with code ${String(child.exitCode)} and signal ${String(child.signalCode)}.`));
+      else resolve();
     };
     const onError = (error: Error) => {
       if (settled) return;
@@ -223,12 +232,16 @@ async function waitForOwnedProcessExit(child: ChildProcess, label: string, timeo
     }, timeoutMs);
     child.once('exit', onExit);
     child.once('error', onError);
-    if (child.exitCode !== null) onExit();
+    if (hasExited(child)) onExit();
   });
 }
 
 async function quitIsolatedEngineGracefully(): Promise<void> {
-  if (!profilePath || !applicationProcess || applicationProcess.exitCode !== null) return;
+  if (!profilePath || !applicationProcess) return;
+  if (hasExited(applicationProcess)) {
+    await waitForOwnedProcessExit(applicationProcess, 'The isolated AIDraw engine', 15_000);
+    return;
+  }
   const engine = applicationProcess;
   const signal = spawnPackagedE2e(packagedExecutable, [`--user-data-dir=${profilePath}`, '--quit-engine'], { stdio: 'ignore' });
   await waitForOwnedProcessExit(signal, 'The isolated quit signal', 5_000);
@@ -268,7 +281,7 @@ test('shows stable OpenCode MCP bridge settings without rewriting client configu
   const page = await launch(isolatedProfile, {
     environment: { NODE_ENV: 'test' },
   });
-  await page.getByTitle('Activity').click();
+  await page.getByRole('tab', { name: 'Activity', exact: true }).click();
   await page.getByLabel('Agent client').selectOption('opencode');
   await page.getByRole('button', { name: 'Show setup', exact: true }).click();
 
@@ -276,7 +289,12 @@ test('shows stable OpenCode MCP bridge settings without rewriting client configu
   await expect(setup.getByText('One-time client setup', { exact: true })).toBeVisible();
   await expect(setup.getByText('Stable stdio configuration', { exact: true })).toBeVisible();
   await expect(setup.getByText(/no URL, bearer, password, or per-launch value is stored in the client/)).toBeVisible();
-  await expect(setup.locator('code')).toContainText('--mcp-bridge');
+  const setupConfig = JSON.parse(await setup.locator('code').innerText()) as { mcp: { aidraw: { type: string; command: string[]; enabled: boolean } } };
+  expect(setupConfig.mcp.aidraw.type).toBe('local');
+  expect(setupConfig.mcp.aidraw.enabled).toBe(true);
+  expect(setupConfig.mcp.aidraw.command).toEqual(process.platform === 'win32'
+    ? [join(process.env.SystemRoot ?? process.env.windir!, 'System32', 'cmd.exe'), '/d', '/v:off', '/s', '/c', join(isolatedProfile, 'mcp', 'bridge-launcher.cmd')]
+    : ['/bin/sh', join(isolatedProfile, 'mcp', 'bridge-launcher.sh')]);
   await expect(setup.locator('code')).not.toContainText('127.0.0.1');
   expect(await readFile(configPath, 'utf8')).toBe(originalConfig);
   await setup.getByRole('button', { name: 'Got it' }).click();
@@ -443,7 +461,7 @@ test('visibly replays a committed pixel drawing trace', async () => {
     { timeout: 4_000 },
   ).not.toBe(blank);
   const completed = await canvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL());
-  await page.getByTitle('Activity').click();
+  await page.getByRole('tab', { name: 'Activity', exact: true }).click();
   await expect(page.getByText('Agent pixel mosaic', { exact: true })).toBeVisible();
   const replay = page.getByTitle('Replay durable agent trace').first();
   await replay.click();
@@ -471,7 +489,7 @@ test('keeps many open document tabs reachable', async () => {
   await page.getByRole('button', { name: 'All open documents' }).click();
   const menu = page.getByRole('menu', { name: 'All open documents' });
   await expect(menu).toBeVisible();
-  await expect(menu.getByRole('menuitem')).toHaveCount(15);
+  await expect(menu.locator('.all-tabs-list').getByRole('menuitem')).toHaveCount(15);
   await menu.getByRole('menuitem', { name: 'Overflow sprite 1', exact: true }).click();
   await expect(page.locator('.document-tab[title="Overflow sprite 1"]')).toHaveAttribute('aria-selected', 'true');
   await expect.poll(() => page.locator('.document-tab.is-active').evaluate((tab) => {
@@ -759,7 +777,9 @@ test('keeps held illustration-object and pixel-region gestures ahead of authenti
       return { status: applied.status, documentId: document.id, object, artboard: document.artboard };
     });
     expect(illustration.status).toBe('committed');
-    await expect(page.getByText('Human held object', { exact: true })).toBeVisible();
+    const heldObjectRow = page.getByRole('button', { name: 'Human held object shape', exact: true });
+    await heldObjectRow.scrollIntoViewIfNeeded();
+    await expect(heldObjectRow).toBeVisible();
 
     const credentials = await page.evaluate(async () => window.aidraw.getMcpConnection());
     if (!credentials.url || !credentials.token) throw new Error('The isolated AGT-07 MCP endpoint is unavailable.');
@@ -1219,7 +1239,7 @@ test('keeps background collaboration visible without stealing foreground human f
   if (regressionFailure) throw regressionFailure;
 });
 
-test('keeps four authenticated playback lanes visible and fair while a human draws', async () => {
+test('keeps four authenticated document playback lanes isolated and fair while a human draws', async () => {
   const evidenceRoot = join(process.cwd(), 'test-results', 'retained');
   await mkdir(evidenceRoot, { recursive: true });
   const isolatedProfile = await mkdtemp(join(evidenceRoot, 'aidraw-e2e-lanes-'));
@@ -1257,15 +1277,43 @@ test('keeps four authenticated playback lanes visible and fair while a human dra
       { suffix: 'c', name: 'Lane agent C', color: '#6d5bd0', y: 510 },
       { suffix: 'd', name: 'Lane agent D', color: '#d27b2d', y: 690 },
     ];
-    const clients = await Promise.all(agentSpecs.map((agent) => connectMcpTestClient(credentials.url!, credentials.token!, `agt06-${agent.suffix}`, {
+    // Public preparation owns one slot per document and four global slots.
+    // Keep each actor on its own document; the selected canvas shows only its lane.
+    const laneDocuments = await page.evaluate(async (first) => {
+      const documents = [first];
+      for (let index = 1; index < 4; index += 1) {
+        await window.aidraw.newDocument({ kind: 'illustration', name: `AGT-06 board ${index + 1}` });
+        const document = (await window.aidraw.bootstrap()).activeDocument;
+        if (!document || document.kind !== 'illustration') throw new Error('AGT-06 board was not created.');
+        const layer = Object.values(document.layers).find((entry) => entry.type === 'vector');
+        if (!layer) throw new Error('AGT-06 board has no vector layer.');
+        documents.push({ documentId: document.id, revision: document.revision, layerId: layer.id, artboard: document.artboard, objectIds: Object.keys(document.objects) });
+      }
+      await window.aidraw.activateDocument(first.documentId);
+      return documents;
+    }, initial);
+    type LaneObservation = { documentId: string; actorId: string; name: string; color: string; label: string; lane: number; progress: number; status: string };
+    const latestLanes = new Map<string, LaneObservation>();
+    await page.exposeFunction('recordAgt06Lane', (entry: LaneObservation) => { latestLanes.set(entry.actorId, entry); });
+    await page.evaluate(() => {
+      window.aidraw.onEvent((event) => {
+        if (event.type !== 'playback' || !event.label.startsWith('AGT-06 lane ')) return;
+        void (window as unknown as { recordAgt06Lane(entry: unknown): Promise<void> }).recordAgt06Lane({
+          documentId: event.documentId, actorId: event.actor.id, name: event.actor.name, color: event.actor.color,
+          label: event.label, lane: event.lane, progress: event.progress, status: event.status,
+        });
+      });
+    });
+    const clients = await Promise.all(agentSpecs.map((agent, index) => connectMcpTestClient(credentials.url!, credentials.token!, `agt06-${agent.suffix}`, {
       name: agent.name,
       color: agent.color,
-      documentId: initial.documentId,
+      documentId: laneDocuments[index].documentId,
     })));
     expect(new Set(clients.map((client) => client.actor.id)).size).toBe(4);
 
     const timestamp = new Date().toISOString();
-    const agentRequests = clients.map((client, index) => {
+    const startAgent = (index: number) => {
+      const client = clients[index];
       const spec = agentSpecs[index];
       const points = Array.from({ length: 600 }, (_, pointIndex) => ({
         x: 220 + pointIndex * (1_480 / 599),
@@ -1273,7 +1321,7 @@ test('keeps four authenticated playback lanes visible and fair while a human dra
         pressure: 0.55,
       }));
       return callMcpTool(credentials.url!, client.headers, 3, 'canvas_apply', {
-        documentId: initial.documentId,
+        documentId: laneDocuments[index].documentId,
         clientOperationId: `agt06-lane-${spec.suffix}`,
         label: `AGT-06 lane ${spec.suffix.toUpperCase()}`,
         operations: [{
@@ -1285,7 +1333,7 @@ test('keeps four authenticated playback lanes visible and fair while a human dra
             createdAt: timestamp,
             updatedAt: timestamp,
             createdBy: client.actor.id,
-            layerId: initial.layerId,
+            layerId: laneDocuments[index].layerId,
             visible: true,
             locked: false,
             opacity: 1,
@@ -1298,50 +1346,49 @@ test('keeps four authenticated playback lanes visible and fair while a human dra
         }],
         playback: { mode: 'animated', speed: 0.25 },
       });
+    };
+    const firstAgentRequest = startAgent(0);
+    await expect.poll(() => latestLanes.get(clients[0].actor.id)?.status).toBe('playing');
+    const sameDocumentBusy = await callMcpTool(credentials.url, clients[1].headers, 2, 'canvas_apply', {
+      documentId: initial.documentId, clientOperationId: 'agt06-same-document-busy', label: 'Must stay busy',
+      operations: [{ kind: 'document.rename', name: 'Must not rename' }], playback: { mode: 'instant', speed: 1 },
     });
+    expect(sameDocumentBusy.status).toBe('busy');
+    const agentRequests = [firstAgentRequest, ...[1, 2, 3].map(startAgent)];
     const agentResultsPromise = Promise.all(agentRequests);
     let agentsSettled = false;
     void agentResultsPromise.then(() => { agentsSettled = true; }, () => { agentsSettled = true; });
 
     const lanePanel = page.getByRole('region', { name: 'Active agent playback lanes' });
     const laneRows = lanePanel.locator('.playback-lane');
-    await expect(lanePanel).toBeVisible();
-    await expect(laneRows).toHaveCount(4);
-    for (let index = 0; index < 4; index += 1) await expect(laneRows.nth(index)).toBeVisible();
-    const laneSnapshot = await laneRows.evaluateAll((rows) => rows.map((row) => {
-      const bounds = row.getBoundingClientRect();
-      return {
-        lane: Number((row as HTMLElement).dataset.playbackLane),
-        name: row.querySelector('.playback-lane-agent')?.textContent ?? '',
-        color: getComputedStyle(row).getPropertyValue('--actor').trim().toLocaleLowerCase(),
-        label: row.getAttribute('title') ?? '',
-        progress: (row.querySelector('progress') as HTMLProgressElement | null)?.value ?? -1,
-        bounds: { top: bounds.top, bottom: bounds.bottom, width: bounds.width, height: bounds.height },
-      };
-    }));
+    await expect.poll(() => [...latestLanes.values()].filter((entry) => entry.status === 'playing').length).toBe(4);
+    const laneSnapshot = [...latestLanes.values()].sort((left, right) => left.lane - right.lane);
     expect(laneSnapshot.map((entry) => entry.lane)).toEqual([0, 1, 2, 3]);
+    expect(new Set(laneSnapshot.map((entry) => entry.documentId))).toEqual(new Set(laneDocuments.map((entry) => entry.documentId)));
     expect(new Set(laneSnapshot.map((entry) => entry.name))).toEqual(new Set(agentSpecs.map((entry) => entry.name)));
     expect(new Set(laneSnapshot.map((entry) => entry.color))).toEqual(new Set(agentSpecs.map((entry) => entry.color)));
     expect(new Set(laneSnapshot.map((entry) => entry.label))).toEqual(new Set(agentSpecs.map((entry) => `AGT-06 lane ${entry.suffix.toUpperCase()}`)));
-    for (const lane of laneSnapshot) {
-      expect(lane.bounds.width).toBeGreaterThan(150);
-      expect(lane.bounds.height).toBeGreaterThan(20);
-      expect(lane.progress).toBeGreaterThanOrEqual(0);
-      expect(lane.progress).toBeLessThan(1);
+    for (let index = 0; index < 4; index += 1) {
+      await page.evaluate((documentId) => window.aidraw.activateDocument(documentId), laneDocuments[index].documentId);
+      await expect(laneRows).toHaveCount(1);
+      await expect(laneRows.locator('.playback-lane-agent')).toHaveText(agentSpecs[index].name);
+      const lane = latestLanes.get(clients[index].actor.id)!;
+      await expect(laneRows).toHaveAttribute('data-playback-lane', String(lane.lane));
+      await expect(laneRows).toBeVisible();
     }
-    for (let index = 1; index < laneSnapshot.length; index += 1) expect(laneSnapshot[index - 1].bounds.bottom).toBeLessThanOrEqual(laneSnapshot[index].bounds.top);
-    await lanePanel.screenshot({ path: join(isolatedProfile, 'agt06-four-visible-lanes.png') });
-
-    const progressBefore = laneSnapshot.map((entry) => entry.progress);
-    await expect.poll(async () => {
-      const progress = await laneRows.locator('progress').evaluateAll((entries) => entries.map((entry) => (entry as HTMLProgressElement).value));
-      return progress.every((value, index) => value > progressBefore[index]);
-    }, { timeout: 2_000 }).toBe(true);
-    const progressAfter = await laneRows.locator('progress').evaluateAll((progress) => progress.map((entry) => (entry as HTMLProgressElement).value));
-    const inspected = await callMcpTool(credentials.url, clients[0].headers, 4, 'session_manage', { action: 'inspect', documentId: initial.documentId });
-    const presenceDuring = (inspected.presence as Array<{ actor: Actor; queueDepth: number; status: string }>).filter((entry) => clients.some((client) => client.actor.id === entry.actor.id));
+    await page.evaluate((documentId) => window.aidraw.activateDocument(documentId), initial.documentId);
+    await expect(laneRows.locator('.playback-lane-agent')).toHaveText(agentSpecs[0].name);
+    await lanePanel.screenshot({ path: join(isolatedProfile, 'agt06-selected-document-lane.png') });
+    const progressBefore = clients.map((client) => latestLanes.get(client.actor.id)!.progress);
+    await expect.poll(() => clients.every((client, index) => latestLanes.get(client.actor.id)!.progress > progressBefore[index]), { timeout: 2_000 }).toBe(true);
+    const progressAfter = clients.map((client) => latestLanes.get(client.actor.id)!.progress);
+    const inspectPresence = async (requestId: number) => {
+      const results = await Promise.all(clients.map((client, index) => callMcpTool(credentials.url!, client.headers, requestId, 'session_manage', { action: 'inspect', documentId: laneDocuments[index].documentId })));
+      return results.map((result, index) => (result.presence as Array<{ actor: Actor; queueDepth: number; status: string }>).find((entry) => entry.actor.id === clients[index].actor.id)!);
+    };
+    const presenceDuring = await inspectPresence(4);
     expect(presenceDuring).toHaveLength(4);
-    expect(presenceDuring.every((entry) => entry.status === 'working' && entry.queueDepth === 0)).toBe(true);
+    expect(presenceDuring.every((entry) => entry?.status === 'working' && entry.queueDepth === 0)).toBe(true);
 
     const canvas = page.getByRole('application', { name: /Illustration canvas/ });
     await page.getByTitle('Pressure pen').click();
@@ -1376,7 +1423,8 @@ test('keeps four authenticated playback lanes visible and fair while a human dra
         newHumanObjects: Object.values(document.objects).filter((object) => object.createdBy === 'human' && !objectIds.includes(object.id)).map((object) => object.id),
       };
     }, initial)).toEqual({ revision: initial.revision, newHumanObjects: [] });
-    await expect(laneRows).toHaveCount(4);
+    await expect(laneRows).toHaveCount(1);
+    expect([...latestLanes.values()].filter((entry) => entry.status === 'playing')).toHaveLength(4);
 
     await page.mouse.up();
     await expect.poll(async () => page.evaluate(async ({ documentId, objectIds }) => {
@@ -1394,40 +1442,38 @@ test('keeps four authenticated playback lanes visible and fair while a human dra
     expect(humanCommit).toBeDefined();
     expect(humanCommit?.pointCount).toBeGreaterThan(2);
     expect(agentsSettled).toBe(false);
-    await expect(laneRows).toHaveCount(4);
+    await expect(laneRows).toHaveCount(1);
+    expect([...latestLanes.values()].filter((entry) => entry.status === 'playing')).toHaveLength(4);
 
     const agentResults = await agentResultsPromise;
     expect(agentResults.map((entry) => entry.status)).toEqual(['committed', 'committed', 'committed', 'committed']);
-    expect(agentResults.map((entry) => Number(entry.revision)).sort((left, right) => left - right)).toEqual([
-      initial.revision + 2,
-      initial.revision + 3,
-      initial.revision + 4,
-      initial.revision + 5,
-    ]);
+    expect(agentResults.map((entry) => Number(entry.revision))).toEqual(laneDocuments.map((entry, index) => entry.revision + (index === 0 ? 2 : 1)));
     await expect(lanePanel).toBeHidden();
-
-    const observed = await callMcpTool(credentials.url, clients[0].headers, 5, 'canvas_observe', { documentId: initial.documentId });
-    const observedDocument = observed.document as IllustrationDocument;
-    expect(observedDocument.revision).toBe(initial.revision + 5);
+    const observedDocuments: IllustrationDocument[] = [];
     for (let index = 0; index < agentSpecs.length; index += 1) {
       const spec = agentSpecs[index];
-      const object = observedDocument.objects[`agt06-lane-${spec.suffix}`];
+      const observed = await callMcpTool(credentials.url, clients[index].headers, 5, 'canvas_observe', { documentId: laneDocuments[index].documentId });
+      const document = observed.document as IllustrationDocument;
+      observedDocuments.push(document);
+      expect(document.revision).toBe(laneDocuments[index].revision + (index === 0 ? 2 : 1));
+      const object = document.objects[`agt06-lane-${spec.suffix}`];
       expect(object).toMatchObject({ name: `AGT-06 lane ${spec.suffix.toUpperCase()}`, createdBy: clients[index].actor.id, type: 'vector-stroke' });
       if (object.type !== 'vector-stroke') throw new Error(`Authenticated observation lost AGT-06 lane ${spec.suffix.toUpperCase()}.`);
       expect(object.points).toHaveLength(600);
       expect(object.brush.color).toBe(spec.color);
+      expect(Object.keys(document.objects).filter((id) => id.startsWith('agt06-lane-'))).toEqual([`agt06-lane-${spec.suffix}`]);
     }
+    const observedDocument = observedDocuments[0];
     expect(humanCommit && observedDocument.objects[humanCommit.id]).toMatchObject({ name: 'Pressure stroke', createdBy: 'human', type: 'vector-stroke' });
     const rendererCanonical = await page.evaluate(async () => {
       const document = (await window.aidraw.bootstrap()).activeDocument;
       return document?.kind === 'illustration' ? { revision: document.revision, objectIds: Object.keys(document.objects).sort() } : undefined;
     });
     expect(rendererCanonical).toEqual({ revision: observedDocument.revision, objectIds: Object.keys(observedDocument.objects).sort() });
-    const agentActivity = observedDocument.activity.filter((entry) => entry.label.startsWith('AGT-06 lane '));
+    const agentActivity = observedDocuments.flatMap((document) => document.activity.filter((entry) => entry.label.startsWith('AGT-06 lane ')));
     expect(new Set(agentActivity.map((entry) => entry.actor.id))).toEqual(new Set(clients.map((client) => client.actor.id)));
     expect(agentActivity.every((entry) => entry.status === 'committed')).toBe(true);
-    const inspectedAfter = await callMcpTool(credentials.url, clients[0].headers, 6, 'session_manage', { action: 'inspect', documentId: initial.documentId });
-    const presenceAfter = (inspectedAfter.presence as Array<{ actor: Actor; queueDepth: number; status: string }>).filter((entry) => clients.some((client) => client.actor.id === entry.actor.id));
+    const presenceAfter = await inspectPresence(6);
     expect(presenceAfter).toHaveLength(4);
     expect(presenceAfter.every((entry) => entry.status === 'idle' && entry.queueDepth === 0)).toBe(true);
     expect(applicationProcess?.pid).toBe(enginePid);
@@ -1436,6 +1482,8 @@ test('keeps four authenticated playback lanes visible and fair while a human dra
       packagedExecutable,
       enginePid,
       lanes: laneSnapshot,
+      sameDocumentBusy,
+      documents: observedDocuments.map((document) => ({ id: document.id, revision: document.revision, objectIds: Object.keys(document.objects).sort() })),
       progressBefore,
       progressAfter,
       presenceDuring: presenceDuring.map((entry) => ({ actor: entry.actor.name, queueDepth: entry.queueDepth, status: entry.status })),
@@ -1753,7 +1801,7 @@ test('keeps human drawing responsive while an MCP agent plays visibly', async ()
   const page = await launch(); const state = await page.evaluate(async () => ({ snapshot: await window.aidraw.bootstrap(), credentials: await window.aidraw.getMcpConnection() })); const document = state.snapshot.activeDocument; if (!document || document.kind !== 'illustration' || !state.credentials.url) throw new Error('Illustration MCP setup unavailable'); const vectorLayer = Object.values(document.layers).find((layer) => layer.type === 'vector'); if (!vectorLayer) throw new Error('Vector layer unavailable');
   const { headers } = await initializeDirectMcp(state.credentials, { clientInfo: { name: 'Playwright agent', version: '1.0' } }); await fetch(state.credentials.url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'session_manage', arguments: { action: 'join', name: 'Playwright agent', color: '#2fa7a0', documentId: document.id } } }) });
   const timestamp = new Date().toISOString(); const points = Array.from({ length: 120 }, (_, index) => ({ x: 180 + index * 4, y: 230 + Math.sin(index / 8) * 70, pressure: 0.5 })); const agentRequest = fetch(state.credentials.url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'canvas_apply', arguments: { documentId: document.id, clientOperationId: 'playwright-agent-stroke', label: 'Agent ribbon', operations: [{ kind: 'illustration.object.add', object: { id: 'playwright-ribbon', revision: 0, name: 'Agent ribbon', createdAt: timestamp, updatedAt: timestamp, createdBy: 'playwright-agent', layerId: vectorLayer.id, visible: true, locked: false, opacity: 1, blendMode: 'normal', transform: { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, skewX: 0, skewY: 0 }, type: 'vector-stroke', points, brush: { size: 18, thinning: 0.5, smoothing: 0.5, streamline: 0.5, simulatePressure: false, color: '#2fa7a0' } } }], playback: { mode: 'animated', speed: 1 } } } }) });
-  await page.waitForTimeout(150); const canvas = page.getByRole('application', { name: /Illustration canvas/ }); await page.getByTitle('Pressure pen').click(); const bounds = await canvas.boundingBox(); if (!bounds) throw new Error('Illustration canvas has no bounds'); await page.mouse.move(bounds.x + bounds.width * 0.45, bounds.y + bounds.height * 0.45); await page.mouse.down(); await page.mouse.move(bounds.x + bounds.width * 0.58, bounds.y + bounds.height * 0.54, { steps: 8 }); await page.mouse.up(); await page.getByRole('button', { name: 'Stop All Agents' }).click(); expect((await agentRequest).ok).toBe(true); await page.getByTitle('Activity').click(); const activity = page.locator('.activity-row').filter({ hasText: 'Agent ribbon' }).first(); await expect(activity).toBeVisible(); await expect(activity.locator('.activity-state')).toHaveText('partial'); await expect(page.getByText(/Playwright agent/).last()).toBeVisible(); const undoAgent = page.getByTitle('Undo the latest transaction by Playwright agent'); await undoAgent.click(); await expect.poll(async () => page.evaluate(async () => { const document = (await window.aidraw.bootstrap()).activeDocument; return document?.kind === 'illustration' && Boolean(document.objects['playwright-ribbon']); })).toBe(false); const redoAgent = page.getByTitle('Redo the latest undone transaction by Playwright agent'); await redoAgent.click(); await expect.poll(async () => page.evaluate(async () => { const document = (await window.aidraw.bootstrap()).activeDocument; return document?.kind === 'illustration' && Boolean(document.objects['playwright-ribbon']); })).toBe(true); const replay = page.getByTitle('Replay durable agent trace').first(); await replay.click(); await expect(replay).toHaveText(/Replaying/); await expect(replay).toHaveText('Replay', { timeout: 4_000 });
+  await page.waitForTimeout(150); const canvas = page.getByRole('application', { name: /Illustration canvas/ }); await page.getByTitle('Pressure pen').click(); const bounds = await canvas.boundingBox(); if (!bounds) throw new Error('Illustration canvas has no bounds'); await page.mouse.move(bounds.x + bounds.width * 0.45, bounds.y + bounds.height * 0.45); await page.mouse.down(); await page.mouse.move(bounds.x + bounds.width * 0.58, bounds.y + bounds.height * 0.54, { steps: 8 }); await page.mouse.up(); await page.getByRole('button', { name: 'Stop All Agents' }).click(); expect((await agentRequest).ok).toBe(true); await page.getByRole('tab', { name: 'Activity', exact: true }).click(); const activity = page.locator('.activity-row').filter({ hasText: 'Agent ribbon' }).first(); await expect(activity).toBeVisible(); await expect(activity.locator('.activity-state')).toHaveText('partial'); await expect(page.getByText(/Playwright agent/).last()).toBeVisible(); const undoAgent = page.getByTitle('Undo the latest transaction by Playwright agent'); await undoAgent.click(); await expect.poll(async () => page.evaluate(async () => { const document = (await window.aidraw.bootstrap()).activeDocument; return document?.kind === 'illustration' && Boolean(document.objects['playwright-ribbon']); })).toBe(false); const redoAgent = page.getByTitle('Redo the latest undone transaction by Playwright agent'); await redoAgent.click(); await expect.poll(async () => page.evaluate(async () => { const document = (await window.aidraw.bootstrap()).activeDocument; return document?.kind === 'illustration' && Boolean(document.objects['playwright-ribbon']); })).toBe(true); const replay = page.getByTitle('Replay durable agent trace').first(); await replay.click(); await expect(replay).toHaveText(/Replaying/); await expect(replay).toHaveText('Replay', { timeout: 4_000 });
 });
 
 test('shows structured file approval and applies session trust without bypassing overwrites', async () => {
@@ -1767,7 +1815,7 @@ test('shows structured file approval and applies session trust without bypassing
   const first = await callMcpTool(state.credentials.url, headers, 3, 'document_export', { documentId: state.snapshot.activeDocumentId, path: firstPath, format: 'png', scale: 1 });
   expect(first.status).toBe('waiting-for-user');
 
-  await page.getByTitle('Activity').click();
+  await page.getByRole('tab', { name: 'Activity', exact: true }).click();
   const approval = page.locator('.approval-card').filter({ hasText: 'Export document' });
   await expect(approval).toBeVisible();
   await expect(approval.locator('.approval-target')).toContainText('first.png');
@@ -1886,7 +1934,7 @@ test('QA-06 denies and allow-once saves exact paths without granting file trust'
     const beforeSha256 = visualHash(Buffer.from(JSON.stringify(beforeDocument), 'utf8'));
 
     const assertVisibleApproval = async (targetPath: string) => {
-      await page.getByTitle('Activity').click();
+      await page.getByRole('tab', { name: 'Activity', exact: true }).click();
       const card = page.locator('.approval-card').filter({ hasText: 'Save AIDraw document as' });
       await expect(card).toBeVisible();
       await expect(card.locator('.approval-heading small')).toHaveText('QA-06 file approval agent requests approval');
@@ -2209,18 +2257,22 @@ test('QA-06-ANIM closes an exact packaged animated-sprite lifecycle', async () =
     await tagButton.click();
     await expect(tagButton).toHaveClass(/is-active/);
     await frameButtons().nth(1).click();
-    const onionButton = page.getByTitle('Onion skin');
+    const onionButton = page.getByTitle('Onion skin', { exact: true });
     await expect(onionButton).toHaveClass(/is-active/);
     const pixelCanvas = page.getByRole('application', { name: /Pixel-art canvas/ });
     const onionOn = await pixelCanvas.screenshot({ path: onionScreenshotPath });
+    const onionRaster = await pixelCanvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL());
     await onionButton.click();
     await expect(onionButton).not.toHaveClass(/is-active/);
     const onionOff = await pixelCanvas.screenshot();
     expect(visualHash(onionOff)).not.toBe(visualHash(onionOn));
+    await expect.poll(() => pixelCanvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL())).not.toBe(onionRaster);
     await onionButton.click();
     await expect(onionButton).toHaveClass(/is-active/);
-    const restoredOnion = await pixelCanvas.screenshot();
-    expect(visualHash(restoredOnion)).toBe(visualHash(onionOn));
+    // Compare the canvas itself exactly: screenshots also composite the floating
+    // toolbar, whose antialiased shadow may differ after pointer interaction.
+    await expect.poll(() => pixelCanvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL())).toBe(onionRaster);
+    await pixelCanvas.screenshot({ path: join(isolatedProfile, 'qa06-animation-onion-restored.png') });
 
     await expect.poll(async () => {
       const inspected = await call('session_manage', { action: 'inspect', documentId: canonicalDocument.id });
@@ -2249,7 +2301,7 @@ test('QA-06-ANIM closes an exact packaged animated-sprite lifecycle', async () =
     });
     expect(exportRequest).toMatchObject({ status: 'waiting-for-user' });
     const exportJobId = String(exportRequest.jobId);
-    await page.getByTitle('Activity').click();
+    await page.getByRole('tab', { name: 'Activity', exact: true }).click();
     const approvalCard = page.locator('.approval-card').filter({ hasText: 'Export document' });
     await expect(approvalCard).toBeVisible();
     await expect(approvalCard.locator('.approval-heading small')).toHaveText('QA-06 animation agent requests approval');
@@ -2439,7 +2491,7 @@ test('QA-06-WANG closes an exact packaged finite-map Wang-terrain lifecycle', as
       return document?.kind === 'pixel' ? [document.name, document.scope, Object.keys(document.pixelAssets).length] : undefined;
     }).toEqual(['QA-06 Wang Terrain', 'project', 1]);
 
-    await page.getByTitle('Assets').click();
+    await page.getByRole('tab', { name: 'Assets', exact: true }).click();
     const assetsPanel = page.locator('.assets-panel');
     await expect(assetsPanel).toBeVisible();
     await assetsPanel.getByRole('button', { name: 'Tileset', exact: true }).click();
@@ -2464,7 +2516,7 @@ test('QA-06-WANG closes an exact packaged finite-map Wang-terrain lifecycle', as
     });
 
     await assetsPanel.locator('.pixel-asset-list button').filter({ hasText: createdAssets.tilesetName }).click();
-    await page.getByTitle('Layers').click();
+    await page.getByRole('tab', { name: 'Layers', exact: true }).click();
     const tilesetPanel = page.locator('.tileset-panel');
     await expect(tilesetPanel).toBeVisible();
     await tilesetPanel.getByRole('button', { name: '+ Terrain', exact: true }).click();
@@ -2479,25 +2531,25 @@ test('QA-06-WANG closes an exact packaged finite-map Wang-terrain lifecycle', as
       return set ? { name: set.name, type: set.type, colorName: set.colors[0]?.name, color: set.colors[0]?.color, probability: set.colors[0]?.probability } : undefined;
     });
     const wangEditor = tilesetPanel.locator('.wang-editor');
-    const setNameInput = wangEditor.getByLabel('Set name');
+    const setNameInput = wangEditor.getByRole('textbox', { name: /^Wang set .+ name$/ });
     await setNameInput.fill('QA-06 Meadow');
     await setNameInput.blur();
     await expect.poll(wangState).toMatchObject({ name: 'QA-06 Meadow' });
-    const modeSelect = wangEditor.getByLabel('Mode');
+    const modeSelect = wangEditor.getByRole('combobox', { name: /^Wang set .+ mode$/ });
     await modeSelect.selectOption('edge');
     await expect.poll(wangState).toMatchObject({ type: 'edge' });
     await modeSelect.selectOption('mixed');
     await expect.poll(wangState).toMatchObject({ type: 'mixed' });
-    await wangEditor.getByLabel('Wang color name 1').fill('Meadow');
+    await wangEditor.getByLabel('Wang color 1 name', { exact: true }).fill('Meadow');
     await expect.poll(wangState).toMatchObject({ colorName: 'Meadow' });
-    await wangEditor.getByLabel('Wang color 1').fill('#55aa44');
+    await wangEditor.getByLabel('Wang color 1 value', { exact: true }).fill('#55aa44');
     await expect.poll(wangState).toMatchObject({ color: '#55aa44' });
-    await wangEditor.getByLabel('Wang color probability 1').fill('0.75');
+    await wangEditor.getByLabel('Wang color 1 probability', { exact: true }).fill('0.75');
     await expect.poll(wangState).toEqual({ name: 'QA-06 Meadow', type: 'mixed', colorName: 'Meadow', color: '#55aa44', probability: 0.75 });
 
-    await page.getByTitle('Assets').click();
+    await page.getByRole('tab', { name: 'Assets', exact: true }).click();
     await assetsPanel.locator('.pixel-asset-list button').filter({ hasText: createdAssets.mapName }).click();
-    await page.getByTitle('Layers').click();
+    await page.getByRole('tab', { name: 'Layers', exact: true }).click();
     const mapSetupButton = page.locator('.map-setup-disclosure-trigger');
     if ((await mapSetupButton.getAttribute('aria-expanded')) !== 'true') await mapSetupButton.click();
     const mapSettings = page.locator('.tilemap-settings');
@@ -2526,7 +2578,7 @@ test('QA-06-WANG closes an exact packaged finite-map Wang-terrain lifecycle', as
     }).toEqual([10, false, 'orthogonal']);
     await mapSettings.getByLabel('Map property name').fill('qa06-scenario');
     await mapSettings.getByLabel('Map property value').fill('finite-wang');
-    await mapSettings.locator('.tile-property-add').getByRole('button', { name: 'Add', exact: true }).click();
+    await mapSettings.getByRole('button', { name: 'Add map property qa06-scenario', exact: true }).click();
     await expect.poll(async () => {
       const document = await page.evaluate(async () => (await window.aidraw.bootstrap()).activeDocument);
       const map = document?.kind === 'pixel' ? document.pixelAssets[createdAssets.mapId] : undefined;
@@ -2588,24 +2640,24 @@ test('QA-06-WANG closes an exact packaged finite-map Wang-terrain lifecycle', as
     });
     expect(seededTileset.wangSets[0].tiles).toEqual(transitionWangIds.map((wangId, tileId) => ({ tileId, wangId })));
 
-    await page.getByTitle('Assets').click();
+    await page.getByRole('tab', { name: 'Assets', exact: true }).click();
     await assetsPanel.locator('.pixel-asset-list button').filter({ hasText: createdAssets.tilesetName }).click();
-    await page.getByTitle('Layers').click();
-    await expect(tilesetPanel.locator('.terrain-row').filter({ hasText: 'QA-06 Meadow' })).toContainText('mixed · 10 mapped tiles');
+    await page.getByRole('tab', { name: 'Layers', exact: true }).click();
+    await expect(tilesetPanel.getByRole('button', { name: /^Select Wang terrain set QA-06 Meadow,/ })).toContainText('Mixed · 1 color · 10 mapped tiles');
     await tilesetPanel.locator('.tile-definition-grid button').getByText('1', { exact: true }).click();
-    await expect(wangEditor.getByLabel('Set name')).toHaveValue('QA-06 Meadow');
-    await expect(wangEditor.getByLabel('Mode')).toHaveValue('mixed');
-    await expect(wangEditor.getByLabel('Wang color name 1')).toHaveValue('Meadow');
-    await expect(wangEditor.getByLabel('Wang color 1')).toHaveValue('#55aa44');
-    await expect(wangEditor.getByLabel('Wang color probability 1')).toHaveValue('0.75');
-    const wangSlots = wangEditor.locator('.wang-slot-grid select');
+    await expect(wangEditor.getByRole('textbox', { name: /^Wang set .+ name$/ })).toHaveValue('QA-06 Meadow');
+    await expect(wangEditor.getByRole('combobox', { name: /^Wang set .+ mode$/ })).toHaveValue('mixed');
+    await expect(wangEditor.getByLabel('Wang color 1 name', { exact: true })).toHaveValue('Meadow');
+    await expect(wangEditor.getByLabel('Wang color 1 value', { exact: true })).toHaveValue('#55aa44');
+    await expect(wangEditor.getByLabel('Wang color 1 probability', { exact: true })).toHaveValue('0.75');
+    const wangSlots = wangEditor.getByRole('group', { name: 'Tile 1 Wang signature colors', exact: true }).getByRole('combobox');
     await expect(wangSlots).toHaveCount(8);
     for (let index = 0; index < 8; index += 1) await expect(wangSlots.nth(index)).toHaveValue('1');
     await page.screenshot({ path: metadataScreenshotPath });
 
-    await page.getByTitle('Assets').click();
+    await page.getByRole('tab', { name: 'Assets', exact: true }).click();
     await assetsPanel.locator('.pixel-asset-list button').filter({ hasText: createdAssets.mapName }).click();
-    await page.getByTitle('Layers').click();
+    await page.getByRole('tab', { name: 'Layers', exact: true }).click();
     await expect(mapSettings.getByText('Finite bounds', { exact: true })).toBeVisible();
     await expect(widthInput).toHaveValue('12');
     await expect(heightInput).toHaveValue('10');
@@ -2645,6 +2697,7 @@ test('QA-06-WANG closes an exact packaged finite-map Wang-terrain lifecycle', as
     await clickMapCell(center.x, center.y);
     await expect.poll(readRendererPattern).toEqual(expectedPattern.map((entry) => entry.gid));
     const paintedCanvas = await pixelCanvas.screenshot({ path: paintedScreenshotPath });
+    const paintedRaster = await pixelCanvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL());
     expect(visualHash(paintedCanvas)).not.toBe(visualHash(initialCanvas));
 
     await terrainToggle.click();
@@ -2658,8 +2711,9 @@ test('QA-06-WANG closes an exact packaged finite-map Wang-terrain lifecycle', as
     await expect(terrainToggle).toContainText('Paint');
     await clickMapCell(center.x, center.y);
     await expect.poll(readRendererPattern).toEqual(expectedPattern.map((entry) => entry.gid));
-    const repaintedCanvas = await pixelCanvas.screenshot();
-    expect(visualHash(repaintedCanvas)).toBe(visualHash(paintedCanvas));
+    await expect.poll(() => pixelCanvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL())).toBe(paintedRaster);
+    const repaintedCanvas = await pixelCanvas.screenshot({ path: join(isolatedProfile, 'qa06-wang-repainted.png') });
+    const repaintedRaster = await pixelCanvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL());
     await page.screenshot({ path: finalScreenshotPath });
 
     const canonicalObserved = await call('canvas_observe', {
@@ -2692,7 +2746,7 @@ test('QA-06-WANG closes an exact packaged finite-map Wang-terrain lifecycle', as
     });
     expect(exportRequest).toMatchObject({ status: 'waiting-for-user' });
     const exportJobId = String(exportRequest.jobId);
-    await page.getByTitle('Activity').click();
+    await page.getByRole('tab', { name: 'Activity', exact: true }).click();
     const approvalCard = page.locator('.approval-card').filter({ hasText: 'Export document' });
     await expect(approvalCard).toBeVisible();
     await expect(approvalCard.locator('.approval-heading small')).toHaveText('QA-06 terrain agent requests approval');
@@ -2817,7 +2871,10 @@ test('QA-06-WANG closes an exact packaged finite-map Wang-terrain lifecycle', as
         paintedSha256: visualHash(paintedCanvas),
         erasedSha256: visualHash(erasedCanvas),
         repaintedSha256: visualHash(repaintedCanvas),
-        repaintRestoredPaintHash: visualHash(repaintedCanvas) === visualHash(paintedCanvas),
+        compositorScreenshotHashesMatch: visualHash(repaintedCanvas) === visualHash(paintedCanvas),
+        paintedCanvasSha256: visualHash(Buffer.from(paintedRaster)),
+        repaintedCanvasSha256: visualHash(Buffer.from(repaintedRaster)),
+        repaintRestoredCanvasExactly: repaintedRaster === paintedRaster,
       },
       canonicalAgreement: {
         rendererMatchedMcp: true,
@@ -2942,7 +2999,7 @@ test('QA-06-INFINITE closes an exact packaged orthogonal sparse-chunk lifecycle'
     await newDocumentDialog.getByLabel('Document height').fill('64');
     await newDocumentDialog.getByRole('button', { name: 'Create Pixel Project' }).click();
 
-    await page.getByTitle('Assets').click();
+    await page.getByRole('tab', { name: 'Assets', exact: true }).click();
     const assetsPanel = page.locator('.assets-panel');
     await expect(assetsPanel).toBeVisible();
     await assetsPanel.getByRole('button', { name: 'Tileset', exact: true }).click();
@@ -2966,7 +3023,7 @@ test('QA-06-INFINITE closes an exact packaged orthogonal sparse-chunk lifecycle'
       return { documentId: document.id, sourceId: source.id, tilesetId: tileset.id, mapId: map.id, mapName: map.name };
     });
     await assetsPanel.locator('.pixel-asset-list button').filter({ hasText: createdAssets.mapName }).click();
-    await page.getByTitle('Layers').click();
+    await page.getByRole('tab', { name: 'Layers', exact: true }).click();
     const mapSetupButton = page.locator('.map-setup-disclosure-trigger');
     if ((await mapSetupButton.getAttribute('aria-expanded')) !== 'true') await mapSetupButton.click();
     const mapSettings = page.locator('.tilemap-settings');
@@ -2993,7 +3050,7 @@ test('QA-06-INFINITE closes an exact packaged orthogonal sparse-chunk lifecycle'
     }).toEqual([32, 32]);
     const infiniteToggle = mapSettings.getByRole('radio', { name: 'Use sparse infinite map mode' });
     await expect(infiniteToggle).toHaveCount(1);
-    await infiniteToggle.check();
+    await infiniteToggle.click();
     await expect.poll(async () => {
       const document = await page.evaluate(async () => (await window.aidraw.bootstrap()).activeDocument);
       const map = document?.kind === 'pixel' ? document.pixelAssets[createdAssets.mapId] : undefined;
@@ -3002,9 +3059,9 @@ test('QA-06-INFINITE closes an exact packaged orthogonal sparse-chunk lifecycle'
     await expect(infiniteToggle).toBeChecked();
     await mapSettings.getByLabel('Map property name').fill('qa06-scenario');
     await mapSettings.getByLabel('Map property value').fill('orthogonal-sparse-chunks');
-    await mapSettings.locator('.tile-property-add').getByRole('button', { name: 'Add', exact: true }).click();
+    await mapSettings.getByRole('button', { name: 'Add map property qa06-scenario', exact: true }).click();
     await expect(mapSettings.getByText('Sparse infinite chunks', { exact: true })).toBeVisible();
-    await expect(mapSettings.getByText('qa06-scenario', { exact: true })).toBeVisible();
+    await expect(mapSettings.getByText('"qa06-scenario"', { exact: true })).toBeVisible();
     await page.screenshot({ path: settingsScreenshotPath });
 
     const credentials = await waitForMcpConnection(connectionPath);
@@ -3085,7 +3142,7 @@ test('QA-06-INFINITE closes an exact packaged orthogonal sparse-chunk lifecycle'
     const exportRequest = await call('document_export', { documentId: seededDocument.id, path: exportPath, format: 'tiled-json' });
     expect(exportRequest).toMatchObject({ status: 'waiting-for-user' });
     const exportJobId = String(exportRequest.jobId);
-    await page.getByTitle('Activity').click();
+    await page.getByRole('tab', { name: 'Activity', exact: true }).click();
     const approvalCard = page.locator('.approval-card').filter({ hasText: 'Export document' });
     await expect(approvalCard).toBeVisible();
     await expect(approvalCard.locator('.approval-heading small')).toHaveText('QA-06 infinite map agent requests approval');
@@ -3402,7 +3459,7 @@ test('QA-06-TILED-RT closes an exact packaged supported orthogonal TMJ companion
     await newDocumentDialog.getByLabel('Document height').fill('16');
     await newDocumentDialog.getByRole('button', { name: 'Create Pixel Project' }).click();
 
-    await page.getByTitle('Assets').click();
+    await page.getByRole('tab', { name: 'Assets', exact: true }).click();
     const assetsPanel = page.locator('.assets-panel');
     await expect(assetsPanel).toBeVisible();
     await assetsPanel.getByRole('button', { name: 'Tileset', exact: true }).click();
@@ -3497,16 +3554,16 @@ test('QA-06-TILED-RT closes an exact packaged supported orthogonal TMJ companion
     const firstSpritePng = firstSpriteObserved.png as { available: boolean; width: number; height: number; data: string };
     expect(firstSpritePng).toMatchObject({ available: true, width: 32, height: 16 });
 
-    await page.getByTitle('Assets').click();
+    await page.getByRole('tab', { name: 'Assets', exact: true }).click();
     await assetsPanel.locator('.pixel-asset-list button').filter({ hasText: 'Signed map' }).click();
-    await page.getByTitle('Layers').click();
+    await page.getByRole('tab', { name: 'Layers', exact: true }).click();
     const sourceMapSetupButton = page.locator('.map-setup-disclosure-trigger');
     if ((await sourceMapSetupButton.getAttribute('aria-expanded')) !== 'true') await sourceMapSetupButton.click();
     const sourceMapSettings = page.locator('.tilemap-settings');
     await expect(sourceMapSettings.getByText('Sparse infinite chunks', { exact: true })).toBeVisible();
-    await expect(sourceMapSettings.getByText('qa06-scenario', { exact: true })).toBeVisible();
-    await expect(sourceMapSettings.getByText('collisionSafe', { exact: true })).toBeVisible();
-    await expect(sourceMapSettings.getByText('seed', { exact: true })).toBeVisible();
+    await expect(sourceMapSettings.getByText('"qa06-scenario"', { exact: true })).toBeVisible();
+    await expect(sourceMapSettings.getByText('"collisionSafe"', { exact: true })).toBeVisible();
+    await expect(sourceMapSettings.getByText('"seed"', { exact: true })).toBeVisible();
     await page.screenshot({ path: authoredScreenshotPath });
 
     const findApprovalCard = (title: string, target: string) => page.locator('.approval-card').filter({ hasText: title }).filter({ has: page.locator('.approval-target code').filter({ hasText: target }) });
@@ -3522,7 +3579,7 @@ test('QA-06-TILED-RT closes an exact packaged supported orthogonal TMJ companion
     const firstExportRequest = await call('document_export', { documentId: firstDocument.id, path: firstExportPath, format: 'tiled-json' });
     expect(firstExportRequest).toMatchObject({ status: 'waiting-for-user' });
     const firstExportJobId = String(firstExportRequest.jobId);
-    await page.getByTitle('Activity').click();
+    await page.getByRole('tab', { name: 'Activity', exact: true }).click();
     const firstExportApproval = findApprovalCard('Export document', firstExportPath);
     await assertApproval(firstExportApproval, firstExportPath, 'tiled-json');
     await expect(firstExportApproval.locator('.approval-review')).toContainText('No existing target detected');
@@ -3585,19 +3642,19 @@ test('QA-06-TILED-RT closes an exact packaged supported orthogonal TMJ companion
     expect(importedSpritePng).toMatchObject({ available: true, width: 32, height: 16 });
     expect(pngPixels(Buffer.from(importedSpritePng.data, 'base64')).rgba.equals(firstPng.rgba)).toBe(true);
 
-    await page.getByTitle('Assets').click();
-    await page.getByTitle('Layers').click();
+    await page.getByRole('tab', { name: 'Assets', exact: true }).click();
+    await page.getByRole('tab', { name: 'Layers', exact: true }).click();
     const importedMapSetupButton = page.locator('.map-setup-disclosure-trigger');
     if ((await importedMapSetupButton.getAttribute('aria-expanded')) !== 'true') await importedMapSetupButton.click();
     const importedMapSettings = page.locator('.tilemap-settings');
     await expect(importedMapSettings.getByText('Sparse infinite chunks', { exact: true })).toBeVisible();
-    await expect(importedMapSettings.getByText('qa06-scenario', { exact: true })).toBeVisible();
+    await expect(importedMapSettings.getByText('"qa06-scenario"', { exact: true })).toBeVisible();
     await page.screenshot({ path: importedScreenshotPath });
 
     const secondExportRequest = await call('document_export', { documentId: importedDocument.id, path: secondExportPath, format: 'tiled-json' });
     expect(secondExportRequest).toMatchObject({ status: 'waiting-for-user' });
     const secondExportJobId = String(secondExportRequest.jobId);
-    await page.getByTitle('Activity').click();
+    await page.getByRole('tab', { name: 'Activity', exact: true }).click();
     const secondExportApproval = findApprovalCard('Export document', secondExportPath);
     await assertApproval(secondExportApproval, secondExportPath, 'tiled-json');
     await expect(secondExportApproval.locator('.approval-review')).toContainText('No existing target detected');
@@ -3622,8 +3679,8 @@ test('QA-06-TILED-RT closes an exact packaged supported orthogonal TMJ companion
     const afterReexport = await call('canvas_observe', { documentId: importedDocument.id });
     expect(afterReexport.document).toEqual(importedDocument);
     expect(await page.evaluate(async () => (await window.aidraw.bootstrap()).activeDocument)).toEqual(importedDocument);
-    await page.getByTitle('Assets').click();
-    await page.getByTitle('Layers').click();
+    await page.getByRole('tab', { name: 'Assets', exact: true }).click();
+    await page.getByRole('tab', { name: 'Layers', exact: true }).click();
     await page.screenshot({ path: reexportScreenshotPath });
 
     const finalJobs = await call('job_manage', { action: 'list' });
@@ -3849,7 +3906,7 @@ test('UX-11-BATCH closes an exact packaged multi-document Save All, export, and 
     expect(beforeSave.activeDocument).toEqual(beforeSaveObserved.find((document) => document.id === setup.foregroundDocumentId));
 
     let menu = await openAllTabs();
-    await menu.getByRole('button', { name: 'Save all', exact: true }).click();
+    await menu.getByRole('menuitem', { name: 'Save all', exact: true }).click();
     await waitForAuditEvents(1);
     const afterCancelledSave = await page.evaluate(async () => window.aidraw.bootstrap());
     expect(afterCancelledSave.activeDocumentId).toBe(setup.foregroundDocumentId);
@@ -3858,7 +3915,7 @@ test('UX-11-BATCH closes an exact packaged multi-document Save All, export, and 
     await expect(page.getByRole('dialog', { name: 'Save All complete' })).toHaveCount(0);
 
     menu = await openAllTabs();
-    await menu.getByRole('button', { name: 'Save all', exact: true }).click();
+    await menu.getByRole('menuitem', { name: 'Save all', exact: true }).click();
     const saveResultDialog = page.getByRole('dialog', { name: 'Save All complete' });
     await expect(saveResultDialog).toBeVisible();
     await waitForAuditEvents(2);
@@ -3888,7 +3945,7 @@ test('UX-11-BATCH closes an exact packaged multi-document Save All, export, and 
     expect(beforeExport.activeDocument).toEqual(beforeExportObserved.find((document) => document.id === setup.foregroundDocumentId));
 
     menu = await openAllTabs();
-    await menu.getByRole('button', { name: 'Batch export', exact: true }).click();
+    await menu.getByRole('menuitem', { name: 'Batch export', exact: true }).click();
     const exportDialog = page.getByRole('dialog', { name: 'Batch export' });
     await expect(exportDialog).toBeVisible();
     await exportDialog.getByRole('button', { name: 'Choose folder and export', exact: true }).click();
@@ -3925,7 +3982,7 @@ test('UX-11-BATCH closes an exact packaged multi-document Save All, export, and 
     await exportResultDialog.getByRole('button', { name: 'Done', exact: true }).click();
 
     menu = await openAllTabs();
-    await menu.getByRole('button', { name: 'Close all', exact: true }).click();
+    await menu.getByRole('menuitem', { name: 'Close all', exact: true }).click();
     await waitForAuditEvents(5);
     const afterCancelledClose = await page.evaluate(async () => window.aidraw.bootstrap());
     expect(afterCancelledClose.activeDocumentId).toBe(setup.foregroundDocumentId);
@@ -3933,7 +3990,7 @@ test('UX-11-BATCH closes an exact packaged multi-document Save All, export, and 
     await expect(page.getByRole('dialog', { name: 'Close All complete' })).toHaveCount(0);
 
     menu = await openAllTabs();
-    await menu.getByRole('button', { name: 'Close all', exact: true }).click();
+    await menu.getByRole('menuitem', { name: 'Close all', exact: true }).click();
     const closeResultDialog = page.getByRole('dialog', { name: 'Close All complete' });
     await expect(closeResultDialog).toBeVisible();
     await waitForAuditEvents(6);
@@ -4085,7 +4142,7 @@ test('keeps the authenticated engine working with no editor window and replays i
   await signalExistingEngine('--show');
   const reopened = await waitForRendererPage();
   await expect(reopened.getByText('Headless result', { exact: true }).first()).toBeVisible();
-  await reopened.getByTitle('Activity').click();
+  await reopened.getByRole('tab', { name: 'Activity', exact: true }).click();
   await expect(reopened.getByText('Closed-window agent edit', { exact: true })).toBeVisible();
   await expect(reopened.getByTitle('Replay durable agent trace')).toBeVisible();
   await reopened.close();

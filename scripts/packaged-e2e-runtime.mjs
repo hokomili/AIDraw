@@ -8,7 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 export const PACKAGED_E2E_SUITE_ENV = 'AIDRAW_E2E_SUITE';
 export const PACKAGED_E2E_RETAINED_TITLE_PATTERN = /(?:MCP-COLD-DISCOVERY|FND-02-PACKAGED-SECURITY|FND-05-(?:STALE|UNRESPONSIVE)-RENDERER|UX-01-(?:DENSITY|WINDOW-CHROME)|UX-09-TEXT-REFLOW|FND-09-(?!GENERATION(?:-RESULT|-NORMALIZATION)?\b))/;
-export const PACKAGED_E2E_SELF_CONTAINED_CASES = 27;
+export const PACKAGED_E2E_SELF_CONTAINED_CASES = 25;
 export const PACKAGED_E2E_RETAINED_CASES = 13;
 
 export const PACKAGED_E2E_RETAINED_PROFILE_ENVS = Object.freeze([
@@ -195,7 +195,8 @@ export async function waitForPackagedE2eReady({
       const value = await attempt();
       if (value !== undefined && value !== null && value !== false) return value;
       if (child.exitCode !== null || child.signalCode !== null) {
-        throw new Error(`${label} stopped because the packaged app exited with code ${String(child.exitCode)} and signal ${String(child.signalCode)}.`);
+        const diagnostic = String(stderr()).trim();
+        throw new Error(`${label} stopped because the packaged app exited with code ${String(child.exitCode)} and signal ${String(child.signalCode)}.${diagnostic ? `\n${diagnostic}` : ''}`);
       }
       await delay(intervalMs);
     }
