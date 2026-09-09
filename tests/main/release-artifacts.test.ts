@@ -38,7 +38,10 @@ describe('desktop release artifact preflight', () => {
     await writeFile(join(workspace, 'package.json'), '{"name":"aidraw","version":"0.1.0-alpha.1"}', 'utf8');
 
     const script = resolve('scripts/prepare-make-output.mjs');
-    const result = await execute(process.execPath, [script], { cwd: workspace });
+    const result = await execute(process.execPath, [script], {
+      cwd: workspace,
+      env: { ...process.env, AIDRAW_FORGE_OUT_DIR: join(workspace, 'out') },
+    });
 
     expect(result.stdout).toContain('release preflight: fresh package-generation root out');
     await expect(readFile(join(workspace, 'out'))).rejects.toMatchObject({ code: 'ENOENT' });
@@ -55,7 +58,10 @@ describe('desktop release artifact preflight', () => {
     await writeFile(join(workspace, 'out', 'AIDraw-win32-x64', 'keep.txt'), 'current package', 'utf8');
 
     const script = resolve('scripts/prepare-make-output.mjs');
-    await expect(execute(process.execPath, [script], { cwd: workspace })).rejects.toMatchObject({
+    await expect(execute(process.execPath, [script], {
+      cwd: workspace,
+      env: { ...process.env, AIDRAW_FORGE_OUT_DIR: join(workspace, 'out') },
+    })).rejects.toMatchObject({
       stderr: expect.stringContaining('Refusing to replace package-generation root out'),
     });
 

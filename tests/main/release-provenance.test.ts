@@ -48,6 +48,7 @@ async function releaseWorkspace() {
 async function capture(root: string) {
   return captureReleaseProvenance({
     cwd: root,
+    outDirectory: join(root, 'out'),
     repository: { commit, status: '' },
     runtime: { nodeVersion: 'v24.14.0', npmVersion: '11.7.0', platform: 'win32', architecture: 'x64', osRelease: 'test-os-a' },
     capturedAt: '2026-08-11T00:00:00.000Z',
@@ -82,6 +83,7 @@ describe('release provenance and reproducibility', () => {
     const root = await releaseWorkspace();
     await expect(captureReleaseProvenance({
       cwd: root,
+      outDirectory: join(root, 'out'),
       repository: { commit, status: ' M src/main.ts' },
       runtime: { nodeVersion: 'v24.14.0', npmVersion: '11.7.0', platform: 'win32', architecture: 'x64' },
     })).rejects.toThrow('requires a clean checkout');
