@@ -122,6 +122,17 @@ describe('dependency and packaged-runtime security policy', () => {
     expect(() => inspectDependencySecurityPolicy(forbidden)).toThrow(/appdmg/);
   });
 
+  it.each([
+    ['node_modules/fast-uri', '3.1.5', '3.1.7'],
+    ['node_modules/@xmldom/xmldom', '0.9.10', '0.9.12'],
+    ['node_modules/js-yaml', '4.3.1', '4.3.2'],
+  ])('rejects a regression to the vulnerable %s version', async (lockPath, vulnerableVersion, patchedVersion) => {
+    const inputs = await currentPolicyInputs();
+    const record = (inputs.lockJson.packages as Record<string, Record<string, unknown>>)[lockPath];
+    record.version = vulnerableVersion;
+    expect(() => inspectDependencySecurityPolicy(inputs)).toThrow(`${lockPath} version must be exactly ${patchedVersion}; found ${vulnerableVersion}.`);
+  });
+
   it('keeps Forge 7 on its positional-hook Packager and substitutes only the extractor API', async () => {
     const packagerPackage = JSON.parse(await readFile(resolve('node_modules/@electron/packager/package.json'), 'utf8')) as { version: string };
     const extractorPackage = JSON.parse(

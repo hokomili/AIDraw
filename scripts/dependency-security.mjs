@@ -31,8 +31,11 @@ export const REQUIRED_SECURITY_OVERRIDES = Object.freeze({
 const REQUIRED_LOCKED_PACKAGES = Object.freeze({
   'node_modules/@electron/packager': '18.4.4',
   'node_modules/@electron/rebuild': '4.2.0',
+  'node_modules/@xmldom/xmldom': '0.9.12',
   'node_modules/electron': EXPECTED_ELECTRON_VERSION,
   'node_modules/extract-zip': '1.0.5',
+  'node_modules/fast-uri': '3.1.7',
+  'node_modules/js-yaml': '4.3.2',
   'node_modules/tar': '7.5.22',
   'node_modules/tmp': '0.2.7',
 });

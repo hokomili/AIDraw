@@ -1,6 +1,28 @@
 # Dependency audit
 
-Current lock checkpoint: 2026-08-21. It removes the unused OpenAI SDK and the orphaned direct `jsonc-parser` entry, and builds on the historical 2026-08-13 live registry/advisory review and Apple Silicon package evidence under pinned Node 24.14.0 / npm 11.9.0. Project source, tests, and scripts have no `jsonc-parser` consumer. Both the manifest and lock root now contain exactly **24 runtime dependencies and 28 development dependencies**—52 direct entries total, with zero optional and zero peer entries. Registry-dependent results below remain that review's historical snapshot until the next authorized online audit.
+## September 9, 2026 security correction
+
+The user authorized fixing the three dependency packages carrying high-severity findings. The lockfile now selects the following compatible patches without changing direct dependencies or adding overrides:
+
+| Dependency | Previous | Corrected | Surface |
+| --- | --- | --- | --- |
+| `fast-uri` | 3.1.5 | 3.1.7 | Runtime URI handling through AJV. Version 3.1.7 includes the additional serialization/bracket fixes beyond 3.1.6. |
+| `@xmldom/xmldom` | 0.9.10 | 0.9.12 | Electron build tooling through `plist`. npm hoisted this record from the nested `plist` directory. |
+| `js-yaml` | 4.3.1 | 4.3.2 | Development tooling through ESLint. |
+
+Only these three package versions changed. npm also refreshed peer metadata. The manifest remains unchanged: 24 runtime and 28 development dependencies, zero optional/peer direct entries, and 699 external registry lock records. The existing security policy now requires the patched locked versions; three regression cases reject the preceding vulnerable versions.
+
+A fresh disposable worktree installed 641 packages with `npm ci`. On Node 24.19.0 / npm 11.6.2, the full security gate passes: both runtime and complete audits have zero high/critical findings, 639 external packages have verified registry signatures, and 140 have verified attestations. The runtime audit still reports one moderate entry in Hono; the complete audit reports three moderate entries in Hono, Vitest and `@vitest/mocker`. No advisory exemption or forced upgrade was used.
+
+Source verification passes portability, TypeScript, ESLint and 242 files / 1,762 tests against the freshly installed patched tree. Bounded dependency probes confirm rejection of malformed IPv6, XML-name injection and empty YAML merges exceeding their configured budget, with valid URI/XML/YAML and an Electron-style plist round trip preserved. These probes exercise the libraries directly; they do not establish prior exploitability through AIDraw's public interfaces.
+
+Evidence is retained under `test-results/dependency-security-20260909/`, including the lock delta, clean install, security/source verification, dependency probes and final file identities. This is source/dependency evidence. It does not rebuild or replace ModelBenchmark's retained r2 package, certify native distribution, or close the remaining independent release gates. The earlier correction/package evidence remains immutable.
+
+Advisory sources: [fast-uri 3.1.7 security release](https://github.com/fastify/fast-uri/releases/tag/v3.1.7), [xmldom memory exhaustion](https://github.com/advisories/GHSA-965w-775f-mr7g), [xmldom name injection](https://github.com/advisories/GHSA-3px3-54cx-rmw9), and [js-yaml empty-merge budget bypass](https://github.com/advisories/GHSA-2883-xcg3-v3hh).
+
+## Historical August checkpoint
+
+Historical lock checkpoint: 2026-08-21. It removes the unused OpenAI SDK and the orphaned direct `jsonc-parser` entry, and builds on the historical 2026-08-13 live registry/advisory review and Apple Silicon package evidence under pinned Node 24.14.0 / npm 11.9.0. Project source, tests, and scripts have no `jsonc-parser` consumer. Both the manifest and lock root now contain exactly **24 runtime dependencies and 28 development dependencies**—52 direct entries total, with zero optional and zero peer entries. Registry-dependent results below remain that review's historical snapshot until the next authorized online audit.
 
 ## Audited surfaces
 
