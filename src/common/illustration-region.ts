@@ -134,7 +134,10 @@ export function phaseExactIllustrationObjectIntersectsRegion(
  * render and raw-crop path.
  */
 export function illustrationRegionCanRenderLocally(document: IllustrationDocument, onlyLayerId?: string): boolean {
-  const objectChildren = new Set(Object.values(document.objects).flatMap((object) => object.type === 'group' ? object.childIds : []));
+  const objectChildren = new Set<string>();
+  for (const object of Object.values(document.objects)) {
+    if (object.type === 'group') for (const childId of object.childIds) objectChildren.add(childId);
+  }
   const visitedLayers = new Set<string>();
   const visitingLayers = new Set<string>();
   const visitedObjects = new Set<string>();
@@ -147,8 +150,10 @@ export function illustrationRegionCanRenderLocally(document: IllustrationDocumen
     if (graphVisitingObjects.has(objectId)) return false;
     const object = document.objects[objectId];
     if (!object) return false;
+    // Leaves cannot introduce a cycle; reserve graph bookkeeping for groups.
+    if (object.type !== 'group') return true;
     graphVisitingObjects.add(objectId);
-    const valid = object.type !== 'group' || object.childIds.every(visitObjectGraph);
+    const valid = object.childIds.every(visitObjectGraph);
     graphVisitingObjects.delete(objectId);
     if (valid) graphVisitedObjects.add(objectId);
     return valid;
@@ -159,10 +164,11 @@ export function illustrationRegionCanRenderLocally(document: IllustrationDocumen
     if (visitingObjects.has(objectId)) return false;
     const object = document.objects[objectId];
     if (!object) return false;
-    if (!object.visible) { visitedObjects.add(objectId); return true; }
+    if (!object.visible) return true;
     if (!objectCanRenderPhaseExactly(document, object)) return false;
+    if (object.type !== 'group') return true;
     visitingObjects.add(objectId);
-    const local = object.type !== 'group' || object.childIds.every(visitObject);
+    const local = object.childIds.every(visitObject);
     visitingObjects.delete(objectId);
     if (local) visitedObjects.add(objectId);
     return local;

@@ -212,7 +212,10 @@ async function renderIllustrationSurface(document: IllustrationDocument, region:
   context.translate(-region.x, -region.y);
   const paintTileImages = new Map<string, LoadedImage>();
   if (includeBackground && document.artboard.background) { context.fillStyle = document.artboard.background; context.fillRect(0, 0, document.artboard.width, document.artboard.height); }
-  const objectChildren = new Set(Object.values(document.objects).flatMap((object) => object.type === 'group' ? object.childIds : []));
+  const objectChildren = new Set<string>();
+  for (const object of Object.values(document.objects)) {
+    if (object.type === 'group') for (const childId of object.childIds) objectChildren.add(childId);
+  }
   const drawObjectEntry = async (
     target: Context,
     objectId: string,

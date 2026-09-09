@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -99,12 +99,24 @@ afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
 
+
+function decodedInvocation(args: readonly string[]): string {
+  expect(args).not.toContain('-Command');
+  expect(args.at(-2)).toBe('-EncodedCommand');
+  return Buffer.from(args.at(-1)!, 'base64').toString('utf16le');
+}
+
+function expectedInvocationSuffix(mode: string, directory: string): string {
+  return `} '${mode}' '${directory.replaceAll("'", "''")}'`;
+}
+
 describe('Windows private MCP runtime directory', () => {
   it('uses actual fixed-volume identity and checks every ancestor before and after exact leaf enforcement', async () => {
     const execute = vi.fn(async (_command: string, args: readonly string[]) => {
       expect(args).toContain('-NoProfile');
       expect(args).toContain('-NonInteractive');
-      const script = args[args.indexOf('-Command') + 1];
+      const script = decodedInvocation(args);
+      expect(script).toMatch(/^& \{\n/);
       expect(script).toContain('New-Object IO.DriveInfo($root)');
       expect(script).toContain('[IO.DriveType]::Fixed');
       expect(script).toContain('GetVolumeNameForVolumeMountPoint');
@@ -117,16 +129,35 @@ describe('Windows private MCP runtime directory', () => {
       expect(script).toContain('[Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles');
       expect(script).toContain('[Security.AccessControl.FileSystemRights]::WriteData');
       expect(script).toContain('rights = [long]$_.FileSystemRights');
-      expect(args.at(-1)).toBe('C:\\Users\\Artist\\AIDraw Profile\\runtime');
+      expect(script).toContain("'C:\\Users\\Artist\\AIDraw Profile\\runtime'");
       return { stdout: JSON.stringify(safeReport) };
     });
     const options = { platform: 'win32' as const, environment: { SystemRoot: 'C:\\Windows' }, execute };
     await ensureWindowsPrivateDirectory('C:\\Users\\Artist\\AIDraw Profile\\runtime', options);
     await validateWindowsPrivateDirectory('C:\\Users\\Artist\\AIDraw Profile\\runtime', options);
     expect(execute).toHaveBeenCalledTimes(2);
-    expect(execute.mock.calls[0][1].at(-2)).toBe('ensure');
-    expect(execute.mock.calls[1][1].at(-2)).toBe('validate');
+    expect(decodedInvocation(execute.mock.calls[0][1])).toContain(expectedInvocationSuffix('ensure', 'C:\\Users\\Artist\\AIDraw Profile\\runtime'));
+    expect(decodedInvocation(execute.mock.calls[1][1])).toContain(expectedInvocationSuffix('validate', 'C:\\Users\\Artist\\AIDraw Profile\\runtime'));
   });
+
+  it('keeps apostrophes, Unicode and PowerShell syntax literal in the invocation', async () => {
+    const directory = "C:\\Users\\Artist\\QA '畫圖' $(throw 'unexpected')\\runtime";
+    const execute = vi.fn(async (_command: string, args: readonly string[]) => {
+      const invocation = decodedInvocation(args);
+      expect(invocation).toContain(expectedInvocationSuffix('ensure', directory));
+      return { stdout: JSON.stringify(safeReport) };
+    });
+    await ensureWindowsPrivateDirectory(directory, { platform: 'win32', environment: { SystemRoot: 'C:\\Windows' }, execute });
+  });
+
+  it.skipIf(process.platform !== 'win32')('enforces and validates a real private directory through native PowerShell argument transport', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-native-acl-'));
+    temporaryDirectories.push(root);
+    const directory = join(root, "QA '畫圖' $(throw 'unexpected')");
+    await mkdir(directory);
+    await ensureWindowsPrivateDirectory(directory);
+    await validateWindowsPrivateDirectory(directory);
+  }, 30_000);
 
   it('accepts ordinary safe profile ancestry but rejects unsafe owner, replacement, and immediate-parent creation authority', () => {
     expect(assertWindowsPrivateDirectoryReport(safeReport)).toEqual(safeReport);
@@ -145,7 +176,7 @@ describe('Windows private MCP runtime directory', () => {
   it('rejects mapped-network and substituted drive reports through the production call boundary', async () => {
     const networkExecute = vi.fn(async (command: string, args: readonly string[]) => {
       expect(command).toContain('powershell.exe');
-      expect(args.at(-1)).toBe('Z:\\MappedShare\\Artist\\runtime');
+      expect(decodedInvocation(args)).toContain(expectedInvocationSuffix('validate', 'Z:\\MappedShare\\Artist\\runtime'));
       return { stdout: JSON.stringify({ ...safeReport, driveType: 'Network', volumeIdentity: '' }) };
     });
     await expect(validateWindowsPrivateDirectory('Z:\\MappedShare\\Artist\\runtime', {
@@ -154,11 +185,11 @@ describe('Windows private MCP runtime directory', () => {
       execute: networkExecute,
     })).rejects.toThrow('fixed local Windows volume');
     expect(networkExecute).toHaveBeenCalledOnce();
-    expect(networkExecute.mock.calls[0][1].at(-1)).toBe('Z:\\MappedShare\\Artist\\runtime');
+    expect(decodedInvocation(networkExecute.mock.calls[0][1])).toContain(expectedInvocationSuffix('validate', 'Z:\\MappedShare\\Artist\\runtime'));
 
     const aliasExecute = vi.fn(async (command: string, args: readonly string[]) => {
       expect(command).toContain('powershell.exe');
-      expect(args.at(-1)).toBe('S:\\Substituted\\Artist\\runtime');
+      expect(decodedInvocation(args)).toContain(expectedInvocationSuffix('validate', 'S:\\Substituted\\Artist\\runtime'));
       return { stdout: JSON.stringify({ ...safeReport, volumeIdentity: 'C:\\' }) };
     });
     await expect(validateWindowsPrivateDirectory('S:\\Substituted\\Artist\\runtime', {

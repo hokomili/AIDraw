@@ -42,9 +42,9 @@ export function resolvePackageOutputRoot(options = {}) {
   let parentInfo;
   let parentRealPath;
   try {
-    workspaceRealPath = realpathSync(workspace);
+    workspaceRealPath = realpathSync.native(workspace);
     parentInfo = lstatSync(dirname(selectedDirectory));
-    parentRealPath = realpathSync(dirname(selectedDirectory));
+    parentRealPath = realpathSync.native(dirname(selectedDirectory));
   } catch (error) {
     throw new Error('Package-generation output must have an existing directory parent inside the AIDraw workspace.', { cause: error });
   }

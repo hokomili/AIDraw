@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { join } from 'node:path';
 import { createCanvas, loadImage } from '@napi-rs/canvas';
 import {
   HUMAN_ACTOR,
@@ -451,7 +452,7 @@ describe('interchange exporters', () => {
     expect(xml.companions?.map((companion) => companion.name)).toEqual(['Terrain-Day.png', 'terrain-day (2).png']);
     expect(xml.data.toString()).toContain('<image source="Terrain-Day.png"');
     expect(xml.data.toString()).toContain('<image source="terrain-day (2).png"');
-    expect(plannedExportCompanionPaths(document, 'tiled-json', '/exports/map.tmj')).toEqual(['/exports/Terrain-Day.png', '/exports/terrain-day (2).png']);
+    expect(plannedExportCompanionPaths(document, 'tiled-json', '/exports/map.tmj')).toEqual([join('/exports', 'Terrain-Day.png'), join('/exports', 'terrain-day (2).png')]);
   });
 
   it('exports Tiled JSON/XML with first-GID ranges, chunks, and source artwork', async () => {

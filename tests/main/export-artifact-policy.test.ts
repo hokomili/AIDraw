@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { join } from 'node:path';
 import { createPixelDocument, createPixelSprite, createPixelTilemap, createPixelTileset } from '@aidraw/core';
 import {
   MAX_TILED_EXPORT_COMPANIONS,
@@ -39,7 +40,7 @@ describe('Tiled export artifact policy', () => {
     expect(planTiledExportCompanions(document)?.map((entry) => entry.name)).toEqual(names);
     expect(planTiledExportCompanions(document)?.map((entry) => entry.name)).toEqual(names);
     expect(expectedExportArtifactIdentity(document, 'tiled-json')?.companions?.map((entry) => entry.name)).toEqual(names);
-    expect(plannedExportCompanionPaths(document, 'tiled-json', '/exports/map.tmj')).toEqual(names.map((name) => `/exports/${name}`));
+    expect(plannedExportCompanionPaths(document, 'tiled-json', '/exports/map.tmj')).toEqual(names.map((name) => join('/exports', name)));
   });
 
   it('admits the exact import-compatible map-tileset boundary and retains the utility-member defense', () => {

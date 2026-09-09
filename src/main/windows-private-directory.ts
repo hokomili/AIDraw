@@ -356,9 +356,13 @@ async function runWindowsAcl(
     encoding: 'utf8',
     maxBuffer: MAX_ACL_REPORT_BYTES,
   }));
+  // -Command joins trailing argv into source instead of binding $args. Invoke
+  // a script block explicitly and transport it without Windows quoting loss.
+  const literal = (value: string) => `'${value.replaceAll("'", "''")}'`;
+  const invocation = `& {\n${WINDOWS_PRIVATE_DIRECTORY_SCRIPT}\n} ${literal(mode)} ${literal(normalizedDirectory)}`;
   const { stdout } = await executor(executable, [
     '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-    '-Command', WINDOWS_PRIVATE_DIRECTORY_SCRIPT, mode, normalizedDirectory,
+    '-EncodedCommand', Buffer.from(invocation, 'utf16le').toString('base64'),
   ]);
   const text = stdout.toString();
   if (Buffer.byteLength(text, 'utf8') > MAX_ACL_REPORT_BYTES) throw new Error('AIDraw rejected an oversized Windows ACL report.');

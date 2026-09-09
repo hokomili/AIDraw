@@ -173,16 +173,16 @@ async function maintainedVitestCommands(): Promise<VitestCommand[]> {
     ...await existingOptionalPath(resolve(root, '.codex', 'SECRETARY_HANDOFF.md')),
   ];
   for (const path of markdownPaths) {
-    commands.push(...markdownVitestCommands(relative(root, path), await readFile(path, 'utf8')));
+    commands.push(...markdownVitestCommands(relative(root, path).replaceAll('\\', '/'), await readFile(path, 'utf8')));
   }
   for (const path of await filesBelow(resolve(root, 'scripts'), /\.(?:mjs|cjs|js|mts|ts|ps1|sh|cmd)$/u)) {
     const script = await readFile(path, 'utf8');
     commands.push(.../\.(?:ps1|sh|cmd)$/u.test(path)
-      ? shellVitestCommands(relative(root, path), script)
-      : executableVitestCommands(relative(root, path), script));
+      ? shellVitestCommands(relative(root, path).replaceAll('\\', '/'), script)
+      : executableVitestCommands(relative(root, path).replaceAll('\\', '/'), script));
   }
   for (const path of await filesBelow(resolve(root, '.github'), /\.(?:yml|yaml)$/u)) {
-    commands.push(...shellVitestCommands(relative(root, path), await readFile(path, 'utf8')));
+    commands.push(...shellVitestCommands(relative(root, path).replaceAll('\\', '/'), await readFile(path, 'utf8')));
   }
   return commands;
 }

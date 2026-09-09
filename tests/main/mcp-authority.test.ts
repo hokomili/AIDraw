@@ -88,6 +88,7 @@ describe('ephemeral MCP authority', () => {
     const firstRuntime = new EngineRuntime({ userDataPath, appVersion: 'authority-test' });
     runtimes.push(firstRuntime);
     await firstRuntime.start();
+    expect(firstRuntime.service.getMcpInfo()).toMatchObject({ running: true, authority: 'ephemeral' });
     const firstConnection = firstRuntime.mcpHost.connection();
     expect(firstConnection.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/mcp$/);
     expect(firstConnection.token).toMatch(MCP_AUTHORITY_PATTERN);
