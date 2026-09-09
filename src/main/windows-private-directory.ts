@@ -19,6 +19,9 @@ const MAX_RULES_PER_COMPONENT = 64;
 
 const WINDOWS_PRIVATE_DIRECTORY_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
+# This helper uses only modules shipped with this Windows PowerShell runtime.
+# A Node child of pwsh can otherwise inherit incompatible PowerShell 7 modules.
+$env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules')
 $mode = $args[0]
 $path = [IO.Path]::GetFullPath($args[1])
 Add-Type -TypeDefinition @'

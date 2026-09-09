@@ -89,7 +89,7 @@ const config: ForgeConfig = {
     new SafeDmgMaker({ name: 'AIDraw' }, ['darwin']),
     new MakerDeb({
       options: {
-        name: 'aidraw', productName: 'AIDraw', genericName: 'Drawing Studio',
+        name: 'aidraw', productName: 'AIDraw', bin: 'AIDraw', genericName: 'Drawing Studio',
         description: 'Agent-native mixed-media and pixel-art studio',
         maintainer: 'AIDraw contributors', homepage: 'https://github.com/hokomili/AIDraw',
         categories: ['Graphics'], mimeType: ['application/x-aidraw'],
@@ -97,7 +97,7 @@ const config: ForgeConfig = {
     }, ['linux']),
     new MakerRpm({
       options: {
-        name: 'aidraw', productName: 'AIDraw', genericName: 'Drawing Studio',
+        name: 'aidraw', productName: 'AIDraw', bin: 'AIDraw', genericName: 'Drawing Studio',
         description: 'Agent-native mixed-media and pixel-art studio',
         license: 'MIT', homepage: 'https://github.com/hokomili/AIDraw',
         categories: ['Graphics'], mimeType: ['application/x-aidraw'],

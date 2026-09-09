@@ -1,6 +1,8 @@
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   assertWindowsPrivateDirectoryReport,
@@ -119,6 +121,7 @@ describe('Windows private MCP runtime directory', () => {
       const script = decodedInvocation(args);
       expect(script).toMatch(/^& \{\n/);
       expect(script).not.toMatch(/^[ \t]+-(?:or|and)\b/m);
+      expect(script.indexOf("$env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules')")).toBeLessThan(script.indexOf('Add-Type'));
       expect(script).toContain('New-Object IO.DriveInfo($root)');
       expect(script).toContain('[IO.DriveType]::Fixed');
       expect(script).toContain('GetVolumeNameForVolumeMountPoint');
@@ -163,6 +166,17 @@ describe('Windows private MCP runtime directory', () => {
     await mkdir(directory);
     await ensureWindowsPrivateDirectory(directory);
     await validateWindowsPrivateDirectory(directory);
+
+    // A caller's module search path must not select its Get-Acl implementation.
+    const moduleRoot = join(root, 'foreign-modules');
+    const moduleDirectory = join(moduleRoot, 'Microsoft.PowerShell.Security');
+    await mkdir(moduleDirectory, { recursive: true });
+    await writeFile(join(moduleDirectory, 'Microsoft.PowerShell.Security.psm1'), "throw 'Unexpected caller-owned security module import'", 'utf8');
+    const execute = async (command: string, args: readonly string[]) => promisify(execFile)(command, [...args], {
+      env: { ...process.env, PSModulePath: moduleRoot }, encoding: 'utf8', windowsHide: true,
+    });
+    await ensureWindowsPrivateDirectory(directory, { execute });
+    await validateWindowsPrivateDirectory(directory, { execute });
   }, 30_000);
 
   it('accepts ordinary safe profile ancestry but rejects unsafe owner, replacement, and immediate-parent creation authority', () => {

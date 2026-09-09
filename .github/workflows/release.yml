@@ -42,7 +42,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y fakeroot rpm
+          sudo apt-get install -y fakeroot rpm xvfb
       - run: npm run verify
         env:
           AIDRAW_GOLDEN_ARTIFACT_DIR: test-results/goldens
@@ -51,14 +51,15 @@ jobs:
       - run: npm run make
       - run: node scripts/verify-package.mjs
       - run: npm run test:e2e:only
-        if: runner.os == 'Windows'
+        if: runner.os != 'Linux'
         env:
           AIDRAW_E2E_LAUNCH_CONTEXT: unsandboxed-gui
+      - run: xvfb-run --auto-servernum npm run test:e2e:only
+        if: runner.os == 'Linux'
       - run: npm run checksums
         env:
           AIDRAW_CHECKSUM_FILE: SHA256SUMS-${{ matrix.platform }}.txt
       - run: npm run licenses
-        if: runner.os == 'Windows'
       - run: npm run provenance
         env:
           AIDRAW_RELEASE_PLATFORM: ${{ matrix.platform }}

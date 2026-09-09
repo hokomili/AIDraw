@@ -86,7 +86,7 @@ async function init(values) {
   const connection = await readMcpConnectionHandoff(connectionPath);
   const initialized = await initializeDirectMcp(connection, {
     capabilities: { resources: { subscribe: true } },
-    clientInfo: { name: 'AIDraw isolated Luna QA', version: '1.0' },
+    clientInfo: { name: 'AIDraw isolated QA', version: '1.0' },
     signal: globalThis.AbortSignal.timeout(30_000),
   });
   const state = {
