@@ -154,12 +154,19 @@ async function animationGolden(): Promise<string> {
   return rgbaHash(await renderIllustration(illustrationAtTime(document, 500)), 'illustrationAnimation');
 }
 
+// Exact native baselines, reviewed with raw RGBA and visual comparisons in
+// docs/RC1_PREPARATION_2026-09-09.md. Keep differences explicit, not tolerant.
+const appleSilicon = process.platform === 'darwin' && process.arch === 'arm64';
 const GOLDEN_HASHES = {
   illustrationComposite: '623e92216930debf11a73466c4d34b888bd9c3c1a57dfce863694784eafd3ac6',
-  illustrationStrokes: '28318fc1cc7f7442de0d63d098ca7d7f2579dad6363c07c925304638c32db284',
+  illustrationStrokes: appleSilicon
+    ? '28318fc1cc7f7442de0d63d098ca7d7f2579dad6363c07c925304638c32db284'
+    : '3701162bbee48591e8a5e98673e86725fa6ca26e91a087890f586c03d128a4c2',
   illustrationBoolean: 'e0309ac1a79db64b45171ceb4cc991b3612061d820edcd0d4f66099537a16083',
-  missingFontText: '09e38eae27a70c6787e2a4efe5f0a71f5a164868db054dbb9415b3ae9762dce8',
-  naturalBrushes: process.platform === 'darwin' && process.arch === 'arm64'
+  missingFontText: appleSilicon
+    ? '09e38eae27a70c6787e2a4efe5f0a71f5a164868db054dbb9415b3ae9762dce8'
+    : '63733c8fb10444bc63c521125eda96b2aa6077c43367597d8a10557d214dae7f',
+  naturalBrushes: appleSilicon
     ? '24d10ac55affbf827b91e0c7336cef4914c99cb08466a40b3c940551b4668bfa'
     : '1ec4a2d01fa69b61bc9f6706abee685b6e207cfa2a9bcffd33a1eea9569bae00',
   indexedSprite: '794c89da39db802f2586364a02711207ee3b3ac0463b9b1e03aa10b389711dc0',
