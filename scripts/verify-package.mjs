@@ -139,7 +139,7 @@ try {
     archiveFiles,
     firstPartyJavaScriptChunks,
   });
-  const utilityContainmentSubject = 'reviewed-main-worker-pair-20260903-macos-background-lifecycle';
+  const utilityContainmentSubject = 'reviewed-main-worker-pair-20260906-rendering-semantic-discovery';
   const packagedUtilityContainment = assertPackagedUtilityContainmentSources({
     mainSource,
     workerSource: utilityWorkerSource,

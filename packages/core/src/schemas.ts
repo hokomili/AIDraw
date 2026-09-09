@@ -1217,6 +1217,18 @@ const ActivityEntryInputSchema = z.object({
   details: z.string().optional(),
 }).strict();
 
+export const CANVAS_OPERATION_KINDS = Object.freeze([...OperationKindSchema.options]);
+
+/** Describe the same payload validator used by canonical transaction admission. */
+export function canvasOperationInputJsonSchema(kind: (typeof CANVAS_OPERATION_KINDS)[number]) {
+  const schema = z.toJSONSchema(TargetedOperationSchemas[kind], { io: 'input' });
+  return {
+    ...schema,
+    properties: { ...schema.properties, kind: { type: 'string' as const, const: kind } },
+    required: [...new Set(['kind', ...(schema.required ?? [])])],
+  };
+}
+
 export const CanvasOperationSchema = z
   .object({
     kind: OperationKindSchema,

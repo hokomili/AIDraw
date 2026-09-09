@@ -424,7 +424,7 @@ function applyOperation(
       if (!previousLayer || previousLayer.type !== 'vector' || !targetLayer || targetLayer.type !== 'vector') throw new Error('Object moves require vector layers');
       const dependent = Object.values(illustration.objects).find((entry) => entry.maskObjectId === object.id);
       if (dependent && previousLayer.id !== targetLayer.id) throw new TransactionConflictError({ operationIndex, entityId: object.id, message: `Clear the object mask from ${dependent.name} before moving ${object.name} to another layer`, retryable: true });
-      if (object.type === 'group' && object.childIds.length > 0 && previousLayer.id !== targetLayer.id) throw new Error('Move a non-empty object group within its current vector layer');
+      if (object.type === 'group' && object.childIds.length > 0 && previousLayer.id !== targetLayer.id) throw new TransactionConflictError({ operationIndex, entityId: object.id, message: 'Move a non-empty object group within its current vector layer; moving its subtree across layers is not supported.', retryable: false });
       const targetParent = operation.parentGroupId ? illustration.objects[operation.parentGroupId] : undefined;
       if (operation.parentGroupId && (!targetParent || targetParent.type !== 'group' || targetParent.layerId !== targetLayer.id)) throw new Error('Object parent must be a group in the target vector layer');
       if (targetParent && (targetParent.id === object.id || groupContainsObject(illustration, object.id, targetParent.id))) throw new Error('Object grouping cannot create a cycle');

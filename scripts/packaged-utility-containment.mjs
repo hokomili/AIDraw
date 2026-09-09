@@ -30,6 +30,17 @@ const UNINITIALIZED_VALUE = Object.freeze({ kind: 'uninitialized' });
 // The fixture identity keeps source tests portable and is never selected by
 // scripts/verify-package.mjs.
 const EXACT_EMITTED_SUBJECTS = Object.freeze({
+  // Independent ModelBenchmark maintainer review: docs/AUDIT_CORRECTION_2026-09-06.md.
+  'reviewed-main-worker-pair-20260906-rendering-semantic-discovery': Object.freeze({
+    main: Object.freeze({
+      bytes: 2_806_262,
+      sha256: '61003a7decca3afbf0f6fd327257f3b74dfb15457613e866751033a803511ae0',
+    }),
+    worker: Object.freeze({
+      bytes: 226_303,
+      sha256: 'ca233e58f2d89f0b26df91eab1ac3b7975cb795d2dd75dcceb864265b5f5aa96',
+    }),
+  }),
   'reviewed-main-worker-pair-20260903-macos-background-lifecycle': Object.freeze({
     main: Object.freeze({
       bytes: 2_794_954,

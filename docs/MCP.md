@@ -124,6 +124,16 @@ Pixel and tile changes can use exact coordinate arrays or compact row runs:
 
 `pixel.tilemap.region` uses the same shape with `gid`. One operation may address at most one million cells; overlapping runs are rejected. Runs drive sample-based playback, partial cancellation, lock conflicts, and exact per-actor undo without expanding the request. Tile GIDs retain Tiled horizontal, vertical, and diagonal flags.
 
+## Operation-specific public schemas
+
+Call `aidraw_help` with `{"topic":"operations"}` to obtain `operationKinds`, then request one kind, for example `{"topic":"operations","operation":"illustration.gradient.set"}`. The response includes that operation's input JSON Schema and runtime preconditions. Canonical descriptions come from the reducer's payload validators; semantic descriptions come from the same schemas used by their expansion. The existing eight structured branches remain in `canvas_apply` discovery; the remaining operation schemas are fetched on demand. Unknown and retired provenance-write kinds are refused.
+
+Use the returned required fields, enum values, units, limits, and observed IDs/revisions to construct `canvas_apply.operations`. JSON Schema validates the payload shape; graph relationships, native path geometry, image bounds, locks and resource budgets are still checked at execution. Copy complete observed records for replacements or a returned `canvas_observe.fragment` for fragment import.
+
+Gradient endpoints are **local object pixels**, before its transform. Linear endpoints describe a line; radial endpoints describe the center `(x1,y1)` and a point `(x2,y2)` on the radius. Both Canvas circles share the center. A radial gradient with zero radius uses its final stop's color and opacity, matching SVG.
+
+Boolean operands may be valid while their result is unsupported: all four modes must produce a nonempty path within the single-simple-subpath admission envelope. Holes/disjoint outlines can require compound geometry and are refused without changing the operands. Populated object groups may move within their current vector layer, but cannot move their subtree across layers. Single objects and empty groups retain their existing mask/reference-safe cross-layer move contract. These capability refusals are non-retryable with unchanged intent and direct the client to operation help.
+
 ## Semantic `canvas_apply` operations
 
 In addition to the canonical reducer kinds, MCP accepts these validated semantic requests and expands them into one or more canonical revision-checked operations:
@@ -145,7 +155,7 @@ In addition to the canonical reducer kinds, MCP accepts these validated semantic
 - `illustration.layer.filters.replace` for the same ordered adjustments on an isolated paint/vector/group-layer composite;
 - `illustration.object.mask.set` and `illustration.layer.mask.set` for reference-safe assignment or clearing of editable path/layer masks;
 - `illustration.animation.settings.replace`, `illustration.animation.keyframe.upsert`, and `illustration.animation.keyframe.delete` for revision-checked transform/opacity/visibility poses with linear, hold, or ease-in-out interpolation;
-- `illustration.path.boolean` for exact Paper.js union/subtract/intersect/exclude over transformed compatible shapes and paths;
+- `illustration.path.boolean` for Paper.js union/subtract/intersect/exclude over transformed compatible shapes and paths when the result fits the supported single-subpath editing envelope;
 - `pixel.frame.duplicate`, `pixel.frame.move`, `pixel.frame.cels.link`, `pixel.frame.duration.set`, animation-tag upsert/delete, and per-frame palette overrides;
 - `pixel.stamp.place` and `pixel.tile-stamp.place` for reusable exact indexed/GID stamp placement and optional transforms;
 - `pixel.map-object.upsert` and `pixel.map-object.delete` for typed rectangle/ellipse/polygon/polyline object-layer authoring in map-pixel coordinates;

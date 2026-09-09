@@ -1,4 +1,5 @@
 import paper from 'paper';
+import { inspectNativeEditableSvgPathData } from './path-conversion';
 import {
   HUMAN_ACTOR,
   IDENTITY_TRANSFORM,
@@ -10,6 +11,18 @@ import {
 } from '@aidraw/core';
 
 export type BooleanMode = 'union' | 'subtract' | 'intersect' | 'exclude';
+
+export class UnsupportedBooleanResultError extends Error {}
+
+/** Admission for an editable transaction, separate from the broader geometry kernel. */
+export function createEditableBooleanPath(first: IllustrationObject, second: IllustrationObject, mode: BooleanMode): PathObject {
+  const result = createBooleanPath(first, second, mode);
+  try { inspectNativeEditableSvgPathData(result.pathData); }
+  catch (error) {
+    throw new UnsupportedBooleanResultError(`This boolean result is outside AIDraw's supported single-subpath editing limits. Both operands are unchanged; do not retry unchanged geometry. ${error instanceof Error ? error.message : 'Unsupported result topology.'}`);
+  }
+  return result;
+}
 
 function shapeItem(scope: paper.PaperScope, object: ShapeObject): paper.PathItem | undefined {
   if (object.shape === 'line' || object.shape === 'arrow') return undefined;

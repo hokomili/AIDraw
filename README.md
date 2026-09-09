@@ -1,5 +1,7 @@
 # AIDraw
 
+Project workers: start with [the context-entry guidance](AGENTS.md) and the live shared AIDraw context before selecting work. The shared context maintains current intentions and jobs; the feature tracker maintains detailed implementation status.
+
 AIDraw is a desktop, agent-native drawing studio. Its authenticated local engine runs independently of the editor window: agents can continue editing crash-safe documents headlessly, and a human can open the UI at any time to collaborate or replay attributed work. Illustration and indexed pixel-art projects are first-class document modes; there is deliberately no built-in chat.
 
 > **Project status: active pre-v1 development.** The surface below is the target v1 scope, not a claim that every workflow is complete. The audited [feature tracker](docs/FEATURE_TRACKER.md) is the source of truth for what is verified, partial, scaffolded, or missing.
@@ -120,6 +122,9 @@ Package output roots are single-use generations. A clean checkout may use the de
 The current transitive advisory review and build-only exceptions are documented in [docs/DEPENDENCY_AUDIT.md](docs/DEPENDENCY_AUDIT.md).
 
 ## Connect an agent
+
+Use `aidraw_help` with `topic=operations` to list supported operation kinds, then add `operation` with an exact kind to obtain its input schema and preconditions. Gradient coordinates use local object pixels. Boolean results must fit the supported single-subpath envelope, and populated object groups stay in their existing vector layer; operation help explains these limits before authoring.
+
 
 Open Activity, choose Codex, Claude Code, OpenCode, Antigravity, or **Other MCP client**, then select **Show setup**. Add the displayed stdio configuration to that client once. It contains only the stable AIDraw launcher, `--mcp-bridge`, and an optional stable profile path—never a URL, bearer, password, account credential, or per-launch value. AIDraw does not inspect, back up, or edit the client configuration and does not enable login startup.
 

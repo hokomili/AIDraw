@@ -2023,6 +2023,80 @@ describe('authenticated stateful MCP contract', () => {
     current = documents.getDocument(document.id); if (!current || current.kind !== 'illustration') throw new Error('Expected illustration'); expect(current.layers[layer.id].filters).toEqual([{ type: 'contrast', value: 0.2 }, { type: 'blur', value: 1.5 }]);
   });
 
+  it('serves every operation schema on demand and admits a semantic edit constructed from public discovery', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-operation-help-')); temporaryPaths.push(root);
+    const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0'); documents.initialize();
+    const host = new McpHost(documents, '1.0.0', join(root, 'port.json')); hosts.push(host);
+    const started = await host.start('operation-help-token'); const client = await initializeClient(started.url, 'operation-help-token', 'operation-help-client');
+    let requestId = 2;
+    const call = (name: string, args: Record<string, unknown>) => callTool(started.url, client.headers, requestId++, name, args);
+    const catalog = await call('aidraw_help', { topic: 'operations' });
+    const kinds = catalog.operationKinds as string[];
+    expect(kinds.length).toBeGreaterThan(80);
+    expect(new Set(kinds).size).toBe(kinds.length);
+    expect(kinds).not.toContain('provenance.add'); expect(kinds).not.toContain('provenance.delete');
+    const hostSource = await readFile(join(process.cwd(), 'src/main/mcp-host.ts'), 'utf8');
+    const semanticDispatch = [...hostSource.matchAll(/value\.kind === '([^']+)'/g)].map((match) => match[1]).filter((kind) => !kind.startsWith('provenance.'));
+    expect(kinds).toEqual(expect.arrayContaining(semanticDispatch));
+    const validator = new Ajv2020({ strict: false, validateFormats: false });
+    const schemas = new Map<string, Record<string, unknown>>();
+    for (const kind of kinds) {
+      const help = await call('aidraw_help', { topic: 'operations', operation: kind });
+      const detail = help.operation as { kind: string; inputSchema: Record<string, unknown>; preconditions: string[] };
+      expect(detail.kind).toBe(kind); expect(detail.preconditions.length).toBeGreaterThan(0);
+      expect(() => validator.compile(detail.inputSchema)).not.toThrow(); schemas.set(kind, detail.inputSchema);
+    }
+    expect(await callToolMessage(started.url, client.headers, requestId++, 'aidraw_help', { topic: 'operations', operation: 'provenance.add' })).toMatchObject({ result: { isError: true } });
+    expect(await callToolMessage(started.url, client.headers, requestId++, 'aidraw_help', { topic: 'canvas', operation: 'illustration.gradient.set' })).toMatchObject({ result: { isError: true } });
+    const created = await call('document_manage', { action: 'new', kind: 'illustration', name: 'Discovered semantic gradient', width: 128, height: 128 });
+    const document = created.activeDocument as ReturnType<DocumentService['snapshot']>['activeDocument'];
+    if (!document || document.kind !== 'illustration') throw new Error('Expected illustration');
+    const layer = Object.values(document.layers).find((entry) => entry.type === 'vector')!;
+    const apply = (operations: unknown[], id: string) => call('canvas_apply', { documentId: document.id, clientOperationId: id, label: id, playback: { mode: 'instant', speed: 1 }, operations });
+    const add = { kind: 'illustration.object.add', object: { id: 'discovered-shape', name: 'Discovered shape', layerId: layer.id, type: 'shape', shape: 'ellipse', width: 120, height: 120 } };
+    expect(validator.validate(schemas.get(add.kind)!, add)).toBe(true);
+    expect(await apply([add], 'discovered-add')).toMatchObject({ status: 'committed' });
+    const observed = await call('canvas_observe', { documentId: document.id });
+    const current = observed.document as typeof document;
+    const gradientSchema = schemas.get('illustration.gradient.set')!;
+    const gradientHelp = await call('aidraw_help', { topic: 'operations', operation: 'illustration.gradient.set' });
+    expect(JSON.stringify(gradientHelp).length).toBeLessThan(4_096);
+    expect(gradientHelp.operationKinds).toBeUndefined();
+    const properties = gradientSchema.properties as Record<string, { const?: string; enum?: string[] }>;
+    const gradient = { kind: properties.kind.const, objectId: 'discovered-shape', gradientKind: properties.gradientKind.enum!.find((value) => value === 'radial-gradient'), x1: 60, y1: 60, x2: 120, y2: 60, stops: [{ offset: 0, color: '#ffffff' }, { offset: 1, color: '#000000' }], expectedRevision: current.objects['discovered-shape'].revision };
+    expect(validator.validate(gradientSchema, gradient)).toBe(true);
+    expect(await apply([gradient], 'discovered-gradient')).toMatchObject({ status: 'committed' });
+    const after = (await call('canvas_observe', { documentId: document.id })).document as typeof document;
+    expect(after.objects['discovered-shape']).toMatchObject({ fill: { kind: 'radial-gradient', x1: 60, y1: 60, x2: 120, y2: 60 } });
+    expect((await call('aidraw_help', { topic: 'operations', operation: 'illustration.gradient.set' })).operation).toMatchObject({ preconditions: expect.arrayContaining([expect.stringContaining('local object pixels')]) });
+  });
+
+  it('refuses compound boolean results and cross-layer group subtrees without mutation or retry advice', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidraw-capability-refusal-')); temporaryPaths.push(root);
+    const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0'); documents.initialize();
+    const host = new McpHost(documents, '1.0.0', join(root, 'port.json')); hosts.push(host);
+    const started = await host.start('capability-token'); const client = await initializeClient(started.url, 'capability-token', 'capability-client');
+    let requestId = 2;
+    const call = (name: string, args: Record<string, unknown>) => callTool(started.url, client.headers, requestId++, name, args);
+    const made = await call('document_manage', { action: 'new', kind: 'illustration', name: 'Capability boundaries' });
+    const document = made.activeDocument as ReturnType<DocumentService['snapshot']>['activeDocument'];
+    if (!document || document.kind !== 'illustration') throw new Error('Expected illustration');
+    const layer = Object.values(document.layers).find((entry) => entry.type === 'vector')!;
+    const apply = (operations: unknown[], id: string) => call('canvas_apply', { documentId: document.id, clientOperationId: id, label: id, playback: { mode: 'instant', speed: 1 }, operations });
+    expect(await apply(['a', 'b'].map((id, i) => ({ kind: 'illustration.object.add', object: { id, name: id, layerId: layer.id, type: 'shape', shape: 'rectangle', width: 40, height: 40, transform: { x: 10 + i * 20, y: 10 } } })), 'boolean-operands')).toMatchObject({ status: 'committed' });
+    const before = structuredClone(documents.getDocument(document.id));
+    const excluded = await apply([{ kind: 'illustration.path.boolean', objectIds: ['a', 'b'], expectedRevisions: { a: 0, b: 0 }, mode: 'exclude' }], 'unsupported-exclude');
+    expect(excluded).toMatchObject({ status: 'conflict', conflict: { retryable: false }, next: { tool: 'aidraw_help' } });
+    expect(String(excluded.message)).toContain('Both operands are unchanged');
+    expect(documents.getDocument(document.id)).toEqual(before);
+    expect(await apply([{ kind: 'illustration.object.add', object: { id: 'group', name: 'Populated group', layerId: layer.id, type: 'group', childIds: ['a', 'b'] } }, { kind: 'illustration.layer.add', layer: { ...layer, id: 'target-vector', name: 'Target', objectIds: [] } }], 'group-and-layer')).toMatchObject({ status: 'committed' });
+    const grouped = structuredClone(documents.getDocument(document.id));
+    if (!grouped || grouped.kind !== 'illustration') throw new Error('Expected illustration');
+    expect(await apply([{ kind: 'illustration.object.move', objectId: 'group', layerId: 'target-vector', expectedRevision: grouped.objects.group.revision }], 'unsupported-group-move')).toMatchObject({ status: 'conflict', conflict: { retryable: false }, next: { tool: 'aidraw_help' } });
+    expect(documents.getDocument(document.id)).toEqual(grouped);
+    expect(await apply([{ kind: 'illustration.object.move', objectId: 'a', layerId: 'target-vector', expectedRevision: grouped.objects.a.revision }], 'supported-single-move')).toMatchObject({ status: 'committed' });
+  });
+
   it('authors multi-stop gradients and exact styled text ranges through semantic operations', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aidraw-mcp-')); temporaryPaths.push(root); const documents = new DocumentService(new RecoveryJournal(join(root, 'journal')), '1.0.0'); documents.initialize(); const host = new McpHost(documents, '1.0.0', join(root, 'port.json')); hosts.push(host); const started = await host.start('styled-content-token'); const client = await initializeClient(started.url, 'styled-content-token', 'styled-content-client');
     const created = await callTool(started.url, client.headers, 2, 'document_manage', { action: 'new', kind: 'illustration', name: 'Styled content', width: 320, height: 180, background: null }); const document = created.activeDocument as ReturnType<DocumentService['snapshot']>['activeDocument']; if (!document || document.kind !== 'illustration') throw new Error('Expected illustration'); const layer = Object.values(document.layers).find((entry) => entry.type === 'vector')!; const timestamp = nowIso();

@@ -1,5 +1,7 @@
 # AIDraw testing workflow
 
+Current September 6 rendering/semantic correction evidence is recorded separately in [the exact correction checkpoint](AUDIT_CORRECTION_2026-09-06.md). Its source and local headless package checks do not promote the dated package results below.
+
 Last updated: 2026-09-03
 
 The current product has no native generative-content provider, provider credential, protected-secret store, or persistent MCP credential. Dated evidence below is intentionally retained as immutable test chronology; descriptions of the retired provider/secure-storage design document only what an older exact artifact exercised and are not current requirements, capabilities, or reusable test instructions.

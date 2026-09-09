@@ -2863,8 +2863,8 @@ function ObjectInspector({ document }: { document: IllustrationDocument }) {
       return;
     }
     try {
-      const { createBooleanPath } = await import("../common/path-boolean");
-      const result = createBooleanPath(objects[0], objects[1], mode);
+      const { createEditableBooleanPath } = await import("../common/path-boolean");
+      const result = createEditableBooleanPath(objects[0], objects[1], mode);
       const operations: CanvasOperation[] = objects.map((entry) => ({
         kind: "illustration.object.delete",
         objectId: entry.id,

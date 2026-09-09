@@ -26,7 +26,7 @@ import { useEditorStore } from '../store';
 import { collectReplayMasks } from '../replay';
 import { EntryDialog } from '../components/EditorDialog';
 import { PlaybackLanes } from '../components/PlaybackLanes';
-import { colorWithOpacity } from '../../common/color';
+import { canvasPaint } from '../../common/canvas-paint';
 import { applyCanvasStrokeStyle } from '../../common/canvas-stroke';
 import { paintTileCachePlan } from '../../common/paint-tile-cache';
 import { renderRasterStroke } from '../../common/raster-brush';
@@ -111,13 +111,7 @@ function objectBase(layerId: string, name: string) {
 }
 
 function paintValue(style: PaintStyle, context: CanvasRenderingContext2D): string | CanvasGradient | undefined {
-  if (style.kind === 'none') return undefined;
-  if (style.kind === 'solid') return style.color;
-  const gradient = style.kind === 'linear-gradient'
-    ? context.createLinearGradient(style.x1, style.y1, style.x2, style.y2)
-    : context.createRadialGradient(style.x1, style.y1, 0, style.x2, style.y2, Math.hypot(style.x2 - style.x1, style.y2 - style.y1));
-  for (const stop of style.stops) gradient.addColorStop(stop.offset, colorWithOpacity(stop.color, stop.opacity));
-  return gradient;
+  return canvasPaint(context, style);
 }
 
 function applyObjectTransform(context: CanvasRenderingContext2D, object: IllustrationObject): void {

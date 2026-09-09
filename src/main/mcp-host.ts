@@ -1,4 +1,6 @@
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
+import { CANVAS_OPERATION_KINDS, canvasOperationInputJsonSchema } from '@aidraw/core';
+import { operationPreconditions } from './mcp-operation-guide';
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from 'node:http';
 import { mkdir, open, readFile, realpath, rename, stat, unlink } from 'node:fs/promises';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
@@ -69,7 +71,7 @@ import { convertPathNode, deletePathNode, inspectPathNodes, insertPathNode, move
 import { transformPixelSelection } from '../common/pixel-selection';
 import { scaleGridSelection } from '../common/grid-selection';
 import { cropImageObject, cropImageToAspect, resetImageCrop } from '../common/image-crop';
-import { createBooleanPath } from '../common/path-boolean';
+import { createEditableBooleanPath, UnsupportedBooleanResultError } from '../common/path-boolean';
 import { convertPathArcsToCubics, inspectNativeEditableSvgPathData } from '../common/path-conversion';
 import { joinPathObjects } from '../common/path-topology';
 import { assignWangTile, deleteWangColor, deleteWangSet, upsertWangColor, upsertWangSet } from '../common/wang-authoring';
@@ -417,7 +419,7 @@ const PublicIllustrationObjectReplaceSchema = z.object({
 const PublicIllustrationObjectMoveInputShape = {
   kind: z.literal('illustration.object.move').describe('Move one existing illustration object.'),
   objectId: z.string().min(1),
-  layerId: z.string().min(1).describe('Destination vector-layer ID.'),
+  layerId: z.string().min(1).describe('Destination vector-layer ID. A populated object group must stay in its current layer; this operation does not move its subtree across layers.'),
   index: z.number().int().nonnegative().max(1_000_000).optional(),
   expectedRevision: z.number().int().nonnegative().describe('Exact object revision from canvas_observe.'),
 };
@@ -528,11 +530,80 @@ const PublicCanvasOperationInputSchema = z.union([
 }).describe('Canvas operation. Editable illustration objects, indexed-pixel regions, tilemap regions, and reusable tile stamps have complete machine-readable branches; other strict families are documented by aidraw_help topic=operations.');
 const DocumentFragmentImportSchema = z.object({
   kind: z.literal('document.fragment.import'),
-  fragment: z.unknown(),
+  fragment: z.unknown().describe('Copy the fragment returned by canvas_observe.fragment; it is validated as an illustration-objects or pixel-assets fragment.'),
   targetLayerId: z.string().min(1).optional(),
   offsetX: z.number().finite().min(-1_000_000).max(1_000_000).optional(),
   offsetY: z.number().finite().min(-1_000_000).max(1_000_000).optional(),
 }).strict();
+const SemanticOperationSchemas: Record<string, z.ZodType> = {
+  'pixel.image.quantize': AgentQuantizeOperationSchema,
+  'pixel.flood-fill': PixelFloodFillSchema,
+  'pixel.replace-color': PixelReplaceColorSchema,
+  'pixel.palette.replace-delete': PixelPaletteReplaceDeleteSchema,
+  'pixel.adjust-index': PixelAdjustIndexSchema,
+  'pixel.ordered-dither': PixelOrderedDitherSchema,
+  'pixel.bitmap-text.paint': PixelBitmapTextSchema,
+  'pixel.selection.transform': PixelSelectionTransformSchema,
+  'pixel.frame.duplicate': PixelFrameDuplicateSchema,
+  'pixel.frame.move': PixelFrameMoveSchema,
+  'pixel.frame.cels.link': PixelFrameCelsLinkSchema,
+  'pixel.frame.duration.set': PixelFrameDurationSchema,
+  'pixel.animation.tag.upsert': PixelAnimationTagUpsertSchema,
+  'pixel.animation.tag.delete': PixelAnimationTagDeleteSchema,
+  'pixel.palette-override.set': PixelPaletteOverrideSchema,
+  'pixel.project-link.embed': PixelProjectLinkEmbedSchema,
+  'pixel.project-links.pack': PixelProjectLinksPackSchema,
+  'pixel.image-collection.create': PixelImageCollectionCreateSchema,
+  'pixel.image-collection.append': PixelImageCollectionAppendSchema,
+  'pixel.image-collection.source.replace': PixelImageCollectionSourceReplaceSchema,
+  'pixel.image-collection.source.remove': PixelImageCollectionSourceRemoveSchema,
+  'pixel.image-collection.tile.move': PixelImageCollectionTileMoveSchema,
+  'pixel.tile-object.create': PixelTileObjectCreateSchema,
+  'pixel.stamp.place': PixelStampPlaceSchema,
+  'pixel.tile-stamp.place': PixelTileStampPlaceSchema,
+  'pixel.tile-variants.paint': PixelTileVariantsPaintSchema,
+  'pixel.wang-terrain.stroke': PixelWangTerrainStrokeSchema,
+  'pixel.map-object.upsert': PixelMapObjectUpsertSchema,
+  'pixel.map-object.delete': PixelMapObjectDeleteSchema,
+  'pixel.tileset-collision.upsert': PixelTilesetCollisionUpsertSchema,
+  'pixel.tileset-collision.delete': PixelTilesetCollisionDeleteSchema,
+  'pixel.wang-set.upsert': PixelWangSetUpsertSchema,
+  'pixel.wang-set.delete': PixelWangSetDeleteSchema,
+  'pixel.wang-color.upsert': PixelWangColorUpsertSchema,
+  'pixel.wang-color.delete': PixelWangColorDeleteSchema,
+  'pixel.wang-tile.assign': PixelWangTileAssignSchema,
+  'illustration.objects.align': IllustrationAlignSchema,
+  'illustration.objects.distribute': IllustrationDistributeSchema,
+  'illustration.path.boolean': IllustrationBooleanSchema,
+  'illustration.material.apply': IllustrationMaterialSchema,
+  'illustration.gradient.set': IllustrationGradientSetSchema,
+  'illustration.image.crop': IllustrationImageCropSchema,
+  'illustration.layer.filters.replace': IllustrationLayerFiltersSchema,
+  'illustration.object.mask.set': IllustrationObjectMaskSchema,
+  'illustration.layer.mask.set': IllustrationLayerMaskSchema,
+  'illustration.text.style': IllustrationTextStyleSchema,
+  'illustration.text.content.set': IllustrationTextContentSchema,
+  'illustration.path.node.move': IllustrationPathNodeMoveSchema,
+  'illustration.path.node.insert': IllustrationPathNodeInsertSchema,
+  'illustration.path.node.delete': IllustrationPathNodeDeleteSchema,
+  'illustration.path.node.convert': IllustrationPathNodeConvertSchema,
+  'illustration.path.closed.set': IllustrationPathClosedSchema,
+  'illustration.path.arcs.convert': IllustrationPathArcConvertSchema,
+  'illustration.path.split': IllustrationPathSplitSchema,
+  'illustration.path.join': IllustrationPathJoinSchema,
+  'illustration.image.filters.replace': IllustrationImageFiltersSchema,
+  'illustration.object.filters.replace': IllustrationImageFiltersSchema,
+  'document.fragment.import': DocumentFragmentImportSchema,
+};
+const PublicOperationKinds = [...new Set([...CANVAS_OPERATION_KINDS.filter((kind) => !kind.startsWith('provenance.')), ...Object.keys(SemanticOperationSchemas), ...Object.keys(PublicExactCanvasOperationSchemas)])].sort();
+
+function operationInputJsonSchema(kind: string) {
+  if (!PublicOperationKinds.includes(kind)) throw new Error(`Unknown public canvas operation: ${kind}. Read aidraw_help topic=operations for operationKinds.`);
+  const schema = PublicExactCanvasOperationSchemas[kind] ?? SemanticOperationSchemas[kind];
+  if (schema) return z.toJSONSchema(schema, { io: 'input' });
+  return canvasOperationInputJsonSchema(kind as (typeof CANVAS_OPERATION_KINDS)[number]);
+}
+
 const ObservationFragmentSchema = z.object({
   kind: z.enum(['illustration-objects', 'pixel-assets']),
   objectIds: z.array(z.string().min(1)).min(1).max(192).optional(),
@@ -647,7 +718,10 @@ const JobManageInputSchema = z.object({
 }).strict().superRefine((value, context) => enforceActionInput(value, context, JobManageStrictInputSchema))
   .describe('Flat discovery contract for client compatibility; the server still enforces the selected action’s strict field set.');
 
-const HelpInputSchema = z.object({ topic: z.enum(AIDRAW_HELP_TOPICS).default('quickstart').describe('Progressive help topic; start with quickstart.') }).strict();
+const HelpInputSchema = z.object({
+  topic: z.enum(AIDRAW_HELP_TOPICS).default('quickstart').describe('Progressive help topic; start with quickstart.'),
+  operation: z.string().min(1).max(200).optional().describe('operations topic only: exact kind from operationKinds. Returns its complete input JSON Schema and runtime preconditions.'),
+}).strict().refine((input) => input.operation === undefined || input.topic === 'operations', 'operation is valid only with topic=operations');
 const NextStepSchema = z.object({
   tool: z.string().min(1).describe('Tool to call next.'),
   arguments: z.record(z.string(), z.unknown()).optional().describe('Safe next-call arguments; placeholders are never secrets.'),
@@ -662,6 +736,8 @@ const HelpOutputSchema = z.object({
   relatedTools: z.array(z.string()),
   examples: z.array(z.object({ tool: z.string(), arguments: z.record(z.string(), z.unknown()), purpose: z.string() }).strict()),
   guideUri: z.literal(AIDRAW_GUIDE_URI),
+  operationKinds: z.array(z.string()).optional(),
+  operation: z.object({ kind: z.string(), inputSchema: z.record(z.string(), z.unknown()), preconditions: z.array(z.string()) }).strict().optional(),
 }).strict();
 const SessionManageOutputSchema = z.object({
   actor: z.record(z.string(), z.unknown()).describe('Authenticated server-owned actor identity used for presence and attribution.'),
@@ -740,7 +816,8 @@ function jobNextStep(job: AsyncJob): NextStep | undefined {
   return undefined;
 }
 
-function canvasRetryNextStep(status: string, documentId: string): NextStep | undefined {
+function canvasRetryNextStep(status: string, documentId: string, conflict?: { retryable?: boolean }): NextStep | undefined {
+  if (conflict?.retryable === false) return { tool: 'aidraw_help', arguments: { topic: 'operations' }, guidance: 'This refusal is not retryable with unchanged intent. Read the operation-specific schema and capability limits before choosing a different supported edit.' };
   if (!['conflict', 'busy', 'locked', 'cancelled'].includes(status)) return undefined;
   return {
     tool: 'canvas_observe',
@@ -1205,7 +1282,7 @@ async function expandAgentCanvasOperation(
   }
   if (value.kind === 'illustration.path.boolean') {
     const operation = IllustrationBooleanSchema.parse(value); const target = semanticObjects(document, operation.objectIds, operation.expectedRevisions); if (target.objects[0].layerId !== target.objects[1].layerId) throw new Error('Path boolean inputs must share one vector layer.');
-    const object = createBooleanPath(target.objects[0], target.objects[1], operation.mode);
+    const object = createEditableBooleanPath(target.objects[0], target.objects[1], operation.mode);
     return [
       { kind: 'illustration.object.delete', objectId: target.objects[0].id, expectedRevision: operation.expectedRevisions[target.objects[0].id] },
       { kind: 'illustration.object.delete', objectId: target.objects[1].id, expectedRevision: operation.expectedRevisions[target.objects[1].id] },
@@ -1865,7 +1942,19 @@ export class McpHost {
       inputSchema: HelpInputSchema,
       outputSchema: HelpOutputSchema,
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    }, async ({ topic }) => jsonText(aidrawHelp(topic)));
+    }, async ({ topic, operation }) => jsonText(operation ? {
+      topic,
+      summary: `Input contract and runtime preconditions for ${operation}.`,
+      operation: { kind: operation, inputSchema: operationInputJsonSchema(operation), preconditions: operationPreconditions(operation) },
+      steps: ['Observe the target, construct this operation from its schema, then submit it inside canvas_apply.operations.'],
+      invariants: ['Discovery grants no filesystem authority and does not bypass canonical validation or human locks.'],
+      relatedTools: ['canvas_observe', 'canvas_apply'],
+      examples: [],
+      guideUri: AIDRAW_GUIDE_URI,
+    } : {
+      ...aidrawHelp(topic),
+      ...(topic === 'operations' ? { operationKinds: PublicOperationKinds } : {}),
+    }));
 
     server.registerTool('session_manage', {
       title: 'Manage AIDraw agent session',
@@ -2087,8 +2176,12 @@ export class McpHost {
       catch (error) { result = { status: 'conflict' as const, message: error instanceof Error ? error.message : 'The batch transaction failed.' }; }
       if (batch && this.activeBatchTransactions.get(batch.jobId) === transaction.id) this.activeBatchTransactions.delete(batch.jobId);
       const batchJob = batch && batchDispatched ? await this.batches.finish(batch, transaction, result) : undefined;
-      return jsonText({ ...result, batch: batchJob ? { jobId: batchJob.id, progress: batchJob.progress, status: batchJob.status, ...(batchJob.result as Record<string, unknown>) } : undefined, next: canvasRetryNextStep(result.status, documentId) });
+      return jsonText({ ...result, batch: batchJob ? { jobId: batchJob.id, progress: batchJob.progress, status: batchJob.status, ...(batchJob.result as Record<string, unknown>) } : undefined, next: canvasRetryNextStep(result.status, documentId, result.conflict) });
       } catch (error) {
+        if (error instanceof UnsupportedBooleanResultError) {
+          const conflict = { retryable: false };
+          return jsonText({ status: 'conflict', message: error.message, conflict, next: canvasRetryNextStep('conflict', documentId, conflict) });
+        }
         if (!(error instanceof PublicMutationDocumentChangedError)) throw error;
         const response = { status: 'conflict' as const, message: error.message };
         return jsonText({ ...response, next: canvasRetryNextStep(response.status, documentId) });

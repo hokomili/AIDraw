@@ -20,6 +20,12 @@ The stdio bridge is a small protocol state machine rather than a transparent rep
 
 All committed changes are `CanvasTransaction` values over the application-owned model in `packages/core`. Every canonical operation kind has a bounded runtime payload schema. The reducer verifies document identity and expected entity revisions, produces inverse operations, increments revisions, and records attribution. Layer/object replacements may change entity content but not ordered layer, vector-layer, or object-group membership; those structural edits must use the dedicated add/move/delete operations so their exact positions remain invertible. File formats and renderer libraries are adapters; their private serialization never becomes the native model.
 
+## Operation discovery and paint geometry
+
+The existing `aidraw_help` tool exposes an operations catalog plus one on-demand input JSON Schema and runtime-precondition list per public kind. Canonical schemas are derived from the reducer payload validators; semantic schemas reference the validators used during expansion. This does not widen canonical admission or expose retired provenance-write operations. The public object and region/stamp branches remain in ordinary tool discovery.
+
+Both editor and headless Canvas painting use the shared `canvasPaint` adapter. A radial gradient uses one center and the distance to the radius endpoint, matching SVG import/export; a zero radius uses the final stop including alpha. Public/UI boolean authoring calls the shared editable-result admission wrapper before proposing delete/add operations. The broader Paper.js kernel remains usable for geometry and passive-render compatibility tests, but does not establish new compound-path mutation support. Populated-group cross-layer moves remain a non-retryable canonical refusal.
+
 ## Concurrency
 
 Pixel fill and replacement are one-shot previews. Pointer cancellation or Escape synchronously clears every transient gesture state, then best-effort releases each distinct lock that eventually resolves, and never invokes the commit path.

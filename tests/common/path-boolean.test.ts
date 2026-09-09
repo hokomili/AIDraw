@@ -6,7 +6,7 @@ import {
   type PathObject,
   type ShapeObject,
 } from '@aidraw/core';
-import { createBooleanPath, type BooleanMode } from '../../src/common/path-boolean';
+import { createBooleanPath, createEditableBooleanPath, UnsupportedBooleanResultError, type BooleanMode } from '../../src/common/path-boolean';
 
 const timestamp = '2026-08-12T00:00:00.000Z';
 
@@ -57,6 +57,15 @@ function measurePath(object: PathObject, points: Array<[number, number]> = []) {
 }
 
 describe('canonical illustration path booleans', () => {
+  it('distinguishes editable boolean admission from a compound kernel result', () => {
+    const a = rectangle('a', 10, 10); const b = rectangle('b', 30, 10);
+    const before = structuredClone([a, b]);
+    expect(createEditableBooleanPath(a, b, 'union').type).toBe('path');
+    expect(() => createEditableBooleanPath(a, b, 'exclude')).toThrow(UnsupportedBooleanResultError);
+    expect(() => createEditableBooleanPath(a, b, 'exclude')).toThrow(/Both operands are unchanged/);
+    expect([a, b]).toEqual(before);
+  });
+
   it('keeps all four transformed rectangle modes geometrically exact and inputs immutable', () => {
     const first = rectangle('first', 10, 10);
     const second = rectangle('second', 30, 10);

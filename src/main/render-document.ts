@@ -16,7 +16,7 @@ import {
 } from '@aidraw/core';
 import { BoundedResourceCache } from '../common/bounded-resource-cache';
 import { applyCanvasStrokeStyle } from '../common/canvas-stroke';
-import { colorWithOpacity } from '../common/color';
+import { canvasPaint } from '../common/canvas-paint';
 import { illustrationGroupRequiresIsolation, illustrationObjectHasTransform } from '../common/illustration-geometry';
 import { illustrationRegionBacking, illustrationRegionCanRenderLocally, paintTileCacheEntriesForIllustrationRegion, phaseExactIllustrationObjectIntersectsRegion, type IllustrationRasterRegion } from '../common/illustration-region';
 import { isometricCellRect, isometricObjectMatrix, isometricProjectionExtent } from '../common/isometric-projection';
@@ -103,13 +103,7 @@ function composite(mode: BlendMode): GlobalCompositeOperation {
 }
 
 function paint(context: Context, style: PaintStyle): string | ReturnType<Context['createLinearGradient']> | undefined {
-  if (style.kind === 'none') return undefined;
-  if (style.kind === 'solid') return style.color;
-  const gradient = style.kind === 'linear-gradient'
-    ? context.createLinearGradient(style.x1, style.y1, style.x2, style.y2)
-    : context.createRadialGradient(style.x1, style.y1, 0, style.x2, style.y2, Math.hypot(style.x2 - style.x1, style.y2 - style.y1));
-  for (const stop of style.stops) gradient.addColorStop(stop.offset, colorWithOpacity(stop.color, stop.opacity));
-  return gradient;
+  return canvasPaint(context, style);
 }
 
 function pressurePath(object: Extract<IllustrationObject, { type: 'vector-stroke' }>): Path2D {
