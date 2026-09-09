@@ -107,7 +107,8 @@ function decodedInvocation(args: readonly string[]): string {
 }
 
 function expectedInvocationSuffix(mode: string, directory: string): string {
-  return `} '${mode}' '${directory.replaceAll("'", "''")}'`;
+  const argument = (value: string) => `([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${Buffer.from(value, 'utf16le').toString('base64')}')))`;
+  return `} ${argument(mode)} ${argument(directory)}`;
 }
 
 describe('Windows private MCP runtime directory', () => {
@@ -117,6 +118,7 @@ describe('Windows private MCP runtime directory', () => {
       expect(args).toContain('-NonInteractive');
       const script = decodedInvocation(args);
       expect(script).toMatch(/^& \{\n/);
+      expect(script).not.toMatch(/^[ \t]+-(?:or|and)\b/m);
       expect(script).toContain('New-Object IO.DriveInfo($root)');
       expect(script).toContain('[IO.DriveType]::Fixed');
       expect(script).toContain('GetVolumeNameForVolumeMountPoint');
@@ -129,7 +131,7 @@ describe('Windows private MCP runtime directory', () => {
       expect(script).toContain('[Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles');
       expect(script).toContain('[Security.AccessControl.FileSystemRights]::WriteData');
       expect(script).toContain('rights = [long]$_.FileSystemRights');
-      expect(script).toContain("'C:\\Users\\Artist\\AIDraw Profile\\runtime'");
+      expect(script).not.toContain('C:\\Users\\Artist\\AIDraw Profile\\runtime');
       return { stdout: JSON.stringify(safeReport) };
     });
     const options = { platform: 'win32' as const, environment: { SystemRoot: 'C:\\Windows' }, execute };
@@ -140,11 +142,15 @@ describe('Windows private MCP runtime directory', () => {
     expect(decodedInvocation(execute.mock.calls[1][1])).toContain(expectedInvocationSuffix('validate', 'C:\\Users\\Artist\\AIDraw Profile\\runtime'));
   });
 
-  it('keeps apostrophes, Unicode and PowerShell syntax literal in the invocation', async () => {
-    const directory = "C:\\Users\\Artist\\QA '畫圖' $(throw 'unexpected')\\runtime";
+  it.each(["QA '畫圖' $(throw 'unexpected')", "Artist’s work", "QA ‘ $(throw 'unexpected') ’ “畫圖”"])(
+    'keeps the directory argument as data through PowerShell transport: %s', async (name) => {
+    const directory = `C:\\Users\\Artist\\${name}\\runtime`;
     const execute = vi.fn(async (_command: string, args: readonly string[]) => {
       const invocation = decodedInvocation(args);
       expect(invocation).toContain(expectedInvocationSuffix('ensure', directory));
+      expect(invocation).not.toContain(name);
+      const encodedArguments = [...invocation.matchAll(/FromBase64String\('([A-Za-z0-9+/=]+)'\)/g)];
+      expect(encodedArguments.map((match) => Buffer.from(match[1], 'base64').toString('utf16le'))).toEqual(['ensure', directory]);
       return { stdout: JSON.stringify(safeReport) };
     });
     await ensureWindowsPrivateDirectory(directory, { platform: 'win32', environment: { SystemRoot: 'C:\\Windows' }, execute });
@@ -153,7 +159,7 @@ describe('Windows private MCP runtime directory', () => {
   it.skipIf(process.platform !== 'win32')('enforces and validates a real private directory through native PowerShell argument transport', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aidraw-native-acl-'));
     temporaryDirectories.push(root);
-    const directory = join(root, "QA '畫圖' $(throw 'unexpected')");
+    const directory = join(root, "QA '畫圖' ‘ $(throw 'unexpected') ’ “畫圖”");
     await mkdir(directory);
     await ensureWindowsPrivateDirectory(directory);
     await validateWindowsPrivateDirectory(directory);

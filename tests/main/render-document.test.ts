@@ -823,12 +823,13 @@ describe('native document rendering', () => {
     expect(paint.tileCache?.strokeCount).toBe(2);
     expect(Object.keys(paint.tileAssetIds)).toEqual(['0,0', '2,0']);
     const cached = (await renderIllustration(document)).getContext('2d').getImageData(0, 0, 768, 128).data;
-    expect(Buffer.from(cached)).toEqual(Buffer.from(uncached));
+    // Compare exact bytes without a general deep-object walk over large buffers.
+    expect(Buffer.from(cached).equals(Buffer.from(uncached))).toBe(true);
 
     for (const background of [null, '#f8efe5']) for (const region of [{ x: 512, y: 0, width: 128, height: 96 }, { x: 540, y: 21, width: 110, height: 80 }]) {
       document.artboard.background = background;
       const full = await renderIllustration(document); const regional = await renderIllustrationRegion(document, region);
-      expect(Buffer.from(regional.getContext('2d').getImageData(0, 0, region.width, region.height).data), `${background ?? 'transparent'}/${region.x},${region.y}`).toEqual(Buffer.from(full.getContext('2d').getImageData(region.x, region.y, region.width, region.height).data));
+      expect(Buffer.from(regional.getContext('2d').getImageData(0, 0, region.width, region.height).data).equals(Buffer.from(full.getContext('2d').getImageData(region.x, region.y, region.width, region.height).data)), `${background ?? 'transparent'}/${region.x},${region.y}`).toBe(true);
       full.width = 1; full.height = 1; regional.width = 1; regional.height = 1;
     }
     document.artboard.background = null;
@@ -839,7 +840,7 @@ describe('native document rendering', () => {
     const cachedWithTail = (await renderIllustration(document)).getContext('2d').getImageData(0, 0, 768, 128).data;
     const sourceOnly = structuredClone(document); const sourcePaint = Object.values(sourceOnly.layers).find((entry) => entry.type === 'paint'); if (!sourcePaint || sourcePaint.type !== 'paint') throw new Error('Paint layer missing'); sourcePaint.tileAssetIds = {}; delete sourcePaint.tileCache;
     const fullStrokeRender = (await renderIllustration(sourceOnly)).getContext('2d').getImageData(0, 0, 768, 128).data;
-    expect(Buffer.from(cachedWithTail)).toEqual(Buffer.from(fullStrokeRender));
+    expect(Buffer.from(cachedWithTail).equals(Buffer.from(fullStrokeRender))).toBe(true);
 
     expect(materializePaintTiles(document)).toEqual({ layers: 1, renderedTiles: 1, reusedTiles: 1 });
     expect(paint.tileCache?.strokeCount).toBe(3);
@@ -847,7 +848,7 @@ describe('native document rendering', () => {
     expect(paint.tileAssetIds['2,0']).toBe(originalRightAssetId);
     expect(document.assets[originalLeftAssetId]).toBeUndefined();
     const incrementallyMaterialized = (await renderIllustration(document)).getContext('2d').getImageData(0, 0, 768, 128).data;
-    expect(Buffer.from(incrementallyMaterialized)).toEqual(Buffer.from(fullStrokeRender));
+    expect(Buffer.from(incrementallyMaterialized).equals(Buffer.from(fullStrokeRender))).toBe(true);
   });
 
   it('applies non-destructive blur to vector objects', async () => {

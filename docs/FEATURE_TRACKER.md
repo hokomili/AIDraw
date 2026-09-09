@@ -205,7 +205,7 @@ Priorities are `P0` release blocker, `P1` core v1 workflow, `P2` completeness/fi
 | Deferred | 1 |
 | P0 / P1 / P2 | 59 / 74 / 13 |
 
-Requirements added during hands-on testing and competitiveness review are included explicitly: autonomous headless work and trace replay (FND-04, AGT-10), model/effort attribution (AGT-16), the observed stale-instance and control-density defects (FND-05, UX-01), professional input/workspace acceptance (UX-08/09/10), external technical-artist task benchmarking (QA-12), the game-production agent moat (AGT-17), natural-media and custom brushes (ILL-07/08), polished material construction (ILL-19), illustration animation (ILL-21), presentation upscaling and CLI export (PIX-15), large-run save/export/close UX (UX-11), and independent three-level Luna/high MCP plus Computer Use QA (QA-09/10).
+Requirements added during hands-on testing and competitiveness review are included explicitly: autonomous headless work and trace replay (FND-04, AGT-10), model/effort attribution (AGT-16), the observed stale-instance and control-density defects (FND-05, UX-01), professional input/workspace acceptance (UX-08/09/10), external technical-artist task benchmarking (QA-12), the game-production agent moat (AGT-17), natural-media and custom brushes (ILL-07/08), polished material construction (ILL-19), illustration animation (ILL-21), presentation upscaling and CLI export (PIX-15), large-run save/export/close UX (UX-11), and independent three-level Astra/high MCP plus Computer Use QA (QA-09/10).
 
 ## 1. Foundation, process model, and storage
 

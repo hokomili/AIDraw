@@ -123,12 +123,12 @@ function Assert-AIDrawExactLeaf([string]$candidate) {
   $seen = @{}
   foreach ($rule in $rules) {
     $sid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
-    if (($sid -ne $current.Value -and $sid -ne $system.Value) -or $seen.ContainsKey($sid)
-      -or $rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow
-      -or [long]$rule.FileSystemRights -ne [long][Security.AccessControl.FileSystemRights]::FullControl
-      -or $rule.IsInherited
-      -or [int]$rule.InheritanceFlags -ne ([int][Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [int][Security.AccessControl.InheritanceFlags]::ObjectInherit)
-      -or $rule.PropagationFlags -ne [Security.AccessControl.PropagationFlags]::None) {
+    if (($sid -ne $current.Value -and $sid -ne $system.Value) -or $seen.ContainsKey($sid) -or
+      $rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
+      [long]$rule.FileSystemRights -ne [long][Security.AccessControl.FileSystemRights]::FullControl -or
+      $rule.IsInherited -or
+      [int]$rule.InheritanceFlags -ne ([int][Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [int][Security.AccessControl.InheritanceFlags]::ObjectInherit) -or
+      $rule.PropagationFlags -ne [Security.AccessControl.PropagationFlags]::None) {
       throw 'AIDraw runtime directory has an unsafe Windows ACL rule.'
     }
     $seen[$sid] = $true
@@ -358,8 +358,10 @@ async function runWindowsAcl(
   }));
   // -Command joins trailing argv into source instead of binding $args. Invoke
   // a script block explicitly and transport it without Windows quoting loss.
-  const literal = (value: string) => `'${value.replaceAll("'", "''")}'`;
-  const invocation = `& {\n${WINDOWS_PRIVATE_DIRECTORY_SCRIPT}\n} ${literal(mode)} ${literal(normalizedDirectory)}`;
+  // Keep path data out of source: PowerShell recognizes smart quotes as string
+  // delimiters too. Base64's alphabet cannot terminate the fixed literal below.
+  const argument = (value: string) => `([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${Buffer.from(value, 'utf16le').toString('base64')}')))`;
+  const invocation = `& {\n${WINDOWS_PRIVATE_DIRECTORY_SCRIPT}\n} ${argument(mode)} ${argument(normalizedDirectory)}`;
   const { stdout } = await executor(executable, [
     '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
     '-EncodedCommand', Buffer.from(invocation, 'utf16le').toString('base64'),
