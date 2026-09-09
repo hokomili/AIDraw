@@ -31,31 +31,54 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - name: Place Windows candidate beneath its private user profile
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $AidrawPrivateWorkspace = Join-Path $env:LOCALAPPDATA "AIDraw-RC-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          if (Test-Path -LiteralPath $AidrawPrivateWorkspace) { throw 'The single-use private candidate workspace already exists.' }
+          git clone --no-hardlinks --no-checkout -- "$env:GITHUB_WORKSPACE" "$AidrawPrivateWorkspace"
+          if ($LASTEXITCODE -ne 0) { throw 'Could not prepare the private candidate checkout.' }
+          git -C "$AidrawPrivateWorkspace" checkout --detach "$env:GITHUB_SHA"
+          if ($LASTEXITCODE -ne 0) { throw 'Could not select the exact candidate commit.' }
+          $AidrawActualCommit = git -C "$AidrawPrivateWorkspace" rev-parse HEAD
+          if ($AidrawActualCommit -ne $env:GITHUB_SHA) { throw 'The private candidate commit does not match the workflow subject.' }
+          "AIDRAW_CANDIDATE_WORKSPACE=$AidrawPrivateWorkspace" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
           cache: npm
       - name: Verify native release host identity
+        working-directory: ${{ env.AIDRAW_CANDIDATE_WORKSPACE || github.workspace }}
         run: node scripts/check-portability.mjs --expect-platform=${{ matrix.node-platform }} --expect-arch=${{ matrix.node-arch }}
-      - run: npm ci --cache .npm-cache
+      - working-directory: ${{ env.AIDRAW_CANDIDATE_WORKSPACE || github.workspace }}
+        run: npm ci --cache .npm-cache
       - name: Install Linux packaging tools
         if: runner.os == 'Linux'
+        working-directory: ${{ env.AIDRAW_CANDIDATE_WORKSPACE || github.workspace }}
         run: |
           sudo apt-get update
           sudo apt-get install -y fakeroot rpm xvfb
-      - run: npm run verify
+      - working-directory: ${{ env.AIDRAW_CANDIDATE_WORKSPACE || github.workspace }}
+        run: npm run verify
         env:
           AIDRAW_GOLDEN_ARTIFACT_DIR: test-results/goldens
-      - run: npm run test:performance
-      - run: npm run security:verify
-      - run: npm run make
-      - run: node scripts/verify-package.mjs
-      - run: npm run test:e2e:only
+      - working-directory: ${{ env.AIDRAW_CANDIDATE_WORKSPACE || github.workspace }}
+        run: npm run test:performance
+      - working-directory: ${{ env.AIDRAW_CANDIDATE_WORKSPACE || github.workspace }}
+        run: npm run security:verify
+      - working-directory: ${{ env.AIDRAW_CANDIDATE_WORKSPACE || github.workspace }}
+        run: npm run make
+      - working-directory: ${{ env.AIDRAW_CANDIDATE_WORKSPACE || github.workspace }}
+        run: node scripts/verify-package.mjs
+      - working-directory: ${{ env.AIDRAW_CANDIDATE_WORKSPACE || github.workspace }}
+        run: npm run test:e2e:only
         if: runner.os != 'Linux'
         env:
           AIDRAW_E2E_LAUNCH_CONTEXT: unsandboxed-gui
       - name: Configure the native Linux sandbox helper
         if: runner.os == 'Linux'
+        working-directory: ${{ env.AIDRAW_CANDIDATE_WORKSPACE || github.workspace }}
         run: |
           test -f out/AIDraw-linux-x64/chrome-sandbox
           test ! -L out/AIDraw-linux-x64/chrome-sandbox
@@ -64,13 +87,17 @@ jobs:
           sudo chmod 4755 out/AIDraw-linux-x64/chrome-sandbox
           sha256sum --check /tmp/aidraw-sandbox.sha256
           test "$(stat -c '%u:%g:%a' out/AIDraw-linux-x64/chrome-sandbox)" = '0:0:4755'
-      - run: xvfb-run --auto-servernum npm run test:e2e:only
+      - working-directory: ${{ env.AIDRAW_CANDIDATE_WORKSPACE || github.workspace }}
+        run: xvfb-run --auto-servernum npm run test:e2e:only
         if: runner.os == 'Linux'
-      - run: npm run checksums
+      - working-directory: ${{ env.AIDRAW_CANDIDATE_WORKSPACE || github.workspace }}
+        run: npm run checksums
         env:
           AIDRAW_CHECKSUM_FILE: SHA256SUMS-${{ matrix.platform }}.txt
-      - run: npm run licenses
-      - run: npm run provenance
+      - working-directory: ${{ env.AIDRAW_CANDIDATE_WORKSPACE || github.workspace }}
+        run: npm run licenses
+      - working-directory: ${{ env.AIDRAW_CANDIDATE_WORKSPACE || github.workspace }}
+        run: npm run provenance
         env:
           AIDRAW_RELEASE_PLATFORM: ${{ matrix.platform }}
       - name: Retain candidate package review evidence
@@ -79,22 +106,25 @@ jobs:
         with:
           name: package-review-${{ matrix.platform }}
           path: |
-            out/**/app.asar
-            out/**/.aidraw-package-build-input.json
-            .vite/build/**/*.js
-            test-results/goldens/**/*
-            test-results/performance-gate.json
+            ${{ env.AIDRAW_CANDIDATE_WORKSPACE || github.workspace }}/out/**/app.asar
+            ${{ env.AIDRAW_CANDIDATE_WORKSPACE || github.workspace }}/out/**/.aidraw-package-build-input.json
+            ${{ env.AIDRAW_CANDIDATE_WORKSPACE || github.workspace }}/.vite/build/**/*.js
+            ${{ env.AIDRAW_CANDIDATE_WORKSPACE || github.workspace }}/test-results/goldens/**/*
+            ${{ env.AIDRAW_CANDIDATE_WORKSPACE || github.workspace }}/test-results/performance-gate.json
+            ${{ env.AIDRAW_CANDIDATE_WORKSPACE || github.workspace }}/test-results/playwright/**/*.png
+            ${{ env.AIDRAW_CANDIDATE_WORKSPACE || github.workspace }}/test-results/playwright/**/error-context.md
+            ${{ env.AIDRAW_CANDIDATE_WORKSPACE || github.workspace }}/test-results/retained/**/*.png
           include-hidden-files: true
           if-no-files-found: warn
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: desktop-${{ matrix.platform }}
           path: |
-            out/make/**/*
-            out/SHA256SUMS-${{ matrix.platform }}.txt
-            out/RELEASE_PROVENANCE-${{ matrix.platform }}.json
-            out/THIRD_PARTY_LICENSES.json
-            out/THIRD_PARTY_LICENSES.md
+            ${{ env.AIDRAW_CANDIDATE_WORKSPACE || github.workspace }}/out/make/**/*
+            ${{ env.AIDRAW_CANDIDATE_WORKSPACE || github.workspace }}/out/SHA256SUMS-${{ matrix.platform }}.txt
+            ${{ env.AIDRAW_CANDIDATE_WORKSPACE || github.workspace }}/out/RELEASE_PROVENANCE-${{ matrix.platform }}.json
+            ${{ env.AIDRAW_CANDIDATE_WORKSPACE || github.workspace }}/out/THIRD_PARTY_LICENSES.json
+            ${{ env.AIDRAW_CANDIDATE_WORKSPACE || github.workspace }}/out/THIRD_PARTY_LICENSES.md
           if-no-files-found: error
 
   release:

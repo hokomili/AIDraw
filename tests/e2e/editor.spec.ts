@@ -1248,6 +1248,7 @@ test('keeps four authenticated document playback lanes isolated and fair while a
   preserveProfileAfterTest = true;
   let stoppedGracefully = false;
   let regressionFailure: Error | undefined;
+  let diagnosticStage = 'launch';
 
   try {
     const page = await launch(isolatedProfile, { extraArguments: [`--write-mcp-connection=${connectionPath}`] });
@@ -1268,6 +1269,7 @@ test('keeps four authenticated document playback lanes isolated and fair while a
         objectIds: Object.keys(document.objects),
       };
     });
+    diagnosticStage = 'document setup';
     const credentials = await page.evaluate(async () => window.aidraw.getMcpConnection());
     if (!credentials.url || !credentials.token) throw new Error('The isolated AGT-06 MCP endpoint is unavailable.');
 
@@ -1304,12 +1306,32 @@ test('keeps four authenticated document playback lanes isolated and fair while a
         });
       });
     });
+    diagnosticStage = 'client initialization';
     const clients = await Promise.all(agentSpecs.map((agent, index) => connectMcpTestClient(credentials.url!, credentials.token!, `agt06-${agent.suffix}`, {
       name: agent.name,
       color: agent.color,
       documentId: laneDocuments[index].documentId,
     })));
     expect(new Set(clients.map((client) => client.actor.id)).size).toBe(4);
+
+    // Prepare geometry and the baseline before starting the bounded eight-second playback.
+    const canvas = page.getByRole('application', { name: /Illustration canvas/ });
+    await page.getByTitle('Pressure pen').click();
+    const canvasBounds = await canvas.boundingBox();
+    if (!canvasBounds) throw new Error('The AGT-06 illustration canvas has no bounds.');
+    const scale = Math.min((canvasBounds.width - 128) / initial.artboard.width, (canvasBounds.height - 112) / initial.artboard.height);
+    const offsetX = (canvasBounds.width - initial.artboard.width * scale) / 2;
+    const offsetY = (canvasBounds.height - initial.artboard.height * scale) / 2;
+    const screenPoint = (x: number, y: number) => ({ x: canvasBounds.x + offsetX + x * scale, y: canvasBounds.y + offsetY + y * scale });
+    const humanStart = screenPoint(520, 860);
+    const humanEnd = screenPoint(1_280, 940);
+    const humanClip = {
+      x: Math.floor(Math.min(humanStart.x, humanEnd.x) - 22),
+      y: Math.floor(Math.min(humanStart.y, humanEnd.y) - 22),
+      width: Math.ceil(Math.abs(humanEnd.x - humanStart.x) + 44),
+      height: Math.ceil(Math.abs(humanEnd.y - humanStart.y) + 44),
+    };
+    const humanBefore = await page.screenshot({ clip: humanClip });
 
     const timestamp = new Date().toISOString();
     const startAgent = (index: number) => {
@@ -1347,6 +1369,7 @@ test('keeps four authenticated document playback lanes isolated and fair while a
         playback: { mode: 'animated', speed: 0.25 },
       });
     };
+    diagnosticStage = 'playback dispatch';
     const firstAgentRequest = startAgent(0);
     await expect.poll(() => latestLanes.get(clients[0].actor.id)?.status).toBe('playing');
     const sameDocumentBusy = await callMcpTool(credentials.url, clients[1].headers, 2, 'canvas_apply', {
@@ -1362,23 +1385,15 @@ test('keeps four authenticated document playback lanes isolated and fair while a
     const lanePanel = page.getByRole('region', { name: 'Active agent playback lanes' });
     const laneRows = lanePanel.locator('.playback-lane');
     await expect.poll(() => [...latestLanes.values()].filter((entry) => entry.status === 'playing').length).toBe(4);
+    diagnosticStage = 'global lane observation';
     const laneSnapshot = [...latestLanes.values()].sort((left, right) => left.lane - right.lane);
     expect(laneSnapshot.map((entry) => entry.lane)).toEqual([0, 1, 2, 3]);
     expect(new Set(laneSnapshot.map((entry) => entry.documentId))).toEqual(new Set(laneDocuments.map((entry) => entry.documentId)));
     expect(new Set(laneSnapshot.map((entry) => entry.name))).toEqual(new Set(agentSpecs.map((entry) => entry.name)));
     expect(new Set(laneSnapshot.map((entry) => entry.color))).toEqual(new Set(agentSpecs.map((entry) => entry.color)));
     expect(new Set(laneSnapshot.map((entry) => entry.label))).toEqual(new Set(agentSpecs.map((entry) => `AGT-06 lane ${entry.suffix.toUpperCase()}`)));
-    for (let index = 0; index < 4; index += 1) {
-      await page.evaluate((documentId) => window.aidraw.activateDocument(documentId), laneDocuments[index].documentId);
-      await expect(laneRows).toHaveCount(1);
-      await expect(laneRows.locator('.playback-lane-agent')).toHaveText(agentSpecs[index].name);
-      const lane = latestLanes.get(clients[index].actor.id)!;
-      await expect(laneRows).toHaveAttribute('data-playback-lane', String(lane.lane));
-      await expect(laneRows).toBeVisible();
-    }
-    await page.evaluate((documentId) => window.aidraw.activateDocument(documentId), initial.documentId);
+    await expect(laneRows).toHaveCount(1);
     await expect(laneRows.locator('.playback-lane-agent')).toHaveText(agentSpecs[0].name);
-    await lanePanel.screenshot({ path: join(isolatedProfile, 'agt06-selected-document-lane.png') });
     const progressBefore = clients.map((client) => latestLanes.get(client.actor.id)!.progress);
     await expect.poll(() => clients.every((client, index) => latestLanes.get(client.actor.id)!.progress > progressBefore[index]), { timeout: 2_000 }).toBe(true);
     const progressAfter = clients.map((client) => latestLanes.get(client.actor.id)!.progress);
@@ -1390,23 +1405,7 @@ test('keeps four authenticated document playback lanes isolated and fair while a
     expect(presenceDuring).toHaveLength(4);
     expect(presenceDuring.every((entry) => entry?.status === 'working' && entry.queueDepth === 0)).toBe(true);
 
-    const canvas = page.getByRole('application', { name: /Illustration canvas/ });
-    await page.getByTitle('Pressure pen').click();
-    const canvasBounds = await canvas.boundingBox();
-    if (!canvasBounds) throw new Error('The AGT-06 illustration canvas has no bounds.');
-    const scale = Math.min((canvasBounds.width - 128) / initial.artboard.width, (canvasBounds.height - 112) / initial.artboard.height);
-    const offsetX = (canvasBounds.width - initial.artboard.width * scale) / 2;
-    const offsetY = (canvasBounds.height - initial.artboard.height * scale) / 2;
-    const screenPoint = (x: number, y: number) => ({ x: canvasBounds.x + offsetX + x * scale, y: canvasBounds.y + offsetY + y * scale });
-    const humanStart = screenPoint(520, 860);
-    const humanEnd = screenPoint(1_280, 940);
-    const humanClip = {
-      x: Math.floor(Math.min(humanStart.x, humanEnd.x) - 22),
-      y: Math.floor(Math.min(humanStart.y, humanEnd.y) - 22),
-      width: Math.ceil(Math.abs(humanEnd.x - humanStart.x) + 44),
-      height: Math.ceil(Math.abs(humanEnd.y - humanStart.y) + 44),
-    };
-    const humanBefore = await page.screenshot({ clip: humanClip });
+    diagnosticStage = 'held human gesture';
     const gestureStarted = performance.now();
     await page.mouse.move(humanStart.x, humanStart.y);
     await page.mouse.down();
@@ -1426,6 +1425,7 @@ test('keeps four authenticated document playback lanes isolated and fair while a
     await expect(laneRows).toHaveCount(1);
     expect([...latestLanes.values()].filter((entry) => entry.status === 'playing')).toHaveLength(4);
 
+    diagnosticStage = 'human commit';
     await page.mouse.up();
     await expect.poll(async () => page.evaluate(async ({ documentId, objectIds }) => {
       const document = (await window.aidraw.bootstrap()).activeDocument;
@@ -1445,10 +1445,26 @@ test('keeps four authenticated document playback lanes isolated and fair while a
     await expect(laneRows).toHaveCount(1);
     expect([...latestLanes.values()].filter((entry) => entry.status === 'playing')).toHaveLength(4);
 
+    diagnosticStage = 'selected-document lane observation';
+    // Keep document-navigation evidence outside the critical held-input observation.
+    for (let index = 0; index < 4; index += 1) {
+      await page.evaluate((documentId) => window.aidraw.activateDocument(documentId), laneDocuments[index].documentId);
+      await expect(laneRows).toHaveCount(1);
+      await expect(laneRows.locator('.playback-lane-agent')).toHaveText(agentSpecs[index].name);
+      const lane = latestLanes.get(clients[index].actor.id)!;
+      await expect(laneRows).toHaveAttribute('data-playback-lane', String(lane.lane));
+      await expect(laneRows).toBeVisible();
+    }
+    await page.evaluate((documentId) => window.aidraw.activateDocument(documentId), initial.documentId);
+    await expect(laneRows.locator('.playback-lane-agent')).toHaveText(agentSpecs[0].name);
+    await lanePanel.screenshot({ path: join(isolatedProfile, 'agt06-selected-document-lane.png') });
+
+    diagnosticStage = 'agent commit observation';
     const agentResults = await agentResultsPromise;
     expect(agentResults.map((entry) => entry.status)).toEqual(['committed', 'committed', 'committed', 'committed']);
     expect(agentResults.map((entry) => Number(entry.revision))).toEqual(laneDocuments.map((entry, index) => entry.revision + (index === 0 ? 2 : 1)));
     await expect(lanePanel).toBeHidden();
+    diagnosticStage = 'exact document observation';
     const observedDocuments: IllustrationDocument[] = [];
     for (let index = 0; index < agentSpecs.length; index += 1) {
       const spec = agentSpecs[index];
@@ -1493,10 +1509,12 @@ test('keeps four authenticated document playback lanes isolated and fair while a
       presenceAfter: presenceAfter.map((entry) => ({ actor: entry.actor.name, queueDepth: entry.queueDepth, status: entry.status })),
     }, null, 2)}\n`, 'utf8');
 
+    diagnosticStage = 'graceful cleanup';
     await quitIsolatedEngineGracefully();
     await redactOwnedConnection(connectionPath);
     stoppedGracefully = true;
   } catch (error) {
+    process.stderr.write(`AGT-06 failed during ${diagnosticStage}: ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
     const diagnostic = Buffer.concat(applicationStderr).toString('utf8').trim();
     const invalidSandboxLaunch = /exit_code=-1073741515|0xC0000135|GPU process isn't usable/i.test(diagnostic);
     const boundaryGuidance = invalidSandboxLaunch
@@ -1800,8 +1818,9 @@ test('isolates rapid tab state and restores an exact mixed workspace after grace
 test('keeps human drawing responsive while an MCP agent plays visibly', async () => {
   const page = await launch(); const state = await page.evaluate(async () => ({ snapshot: await window.aidraw.bootstrap(), credentials: await window.aidraw.getMcpConnection() })); const document = state.snapshot.activeDocument; if (!document || document.kind !== 'illustration' || !state.credentials.url) throw new Error('Illustration MCP setup unavailable'); const vectorLayer = Object.values(document.layers).find((layer) => layer.type === 'vector'); if (!vectorLayer) throw new Error('Vector layer unavailable');
   const { headers } = await initializeDirectMcp(state.credentials, { clientInfo: { name: 'Playwright agent', version: '1.0' } }); await fetch(state.credentials.url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'session_manage', arguments: { action: 'join', name: 'Playwright agent', color: '#2fa7a0', documentId: document.id } } }) });
-  const timestamp = new Date().toISOString(); const points = Array.from({ length: 120 }, (_, index) => ({ x: 180 + index * 4, y: 230 + Math.sin(index / 8) * 70, pressure: 0.5 })); const agentRequest = fetch(state.credentials.url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'canvas_apply', arguments: { documentId: document.id, clientOperationId: 'playwright-agent-stroke', label: 'Agent ribbon', operations: [{ kind: 'illustration.object.add', object: { id: 'playwright-ribbon', revision: 0, name: 'Agent ribbon', createdAt: timestamp, updatedAt: timestamp, createdBy: 'playwright-agent', layerId: vectorLayer.id, visible: true, locked: false, opacity: 1, blendMode: 'normal', transform: { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, skewX: 0, skewY: 0 }, type: 'vector-stroke', points, brush: { size: 18, thinning: 0.5, smoothing: 0.5, streamline: 0.5, simulatePressure: false, color: '#2fa7a0' } } }], playback: { mode: 'animated', speed: 1 } } } }) });
-  await page.waitForTimeout(150); const canvas = page.getByRole('application', { name: /Illustration canvas/ }); await page.getByTitle('Pressure pen').click(); const bounds = await canvas.boundingBox(); if (!bounds) throw new Error('Illustration canvas has no bounds'); await page.mouse.move(bounds.x + bounds.width * 0.45, bounds.y + bounds.height * 0.45); await page.mouse.down(); await page.mouse.move(bounds.x + bounds.width * 0.58, bounds.y + bounds.height * 0.54, { steps: 8 }); await page.mouse.up(); await page.getByRole('button', { name: 'Stop All Agents' }).click(); expect((await agentRequest).ok).toBe(true); await page.getByRole('tab', { name: 'Activity', exact: true }).click(); const activity = page.locator('.activity-row').filter({ hasText: 'Agent ribbon' }).first(); await expect(activity).toBeVisible(); await expect(activity.locator('.activity-state')).toHaveText('partial'); await expect(page.getByText(/Playwright agent/).last()).toBeVisible(); const undoAgent = page.getByTitle('Undo the latest transaction by Playwright agent'); await undoAgent.click(); await expect.poll(async () => page.evaluate(async () => { const document = (await window.aidraw.bootstrap()).activeDocument; return document?.kind === 'illustration' && Boolean(document.objects['playwright-ribbon']); })).toBe(false); const redoAgent = page.getByTitle('Redo the latest undone transaction by Playwright agent'); await redoAgent.click(); await expect.poll(async () => page.evaluate(async () => { const document = (await window.aidraw.bootstrap()).activeDocument; return document?.kind === 'illustration' && Boolean(document.objects['playwright-ribbon']); })).toBe(true); const replay = page.getByTitle('Replay durable agent trace').first(); await replay.click(); await expect(replay).toHaveText(/Replaying/); await expect(replay).toHaveText('Replay', { timeout: 4_000 });
+  const canvas = page.getByRole('application', { name: /Illustration canvas/ }); await page.getByTitle('Pressure pen').click(); const bounds = await canvas.boundingBox(); if (!bounds) throw new Error('Illustration canvas has no bounds');
+  const timestamp = new Date().toISOString(); const points = Array.from({ length: 600 }, (_, index) => ({ x: 180 + index * (480 / 599), y: 230 + Math.sin(index / 8) * 70, pressure: 0.5 })); const agentRequest = fetch(state.credentials.url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'canvas_apply', arguments: { documentId: document.id, clientOperationId: 'playwright-agent-stroke', label: 'Agent ribbon', operations: [{ kind: 'illustration.object.add', object: { id: 'playwright-ribbon', revision: 0, name: 'Agent ribbon', createdAt: timestamp, updatedAt: timestamp, createdBy: 'playwright-agent', layerId: vectorLayer.id, visible: true, locked: false, opacity: 1, blendMode: 'normal', transform: { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, skewX: 0, skewY: 0 }, type: 'vector-stroke', points, brush: { size: 18, thinning: 0.5, smoothing: 0.5, streamline: 0.5, simulatePressure: false, color: '#2fa7a0' } } }], playback: { mode: 'animated', speed: 0.25 } } } }) });
+  await expect(page.getByRole('region', { name: 'Active agent playback lanes' }).locator('.playback-lane')).toHaveCount(1); await page.mouse.move(bounds.x + bounds.width * 0.45, bounds.y + bounds.height * 0.45); await page.mouse.down(); await page.mouse.move(bounds.x + bounds.width * 0.58, bounds.y + bounds.height * 0.54, { steps: 8 }); await page.mouse.up(); await page.getByRole('button', { name: 'Stop All Agents' }).click(); expect((await agentRequest).ok).toBe(true); await page.getByRole('tab', { name: 'Activity', exact: true }).click(); const activity = page.locator('.activity-row').filter({ hasText: 'Agent ribbon' }).first(); await expect(activity).toBeVisible(); await expect(activity.locator('.activity-state')).toHaveText('partial'); await expect(page.getByText(/Playwright agent/).last()).toBeVisible(); const undoAgent = page.getByTitle('Undo the latest transaction by Playwright agent'); await undoAgent.click(); await expect.poll(async () => page.evaluate(async () => { const document = (await window.aidraw.bootstrap()).activeDocument; return document?.kind === 'illustration' && Boolean(document.objects['playwright-ribbon']); })).toBe(false); const redoAgent = page.getByTitle('Redo the latest undone transaction by Playwright agent'); await redoAgent.click(); await expect.poll(async () => page.evaluate(async () => { const document = (await window.aidraw.bootstrap()).activeDocument; return document?.kind === 'illustration' && Boolean(document.objects['playwright-ribbon']); })).toBe(true); const replay = page.getByTitle('Replay durable agent trace').first(); await replay.click(); await expect(replay).toHaveText(/Replaying/); await expect(replay).toHaveText('Replay', { timeout: 10_000 });
 });
 
 test('shows structured file approval and applies session trust without bypassing overwrites', async () => {
@@ -3120,19 +3139,31 @@ test('QA-06-INFINITE closes an exact packaged orthogonal sparse-chunk lifecycle'
     const canvasBounds = await pixelCanvas.boundingBox();
     if (!canvasBounds) throw new Error('The QA-06 infinite-map canvas has no bounds.');
     await page.mouse.move(canvasBounds.x + canvasBounds.width / 2, canvasBounds.y + canvasBounds.height / 2);
-    await page.mouse.wheel(-600, -600);
-    await expect.poll(async () => {
-      const viewport = await inspectViewport();
-      return viewport ? [viewport.x < initialViewport.x - 25, viewport.y < initialViewport.y - 25] : [false, false];
-    }).toEqual([true, true]);
-    const negativeViewport = await inspectViewport();
+    const panToCell = async (x: number, y: number) => {
+      const before = await inspectViewport();
+      if (!before) throw new Error('The QA-06 map viewport disappeared.');
+      const target = { x: x + 0.5, y: y + 0.5 };
+      await page.mouse.wheel(
+        (target.x - before.x - before.width / 2) * canvasBounds.width / before.width,
+        (target.y - before.y - before.height / 2) * canvasBounds.height / before.height,
+      );
+      await expect.poll(async () => {
+        const viewport = await inspectViewport();
+        return viewport && Math.abs(viewport.x + viewport.width / 2 - target.x) < 0.1 && Math.abs(viewport.y + viewport.height / 2 - target.y) < 0.1;
+      }).toBe(true);
+      const color = seededDocument.palette[4].color;
+      const expectedRgb = [1, 3, 5].map((index) => Number.parseInt(color.slice(index, index + 2), 16));
+      await expect.poll(() => pixelCanvas.evaluate((element) => {
+        const canvas = element as HTMLCanvasElement;
+        return Array.from(canvas.getContext('2d')!.getImageData(Math.floor(canvas.width / 2), Math.floor(canvas.height / 2), 1, 1).data).slice(0, 3);
+      })).toEqual(expectedRgb);
+      return inspectViewport();
+    };
+    const negativeViewport = await panToCell(-32, -1);
+    const negativeCanvasData = await pixelCanvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL());
     const negativeCanvas = await pixelCanvas.screenshot({ path: negativeScreenshotPath });
-    await page.mouse.wheel(1_200, 1_200);
-    await expect.poll(async () => {
-      const viewport = await inspectViewport();
-      return viewport ? [viewport.x > initialViewport.x + 25, viewport.y > initialViewport.y + 25] : [false, false];
-    }).toEqual([true, true]);
-    const positiveViewport = await inspectViewport();
+    const positiveViewport = await panToCell(32, 32);
+    await expect.poll(() => pixelCanvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL())).not.toBe(negativeCanvasData);
     const positiveCanvas = await pixelCanvas.screenshot({ path: positiveScreenshotPath });
     expect(visualHash(negativeCanvas)).not.toBe(visualHash(positiveCanvas));
     const afterNavigation = await call('canvas_observe', { documentId: seededDocument.id });
