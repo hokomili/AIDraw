@@ -139,7 +139,7 @@ try {
     archiveFiles,
     firstPartyJavaScriptChunks,
   });
-  const utilityContainmentSubject = 'reviewed-main-worker-pair-20260906-rendering-semantic-discovery';
+  const utilityContainmentSubject = 'reviewed-main-worker-pair-20260909-rc1-native-corrections';
   const packagedUtilityContainment = assertPackagedUtilityContainmentSources({
     mainSource,
     workerSource: utilityWorkerSource,

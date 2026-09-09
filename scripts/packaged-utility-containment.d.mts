@@ -1,12 +1,12 @@
 export interface PackagedUtilityContainmentSources {
   mainSource: string;
   workerSource: string;
-  expectedSubject?: 'reviewed-main-worker-pair-20260906-rendering-semantic-discovery' | 'reviewed-main-worker-pair-20260903-macos-background-lifecycle' | 'reviewed-main-worker-pair-20260825-published-pixel-tile-contract' | 'reviewed-main-worker-pair-20260825-authoring-contract' | 'reviewed-main-worker-pair-20260822' | 'maintained-unit-fixture';
+  expectedSubject?: 'reviewed-main-worker-pair-20260909-rc1-native-corrections' | 'reviewed-main-worker-pair-20260906-rendering-semantic-discovery' | 'reviewed-main-worker-pair-20260903-macos-background-lifecycle' | 'reviewed-main-worker-pair-20260825-published-pixel-tile-contract' | 'reviewed-main-worker-pair-20260825-authoring-contract' | 'reviewed-main-worker-pair-20260822' | 'maintained-unit-fixture';
 }
 
 export interface PackagedUtilityContainmentReport {
   assurance: 'exact-emitted-subject-identity-admission';
-  admittedSubject: 'reviewed-main-worker-pair-20260906-rendering-semantic-discovery' | 'reviewed-main-worker-pair-20260903-macos-background-lifecycle' | 'reviewed-main-worker-pair-20260825-published-pixel-tile-contract' | 'reviewed-main-worker-pair-20260825-authoring-contract' | 'reviewed-main-worker-pair-20260822' | 'maintained-unit-fixture';
+  admittedSubject: 'reviewed-main-worker-pair-20260909-rc1-native-corrections' | 'reviewed-main-worker-pair-20260906-rendering-semantic-discovery' | 'reviewed-main-worker-pair-20260903-macos-background-lifecycle' | 'reviewed-main-worker-pair-20260825-published-pixel-tile-contract' | 'reviewed-main-worker-pair-20260825-authoring-contract' | 'reviewed-main-worker-pair-20260822' | 'maintained-unit-fixture';
   identities: {
     main: { bytes: number; sha256: string };
     worker: { bytes: number; sha256: string };

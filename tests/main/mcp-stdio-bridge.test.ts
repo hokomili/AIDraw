@@ -123,7 +123,10 @@ async function initializeDirect(url: string, token: string): Promise<{ sessionId
   return { sessionId: sessionId!, headers };
 }
 
-describe('stable MCP stdio bridge lifecycle', () => {
+// These integration cases launch the real Windows PowerShell ACL helper several
+// times across engine/bridge restarts. Their case budget is not a latency gate;
+// the explicit cancellation, recovery and retirement deadlines below still apply.
+describe('stable MCP stdio bridge lifecycle', { timeout: process.platform === 'win32' ? 30_000 : 5_000 }, () => {
   it('wires the stable launcher mode to newline-delimited MCP stdio', async () => {
     const userDataPath = await mkdtemp(join(tmpdir(), 'aidraw-mcp-stdio-wire-'));
     temporaryPaths.push(userDataPath);
@@ -270,7 +273,9 @@ describe('stable MCP stdio bridge lifecycle', () => {
     const messages: JSONRPCMessage[] = [];
     const bridge = new McpBridgeSession({
       userDataPath,
-      readyTimeoutMs: 3_000,
+      // This case starts the bridge before the engine. Native Windows startup
+      // includes real ACL work; use the product's normal discovery budget there.
+      readyTimeoutMs: process.platform === 'win32' ? 30_000 : 3_000,
       pollIntervalMs: 10,
       emit: (message) => { messages.push(message); },
     });

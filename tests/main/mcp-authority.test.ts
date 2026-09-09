@@ -81,7 +81,10 @@ describe('ephemeral MCP authority', () => {
     expect(() => createMcpBridgeProvisionalId(() => 'not-a-provisional-id')).toThrow('invalid value');
   });
 
-  it('invalidates a real authenticated headless session across stop and restart', async () => {
+  it('invalidates a real authenticated headless session across stop and restart', {
+    // Two native Windows engine starts include real PowerShell ACL validation.
+    timeout: process.platform === 'win32' ? 30_000 : 5_000,
+  }, async () => {
     const userDataPath = await mkdtemp(join(tmpdir(), 'aidraw-engine-authority-'));
     temporaryPaths.push(userDataPath);
 
