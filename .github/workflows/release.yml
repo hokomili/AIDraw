@@ -44,6 +44,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y fakeroot rpm
       - run: npm run verify
+        env:
+          AIDRAW_GOLDEN_ARTIFACT_DIR: test-results/goldens
       - run: npm run test:performance
       - run: npm run security:verify
       - run: npm run make
@@ -69,6 +71,8 @@ jobs:
             out/**/app.asar
             out/**/.aidraw-package-build-input.json
             .vite/build/**/*.js
+            test-results/goldens/**/*
+            test-results/performance-gate.json
           include-hidden-files: true
           if-no-files-found: warn
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
