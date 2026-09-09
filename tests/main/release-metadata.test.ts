@@ -69,6 +69,8 @@ describe('honest release metadata', () => {
     expect(ci).toContain('persist-credentials: false');
     expect(release).toContain('persist-credentials: false');
     expect(release).toMatch(/permissions:\r?\n\s+contents: read/);
+    expect(release).toContain("branches: ['codex/rc1']");
+    expect(release).toContain("release:\n    if: startsWith(github.ref, 'refs/tags/v')");
     expect(release).toMatch(/release:\r?\n[\s\S]*?permissions:\r?\n\s+contents: write/);
   });
 });

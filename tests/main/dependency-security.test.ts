@@ -126,6 +126,9 @@ describe('dependency and packaged-runtime security policy', () => {
     ['node_modules/fast-uri', '3.1.5', '3.1.7'],
     ['node_modules/@xmldom/xmldom', '0.9.10', '0.9.12'],
     ['node_modules/js-yaml', '4.3.1', '4.3.2'],
+    ['node_modules/hono', '4.13.0', '4.13.7'],
+    ['node_modules/vitest', '4.1.10', '4.1.11'],
+    ['node_modules/vitest/node_modules/@vitest/mocker', '4.1.10', '4.1.11'],
   ])('rejects a regression to the vulnerable %s version', async (lockPath, vulnerableVersion, patchedVersion) => {
     const inputs = await currentPolicyInputs();
     const record = (inputs.lockJson.packages as Record<string, Record<string, unknown>>)[lockPath];

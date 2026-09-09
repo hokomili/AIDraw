@@ -36,6 +36,9 @@ const REQUIRED_LOCKED_PACKAGES = Object.freeze({
   'node_modules/extract-zip': '1.0.5',
   'node_modules/fast-uri': '3.1.7',
   'node_modules/js-yaml': '4.3.2',
+  'node_modules/hono': '4.13.7',
+  'node_modules/vitest': '4.1.11',
+  'node_modules/vitest/node_modules/@vitest/mocker': '4.1.11',
   'node_modules/tar': '7.5.22',
   'node_modules/tmp': '0.2.7',
 });

@@ -1,7 +1,7 @@
 {
   "name": "aidraw",
   "productName": "AIDraw",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0-rc.1",
   "description": "Agent-native mixed-media and pixel-art studio",
   "license": "MIT",
   "author": "AIDraw contributors",
@@ -71,7 +71,7 @@
     "fflate": "0.8.3",
     "gifenc": "1.0.3",
     "gifuct-js": "2.1.2",
-    "hono": "4.13.0",
+    "hono": "4.13.7",
     "immer": "11.1.15",
     "lucide-react": "1.28.0",
     "paper": "0.12.18",
@@ -85,7 +85,7 @@
     "zustand": "5.0.14"
   },
   "devDependencies": {
-    "@aidraw/core": "0.1.0-alpha.1",
+    "@aidraw/core": "0.1.0-rc.1",
     "@electron-forge/cli": "7.11.2",
     "@electron-forge/maker-base": "7.11.2",
     "@electron-forge/maker-deb": "7.11.2",
@@ -112,7 +112,7 @@
     "typescript": "5.9.3",
     "typescript-eslint": "8.57.1",
     "vite": "7.3.6",
-    "vitest": "4.1.10"
+    "vitest": "4.1.11"
   },
   "overrides": {
     "@electron/rebuild": "4.2.0",

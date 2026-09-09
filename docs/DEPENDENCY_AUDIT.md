@@ -1,5 +1,11 @@
 # Dependency audit
 
+## September 9, 2026 RC1 dependency follow-up
+
+RC1 preparation advances Hono 4.13.0 to 4.13.7 and Vitest (including its matching components) 4.1.10 to 4.1.11. The dependency census remains 24 runtime / 28 development / 699 external registry records. npm relocates `@vitest/mocker` below Vitest; the canvas/core workspace links remain intact. The lock policy rejects regressions to all three advisory-bearing package records.
+
+A fresh 641-package install and lifecycle rebuild on Node 24.19.0 / npm 11.6.2 pass the complete security gate: **zero vulnerabilities in both runtime and complete audits**, 639 verified registry signatures and 140 verified attestations. Logs are retained in `test-results/rc1-20260909/`. This dependency result does not transfer acceptance from the retained r2 application; RC1 still requires its fresh native package and independent acceptance gates.
+
 ## September 9, 2026 security correction
 
 The user authorized fixing the three dependency packages carrying high-severity findings. The lockfile now selects the following compatible patches without changing direct dependencies or adding overrides:
