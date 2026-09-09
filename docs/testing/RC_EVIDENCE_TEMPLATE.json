@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "candidate": {
-    "version": "0.1.0-alpha.1",
+    "version": "0.1.0-rc.1",
     "commit": "0000000000000000000000000000000000000000",
     "sourceClean": false
   },
@@ -9,7 +9,7 @@
     "result": "BLOCKED",
     "independent": false,
     "tester": {
-      "model": "gpt-5.6-luna",
+      "model": "gpt-6-astra",
       "reasoningEffort": "high"
     },
     "automated": {
@@ -21,7 +21,7 @@
     "crossSurfaceResult": "BLOCKED",
     "mandatoryCoverageComplete": false,
     "report": {
-      "path": "test-results/luna-high/<run-id>/report.md",
+      "path": "test-results/astra-high/<run-id>/report.md",
       "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
     }
   },
@@ -64,17 +64,17 @@
     "reproducibilityReports": [
       {
         "platform": "windows-x64",
-        "path": "test-results/luna-high/<run-id>/reproducibility-windows-x64.json",
+        "path": "test-results/astra-high/<run-id>/reproducibility-windows-x64.json",
         "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
       },
       {
         "platform": "macos-arm64",
-        "path": "test-results/luna-high/<run-id>/reproducibility-macos-arm64.json",
+        "path": "test-results/astra-high/<run-id>/reproducibility-macos-arm64.json",
         "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
       },
       {
         "platform": "linux-x64",
-        "path": "test-results/luna-high/<run-id>/reproducibility-linux-x64.json",
+        "path": "test-results/astra-high/<run-id>/reproducibility-linux-x64.json",
         "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
       }
     ],

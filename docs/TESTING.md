@@ -70,7 +70,7 @@ The pinned Node 24 focused gate is `node scripts/npm-node24.mjs exec -- vitest r
 
 Historical macOS compatibility result (2026-08-09): pinned Node 24.14.0 inspected 359 tracked paths plus 5 non-ignored prospective untracked implementation paths with zero portability violations. The complete launch-free `npm run verify` gate passed typecheck, full ESLint, and 111 Vitest files / 615 tests. The unchanged 1,200 MiB performance budget's final run passed at 744.58 MiB after native-allocation remediation. Its exact local app/DMG/import evidence—and its now-retired Keychain design evidence—remain recorded in `docs/MACOS_DEVELOPMENT.md`; none certifies the current removal checkpoint or replaces a clean hosted run.
 
-This workflow defines three test levels for AIDraw. Every formal run uses an independent Codex task configured as **`gpt-5.6-luna` with `high` reasoning**. The implementer does not certify their own change.
+This workflow defines three test levels for AIDraw. Every formal run uses an independent Codex task configured as **`gpt-6-astra` with `high` reasoning**. The implementer does not certify their own change. The user changed the future verifier default on 2026-09-09; keep historical Luna identities and verdicts intact. Current RCs do not require a repeat run solely for this model change. RC1 may retain otherwise valid existing Luna/high evidence, while new formal dispatches use Astra/high.
 
 Passing automated tests alone is insufficient. Every level includes:
 
@@ -84,7 +84,7 @@ Playwright is valuable automated coverage, but it does not replace Computer Use.
 ## Roles and invariants
 
 - The primary task implements changes and selects the required level.
-- A **new** Luna/high task performs each formal test run. Do not reuse the implementation task as the tester.
+- A **new** Astra/high task performs each formal test run. Do not reuse the implementation task as the tester.
 - On Codex desktop, the primary task also acts as the mechanical launch coordinator: it starts/stops the tester's declared isolated package outside the filesystem sandbox, but it does not perform or judge the test cases.
 - The tester is read-only with respect to production source. It may run commands and write ignored test reports/artifacts, but it must not fix product code, soften assertions, or change tracker statuses.
 - Test documents use a unique `QA L<level> · <UTC timestamp>` prefix. Never modify, save over, close, or discard a pre-existing user document.
@@ -102,7 +102,7 @@ Playwright is valuable automated coverage, but it does not replace Computer Use.
 | 2 | Regression | Before merging a feature cluster or milestone build | 45–120 minutes | Full fast suite and packaged Playwright pass; core illustration, pixel, persistence, collaboration, and UI regressions pass. |
 | 3 | Release exhaustive | Before every versioned release candidate | Several hours or longer | Release artifacts plus exhaustive MCP, UI, interchange, recovery, security, performance, and accessibility evidence pass with no open P0 defects. |
 
-The automated commands are deliberately named `:auto`. They cover only the automated portion of a level; the Luna/high MCP and Computer Use report is still mandatory.
+The automated commands are deliberately named `:auto`. They cover only the automated portion of a level; the Astra/high MCP and Computer Use report is still mandatory.
 
 ## Exact-build and engine identity preflight
 
@@ -137,12 +137,12 @@ The final independent Apple Silicon Level 2 report is retained locally under ign
 Use the supplied harness for every formal run:
 
 1. Run the automated level through Node 24. On Codex desktop hosts, `node scripts/npm-node24.mjs ...` discovers the bundled Node 24 runtime; elsewhere, activate `.nvmrc` or set `AIDRAW_NODE24_EXE`.
-2. The Luna task reports an `AUTOMATION_COMPLETE_AWAITING_COORDINATOR_LAUNCH` checkpoint containing only the executable path/hash and the planned isolated profile/connection/manifest paths. It does not spawn Electron.
+2. The Astra task reports an `AUTOMATION_COMPLETE_AWAITING_COORDINATOR_LAUNCH` checkpoint containing only the executable path/hash and the planned isolated profile/connection/manifest paths. It does not spawn Electron.
 3. The primary launch coordinator validates those paths are below the declared run root and starts the exact package with `scripts/qa-session.mjs`. On Codex desktop, this Windows or macOS native GUI command must use the shell tool's explicit unsandboxed/escalated launch permission and `--launch-context unsandboxed-gui`; launching Electron as a child of the filesystem sandbox can raise Windows exception `0x80000003`, lose the GPU child with `0xC0000135`, or prevent required macOS native services from operating before the health endpoint responds.
-4. The coordinator runs `qa-session status` through the same explicit unsandboxed/escalated boundary on Windows or macOS, then resumes the same Luna task with its non-secret result. It must report `okay: true`, a live PID, matching native executable/profile identity, matching connection PID/URL, and an unchanged executable hash. A sandboxed macOS `ps` denial is not identity evidence.
-5. Luna enumerates AIDraw windows with Computer Use. Read-only observation may be used to disambiguate candidates, but no input or QA document mutation is allowed yet.
-6. Luna selects the window whose process-backed app identifier names the exact executable and whose Activity panel says `Listening at <manifest mcpUrl>`. The window, manifest, connection file, and process PID must agree.
-7. Luna initializes the isolated connection with `scripts/qa-mcp.mjs`. Do not use the globally registered AIDraw MCP for a formal run because it may intentionally serve the user's normal profile.
+4. The coordinator runs `qa-session status` through the same explicit unsandboxed/escalated boundary on Windows or macOS, then resumes the same Astra task with its non-secret result. It must report `okay: true`, a live PID, matching native executable/profile identity, matching connection PID/URL, and an unchanged executable hash. A sandboxed macOS `ps` denial is not identity evidence.
+5. Astra enumerates AIDraw windows with Computer Use. Read-only observation may be used to disambiguate candidates, but no input or QA document mutation is allowed yet.
+6. Astra selects the window whose process-backed app identifier names the exact executable and whose Activity panel says `Listening at <manifest mcpUrl>`. The window, manifest, connection file, and process PID must agree.
+7. Astra initializes the isolated connection with `scripts/qa-mcp.mjs`. Do not use the globally registered AIDraw MCP for a formal run because it may intentionally serve the user's normal profile.
 8. Only after all identity assertions pass may the tester create or edit a QA document. Any mismatch is `BLOCKED`; request coordinator cleanup without mutating documents.
 
 Connection and MCP state files contain the current engine process's localhost bearer. They are explicit PID-lifetime handoffs, not product credential stores. Keep them inside ignored `test-results/`, never print their contents, and never paste them into a report. `qa-mcp close` redacts/removes client state, and a successful coordinator `qa-session stop` redacts the stopped engine's handoff file.
@@ -151,14 +151,14 @@ Example Level 1 bootstrap (replace the run ID once and use separate shell calls 
 
 ```powershell
 $AIDrawRepo = (Resolve-Path .).Path
-$AIDrawRun = Join-Path $AIDrawRepo 'test-results\luna-high\<run-id>-level1'
+$AIDrawRun = Join-Path $AIDrawRepo 'test-results\astra-high\<run-id>-level1'
 node scripts/npm-node24.mjs run test:level1:auto
 node scripts/qa-session.mjs start --exe "$AIDrawRepo\out\AIDraw-win32-x64\AIDraw.exe" --profile "$AIDrawRun\profile" --connection "$AIDrawRun\connection.json" --manifest "$AIDrawRun\session.json" --mode interactive --launch-context unsandboxed-gui
 node scripts/qa-session.mjs status --manifest "$AIDrawRun\session.json"
-node scripts/qa-mcp.mjs init --connection "$AIDrawRun\connection.json" --state "$AIDrawRun\mcp-state.json" --actor-name "QA Luna high L1 <run-id>" --actor-color "#7C3AED"
+node scripts/qa-mcp.mjs init --connection "$AIDrawRun\connection.json" --state "$AIDrawRun\mcp-state.json" --actor-name "QA Astra high L1 <run-id>" --actor-color "#7C3AED"
 ```
 
-The coordinator owns `qa-session start`, `show`, and `stop`; those native-process operations run outside the Codex filesystem sandbox. Luna owns the sandboxed automated, status, MCP-client, Computer Use, assertion, and reporting steps. Write complex tool arguments to JSON files in the run root and pass `--args-file`; this avoids shell quoting from changing the MCP payload. At cleanup, Luna runs `qa-mcp close`, writes a draft result, and returns `TEST_COMPLETE_AWAITING_COORDINATOR_STOP`. After the coordinator stops the isolated engine and the harness redacts its ephemeral-authority handoff, the same Luna task is resumed once to verify cleanup and finalize `report.md`. The harness preserves the non-secret profile/evidence; it does not delete test artifacts.
+The coordinator owns `qa-session start`, `show`, and `stop`; those native-process operations run outside the Codex filesystem sandbox. Astra owns the sandboxed automated, status, MCP-client, Computer Use, assertion, and reporting steps. Write complex tool arguments to JSON files in the run root and pass `--args-file`; this avoids shell quoting from changing the MCP payload. At cleanup, Astra runs `qa-mcp close`, writes a draft result, and returns `TEST_COMPLETE_AWAITING_COORDINATOR_STOP`. After the coordinator stops the isolated engine and the harness redacts its ephemeral-authority handoff, the same Astra task is resumed once to verify cleanup and finalize `report.md`. The harness preserves the non-secret profile/evidence; it does not delete test artifacts.
 
 Normal `qa-session stop` never force-terminates a process. If a known native modal prevents the isolated engine from accepting its graceful quit signal, the coordinator may explicitly opt in with `qa-session stop --manifest <path> --force-on-timeout`. The command still waits for the normal 15-second shutdown first. Before force termination it must re-read the connection and live Windows or macOS process and match the manifest's executable path and SHA-256, PID, exact `--user-data-dir` profile, connection PID/URL, and loopback MCP endpoint. Any mismatch refuses the force action, and the authority handoff is redacted only after the verified PID has exited. Never use this fallback for an unverified process or a non-isolated user profile.
 
@@ -168,19 +168,19 @@ Every tester follows this order:
 
 1. **Identify the subject.** Record test level, UTC run ID, source revision if available, dirty/untracked state, Node/npm versions, executable path, executable SHA-256, and isolated profile path.
 2. **Run the automated portion.** Use the exact Node-24 level command and preserve the full exit status. Confirm the post-package verifier named the expected executable. Do not summarize a failed command as passed because a narrower retry succeeded.
-3. **Pause for coordinated native launch.** Luna returns the automation checkpoint; the primary starts the declared isolated subject through an explicitly unsandboxed `qa-session start` call, then resumes Luna. A native-service or process failure caused by a sandbox-child Electron process is an invalid test launch, not a product failure.
+3. **Pause for coordinated native launch.** Astra returns the automation checkpoint; the primary starts the declared isolated subject through an explicitly unsandboxed `qa-session start` call, then resumes Astra. A native-service or process failure caused by a sandbox-child Electron process is an invalid test launch, not a product failure.
 4. **Select the native window safely.** Use the Computer Use skill, initialize its runtime, read its guidance and confirmation policy, enumerate apps/windows, and continue only after the executable path and Activity MCP URL select exactly one intended AIDraw window.
-5. **Establish the isolated MCP session.** Use `qa-mcp init`, join as `QA Luna high L<level> <run-id>` with a distinct color, list/observe before document mutation, and record document IDs/revisions.
+5. **Establish the isolated MCP session.** Use `qa-mcp init`, join as `QA Astra high L<level> <run-id>` with a distinct color, list/observe before document mutation, and record document IDs/revisions.
 6. **Exercise UI through Computer Use.** Observe, perform one state-derived action, refresh, and visually verify. Re-observe after every layout/modal/focus change. Use real pointer drags for drawing tests.
 7. **Cross-check surfaces.** Verify at least one isolated-MCP-created change visibly in that exact AIDraw window and one Computer-Use-created change through an isolated MCP observation or revision diff.
 8. **Record failures immediately.** Include expected/actual behavior, exact reproduction, affected document/revision, window title, visual observation, logs, severity, and likely tracker IDs. Continue only when later results remain trustworthy.
-9. **Clean up safely.** Restore the initially active isolated tab, close/redact the QA MCP state, and close only safely saved QA documents. Return the stop checkpoint; the coordinator stops the isolated engine outside the sandbox and resumes Luna. Do not touch the user's normal AIDraw profile or use UI deletion as cleanup.
+9. **Clean up safely.** Restore the initially active isolated tab, close/redact the QA MCP state, and close only safely saved QA documents. Return the stop checkpoint; the coordinator stops the isolated engine outside the sandbox and resumes Astra. Do not touch the user's normal AIDraw profile or use UI deletion as cleanup.
 10. **Finalize the report.** Verify the isolated PID is stopped and use [testing/REPORT_TEMPLATE.md](testing/REPORT_TEMPLATE.md). `PASS`, `FAIL`, and `BLOCKED` are the only overall outcomes.
 
 Reports belong under the ignored path:
 
 ```text
-test-results/luna-high/<UTC-run-id>-level<1|2|3>/report.md
+test-results/astra-high/<UTC-run-id>-level<1|2|3>/report.md
 ```
 
 The tester also returns the concise outcome in its task so the primary task can read it without opening local artifacts.
@@ -584,13 +584,13 @@ Eight fixed seeds per illustration and pixel family each run 48 valid operations
 
 The focused reducer/schema/material/checkpoint/history/service/MCP selection passes 11 files / 155 tests under pinned Node 24.14.0. The complete safe `verify` gate passes portability for 369 tracked plus 18 prospective paths, TypeScript, full ESLint, and 120 Vitest files / 716 tests. The unchanged non-GUI performance gate passes 1/1; no performance report was retained as release evidence. `rc:audit` remains non-certifyingly blocked, now with 25 non-Verified P0 rows after QA-01 satisfies its automated exit criteria. This checkpoint does not persist undo stacks across restart, implement semantic merge/CRDT history, prove packaged/native UI actions, exercise other platforms, create Level 3 evidence, or establish an RC.
 
-After a fresh independent Level 3 run, copy [the evidence template](testing/RC_EVIDENCE_TEMPLATE.json) into that ignored `test-results/luna-high/<run-id>/` root, replace every placeholder with observed evidence, and run:
+After a fresh independent Level 3 run, copy [the evidence template](testing/RC_EVIDENCE_TEMPLATE.json) into that ignored `test-results/astra-high/<run-id>/` root, replace every placeholder with observed evidence, and run:
 
 ```powershell
-node scripts/npm-node24.mjs run rc:verify -- --evidence=test-results/luna-high/<run-id>/rc-evidence.json
+node scripts/npm-node24.mjs run rc:verify -- --evidence=test-results/astra-high/<run-id>/rc-evidence.json
 ```
 
-Verification fails closed unless the manifest matches the current `package.json` version and 40-character Git HEAD, both the manifest and actual checkout are clean, the independent `gpt-5.6-luna`/`high` Level 3 result and exact `test:level3:auto` exit are PASS/0, mandatory MCP/Computer Use/cross-surface evidence is complete, Blocker/P0 defect arrays are empty, every P1 exception names an existing P1 tracker ID plus its accepter and rationale, and README/tracker/changelog/known-limitations reconciliation is explicit. The report must be a repository-contained regular file with its full SHA-256 and must contain the candidate commit, required Level 3 identity/result markers, evidence sections, coverage exceptions, and final decision.
+Verification fails closed unless the manifest matches the current `package.json` version and 40-character Git HEAD, both the manifest and actual checkout are clean, the independent `gpt-6-astra`/`high` Level 3 result and exact `test:level3:auto` exit are PASS/0, mandatory MCP/Computer Use/cross-surface evidence is complete, Blocker/P0 defect arrays are empty, every P1 exception names an existing P1 tracker ID plus its accepter and rationale, and README/tracker/changelog/known-limitations reconciliation is explicit. The report must be a repository-contained regular file with its full SHA-256 and must contain the candidate commit, required Level 3 identity/result markers, evidence sections, coverage exceptions, and final decision.
 
 The manifest also requires native verify/package evidence and repository-contained full-SHA-256 files for `windows-x64:squirrel`, `windows-x64:zip`, `windows-x64:checksums`, `macos-arm64:dmg`, `macos-arm64:zip`, `macos-arm64:checksums`, `linux-x64:deb`, `linux-x64:rpm`, `linux-x64:zip`, `linux-x64:checksums`, `all:licenses-json`, and `all:licenses-markdown`. Windows clean-install lifecycle evidence is part of Level 3. Add `--stable-v1` to require macOS/Linux clean-install evidence, every P0 Verified, every selected-v1 P1 Verified or Deferred, the complete utility/corrupt/provider/performance/accessibility/E2E gate, macOS native package lifecycle, signing/notarization or the explicitly documented unsigned limitation allowed by the checklist, three exact hashed per-platform reproducibility PASS reports, dependency/license review, and repository/publication prerequisites.
 
@@ -2376,8 +2376,8 @@ The admitted convention is complete `frame` plus boolean `rotated`/`trimmed`, `s
 | P2 | Bounded defect with a clear workaround | Record; release requires explicit disposition. |
 | P3 | Cosmetic/polish issue | Record and triage. |
 
-After a fix, spawn a **fresh Luna/high task**. A rerun may target the failed case plus the level's smoke core, but a release candidate must receive a fresh complete Level 3 run.
+After a fix, spawn a **fresh Astra/high task**. A rerun may target the failed case plus the level's smoke core, but a release candidate must receive a fresh complete Level 3 run.
 
 ## Tester prompt
 
-Use [testing/LUNA_HIGH_PROMPT.md](testing/LUNA_HIGH_PROMPT.md) as the canonical task prompt. Substitute the level, subject/build identity, and report run ID. Do not remove its Computer Use, isolation, evidence, or no-source-edits requirements.
+Use [testing/ASTRA_HIGH_PROMPT.md](testing/ASTRA_HIGH_PROMPT.md) as the canonical task prompt. Substitute the level, subject/build identity, and report run ID. Do not remove its Computer Use, isolation, evidence, or no-source-edits requirements.

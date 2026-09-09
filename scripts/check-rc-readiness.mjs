@@ -106,7 +106,7 @@ async function inspectHashedFile(cwd, entry, role, maximumBytes) {
 
 function normalizeReport(markdown) { return markdown.replaceAll('`', '').replaceAll('*', ''); }
 
-function inspectReportText(markdown, commit) {
+function inspectReportText(markdown, commit, testerModel) {
   const report = normalizeReport(markdown);
   const errors = [];
   if (!/-\s*Overall:\s*PASS\b/iu.test(report)) errors.push('report does not declare Overall: PASS');
@@ -114,7 +114,7 @@ function inspectReportText(markdown, commit) {
   if (!report.toLowerCase().includes(commit.toLowerCase())) errors.push('report does not contain the candidate commit');
   if (!report.includes(LEVEL3_COMMAND)) errors.push(`report does not contain the exact automated command ${LEVEL3_COMMAND}`);
   if (!/(?:authoritative[^\n]*exit|exit(?:\s+code)?)[^\n\d]*0\b/iu.test(report)) errors.push('report does not record automated exit 0');
-  if (!/gpt-5\.6-luna/iu.test(report) || !/\bhigh\b/iu.test(report)) errors.push('report does not record the required gpt-5.6-luna/high independent tester');
+  if (typeof testerModel !== 'string' || !report.toLowerCase().includes(testerModel.toLowerCase()) || !/\bhigh\b/iu.test(report)) errors.push('report does not record the declared independent tester model with high reasoning');
   for (const [label, pattern] of [
     ['MCP evidence', /^##\s+.*MCP/im],
     ['Computer Use evidence', /^##\s+.*Computer Use/im],
@@ -213,7 +213,10 @@ async function inspectEvidence(cwd, evidence, context) {
   else {
     requirePass(issues, level3.result, 'level3_not_pass', 'Level 3 result');
     if (level3.independent !== true) issues.push(issue(1, 'level3_not_independent', 'Level 3 evidence must declare independent: true.'));
-    if (!isRecord(level3.tester) || level3.tester.model !== 'gpt-5.6-luna' || level3.tester.reasoningEffort !== 'high') issues.push(issue(1, 'level3_tester_invalid', 'Level 3 tester must be gpt-5.6-luna with high reasoning.'));
+    // September 9 user decision: future runs use Astra/high. Existing current
+    // RC1 Luna evidence is not invalidated solely by the dispatch-model change.
+    const legacyRc1Luna = context.packageVersion === '0.1.0-rc.1' && level3.tester?.model === 'gpt-5.6-luna';
+    if (!isRecord(level3.tester) || (level3.tester.model !== 'gpt-6-astra' && !legacyRc1Luna) || level3.tester.reasoningEffort !== 'high') issues.push(issue(1, 'level3_tester_invalid', 'Level 3 tester must be gpt-6-astra with high reasoning; existing RC1 Luna/high evidence is retained.'));
     if (!isRecord(level3.automated) || level3.automated.command !== LEVEL3_COMMAND || level3.automated.exitCode !== 0) issues.push(issue(1, 'level3_automated_invalid', `Level 3 automation must record ${LEVEL3_COMMAND} with exitCode 0.`));
     requirePass(issues, level3.mcpResult, 'level3_mcp_not_pass', 'Level 3 MCP result');
     requirePass(issues, level3.computerUseResult, 'level3_computer_use_not_pass', 'Level 3 Computer Use result');
@@ -223,7 +226,7 @@ async function inspectEvidence(cwd, evidence, context) {
     if (reportResult.error) issues.push(issue(1, 'level3_report_invalid', reportResult.error));
     else {
       const markdown = await readFile(reportResult.absolute, 'utf8');
-      const reportErrors = inspectReportText(markdown, context.repository.commit);
+      const reportErrors = inspectReportText(markdown, context.repository.commit, level3.tester?.model);
       if (reportErrors.length) issues.push(issue(1, 'level3_report_contract_invalid', `Level 3 report contract failed: ${reportErrors.join('; ')}.`));
     }
   }

@@ -101,7 +101,7 @@ npm run test:performance
 
 The gate writes `test-results/performance-gate.json`; packaged pointer/frame-pacing, high-contrast/display-scale, and tablet measurements remain part of the later Computer Use release pass.
 
-Formal QA uses three levels—Smoke, Regression, and Release Exhaustive—and every level combines automated checks, authenticated MCP, and native desktop interaction through Computer Use. Each formal run is performed in a fresh independent `gpt-5.6-luna` / `high` task against one newly packaged executable and isolated profile; PID, executable hash, and the UI/MCP URL must match before mutation. Use `node scripts/npm-node24.mjs run test:level1:auto` for the automated Smoke portion. On Codex desktop, native `qa-session` start/show/status/stop calls must run outside the filesystem sandbox. See [docs/TESTING.md](docs/TESTING.md) for the complete commands, checklists, isolation harness, and report contract.
+Formal QA uses three levels—Smoke, Regression, and Release Exhaustive—and every level combines automated checks, authenticated MCP, and native desktop interaction through Computer Use. Each formal run is performed in a fresh independent `gpt-6-astra` / `high` task against one newly packaged executable and isolated profile; PID, executable hash, and the UI/MCP URL must match before mutation. Use `node scripts/npm-node24.mjs run test:level1:auto` for the automated Smoke portion. On Codex desktop, native `qa-session` start/show/status/stop calls must run outside the filesystem sandbox. See [docs/TESTING.md](docs/TESTING.md) for the complete commands, checklists, isolation harness, and report contract.
 
 Build and launch the packaged-app Playwright scenarios:
 

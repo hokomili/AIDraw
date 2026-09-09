@@ -46,7 +46,7 @@ async function completeEvidence() {
 - Overall: \`PASS\`
 - Level: \`3\`
 - Source revision: \`${commit}\`
-- Tester model: \`gpt-5.6-luna\`
+- Tester model: \`gpt-6-astra\`
 - Tester reasoning effort: \`high\`
 
 ## Automated gate
@@ -111,7 +111,7 @@ PASS.
       level3: {
         result: 'PASS',
         independent: true,
-        tester: { model: 'gpt-5.6-luna', reasoningEffort: 'high' },
+        tester: { model: 'gpt-6-astra', reasoningEffort: 'high' },
         automated: { command: 'node scripts/npm-node24.mjs run test:level3:auto', exitCode: 0 },
         mcpResult: 'PASS',
         computerUseResult: 'PASS',
@@ -165,6 +165,22 @@ describe('release-candidate readiness preflight', () => {
     expect(report.level3).toEqual({ ready: true, issueCount: 0 });
     expect(report.stableV1).toEqual({ ready: true, issueCount: 0 });
     expect(report.issues).toEqual([]);
+  });
+
+  it('preserves current RC1 Luna evidence without allowing Luna for subsequent candidates', async () => {
+    const fixture = await completeEvidence();
+    fixture.evidence.level3.tester.model = 'gpt-5.6-luna';
+    const path = join(fixture.root, fixture.evidence.level3.report.path);
+    const original = await readFile(path, 'utf8');
+    const historical = original.replace('gpt-6-astra', 'gpt-5.6-luna');
+    await writeFile(path, historical, 'utf8');
+    fixture.evidence.level3.report.sha256 = sha256(historical);
+    for (const version of ['0.1.0-rc.1', '0.1.0-rc.2']) {
+      fixture.evidence.candidate.version = version;
+      const report = await inspectReleaseReadiness({ cwd: fixture.root, trackerMarkdown: completeTracker, packageJson: { version }, repository: { commit, status: '' }, evidence: fixture.evidence });
+      expect(report.level3.ready).toBe(version === '0.1.0-rc.1');
+      expect(report.issues.some((entry) => entry.code === 'level3_tester_invalid')).toBe(version !== '0.1.0-rc.1');
+    }
   });
 
   it('does not conflate a complete Level 3 certificate with incomplete stable-v1 tracker work', async () => {
