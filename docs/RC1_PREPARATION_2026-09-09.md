@@ -51,6 +51,12 @@ The fresh independent Astra/high Level 3 attempt on clean `0f6eaf5c73955ea71ff92
 
 The correction explicitly gives each synthetic release fixture its own workspace output. Production containment and single-use generation guards are unchanged. A full `npm run verify` with absolute enclosing output overrides then passes portability, typecheck, lint and all 242 test files / 1,769 tests, with one native-platform skip; the enclosing probe output stays absent. The source-only regression does not convert the failed formal attempt into acceptance. A separately identified fresh independent complete Level 3 run is required.
 
+## Native bridge fixture timing
+
+Hosted Windows run `34329985206` passes 241 source files and all native ACL tests, but six bridge cases still fail. Each discovery validates native ACLs twice; a pipelined initialized notification plus request performs multiple such reads. Short two-second readiness/poll limits therefore include native work that exceeds those fixture budgets. A disposable Mac diagnostic adds 1,100 ms to each real authority read and reproduces three failures; it is a timing simulation, not Windows acceptance. With corrected fixture budgets, all seven selected cases pass under that same injected delay. The ordinary full bridge file also passes locally.
+
+Windows functional discovery now uses the product’s thirty-second readiness default, with ten-second observation and sixty-second aggregate case budgets. POSIX waits remain unchanged. Explicit cancellation/close latency, provisional-session retirement, retry counts, failure-window and lifetime-stability assertions remain intact. The preparing-request cancellation fixture keeps the first engine lifetime open until cancellation so request-driven replacement is exercised deterministically; a competing automatic recovery must not consume its readiness failure before the request reaches the intended hook. Fresh hosted Windows verification is required.
+
 ## Remaining release gates
 
 Independent cumulative Level 3 automated, public MCP, real native Computer Use and cross-surface evidence must bind the final clean candidate. Windows 11 clean installer/portable acceptance requires a verified environment; hosted Windows Server builds do not satisfy it. Native matrix, fresh package/source bindings, artifact hashes, warnings and RC evidence must all pass. Signing remains ad-hoc/unsigned; trusted signing/notarization, independent reproducibility and stable-v1 claims remain separate requirements. Preserve the September 6/8 consumer pins and all recovery stashes.

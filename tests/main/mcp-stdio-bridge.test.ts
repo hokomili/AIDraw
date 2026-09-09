@@ -16,6 +16,11 @@ const temporaryPaths: string[] = [];
 const runtimes: EngineRuntime[] = [];
 const bridges: McpBridgeSession[] = [];
 
+// Windows discovery performs native ACL checks before and after reading authority.
+// Use the product readiness budget there; the shorter POSIX fixture waits remain.
+const discoveryTimeoutMs = process.platform === 'win32' ? 30_000 : 2_000;
+const observationTimeoutMs = (posix: number) => process.platform === 'win32' ? 10_000 : posix;
+
 afterEach(async () => {
   await Promise.all(bridges.splice(0).map((bridge) => bridge.close()));
   await Promise.all(runtimes.splice(0).map((runtime) => runtime.stop()));
@@ -83,7 +88,7 @@ async function wholeResponseLossAfterCommit(response: Response, message: string,
 }
 
 async function waitForMessage(messages: JSONRPCMessage[], id: string | number): Promise<JSONRPCMessage> {
-  const deadline = Date.now() + 2_000;
+  const deadline = Date.now() + observationTimeoutMs(2_000);
   for (;;) {
     const message = messages.find((candidate) => 'id' in candidate && candidate.id === id);
     if (message) return message;
@@ -124,9 +129,10 @@ async function initializeDirect(url: string, token: string): Promise<{ sessionId
 }
 
 // These integration cases launch the real Windows PowerShell ACL helper several
-// times across engine/bridge restarts. Their case budget is not a latency gate;
-// the explicit cancellation, recovery and retirement deadlines below still apply.
-describe('stable MCP stdio bridge lifecycle', { timeout: process.platform === 'win32' ? 30_000 : 5_000 }, () => {
+// times across engine/bridge restarts. Case and discovery-observation budgets
+// include that native setup. Cancellation, close, retirement, retry-count and
+// stability-window assertions keep their existing bounds.
+describe('stable MCP stdio bridge lifecycle', { timeout: process.platform === 'win32' ? 60_000 : 5_000 }, () => {
   it('wires the stable launcher mode to newline-delimited MCP stdio', async () => {
     const userDataPath = await mkdtemp(join(tmpdir(), 'aidraw-mcp-stdio-wire-'));
     temporaryPaths.push(userDataPath);
@@ -148,7 +154,7 @@ describe('stable MCP stdio bridge lifecycle', { timeout: process.platform === 'w
         if (line) messages.push(rpc(JSON.parse(line) as unknown));
       }
     });
-    const running = runMcpStdioBridge({ input, output, userDataPath, readyTimeoutMs: 2_000, pollIntervalMs: 10 });
+    const running = runMcpStdioBridge({ input, output, userDataPath, readyTimeoutMs: discoveryTimeoutMs, pollIntervalMs: 10 });
     input.write(`${JSON.stringify({
       jsonrpc: '2.0', id: 'stdio-init', method: 'initialize',
       params: { protocolVersion: LATEST_PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: 'stdio-wire-client', version: '1.0.0' } },
@@ -200,7 +206,7 @@ describe('stable MCP stdio bridge lifecycle', { timeout: process.platform === 'w
       input,
       output,
       userDataPath,
-      readyTimeoutMs: 2_000,
+      readyTimeoutMs: discoveryTimeoutMs,
       pollIntervalMs: 10,
       fetch: async (request, init) => {
         const url = new URL(request.toString());
@@ -414,7 +420,7 @@ describe('stable MCP stdio bridge lifecycle', { timeout: process.platform === 'w
     let lifetimeStreams = 0;
     const bridge = new McpBridgeSession({
       userDataPath,
-      readyTimeoutMs: 2_000,
+      readyTimeoutMs: discoveryTimeoutMs,
       pollIntervalMs: 10,
       fetch: async (input, init) => {
         const url = new URL(input.toString());
@@ -529,7 +535,7 @@ describe('stable MCP stdio bridge lifecycle', { timeout: process.platform === 'w
     const firstResponseHeld = new Promise<void>((resolve) => { markFirstResponseHeld = resolve; });
     const bridge = new McpBridgeSession({
       userDataPath,
-      readyTimeoutMs: 2_000,
+      readyTimeoutMs: discoveryTimeoutMs,
       pollIntervalMs: 10,
       fetch: async (input, init) => {
         const url = new URL(input.toString());
@@ -671,7 +677,7 @@ describe('stable MCP stdio bridge lifecycle', { timeout: process.platform === 'w
     const restoredJoinHeld = new Promise<void>((resolve) => { markRestoredJoinHeld = resolve; });
     const bridge = new McpBridgeSession({
       userDataPath,
-      readyTimeoutMs: 2_000,
+      readyTimeoutMs: discoveryTimeoutMs,
       pollIntervalMs: 10,
       fetch: async (request, init) => {
         const url = new URL(request.toString());
@@ -746,7 +752,7 @@ describe('stable MCP stdio bridge lifecycle', { timeout: process.platform === 'w
     const messages: JSONRPCMessage[] = [];
     const bridge = new McpBridgeSession({
       userDataPath,
-      readyTimeoutMs: 2_000,
+      readyTimeoutMs: discoveryTimeoutMs,
       pollIntervalMs: 10,
       fetch: async (input, init) => {
         const body = typeof init?.body === 'string' ? JSON.parse(init.body) as { method?: string; params?: { name?: string } } : undefined;
@@ -799,7 +805,7 @@ describe('stable MCP stdio bridge lifecycle', { timeout: process.platform === 'w
     const messages: JSONRPCMessage[] = [];
     const bridge = new McpBridgeSession({
       userDataPath,
-      readyTimeoutMs: 2_000,
+      readyTimeoutMs: discoveryTimeoutMs,
       pollIntervalMs: 10,
       fetch: async (input, init) => {
         const body = typeof init?.body === 'string' ? JSON.parse(init.body) as { method?: string } : undefined;
@@ -842,7 +848,7 @@ describe('stable MCP stdio bridge lifecycle', { timeout: process.platform === 'w
     const messages: JSONRPCMessage[] = [];
     const bridge = new McpBridgeSession({
       userDataPath,
-      readyTimeoutMs: 2_000,
+      readyTimeoutMs: discoveryTimeoutMs,
       pollIntervalMs: 10,
       fetch: async (input, init) => {
         const headers = new Headers(init?.headers);
@@ -887,7 +893,7 @@ describe('stable MCP stdio bridge lifecycle', { timeout: process.platform === 'w
     const messages: JSONRPCMessage[] = [];
     const bridge = new McpBridgeSession({
       userDataPath,
-      readyTimeoutMs: 2_000,
+      readyTimeoutMs: discoveryTimeoutMs,
       pollIntervalMs: 10,
       fetch: async (input, init) => {
         const headers = new Headers(init?.headers);
@@ -938,7 +944,7 @@ describe('stable MCP stdio bridge lifecycle', { timeout: process.platform === 'w
     const messages: JSONRPCMessage[] = [];
     const bridge = new McpBridgeSession({
       userDataPath,
-      readyTimeoutMs: 2_000,
+      readyTimeoutMs: discoveryTimeoutMs,
       pollIntervalMs: 10,
       fetch: async (input, init) => {
         const headers = new Headers(init?.headers);
@@ -1015,7 +1021,7 @@ describe('stable MCP stdio bridge lifecycle', { timeout: process.platform === 'w
     let toolDispatches = 0;
     const bridge = new McpBridgeSession({
       userDataPath,
-      readyTimeoutMs: 2_000,
+      readyTimeoutMs: discoveryTimeoutMs,
       pollIntervalMs: 10,
       fetch: async (input, init) => {
         const body = typeof init?.body === 'string' ? JSON.parse(init.body) as { id?: unknown; method?: string } : undefined;
@@ -1069,7 +1075,7 @@ describe('stable MCP stdio bridge lifecycle', { timeout: process.platform === 'w
     let cancellationDispatches = 0;
     const bridge = new McpBridgeSession({
       userDataPath,
-      readyTimeoutMs: 2_000,
+      readyTimeoutMs: discoveryTimeoutMs,
       pollIntervalMs: 10,
       recoveryStabilityMs: 20,
       fetch: async (input, init) => {
@@ -1152,7 +1158,7 @@ describe('stable MCP stdio bridge lifecycle', { timeout: process.platform === 'w
     let targetDispatches = 0;
     const bridge = new McpBridgeSession({
       userDataPath,
-      readyTimeoutMs: 2_000,
+      readyTimeoutMs: discoveryTimeoutMs,
       pollIntervalMs: 10,
       fetch: async (input, init) => {
         const url = new URL(input.toString());
@@ -1173,7 +1179,9 @@ describe('stable MCP stdio bridge lifecycle', { timeout: process.platform === 'w
       params: { protocolVersion: LATEST_PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: 'preparing-cancellation-client', version: '1.0.0' } },
     }));
     await bridge.accept(rpc({ jsonrpc: '2.0', method: 'notifications/initialized' }));
-    await firstRuntime.stop();
+    // Keep the old lifetime open until request-driven replacement is cancelled.
+    // Otherwise automatic recovery can win the slow native-startup race and the
+    // request consumes that earlier recovery failure without reaching this hook.
     const secondRuntime = new EngineRuntime({ userDataPath, appVersion: 'preparing-cancellation-second' });
     runtimes.push(secondRuntime);
     await secondRuntime.start();
@@ -1190,6 +1198,7 @@ describe('stable MCP stdio bridge lifecycle', { timeout: process.platform === 'w
     expect(targetDispatches).toBe(0);
 
     blockReplacementIdentity = false;
+    await firstRuntime.stop();
     await bridge.accept(rpc({ jsonrpc: '2.0', id: 'after-preparing-cancel', method: 'tools/list', params: {} }));
     expect(responseFor(messages, 'after-preparing-cancel')).toHaveProperty('result');
     expect((secondRuntime.mcpHost as unknown as { sessions: Map<string, unknown> }).sessions.size).toBe(1);
@@ -1208,7 +1217,7 @@ describe('stable MCP stdio bridge lifecycle', { timeout: process.platform === 'w
     let cancellationDispatches = 0;
     const bridge = new McpBridgeSession({
       userDataPath,
-      readyTimeoutMs: 2_000,
+      readyTimeoutMs: discoveryTimeoutMs,
       pollIntervalMs: 10,
       fetch: async (input, init) => {
         const body = typeof init?.body === 'string' ? JSON.parse(init.body) as { id?: unknown; method?: string } : undefined;
@@ -1259,7 +1268,7 @@ describe('stable MCP stdio bridge lifecycle', { timeout: process.platform === 'w
     let failLifetimes = false;
     const bridge = new McpBridgeSession({
       userDataPath,
-      readyTimeoutMs: 2_000,
+      readyTimeoutMs: discoveryTimeoutMs,
       pollIntervalMs: 10,
       recoveryStabilityMs: 25,
       recoveryWindowMs: 500,
@@ -1296,7 +1305,7 @@ describe('stable MCP stdio bridge lifecycle', { timeout: process.platform === 'w
     const initial = [...hostSessions.values()][0]!;
     failLifetimes = true;
     initial.bridgeLifetimeResponse!.end();
-    await expect.poll(() => reportedErrors.some((error) => error.message.includes('could not recover its interrupted lifetime stream')), { timeout: 2_000 }).toBe(true);
+    await expect.poll(() => reportedErrors.some((error) => error.message.includes('could not recover its interrupted lifetime stream')), { timeout: observationTimeoutMs(2_000) }).toBe(true);
     const boundedInitializes = initializeDispatches;
     const boundedLifetimes = lifetimeDispatches;
     await new Promise((resolve) => setTimeout(resolve, 200));
@@ -1331,7 +1340,7 @@ describe('stable MCP stdio bridge lifecycle', { timeout: process.platform === 'w
     let queuedDispatches = 0;
     const bridge = new McpBridgeSession({
       userDataPath,
-      readyTimeoutMs: 2_000,
+      readyTimeoutMs: discoveryTimeoutMs,
       pollIntervalMs: 10,
       recoveryStabilityMs: 20,
       fetch: async (input, init) => {
@@ -1392,7 +1401,7 @@ describe('stable MCP stdio bridge lifecycle', { timeout: process.platform === 'w
       let lifetimeDispatches = 0;
       const bridge = new McpBridgeSession({
         userDataPath,
-        readyTimeoutMs: 2_000,
+        readyTimeoutMs: discoveryTimeoutMs,
         pollIntervalMs: 10,
         recoveryStabilityMs: 20,
         fetch: async (input, init) => {
@@ -1431,7 +1440,7 @@ describe('stable MCP stdio bridge lifecycle', { timeout: process.platform === 'w
       const initial = [...hostSessions.values()][0]!;
       injectFailure = true;
       initial.bridgeLifetimeResponse!.end();
-      await expect.poll(() => hostSessions.size === 1 && initializeDispatches === 3 && lifetimeDispatches === 3, { timeout: 3_000 }).toBe(true);
+      await expect.poll(() => hostSessions.size === 1 && initializeDispatches === 3 && lifetimeDispatches === 3, { timeout: observationTimeoutMs(3_000) }).toBe(true);
       expect(reportedErrors.some((error) => failure === 'malformed'
         ? error.message.includes('JSON') || error.message.includes('position')
         : error.message.includes('oversized server event'))).toBe(true);
@@ -1454,7 +1463,7 @@ describe('stable MCP stdio bridge lifecycle', { timeout: process.platform === 'w
     let lifetimeDispatches = 0;
     const bridge = new McpBridgeSession({
       userDataPath,
-      readyTimeoutMs: 2_000,
+      readyTimeoutMs: discoveryTimeoutMs,
       pollIntervalMs: 10,
       recoveryStabilityMs: 20,
       fetch: async (input, init) => {
@@ -1501,7 +1510,7 @@ describe('stable MCP stdio bridge lifecycle', { timeout: process.platform === 'w
     let lifetimeCount = 0;
     const bridge = new McpBridgeSession({
       userDataPath,
-      readyTimeoutMs: 2_000,
+      readyTimeoutMs: discoveryTimeoutMs,
       pollIntervalMs: 10,
       fetch: async (input, init) => {
         const url = new URL(input.toString());
@@ -1559,8 +1568,8 @@ describe('stable MCP stdio bridge lifecycle', { timeout: process.platform === 'w
     await secondRuntime.start();
     currentState = (await readCurrentMcpEngineRunState(userDataPath))!;
     const reconnecting = bridge.accept(rpc({ jsonrpc: '2.0', id: 'event-generation-reconnect', method: 'tools/list', params: {} }));
-    await expect.poll(() => initializeCount).toBe(2);
-    await expect.poll(() => lifetimeCount).toBe(2);
+    await expect.poll(() => initializeCount, { timeout: observationTimeoutMs(1_000) }).toBe(2);
+    await expect.poll(() => lifetimeCount, { timeout: observationTimeoutMs(1_000) }).toBe(2);
     oldOutputRelease.resolve();
     await reconnecting;
     expect(responseFor(messages, 'event-generation-reconnect')).toHaveProperty('result');
@@ -1594,7 +1603,7 @@ describe('stable MCP stdio bridge lifecycle', { timeout: process.platform === 'w
     let initializeCount = 0;
     const bridge = new McpBridgeSession({
       userDataPath,
-      readyTimeoutMs: 2_000,
+      readyTimeoutMs: discoveryTimeoutMs,
       pollIntervalMs: 10,
       fetch: async (input, init) => {
         const url = new URL(input.toString());
@@ -1669,7 +1678,7 @@ describe('stable MCP stdio bridge lifecycle', { timeout: process.platform === 'w
         input,
         output,
         userDataPath,
-        readyTimeoutMs: 2_000,
+        readyTimeoutMs: discoveryTimeoutMs,
         pollIntervalMs: 10,
         terminalCloseTimeoutMs: 40,
         terminationSignal: termination.signal,
@@ -1719,7 +1728,7 @@ describe('stable MCP stdio bridge lifecycle', { timeout: process.platform === 'w
       let phaseHeld = false;
       const bridge = new McpBridgeSession({
         userDataPath,
-        readyTimeoutMs: 2_000,
+        readyTimeoutMs: discoveryTimeoutMs,
         pollIntervalMs: 10,
         terminalCloseTimeoutMs: 35,
         fetch: async (input, init) => {
@@ -1804,7 +1813,7 @@ describe('stable MCP stdio bridge lifecycle', { timeout: process.platform === 'w
       let queuedDispatches = 0;
       const bridge = new McpBridgeSession({
         userDataPath,
-        readyTimeoutMs: 2_000,
+        readyTimeoutMs: discoveryTimeoutMs,
         pollIntervalMs: 10,
         terminalCloseTimeoutMs: 35,
         fetch: async (input, init) => {
@@ -1882,7 +1891,7 @@ describe('stable MCP stdio bridge lifecycle', { timeout: process.platform === 'w
       let dispatches = 0;
       const bridge = new McpBridgeSession({
         userDataPath,
-        readyTimeoutMs: 2_000,
+        readyTimeoutMs: discoveryTimeoutMs,
         pollIntervalMs: 10,
         terminalCloseTimeoutMs: 35,
         fetch: async (input, init) => {
@@ -1972,7 +1981,7 @@ describe('stable MCP stdio bridge lifecycle', { timeout: process.platform === 'w
       input,
       output,
       userDataPath,
-      readyTimeoutMs: 2_000,
+      readyTimeoutMs: discoveryTimeoutMs,
       pollIntervalMs: 10,
       terminalCloseTimeoutMs: 35,
     });
